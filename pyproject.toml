@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ephemeral-buffer-mcp"
+version = "0.1.0"
+description = "Ephemeral in-memory command output capture and hybrid search MCP server for coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Karl Rister", email = "krister@redhat.com" }
+]
+dependencies = [
+    "mcp<2",
+    "fastembed>=0.7.0",
+    "numpy>=1.24.0"
+]
+
+[project.scripts]
+agy-cap = "cli:main"
