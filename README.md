@@ -20,6 +20,31 @@ When coding agents run commands that generate large outputs (thousands of lines 
 
 ---
 
+## 🏗 Architecture & Flow
+
+```mermaid
+flowchart TD
+    subgraph Ingestion["1. Ingestion Paths"]
+        A["CLI Pipe: command 2>&1 | agy-cap"] --> D["Unix Socket (/tmp/ephemeral_buffer.sock)"]
+        B["Agent Tool: execute_and_capture(cmd)"] --> E["Ephemeral Ring Buffer Engine"]
+        C["Agent Tool: capture_text / capture_file"] --> E
+        D --> E
+    end
+
+    subgraph Indexing["2. Dual Hybrid Indexing"]
+        E --> F["SQLite FTS5 (BM25 Lexical)"]
+        E --> G["FastEmbed ONNX (Dense Vectors)"]
+    end
+
+    subgraph Querying["3. Agent Query & Retrieval"]
+        F & G --> H["Reciprocal Rank Fusion (RRF)"]
+        H --> I["search_capture(query, mode='hybrid')"]
+        I --> J["Precise Context Chunk + Line Numbers"]
+    end
+```
+
+---
+
 ## 🚀 How to Use It
 
 ### 1. From the Terminal (CLI Pipe via `agy-cap`)
