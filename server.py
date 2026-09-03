@@ -23,15 +23,28 @@ engine = EphemeralEngine()
 # --- MCP Tools ---
 
 @mcp.tool()
-def capture_text(content: str, label: str = "") -> str:
+def capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
     """
     Ingests raw text output directly into the ephemeral search index.
-    Returns capture metadata (ID, line count, byte size).
+    Automatically detects diffs, logs, and text structures.
+    Returns capture metadata (ID, line count, byte size, diff summary if applicable).
     """
-    cap = engine.ingest(content, label=label)
+    cap = engine.ingest(content, label=label, content_type=content_type)
+    summary = engine.get_summary(cap.capture_id)
+    
+    if summary.get("content_type") == "diff" and summary.get("file_map"):
+        return (
+            f"Captured into ID '{cap.capture_id}' ({cap.label})\n"
+            f"- Type: Unified Diff ({summary.get('diff_stats')})\n"
+            f"- Lines: {cap.line_count:,} | Bytes: {cap.byte_size:,} | Chunks: {len(cap.chunks)}\n"
+            f"- Detected Signals: {summary.get('signals_summary')}\n\n"
+            f"--- Modified Files Map ---\n{summary['file_map']}\n\n"
+            f"Use `search_capture` or `get_capture_slice` with capture_id='{cap.capture_id}' to query."
+        )
+
     return (
         f"Captured into ID '{cap.capture_id}' ({cap.label})\n"
-        f"- Lines: {cap.line_count}\n"
+        f"- Lines: {cap.line_count:,}\n"
         f"- Bytes: {cap.byte_size:,}\n"
         f"- Chunks: {len(cap.chunks)}\n"
         f"Use `search_capture` with capture_id='{cap.capture_id}' or 'latest' to query."
@@ -39,7 +52,7 @@ def capture_text(content: str, label: str = "") -> str:
 
 
 @mcp.tool()
-def capture_file(file_path: str, label: str = "") -> str:
+def capture_file(file_path: str, label: str = "", content_type: str = "auto") -> str:
     """
     Reads a file or log output from disk and ingests it into the ephemeral search index.
     """
@@ -50,17 +63,28 @@ def capture_file(file_path: str, label: str = "") -> str:
             content = f.read()
         if not label:
             label = os.path.basename(file_path)
-        return capture_text(content, label=label)
+        return capture_text(content, label=label, content_type=content_type)
     except Exception as e:
         return f"Error reading file '{file_path}': {str(e)}"
 
 
 @mcp.tool()
-def execute_and_capture(command: str, cwd: Optional[str] = None, label: str = "") -> str:
+def execute_and_capture(
+    command: str,
+    cwd: Optional[str] = None,
+    label: str = "",
+    content_type: str = "auto"
+) -> str:
     """
-    Runs a shell command in the background, captures stdout and stderr, indexes it,
-    and returns a concise summary (exit code, line count, error signals, preview)
-    WITHOUT flooding your prompt context with thousands of lines.
+    Runs a shell command, captures stdout/stderr, indexes it, and returns a concise summary
+    (exit code, line count, diff map or error signals, head/tail preview) WITHOUT flooding
+    your prompt context with thousands of lines.
+    
+    Args:
+        command: Shell command line to execute.
+        cwd: Optional working directory for command execution.
+        label: Optional human-readable description/label for this capture.
+        content_type: Content type hint - 'auto' (default, detects diff/log/text), 'diff', 'log', or 'text'.
     """
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
@@ -78,19 +102,30 @@ def execute_and_capture(command: str, cwd: Optional[str] = None, label: str = ""
         output = proc.stdout
         exit_code = proc.returncode
         
-        cap = engine.ingest(output, label=f"cmd: {label}")
+        cap = engine.ingest(output, label=f"cmd: {label}", content_type=content_type)
         summary = engine.get_summary(cap.capture_id)
         
         status_str = "SUCCESS" if exit_code == 0 else f"FAILED (Exit Code {exit_code})"
         
-        signals_str = ", ".join(f"{k}: {v}" for k, v in summary["keyword_signals"].items())
-        if not signals_str:
-            signals_str = "None detected"
+        if summary.get("content_type") == "diff" and summary.get("file_map"):
+            diff_stats = summary.get("diff_stats", "")
+            file_map = summary.get("file_map", "")
+            signals_str = summary.get("signals_summary", "None (Clean patch)")
+            return (
+                f"Command: `{command}`\n"
+                f"Status: {status_str} | Type: Unified Diff ({diff_stats})\n"
+                f"Captured ID: `{cap.capture_id}` ({cap.line_count:,} lines, {cap.byte_size:,} bytes)\n"
+                f"Detected Signals: {signals_str}\n\n"
+                f"--- Modified Files Map ---\n"
+                f"{file_map}\n\n"
+                f"Query details using `search_capture(query='...', capture_id='{cap.capture_id}')` or slice lines with `get_capture_slice(start_line=..., end_line=...)`."
+            )
             
+        signals_str = summary.get("signals_summary", "None detected")
         return (
             f"Command: `{command}`\n"
             f"Status: {status_str}\n"
-            f"Captured ID: `{cap.capture_id}` ({cap.line_count} lines, {cap.byte_size:,} bytes)\n"
+            f"Captured ID: `{cap.capture_id}` ({cap.line_count:,} lines, {cap.byte_size:,} bytes)\n"
             f"Detected Signals: {signals_str}\n\n"
             f"--- Head (First 5 lines) ---\n{summary['head_preview']}\n\n"
             f"--- Tail (Last 5 lines) ---\n{summary['tail_preview']}\n\n"
@@ -166,13 +201,25 @@ def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest"
 @mcp.tool()
 def get_capture_summary(capture_id: str = "latest") -> str:
     """
-    Returns quick diagnostics for a capture: total lines, byte size, detected error patterns, and head/tail previews.
+    Returns quick diagnostics for a capture: total lines, byte size, diff file map or error signals, and previews.
     """
     res = engine.get_summary(capture_id)
     if res.get("status") == "error":
         return f"Error: {res.get('message')}"
         
-    signals = ", ".join(f"{k}: {v}" for k, v in res["keyword_signals"].items()) or "None"
+    signals = res.get("signals_summary", "None detected")
+    
+    if res.get("content_type") == "diff" and res.get("file_map"):
+        return (
+            f"Capture: `{res['capture_id']}` ({res['label']})\n"
+            f"Type: Unified Diff ({res.get('diff_stats')})\n"
+            f"Timestamp: {res['timestamp']}\n"
+            f"Total Lines: {res['total_lines']:,} | Size: {res['byte_size']:,} bytes\n"
+            f"Detected Signals: {signals}\n\n"
+            f"--- Modified Files Map ---\n"
+            f"{res['file_map']}"
+        )
+
     return (
         f"Capture: `{res['capture_id']}` ({res['label']})\n"
         f"Timestamp: {res['timestamp']}\n"

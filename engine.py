@@ -5,11 +5,173 @@ Provides hybrid search (BM25 lexical + dense semantic embeddings) with RRF ranki
 
 import sys
 import time
+import re
 import sqlite3
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from fastembed import TextEmbedding
+
+DIFF_GIT_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+BENIGN_SIGNAL_RE = re.compile(
+    r"(\b0\s*(errors?|failures?|failed)\b|\b(errors?|failures?|failed)\s*[:=]\s*0\b|\bno\s+errors?\b)",
+    re.IGNORECASE
+)
+LOG_SIGNAL_PATTERNS = {
+    "error": re.compile(r"\b(ERROR|FATAL|PANIC|CRITICAL)\b", re.IGNORECASE),
+    "exception": re.compile(r"\b(EXCEPTION|TRACEBACK)\b", re.IGNORECASE),
+    "failure": re.compile(r"\b(FAILED|FAILURES?)\b", re.IGNORECASE),
+    "timeout": re.compile(r"\b(TIMED\s*OUT|TIMEOUT)\b", re.IGNORECASE),
+}
+
+
+def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
+    """
+    Parses unified diff lines to extract structured file-level metadata and line boundaries.
+    """
+    if not lines:
+        return None
+
+    diff_markers = sum(
+        1 for line in lines[:50]
+        if line.startswith("diff --git") or line.startswith("@@ ") or line.startswith("--- ") or line.startswith("+++ ")
+    )
+    if diff_markers == 0:
+        return None
+
+    files: List[Dict[str, Any]] = []
+    current_file: Optional[Dict[str, Any]] = None
+    has_conflicts = False
+
+    for idx, line in enumerate(lines, start=1):
+        if line.startswith("<<<<<<<") or line.startswith("=======") or line.startswith(">>>>>>>"):
+            has_conflicts = True
+
+        m = DIFF_GIT_RE.match(line)
+        if m:
+            if current_file:
+                current_file["end_line"] = idx - 1
+                files.append(current_file)
+            old_p, new_p = m.group(1), m.group(2)
+            path = new_p if new_p != "/dev/null" else old_p
+            current_file = {
+                "path": path,
+                "old_path": old_p,
+                "new_path": new_p,
+                "status": "modified",
+                "start_line": idx,
+                "end_line": len(lines),
+                "additions": 0,
+                "deletions": 0,
+                "hunks": 0
+            }
+            continue
+
+        if current_file is None and (line.startswith("--- ") or line.startswith("+++ ")):
+            path = line[4:].strip()
+            if path.startswith("a/") or path.startswith("b/"):
+                path = path[2:]
+            if path:
+                current_file = {
+                    "path": path,
+                    "old_path": path,
+                    "new_path": path,
+                    "status": "modified",
+                    "start_line": idx,
+                    "end_line": len(lines),
+                    "additions": 0,
+                    "deletions": 0,
+                    "hunks": 0
+                }
+
+        if current_file:
+            if line.startswith("new file mode"):
+                current_file["status"] = "added"
+            elif line.startswith("deleted file mode"):
+                current_file["status"] = "deleted"
+            elif line.startswith("similarity index") or line.startswith("rename from"):
+                current_file["status"] = "renamed"
+            elif HUNK_RE.match(line):
+                current_file["hunks"] += 1
+            elif line.startswith("+") and not line.startswith("+++"):
+                current_file["additions"] += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                current_file["deletions"] += 1
+
+    if current_file:
+        current_file["end_line"] = len(lines)
+        files.append(current_file)
+
+    if not files:
+        return None
+
+    total_add = sum(f["additions"] for f in files)
+    total_del = sum(f["deletions"] for f in files)
+
+    return {
+        "total_files": len(files),
+        "total_additions": total_add,
+        "total_deletions": total_del,
+        "files": files,
+        "has_conflicts": has_conflicts
+    }
+
+
+def detect_content_type(lines: List[str], label: str = "", content_type_hint: str = "auto") -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Classifies output content type: 'diff', 'log', or 'text'.
+    Returns (content_type, diff_metadata).
+    """
+    if content_type_hint in ("diff", "log", "text"):
+        if content_type_hint == "diff":
+            diff_meta = parse_unified_diff(lines)
+            return ("diff", diff_meta)
+        return (content_type_hint, None)
+
+    label_lower = label.lower()
+    is_diff_command = any(k in label_lower for k in ["diff", "patch", "git show", "git log -p", "pr diff"])
+    diff_meta = parse_unified_diff(lines)
+
+    if diff_meta or is_diff_command:
+        if diff_meta:
+            return ("diff", diff_meta)
+        return ("diff", None)
+
+    is_log = any(k in label_lower for k in ["test", "build", "make", "cargo", "pytest", "mvn", "gcc", "clang", "compile"])
+    if is_log:
+        return ("log", None)
+
+    return ("text", None)
+
+
+def detect_signals(lines: List[str], content_type: str, diff_meta: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, int], str]:
+    """
+    Extracts high-signal diagnostic indicators according to content type.
+    Avoids false alarms on code/diff lines.
+    """
+    if content_type == "diff":
+        if diff_meta and diff_meta.get("has_conflicts"):
+            return ({"conflicts": 1}, "Conflict markers detected (<<<<<<< / >>>>>>>)!")
+        return ({}, "None (Clean patch)")
+
+    detected = {}
+    for name, pat in LOG_SIGNAL_PATTERNS.items():
+        hits = 0
+        for line in lines:
+            if BENIGN_SIGNAL_RE.search(line):
+                continue
+            if pat.search(line):
+                hits += 1
+        if hits > 0:
+            detected[name] = hits
+
+    if not detected:
+        summary_str = "None detected"
+    else:
+        summary_str = ", ".join(f"{k}: {v}" for k, v in detected.items())
+
+    return (detected, summary_str)
 
 
 @dataclass
@@ -29,6 +191,8 @@ class Capture:
     chunks: List[Chunk] = field(default_factory=list)
     embeddings: Optional[np.ndarray] = None
     fts_conn: Optional[sqlite3.Connection] = None
+    content_type: str = "text"
+    diff_meta: Optional[Dict[str, Any]] = None
 
     @property
     def line_count(self) -> int:
@@ -86,9 +250,10 @@ class EphemeralEngine:
             
         return chunks
 
-    def ingest(self, text: str, label: str = "") -> Capture:
+    def ingest(self, text: str, label: str = "", content_type: str = "auto") -> Capture:
         """
         Ingests text, chunks it, builds SQLite FTS5 BM25 index and FastEmbed dense vector embeddings.
+        Automatically classifies content type (diff, log, text) and extracts structural metadata.
         """
         lines = text.splitlines()
         capture_id = f"cap_{self._next_id}"
@@ -97,6 +262,7 @@ class EphemeralEngine:
         if not label:
             label = f"Capture #{self._next_id - 1}"
 
+        classified_type, diff_meta = detect_content_type(lines, label=label, content_type_hint=content_type)
         chunks = self._chunk_lines(lines)
         
         # 1. Setup SQLite FTS5 in-memory DB for this capture
@@ -127,7 +293,9 @@ class EphemeralEngine:
             raw_lines=lines,
             chunks=chunks,
             embeddings=embeddings,
-            fts_conn=fts_conn
+            fts_conn=fts_conn,
+            content_type=classified_type,
+            diff_meta=diff_meta
         )
 
         # Ring buffer eviction
@@ -331,24 +499,37 @@ class EphemeralEngine:
         if not capture:
             return {"status": "error", "message": f"Capture '{capture_id}' not found."}
 
-        error_keywords = ["error", "exception", "failed", "fatal", "panic", "traceback", "critical", "timed out", "unhandled"]
-        detected_counts = {}
-        for kw in error_keywords:
-            hits = sum(1 for line in capture.raw_lines if kw in line.lower())
-            if hits > 0:
-                detected_counts[kw] = hits
+        signals, signals_str = detect_signals(capture.raw_lines, capture.content_type, capture.diff_meta)
 
         head_preview = [f"  {i+1:5d} | {line}" for i, line in enumerate(capture.raw_lines[:5])]
         tail_preview = [f"  {capture.line_count - len(capture.raw_lines[-5:]) + i + 1:5d} | {line}" for i, line in enumerate(capture.raw_lines[-5:])]
+
+        file_map_str = ""
+        diff_stats_str = ""
+        if capture.content_type == "diff" and capture.diff_meta:
+            meta = capture.diff_meta
+            diff_stats_str = f"{meta['total_files']} file(s) changed, +{meta['total_additions']}, -{meta['total_deletions']}"
+            files_lines = []
+            for f in meta["files"]:
+                status_tag = f" [{f['status'].upper()}]" if f["status"] != "modified" else ""
+                files_lines.append(
+                    f"  - {f['path']}{status_tag} (+{f['additions']}, -{f['deletions']}) | Buffer Lines: L{f['start_line']}-L{f['end_line']}"
+                )
+            file_map_str = "\n".join(files_lines)
 
         return {
             "status": "ok",
             "capture_id": capture.capture_id,
             "label": capture.label,
+            "content_type": capture.content_type,
+            "diff_stats": diff_stats_str,
+            "file_map": file_map_str,
+            "diff_meta": capture.diff_meta,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture.timestamp)),
             "total_lines": capture.line_count,
             "byte_size": capture.byte_size,
-            "keyword_signals": detected_counts,
+            "keyword_signals": signals,
+            "signals_summary": signals_str,
             "head_preview": "\n".join(head_preview),
             "tail_preview": "\n".join(tail_preview)
         }

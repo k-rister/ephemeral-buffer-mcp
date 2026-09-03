@@ -19,7 +19,7 @@ import subprocess
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
 
 
-def send_to_mcp(text: str, label: str = "") -> dict:
+def send_to_mcp(text: str, label: str = "", content_type: str = "auto") -> dict:
     if not os.path.exists(SOCKET_PATH):
         return {
             "status": "error",
@@ -30,7 +30,7 @@ def send_to_mcp(text: str, label: str = "") -> dict:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(SOCKET_PATH)
         
-        payload = json.dumps({"label": label, "text": text}).encode("utf-8")
+        payload = json.dumps({"label": label, "text": text, "content_type": content_type}).encode("utf-8")
         sock.sendall(payload)
         sock.shutdown(socket.SHUT_WR)
         
@@ -52,6 +52,7 @@ def main():
         description="Pipe output into Ephemeral Buffer MCP server for hybrid search and agent analysis."
     )
     parser.add_argument("--label", "-l", default="", help="Optional descriptive label for this capture")
+    parser.add_argument("--type", "-t", choices=["auto", "diff", "log", "text"], default="auto", help="Optional content type hint (default: auto)")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command to execute and capture")
 
     args = parser.parse_args()
@@ -79,7 +80,7 @@ def main():
         sys.stdout.write(output)
         sys.stdout.flush()
         
-        res = send_to_mcp(output, label=label)
+        res = send_to_mcp(output, label=label, content_type=args.type)
         if res.get("status") == "ok":
             print(f"\n[agy-cap] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
@@ -90,7 +91,7 @@ def main():
     if not sys.stdin.isatty():
         input_text = sys.stdin.read()
         label = args.label or "Piped STDIN"
-        res = send_to_mcp(input_text, label=label)
+        res = send_to_mcp(input_text, label=label, content_type=args.type)
         if res.get("status") == "ok":
             print(f"[agy-cap] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:

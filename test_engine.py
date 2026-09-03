@@ -91,8 +91,8 @@ STEP 3: Summary
         # Test summary
         summary = self.engine.get_summary(cap.capture_id)
         self.assertEqual(summary["total_lines"], 100)
-        self.assertIn("fatal", summary["keyword_signals"])
-        self.assertEqual(summary["keyword_signals"]["fatal"], 1)
+        self.assertIn("error", summary["keyword_signals"])
+        self.assertEqual(summary["keyword_signals"]["error"], 1)
 
         # Test slice around line 50
         slice_res = self.engine.get_slice(48, 52, capture_id=cap.capture_id)
@@ -118,6 +118,100 @@ STEP 3: Summary
         self.assertIn("Run 3", labels)
         self.assertNotIn("Run 1", labels)
         print("\n[Ring Buffer Eviction Passed] Oldest captures safely evicted, memory bound maintained.")
+
+    def test_06_diff_parsing_and_file_mapping(self):
+        diff_output = """diff --git a/tool-kernel/src/main.c b/tool-kernel/src/main.c
+index 1234567..89abcdef 100644
+--- a/tool-kernel/src/main.c
++++ b/tool-kernel/src/main.c
+@@ -10,6 +10,8 @@ int main() {
+     if (err != 0) {
++        char *msg = os.strerror(err);
++        except Exception as e:
+         return -1;
+     }
+ }
+diff --git a/tests/test_kernel.py b/tests/test_kernel.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_kernel.py
+@@ -0,0 +1,5 @@
++def test_something():
++    # test error handling routines
++    assert True
+"""
+        cap = self.engine.ingest(diff_output.strip(), label="gh pr diff 68")
+        self.assertEqual(cap.content_type, "diff")
+        self.assertIsNotNone(cap.diff_meta)
+        self.assertEqual(cap.diff_meta["total_files"], 2)
+        self.assertEqual(cap.diff_meta["total_additions"], 5)
+        self.assertEqual(cap.diff_meta["total_deletions"], 0)
+
+        summary = self.engine.get_summary(cap.capture_id)
+        # Verify false-positive signals on code keywords (error, exception, strerror) are suppressed!
+        self.assertEqual(summary["signals_summary"], "None (Clean patch)")
+        self.assertEqual(len(summary["keyword_signals"]), 0)
+        self.assertIn("tool-kernel/src/main.c", summary["file_map"])
+        self.assertIn("tests/test_kernel.py [ADDED]", summary["file_map"])
+
+        # Verify buffer line mapping for second file
+        f2 = cap.diff_meta["files"][1]
+        slice_res = self.engine.get_slice(f2["start_line"], f2["end_line"], capture_id=cap.capture_id)
+        self.assertIn("tests/test_kernel.py", slice_res["content"])
+        self.assertIn("+def test_something():", slice_res["content"])
+        print("\n[Diff Parsing & Signal Suppression Passed]:")
+        print(summary["file_map"])
+
+    def test_07_diff_conflict_detection(self):
+        conflict_diff = """diff --git a/src/config.py b/src/config.py
+--- a/src/config.py
++++ b/src/config.py
+@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+ PORT = 8080
+=======
+ PORT = 9090
+>>>>>>> main
+"""
+        cap = self.engine.ingest(conflict_diff.strip(), label="git diff with conflicts")
+        self.assertEqual(cap.content_type, "diff")
+        self.assertTrue(cap.diff_meta["has_conflicts"])
+        summary = self.engine.get_summary(cap.capture_id)
+        self.assertIn("Conflict markers detected", summary["signals_summary"])
+        print("\n[Diff Conflict Detection Passed] Correctly flagged merge conflict markers.")
+
+    def test_08_log_signal_filtering_and_benign_suppression(self):
+        # 1. Clean run with benign zeros
+        clean_log = """
+============================= test session starts ==============================
+collected 25 items
+tests/test_api.py .........................                              [100%]
+============================== 25 passed in 0.42s ==============================
+passed: 25, failed: 0, errors: 0
+no errors encountered.
+"""
+        cap_clean = self.engine.ingest(clean_log.strip(), label="pytest-clean-run")
+        summary_clean = self.engine.get_summary(cap_clean.capture_id)
+        self.assertEqual(summary_clean["signals_summary"], "None detected")
+        self.assertEqual(len(summary_clean["keyword_signals"]), 0)
+
+        # 2. Failing run with actual errors
+        failing_log = """
+============================= test session starts ==============================
+collected 25 items
+tests/test_api.py ...........F.............                              [100%]
+=================================== FAILURES ===================================
+_________________________________ test_timeout _________________________________
+E   ConnectionError: ERROR: Connection timed out after 10000ms
+=========================== 1 failed, 24 passed in 1.12s ===========================
+"""
+        cap_fail = self.engine.ingest(failing_log.strip(), label="pytest-failing-run")
+        summary_fail = self.engine.get_summary(cap_fail.capture_id)
+        self.assertIn("failure", summary_fail["keyword_signals"])
+        self.assertIn("error", summary_fail["keyword_signals"])
+        self.assertIn("timeout", summary_fail["keyword_signals"])
+        print("\n[Log Signal Scanner Passed] Benign zeros ignored, real errors/failures captured:")
+        print(summary_fail["signals_summary"])
 
 
 if __name__ == "__main__":
