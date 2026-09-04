@@ -71,6 +71,10 @@ The optional `--type`/`-t` hint accepts `auto` (the default), `diff`, `log`, or
 otherwise `auto` classifies diffs, build/test logs, and plain text from the
 content and label.
 
+`agy-cap` also bounds wrapped-command and piped-stdin capture with
+`--max-output-bytes`; it defaults to `EPHEMERAL_MAX_BUFFER_BYTES` or 50 MiB and
+retains the beginning and end of oversized output.
+
 ### 2. From the AI Agent via MCP Tools
 
 The agent has access to the following tools:

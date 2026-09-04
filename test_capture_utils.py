@@ -4,7 +4,7 @@ import shlex
 import sys
 import unittest
 
-from capture_utils import run_command_bounded
+from capture_utils import bound_chunks, run_command_bounded
 
 
 class TestBoundedCommandCapture(unittest.TestCase):
@@ -30,6 +30,17 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertEqual(original_size, len(output.encode("utf-8")))
         self.assertEqual(output, "complete\n")
+
+    def test_stream_chunks_are_bounded(self):
+        output, truncated, original_size = bound_chunks(
+            [b"A" * 700, b"B" * 700],
+            1024,
+        )
+
+        self.assertTrue(truncated)
+        self.assertEqual(original_size, 1400)
+        self.assertLessEqual(len(output.encode("utf-8")), 1024)
+        self.assertIn("output truncated", output)
 
 
 if __name__ == "__main__":

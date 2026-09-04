@@ -18,6 +18,7 @@ from engine import (
 from capture_utils import run_command_bounded
 
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
+SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 
 # Initialize FastMCP
 mcp = FastMCP("ephemeral-buffer")
@@ -314,20 +315,33 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
     async def _handle():
         try:
             # Read payload (simple json line or framed message)
-            data = await reader.read()
+            read_limit = engine.max_buffer_bytes + SOCKET_PAYLOAD_OVERHEAD
+            data = await reader.read(read_limit)
             if not data:
                 return
+            if len(data) >= read_limit:
+                raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
             try:
                 payload = json.loads(data.decode("utf-8"))
                 label = payload.get("label", "CLI pipe")
                 text = payload.get("text", "")
                 content_type = payload.get("content_type", "auto")
+                truncated = bool(payload.get("truncated", False))
+                original_byte_size = payload.get("original_byte_size")
             except Exception:
                 label = "CLI pipe"
                 text = data.decode("utf-8", errors="replace")
                 content_type = "auto"
+                truncated = False
+                original_byte_size = None
 
-            cap = engine.ingest(text, label=label, content_type=content_type)
+            cap = engine.ingest(
+                text,
+                label=label,
+                content_type=content_type,
+                truncated=truncated,
+                original_byte_size=original_byte_size,
+            )
             resp = {
                 "status": "ok",
                 "capture_id": cap.capture_id,

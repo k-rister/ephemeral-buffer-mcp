@@ -57,6 +57,24 @@ class TestEndToEndPipe(unittest.TestCase):
             self.assertIn("Successfully captured", pipe_proc.stderr)
             self.assertIn("order-tests", pipe_proc.stderr)
 
+            bounded_proc = subprocess.run(
+                [
+                    sys.executable,
+                    CLI_PATH,
+                    "--label",
+                    "bounded-pipe",
+                    "--max-output-bytes",
+                    "1024",
+                ],
+                input="HEAD" * 1000 + "TAIL",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            self.assertEqual(bounded_proc.returncode, 0)
+            self.assertIn("Successfully captured", bounded_proc.stderr)
+            self.assertIn("bounded-pipe", bounded_proc.stderr)
+
         finally:
             proc.terminate()
             try:

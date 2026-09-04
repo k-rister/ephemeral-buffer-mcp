@@ -19,12 +19,18 @@ import os
 import socket
 import json
 import argparse
-import subprocess
+from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
 
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
 
 
-def send_to_mcp(text: str, label: str = "", content_type: str = "auto") -> dict:
+def send_to_mcp(
+    text: str,
+    label: str = "",
+    content_type: str = "auto",
+    truncated: bool = False,
+    original_byte_size: int = 0,
+) -> dict:
     if not os.path.exists(SOCKET_PATH):
         return {
             "status": "error",
@@ -35,7 +41,13 @@ def send_to_mcp(text: str, label: str = "", content_type: str = "auto") -> dict:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(SOCKET_PATH)
         
-        payload = json.dumps({"label": label, "text": text, "content_type": content_type}).encode("utf-8")
+        payload = json.dumps({
+            "label": label,
+            "text": text,
+            "content_type": content_type,
+            "truncated": truncated,
+            "original_byte_size": original_byte_size if truncated else None,
+        }).encode("utf-8")
         sock.sendall(payload)
         sock.shutdown(socket.SHUT_WR)
         
@@ -58,6 +70,7 @@ def main():
     )
     parser.add_argument("--label", "-l", default="", help="Optional descriptive label for this capture")
     parser.add_argument("--type", "-t", choices=["auto", "diff", "log", "text"], default="auto", help="Optional content type hint (default: auto)")
+    parser.add_argument("--max-output-bytes", type=int, default=int(os.environ.get("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_OUTPUT_BYTES)), help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command to execute and capture")
 
     args = parser.parse_args()
@@ -72,31 +85,45 @@ def main():
         label = args.label or cmd_str
         print(f"[agy-cap] Executing: {cmd_str}")
         
-        proc = subprocess.run(
-            cmd_str,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace"
-        )
-        output = proc.stdout
+        try:
+            output, exit_code, truncated, original_byte_size = run_command_bounded(
+                cmd_str, None, args.max_output_bytes
+            )
+        except ValueError as e:
+            parser.error(str(e))
         # Also print output locally so user can see it if desired
         sys.stdout.write(output)
         sys.stdout.flush()
         
-        res = send_to_mcp(output, label=label, content_type=args.type)
+        res = send_to_mcp(
+            output,
+            label=label,
+            content_type=args.type,
+            truncated=truncated,
+            original_byte_size=original_byte_size,
+        )
         if res.get("status") == "ok":
             print(f"\n[agy-cap] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
             print(f"\n[agy-cap] Warning: {res.get('message')}", file=sys.stderr)
-        sys.exit(proc.returncode)
+        sys.exit(exit_code)
 
     # Otherwise read from stdin (piped input)
     if not sys.stdin.isatty():
-        input_text = sys.stdin.read()
+        input_stream = getattr(sys.stdin, "buffer", sys.stdin)
+        if input_stream is sys.stdin:
+            input_chunks = (chunk.encode("utf-8") for chunk in iter(lambda: sys.stdin.read(65536), ""))
+        else:
+            input_chunks = iter(lambda: input_stream.read(65536), b"")
+        input_text, truncated, original_byte_size = bound_chunks(input_chunks, args.max_output_bytes)
         label = args.label or "Piped STDIN"
-        res = send_to_mcp(input_text, label=label, content_type=args.type)
+        res = send_to_mcp(
+            input_text,
+            label=label,
+            content_type=args.type,
+            truncated=truncated,
+            original_byte_size=original_byte_size,
+        )
         if res.get("status") == "ok":
             print(f"[agy-cap] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
