@@ -119,7 +119,20 @@ STEP 3: Summary
         self.assertNotIn("Run 1", labels)
         print("\n[Ring Buffer Eviction Passed] Oldest captures safely evicted, memory bound maintained.")
 
-    def test_06_diff_parsing_and_file_mapping(self):
+    def test_06_non_log_text_does_not_emit_keyword_signals(self):
+        source_text = """
+        # Handle an error response and report a failure to the caller.
+        def parse_result(value):
+            return value
+        """
+        cap = self.engine.ingest(source_text.strip(), label="README and source excerpt")
+
+        summary = self.engine.get_summary(cap.capture_id)
+        self.assertEqual(cap.content_type, "text")
+        self.assertEqual(summary["keyword_signals"], {})
+        self.assertEqual(summary["signals_summary"], "None (non-log content)")
+
+    def test_07_diff_parsing_and_file_mapping(self):
         diff_output = """diff --git a/tool-kernel/src/main.c b/tool-kernel/src/main.c
 index 1234567..89abcdef 100644
 --- a/tool-kernel/src/main.c
@@ -162,7 +175,7 @@ new file mode 100644
         print("\n[Diff Parsing & Signal Suppression Passed]:")
         print(summary["file_map"])
 
-    def test_07_diff_conflict_detection(self):
+    def test_08_diff_conflict_detection(self):
         conflict_diff = """diff --git a/src/config.py b/src/config.py
 --- a/src/config.py
 +++ b/src/config.py

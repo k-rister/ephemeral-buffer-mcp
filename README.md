@@ -16,7 +16,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 - **BM25 Lexical Search (SQLite FTS5):** For exact matches on error codes (`NullPointerException`, `ECONNREFUSED`, `exit 137`, HTTP `502`).
 - **Dense Semantic Vector Search (FastEmbed ONNX):** For fuzzy conceptual queries (*"Where did the DB connection pool fail?"* or *"Why did authentication fail?"*).
 - **Unified Diff Structural Mapping:** Automatically detects git diffs and PR diffs (`gh pr diff`, `git show`, `git diff`), parses modified files, additions/deletions, and generates a line-indexed file map in the summary.
-- **Smart Signal Filtering:** Automatically suppresses false-positive keyword errors on diffs and source code, while accurately capturing test runner failures, unhandled exceptions, and merge conflicts.
+- **Smart Signal Filtering:** Scans command/build/test logs for diagnostic keywords, suppresses false positives in diffs and source code, and accurately captures test runner failures, unhandled exceptions, and merge conflicts. Use `content_type='log'` when a plain-text capture should be signal-scanned.
 - **Reciprocal Rank Fusion (RRF):** Blends lexical and semantic ranking for high precision retrieval.
 - **Ring Buffer Eviction:** Holds only the last $N$ captures (default: 10), ensuring zero persistent storage buildup or memory leaks.
 
@@ -88,6 +88,23 @@ The agent has access to the following tools:
 For diff captures, `get_capture_summary` reports the detected file map,
 addition/deletion statistics, line ranges, and merge-conflict signals. Use
 `get_capture_slice` with those ranges to retrieve the complete file context.
+
+### 3. Capture Hygiene
+
+Keep captures focused so search results remain useful and the agent receives
+only the context it needs:
+
+- Capture one command or related output stream at a time, using a descriptive
+  label.
+- Start with `get_capture_summary`, then use `search_capture` or
+  `get_capture_slice` for targeted retrieval instead of repeatedly recapturing
+  the same output.
+- Use `clear_captures(capture_id)` when a capture is no longer needed; use
+  `clear_captures("all")` between unrelated investigations.
+
+The buffer is intentionally transient and bounded by the ring-buffer limit,
+but explicit cleanup prevents recent investigations from obscuring the active
+one before automatic eviction occurs.
 
 ---
 

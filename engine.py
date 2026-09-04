@@ -138,7 +138,7 @@ def detect_content_type(lines: List[str], label: str = "", content_type_hint: st
             return ("diff", diff_meta)
         return ("diff", None)
 
-    is_log = any(k in label_lower for k in ["test", "build", "make", "cargo", "pytest", "mvn", "gcc", "clang", "compile"])
+    is_log = any(k in label_lower for k in ["log", "test", "build", "make", "cargo", "pytest", "mvn", "gcc", "clang", "compile"])
     if is_log:
         return ("log", None)
 
@@ -154,6 +154,12 @@ def detect_signals(lines: List[str], content_type: str, diff_meta: Optional[Dict
         if diff_meta and diff_meta.get("has_conflicts"):
             return ({"conflicts": 1}, "Conflict markers detected (<<<<<<< / >>>>>>>)!")
         return ({}, "None (Clean patch)")
+
+    # Keyword signals are meaningful for command/test/build logs. Scanning
+    # arbitrary text (for example source files or README content) produces
+    # noisy matches for words such as "error" and "failure".
+    if content_type != "log":
+        return ({}, "None (non-log content)")
 
     detected = {}
     for name, pat in LOG_SIGNAL_PATTERNS.items():
