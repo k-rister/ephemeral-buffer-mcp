@@ -77,7 +77,7 @@ The agent has access to the following tools:
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, cwd, label, content_type='auto')` | Executes a shell command, captures all output into the buffer, and returns a compact diagnostic summary (exit code, diff file map, or error signals) to the agent context. |
+| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None)` | Executes a shell command with bounded head/tail capture and returns a compact diagnostic summary (exit code, diff file map, error signals, and truncation status) to the agent context. |
 | `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None)` | Ingests a bounded log/output file from disk; defaults to the configured buffer byte limit. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
@@ -111,6 +111,8 @@ one before automatic eviction occurs.
 The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
 `EPHEMERAL_MAX_BUFFER_BYTES`. The byte limit accounts for captured UTF-8
 content; `get_buffer_stats` also reports embedding memory separately.
+`execute_and_capture` retains the beginning and end of oversized command
+output and marks the capture with its original byte count.
 
 ---
 

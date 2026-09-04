@@ -7,7 +7,6 @@ import os
 import sys
 import json
 import asyncio
-import subprocess
 import threading
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
@@ -16,6 +15,7 @@ from engine import (
     DEFAULT_MAX_CAPTURES,
     EphemeralEngine,
 )
+from capture_utils import run_command_bounded
 
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
 
@@ -107,7 +107,8 @@ def execute_and_capture(
     command: str,
     cwd: Optional[str] = None,
     label: str = "",
-    content_type: str = "auto"
+    content_type: str = "auto",
+    max_output_bytes: Optional[int] = None
 ) -> str:
     """
     Runs a shell command, captures stdout/stderr, indexes it, and returns a concise summary
@@ -119,27 +120,30 @@ def execute_and_capture(
         cwd: Optional working directory for command execution.
         label: Optional human-readable description/label for this capture.
         content_type: Content type hint - 'auto' (default, detects diff/log/text), 'diff', 'log', or 'text'.
+        max_output_bytes: Maximum command output retained (default: configured buffer byte limit).
     """
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
         
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace"
+        output_limit = engine.max_buffer_bytes if max_output_bytes is None else max_output_bytes
+        output, exit_code, truncated, original_byte_size = run_command_bounded(
+            command, cwd, output_limit
         )
-        output = proc.stdout
-        exit_code = proc.returncode
         
-        cap = engine.ingest(output, label=f"cmd: {label}", content_type=content_type)
+        cap = engine.ingest(
+            output,
+            label=f"cmd: {label}",
+            content_type=content_type,
+            truncated=truncated,
+            original_byte_size=original_byte_size if truncated else None,
+        )
         summary = engine.get_summary(cap.capture_id)
         
         status_str = "SUCCESS" if exit_code == 0 else f"FAILED (Exit Code {exit_code})"
+        truncation_str = ""
+        if summary.get("truncated"):
+            truncation_str = f"\nOutput: truncated from {summary['original_byte_size']:,} bytes\n"
         
         if summary.get("content_type") == "diff" and summary.get("file_map"):
             diff_stats = summary.get("diff_stats", "")
@@ -149,6 +153,7 @@ def execute_and_capture(
                 f"Command: `{command}`\n"
                 f"Status: {status_str} | Type: Unified Diff ({diff_stats})\n"
                 f"Captured ID: `{cap.capture_id}` ({cap.line_count:,} lines, {cap.byte_size:,} bytes)\n"
+                f"{truncation_str}"
                 f"Detected Signals: {signals_str}\n\n"
                 f"--- Modified Files Map ---\n"
                 f"{file_map}\n\n"
@@ -160,6 +165,7 @@ def execute_and_capture(
             f"Command: `{command}`\n"
             f"Status: {status_str}\n"
             f"Captured ID: `{cap.capture_id}` ({cap.line_count:,} lines, {cap.byte_size:,} bytes)\n"
+            f"{truncation_str}"
             f"Detected Signals: {signals_str}\n\n"
             f"--- Head (First 5 lines) ---\n{summary['head_preview']}\n\n"
             f"--- Tail (Last 5 lines) ---\n{summary['tail_preview']}\n\n"
@@ -249,6 +255,7 @@ def get_capture_summary(capture_id: str = "latest") -> str:
             f"Type: Unified Diff ({res.get('diff_stats')})\n"
             f"Timestamp: {res['timestamp']}\n"
             f"Total Lines: {res['total_lines']:,} | Size: {res['byte_size']:,} bytes\n"
+            f"Output: {'truncated from ' + format(res['original_byte_size'], ',') + ' bytes' if res.get('truncated') else 'complete'}\n"
             f"Detected Signals: {signals}\n\n"
             f"--- Modified Files Map ---\n"
             f"{res['file_map']}"
@@ -258,6 +265,7 @@ def get_capture_summary(capture_id: str = "latest") -> str:
         f"Capture: `{res['capture_id']}` ({res['label']})\n"
         f"Timestamp: {res['timestamp']}\n"
         f"Total Lines: {res['total_lines']:,} | Size: {res['byte_size']:,} bytes\n"
+        f"Output: {'truncated from ' + format(res['original_byte_size'], ',') + ' bytes' if res.get('truncated') else 'complete'}\n"
         f"Detected Keyword Signals: {signals}\n\n"
         f"--- Head (First 5 lines) ---\n{res['head_preview']}\n\n"
         f"--- Tail (Last 5 lines) ---\n{res['tail_preview']}"

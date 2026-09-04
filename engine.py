@@ -213,6 +213,8 @@ class Capture:
     fts_conn: Optional[sqlite3.Connection] = None
     content_type: str = "text"
     diff_meta: Optional[Dict[str, Any]] = None
+    truncated: bool = False
+    original_byte_size: Optional[int] = None
 
     @property
     def line_count(self) -> int:
@@ -283,7 +285,14 @@ class EphemeralEngine:
         return chunks
 
     @synchronized
-    def ingest(self, text: str, label: str = "", content_type: str = "auto") -> Capture:
+    def ingest(
+        self,
+        text: str,
+        label: str = "",
+        content_type: str = "auto",
+        truncated: bool = False,
+        original_byte_size: Optional[int] = None
+    ) -> Capture:
         """
         Ingests text, chunks it, builds SQLite FTS5 BM25 index and FastEmbed dense vector embeddings.
         Automatically classifies content type (diff, log, text) and extracts structural metadata.
@@ -336,7 +345,9 @@ class EphemeralEngine:
             embeddings=embeddings,
             fts_conn=fts_conn,
             content_type=classified_type,
-            diff_meta=diff_meta
+            diff_meta=diff_meta,
+            truncated=truncated,
+            original_byte_size=original_byte_size
         )
 
         # LRU eviction: capture_order is ordered from least to most recently used.
@@ -590,6 +601,8 @@ class EphemeralEngine:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(capture.timestamp)),
             "total_lines": capture.line_count,
             "byte_size": capture.byte_size,
+            "truncated": capture.truncated,
+            "original_byte_size": capture.original_byte_size,
             "keyword_signals": signals,
             "signals_summary": signals_str,
             "head_preview": "\n".join(head_preview),
