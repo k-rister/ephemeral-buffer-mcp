@@ -74,6 +74,9 @@ content and label.
 `agy-cap` also bounds wrapped-command and piped-stdin capture with
 `--max-output-bytes`; it defaults to `EPHEMERAL_MAX_BUFFER_BYTES` or 50 MiB and
 retains the beginning and end of oversized output.
+Requested `max_output_bytes` and `capture_file` `max_bytes` values may not
+exceed the configured buffer byte limit; the tools return a validation error
+instead of silently clamping them.
 
 ### 2. From the AI Agent via MCP Tools
 

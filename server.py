@@ -75,6 +75,11 @@ def capture_file(
     if not os.path.exists(file_path):
         return f"Error: File '{file_path}' does not exist."
     try:
+        if max_bytes is not None and max_bytes > engine.max_buffer_bytes:
+            return (
+                f"Error: max_bytes ({max_bytes:,}) exceeds the configured "
+                f"buffer limit ({engine.max_buffer_bytes:,})."
+            )
         read_limit = engine.max_buffer_bytes if max_bytes is None else max_bytes
         if read_limit < 1:
             return "Error: max_bytes must be at least 1."
@@ -110,6 +115,11 @@ def execute_and_capture(
         label = command[:40] + ("..." if len(command) > 40 else "")
         
     try:
+        if max_output_bytes is not None and max_output_bytes > engine.max_buffer_bytes:
+            return (
+                f"Error: max_output_bytes ({max_output_bytes:,}) exceeds the configured "
+                f"buffer limit ({engine.max_buffer_bytes:,})."
+            )
         output_limit = engine.max_buffer_bytes if max_output_bytes is None else max_output_bytes
         output, exit_code, truncated, original_byte_size = run_command_bounded(
             command, cwd, output_limit
