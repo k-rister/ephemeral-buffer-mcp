@@ -65,20 +65,29 @@ git diff HEAD~3 | agy-cap --label "feature diff" --type diff
 agy-cap --label "backend build" -- cargo build --verbose
 ```
 
+The optional `--type`/`-t` hint accepts `auto` (the default), `diff`, `log`, or
+`text`. Use `diff` for unified patches when automatic detection is ambiguous;
+otherwise `auto` classifies diffs, build/test logs, and plain text from the
+content and label.
+
 ### 2. From the AI Agent via MCP Tools
 
 The agent has access to the following tools:
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, label, content_type)` | Executes a shell command, captures all output into the buffer, and returns a compact diagnostic summary (exit code, diff file map, or error signals) to the agent context. |
-| `capture_text(content, label, content_type)` | Ingests text directly into the buffer. |
-| `capture_file(file_path, label, content_type)` | Ingests a log/output file from disk. |
+| `execute_and_capture(command, cwd, label, content_type='auto')` | Executes a shell command, captures all output into the buffer, and returns a compact diagnostic summary (exit code, diff file map, or error signals) to the agent context. |
+| `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
+| `capture_file(file_path, label, content_type='auto')` | Ingests a log/output file from disk. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
+
+For diff captures, `get_capture_summary` reports the detected file map,
+addition/deletion statistics, line ranges, and merge-conflict signals. Use
+`get_capture_slice` with those ranges to retrieve the complete file context.
 
 ---
 

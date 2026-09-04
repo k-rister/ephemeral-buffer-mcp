@@ -266,11 +266,13 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 payload = json.loads(data.decode("utf-8"))
                 label = payload.get("label", "CLI pipe")
                 text = payload.get("text", "")
+                content_type = payload.get("content_type", "auto")
             except Exception:
                 label = "CLI pipe"
                 text = data.decode("utf-8", errors="replace")
+                content_type = "auto"
 
-            cap = engine.ingest(text, label=label)
+            cap = engine.ingest(text, label=label, content_type=content_type)
             resp = {
                 "status": "ok",
                 "capture_id": cap.capture_id,

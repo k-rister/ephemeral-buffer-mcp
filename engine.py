@@ -266,7 +266,9 @@ class EphemeralEngine:
         chunks = self._chunk_lines(lines)
         
         # 1. Setup SQLite FTS5 in-memory DB for this capture
-        fts_conn = sqlite3.connect(":memory:")
+        # Captures may be ingested by the CLI socket listener thread and queried
+        # by the MCP thread, so allow the per-capture connection to cross threads.
+        fts_conn = sqlite3.connect(":memory:", check_same_thread=False)
         cur = fts_conn.cursor()
         cur.execute("CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61')")
         

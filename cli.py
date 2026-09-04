@@ -4,9 +4,14 @@ CLI Helper tool for piping command output into Ephemeral Buffer MCP Server.
 Usage:
   # Pipe stdout/stderr directly:
   pytest -v 2>&1 | agy-cap --label "pytest run"
+
+  # Force unified-diff parsing when automatic detection is ambiguous:
+  git diff HEAD~3 | agy-cap --label "feature diff" --type diff
   
   # Or wrap a command execution:
   agy-cap --label "build" -- make all
+
+  --type accepts: auto (default), diff, log, or text.
 """
 
 import sys
