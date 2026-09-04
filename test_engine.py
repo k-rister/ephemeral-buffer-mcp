@@ -255,6 +255,28 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(statuses, ["ok"] * 16)
         print("\n[Thread Safety Passed] Concurrent ingest and reads remained consistent.")
 
+    def test_10_byte_budget_and_buffer_stats(self):
+        self.engine.clear("all")
+        original_limit = self.engine.max_buffer_bytes
+        self.engine.max_buffer_bytes = 50
+        try:
+            first = self.engine.ingest("a" * 20, label="byte-budget-1")
+            second = self.engine.ingest("b" * 20, label="byte-budget-2")
+            third = self.engine.ingest("c" * 20, label="byte-budget-3")
+
+            stats = self.engine.get_buffer_stats()
+            self.assertEqual(stats["capture_count"], 2)
+            self.assertEqual(stats["total_bytes"], second.byte_size + third.byte_size)
+            self.assertEqual(stats["max_buffer_bytes"], 50)
+            self.assertNotIn(first.capture_id, self.engine.captures)
+
+            with self.assertRaises(ValueError):
+                self.engine.ingest("x" * 100, label="oversized")
+        finally:
+            self.engine.max_buffer_bytes = original_limit
+            self.engine.clear("all")
+        print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
+
 
 if __name__ == "__main__":
     unittest.main()

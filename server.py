@@ -11,13 +11,36 @@ import subprocess
 import threading
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
-from engine import EphemeralEngine
+from engine import (
+    DEFAULT_MAX_BUFFER_BYTES,
+    DEFAULT_MAX_CAPTURES,
+    EphemeralEngine,
+)
 
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
 
 # Initialize FastMCP
 mcp = FastMCP("ephemeral-buffer")
-engine = EphemeralEngine()
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        if parsed < 1:
+            raise ValueError
+        return parsed
+    except ValueError:
+        print(f"Ignoring invalid {name}={value!r}; using {default}", file=sys.stderr)
+        return default
+
+
+engine = EphemeralEngine(
+    max_captures=_positive_int_env("EPHEMERAL_MAX_CAPTURES", DEFAULT_MAX_CAPTURES),
+    max_buffer_bytes=_positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
+)
 
 
 # --- MCP Tools ---
@@ -52,15 +75,26 @@ def capture_text(content: str, label: str = "", content_type: str = "auto") -> s
 
 
 @mcp.tool()
-def capture_file(file_path: str, label: str = "", content_type: str = "auto") -> str:
+def capture_file(
+    file_path: str,
+    label: str = "",
+    content_type: str = "auto",
+    max_bytes: Optional[int] = None
+) -> str:
     """
     Reads a file or log output from disk and ingests it into the ephemeral search index.
     """
     if not os.path.exists(file_path):
         return f"Error: File '{file_path}' does not exist."
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        read_limit = engine.max_buffer_bytes if max_bytes is None else max_bytes
+        if read_limit < 1:
+            return "Error: max_bytes must be at least 1."
+        with open(file_path, "rb") as f:
+            content_bytes = f.read(read_limit + 1)
+        if len(content_bytes) > read_limit:
+            return f"Error: File exceeds the {read_limit:,}-byte capture limit."
+        content = content_bytes.decode("utf-8", errors="replace")
         if not label:
             label = os.path.basename(file_path)
         return capture_text(content, label=label, content_type=content_type)
@@ -251,6 +285,19 @@ def clear_captures(capture_id: str = "all") -> str:
     Clears all or a specific capture from the ephemeral buffer to free memory.
     """
     return engine.clear(capture_id)
+
+
+@mcp.tool()
+def get_buffer_stats() -> str:
+    """Returns aggregate capture count, byte, chunk, and embedding metrics."""
+    stats = engine.get_buffer_stats()
+    return (
+        f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
+        f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
+        f"Lines: {stats['total_lines']:,}\n"
+        f"Chunks: {stats['total_chunks']:,}\n"
+        f"Embedding bytes: {stats['embedding_bytes']:,}"
+    )
 
 
 # --- Unix Domain Socket IPC for CLI piping (agy-cap) ---

@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from functools import wraps
 from fastembed import TextEmbedding
 
+DEFAULT_MAX_CAPTURES = 25
+DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
+
 
 def synchronized(method):
     """Serialize access to shared engine state, including nested calls."""
@@ -221,11 +224,22 @@ class Capture:
 
 
 class EphemeralEngine:
-    def __init__(self, max_captures: int = 25, embedding_model_name: str = "BAAI/bge-small-en-v1.5"):
+    def __init__(
+        self,
+        max_captures: int = DEFAULT_MAX_CAPTURES,
+        max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
+        embedding_model_name: str = "BAAI/bge-small-en-v1.5"
+    ):
         self._lock = threading.RLock()
+        if max_captures < 1:
+            raise ValueError("max_captures must be at least 1")
+        if max_buffer_bytes < 1:
+            raise ValueError("max_buffer_bytes must be at least 1")
         self.max_captures = max_captures
+        self.max_buffer_bytes = max_buffer_bytes
         self.captures: Dict[str, Capture] = {}
         self.capture_order: List[str] = []
+        self._total_bytes = 0
         self._next_id = 1
         
         # Lazy or fast load embedding model
@@ -281,6 +295,12 @@ class EphemeralEngine:
         if not label:
             label = f"Capture #{self._next_id - 1}"
 
+        capture_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines)
+        if capture_bytes > self.max_buffer_bytes:
+            raise ValueError(
+                f"Capture is {capture_bytes:,} bytes, exceeding the {self.max_buffer_bytes:,}-byte buffer limit"
+            )
+
         classified_type, diff_meta = detect_content_type(lines, label=label, content_type_hint=content_type)
         chunks = self._chunk_lines(lines)
         
@@ -320,15 +340,20 @@ class EphemeralEngine:
         )
 
         # LRU eviction: capture_order is ordered from least to most recently used.
-        if len(self.capture_order) >= self.max_captures:
+        while self.capture_order and (
+            len(self.capture_order) >= self.max_captures
+            or self._total_bytes + capture.byte_size > self.max_buffer_bytes
+        ):
             evicted_id = self.capture_order.pop(0)
             if evicted_id in self.captures:
                 old_cap = self.captures.pop(evicted_id)
+                self._total_bytes -= old_cap.byte_size
                 if old_cap.fts_conn:
                     old_cap.fts_conn.close()
 
         self.captures[capture_id] = capture
         self.capture_order.append(capture_id)
+        self._total_bytes += capture.byte_size
         return capture
 
     @synchronized
@@ -589,6 +614,25 @@ class EphemeralEngine:
         return result
 
     @synchronized
+    def get_buffer_stats(self) -> Dict[str, Any]:
+        """Returns aggregate capture and memory-accounting metrics."""
+        total_lines = sum(cap.line_count for cap in self.captures.values())
+        total_chunks = sum(len(cap.chunks) for cap in self.captures.values())
+        embedding_bytes = sum(
+            int(cap.embeddings.nbytes) for cap in self.captures.values()
+            if cap.embeddings is not None
+        )
+        return {
+            "capture_count": len(self.captures),
+            "max_captures": self.max_captures,
+            "total_lines": total_lines,
+            "total_chunks": total_chunks,
+            "total_bytes": self._total_bytes,
+            "max_buffer_bytes": self.max_buffer_bytes,
+            "embedding_bytes": embedding_bytes,
+        }
+
+    @synchronized
     def clear(self, capture_id: str = "all") -> str:
         """
         Clears one or all captures from the buffer.
@@ -599,9 +643,11 @@ class EphemeralEngine:
                     cap.fts_conn.close()
             self.captures.clear()
             self.capture_order.clear()
+            self._total_bytes = 0
             return "Cleared all captures from ephemeral buffer."
         elif capture_id in self.captures:
             cap = self.captures.pop(capture_id)
+            self._total_bytes -= cap.byte_size
             if cap.fts_conn:
                 cap.fts_conn.close()
             if capture_id in self.capture_order:

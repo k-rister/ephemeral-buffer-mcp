@@ -18,7 +18,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 - **Unified Diff Structural Mapping:** Automatically detects git diffs and PR diffs (`gh pr diff`, `git show`, `git diff`), parses modified files, additions/deletions, and generates a line-indexed file map in the summary.
 - **Smart Signal Filtering:** Scans command/build/test logs for diagnostic keywords, suppresses false positives in diffs and source code, and accurately captures test runner failures, unhandled exceptions, and merge conflicts. Use `content_type='log'` when a plain-text capture should be signal-scanned.
 - **Reciprocal Rank Fusion (RRF):** Blends lexical and semantic ranking for high precision retrieval.
-- **LRU Capture Eviction:** Holds up to 25 captures by default and evicts the least recently used capture when full, ensuring zero persistent storage buildup.
+- **LRU Capture Eviction:** Holds up to 25 captures and 50 MiB of captured content by default, evicting the least recently used captures when either limit is reached.
 - **Thread-Safe Shared Engine:** Serializes ingestion, search, LRU updates, eviction, and cleanup across MCP requests and CLI socket clients.
 
 ---
@@ -79,10 +79,11 @@ The agent has access to the following tools:
 | :--- | :--- |
 | `execute_and_capture(command, cwd, label, content_type='auto')` | Executes a shell command, captures all output into the buffer, and returns a compact diagnostic summary (exit code, diff file map, or error signals) to the agent context. |
 | `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
-| `capture_file(file_path, label, content_type='auto')` | Ingests a log/output file from disk. |
+| `capture_file(file_path, label, content_type='auto', max_bytes=None)` | Ingests a bounded log/output file from disk; defaults to the configured buffer byte limit. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, and embedding bytes against configured limits. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
@@ -106,6 +107,10 @@ only the context it needs:
 The buffer is intentionally transient and bounded by the LRU capture limit,
 but explicit cleanup prevents recent investigations from obscuring the active
 one before automatic eviction occurs.
+
+The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
+`EPHEMERAL_MAX_BUFFER_BYTES`. The byte limit accounts for captured UTF-8
+content; `get_buffer_stats` also reports embedding memory separately.
 
 ---
 
