@@ -131,7 +131,12 @@ Run the test suite:
 ```bash
 ./venv/bin/python test_engine.py
 ./venv/bin/python -m unittest test_config.py test_capture_utils.py
+./venv/bin/python -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py
+./venv/bin/python -m unittest test_e2e_pipe.py
 ```
+
+GitHub Actions runs the compile check, focused tests, and end-to-end test on
+Python 3.10 and 3.12 for pushes to `main` and pull requests.
 
 Run the concurrency benchmark:
 ```bash
