@@ -90,7 +90,7 @@ The agent has access to the following tools:
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
-| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, and embedding bytes against configured limits. |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding bytes, accounted bytes, and process RSS. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
@@ -113,7 +113,9 @@ only the context it needs:
 
 The buffer is intentionally transient and bounded by the LRU capture limit,
 but explicit cleanup prevents recent investigations from obscuring the active
-one before automatic eviction occurs.
+one before automatic eviction occurs. Its memory metrics separate captured
+content and embedding bytes from process RSS; the unaccounted RSS value includes
+model, index, and Python object overhead and is approximate.
 
 The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
 `EPHEMERAL_MAX_BUFFER_BYTES`. The byte limit accounts for captured UTF-8

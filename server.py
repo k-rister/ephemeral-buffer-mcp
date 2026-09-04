@@ -291,14 +291,25 @@ def clear_captures(capture_id: str = "all") -> str:
 
 @mcp.tool()
 def get_buffer_stats() -> str:
-    """Returns aggregate capture count, byte, chunk, and embedding metrics."""
+    """Returns aggregate capture, accounting, and process RSS metrics."""
     stats = engine.get_buffer_stats()
+    rss = stats["process_rss_bytes"]
+    unaccounted = stats["unaccounted_rss_bytes"]
+    rss_line = "Process RSS: unavailable" if rss is None else f"Process RSS: {rss:,} bytes"
+    unaccounted_line = (
+        "Unaccounted RSS bytes: unavailable"
+        if unaccounted is None
+        else f"Unaccounted RSS bytes: {unaccounted:,}"
+    )
     return (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
         f"Lines: {stats['total_lines']:,}\n"
         f"Chunks: {stats['total_chunks']:,}\n"
-        f"Embedding bytes: {stats['embedding_bytes']:,}"
+        f"Embedding bytes: {stats['embedding_bytes']:,}\n"
+        f"Accounted bytes: {stats['accounted_bytes']:,}\n"
+        f"{rss_line}\n"
+        f"{unaccounted_line}"
     )
 
 

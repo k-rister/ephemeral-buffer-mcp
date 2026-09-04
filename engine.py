@@ -3,6 +3,7 @@ Core search and indexing engine for ephemeral command output buffer.
 Provides hybrid search (BM25 lexical + dense semantic embeddings) with RRF ranking.
 """
 
+import os
 import sys
 import time
 import re
@@ -16,6 +17,22 @@ from fastembed import TextEmbedding
 
 DEFAULT_MAX_CAPTURES = 25
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
+
+
+def process_rss_bytes() -> Optional[int]:
+    """Return current process RSS, when the host exposes it."""
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as stream:
+            resident_pages = int(stream.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, IndexError, ValueError):
+        try:
+            import resource
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # Linux reports KiB; macOS reports bytes.
+            return int(rss if sys.platform == "darwin" else rss * 1024)
+        except (ImportError, OSError, ValueError):
+            return None
 
 
 def synchronized(method):
@@ -635,6 +652,8 @@ class EphemeralEngine:
             int(cap.embeddings.nbytes) for cap in self.captures.values()
             if cap.embeddings is not None
         )
+        accounted_bytes = self._total_bytes + embedding_bytes
+        rss_bytes = process_rss_bytes()
         return {
             "capture_count": len(self.captures),
             "max_captures": self.max_captures,
@@ -643,6 +662,11 @@ class EphemeralEngine:
             "total_bytes": self._total_bytes,
             "max_buffer_bytes": self.max_buffer_bytes,
             "embedding_bytes": embedding_bytes,
+            "accounted_bytes": accounted_bytes,
+            "process_rss_bytes": rss_bytes,
+            "unaccounted_rss_bytes": (
+                max(0, rss_bytes - accounted_bytes) if rss_bytes is not None else None
+            ),
         }
 
     @synchronized

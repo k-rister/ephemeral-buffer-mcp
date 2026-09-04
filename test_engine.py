@@ -277,6 +277,21 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.engine.clear("all")
         print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
 
+    def test_11_buffer_stats_separate_accounted_and_process_memory(self):
+        self.engine.ingest("stats payload", label="stats")
+
+        stats = self.engine.get_buffer_stats()
+
+        self.assertEqual(
+            stats["accounted_bytes"],
+            stats["total_bytes"] + stats["embedding_bytes"],
+        )
+        self.assertIn("process_rss_bytes", stats)
+        self.assertIn("unaccounted_rss_bytes", stats)
+        if stats["process_rss_bytes"] is not None:
+            self.assertGreater(stats["process_rss_bytes"], 0)
+            self.assertGreaterEqual(stats["unaccounted_rss_bytes"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
