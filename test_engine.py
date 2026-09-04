@@ -101,23 +101,30 @@ STEP 3: Summary
         print("\n[Slice & Summary Test Passed]:")
         print(slice_res["content"])
 
-    def test_05_ring_buffer_eviction(self):
-        # max_captures is 3
+    def test_05_lru_buffer_eviction(self):
+        # max_captures is 3 for this focused eviction test
         self.engine.clear("all")
         self.assertEqual(len(self.engine.captures), 0)
 
-        for i in range(1, 6):
-            self.engine.ingest(f"Content for run {i}\nDone {i}", label=f"Run {i}")
+        initial_captures = []
+        for i in range(1, 4):
+            initial_captures.append(self.engine.ingest(f"Content for run {i}\nDone {i}", label=f"Run {i}"))
+
+        # Refresh Run 1 so Run 2 becomes the least recently used capture.
+        self.engine.get_summary(initial_captures[0].capture_id)
+        self.engine.ingest("Content for run 4\nDone 4", label="Run 4")
+        self.engine.ingest("Content for run 5\nDone 5", label="Run 5")
 
         active_caps = self.engine.list_captures()
         self.assertEqual(len(active_caps), 3)
-        # Should contain Run 3, Run 4, Run 5 (Run 1 and 2 evicted)
+        # Run 2 and then Run 3 should be evicted; recently used Run 1 remains.
         labels = [c["label"] for c in active_caps]
         self.assertIn("Run 5", labels)
         self.assertIn("Run 4", labels)
-        self.assertIn("Run 3", labels)
-        self.assertNotIn("Run 1", labels)
-        print("\n[Ring Buffer Eviction Passed] Oldest captures safely evicted, memory bound maintained.")
+        self.assertIn("Run 1", labels)
+        self.assertNotIn("Run 2", labels)
+        self.assertNotIn("Run 3", labels)
+        print("\n[LRU Eviction Passed] Least recently used captures evicted, memory bound maintained.")
 
     def test_06_non_log_text_does_not_emit_keyword_signals(self):
         source_text = """

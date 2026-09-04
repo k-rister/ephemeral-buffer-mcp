@@ -210,7 +210,7 @@ class Capture:
 
 
 class EphemeralEngine:
-    def __init__(self, max_captures: int = 10, embedding_model_name: str = "BAAI/bge-small-en-v1.5"):
+    def __init__(self, max_captures: int = 25, embedding_model_name: str = "BAAI/bge-small-en-v1.5"):
         self.max_captures = max_captures
         self.captures: Dict[str, Capture] = {}
         self.capture_order: List[str] = []
@@ -306,7 +306,7 @@ class EphemeralEngine:
             diff_meta=diff_meta
         )
 
-        # Ring buffer eviction
+        # LRU eviction: capture_order is ordered from least to most recently used.
         if len(self.capture_order) >= self.max_captures:
             evicted_id = self.capture_order.pop(0)
             if evicted_id in self.captures:
@@ -322,8 +322,18 @@ class EphemeralEngine:
         if not self.captures:
             return None
         if capture_id == "latest" or not capture_id:
-            return self.captures[self.capture_order[-1]]
-        return self.captures.get(capture_id)
+            capture = self.captures[self.capture_order[-1]]
+        else:
+            capture = self.captures.get(capture_id)
+        if capture:
+            self._touch_capture(capture.capture_id)
+        return capture
+
+    def _touch_capture(self, capture_id: str) -> None:
+        """Marks a capture as recently used for LRU eviction."""
+        if capture_id in self.capture_order:
+            self.capture_order.remove(capture_id)
+            self.capture_order.append(capture_id)
 
     def search_bm25(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """

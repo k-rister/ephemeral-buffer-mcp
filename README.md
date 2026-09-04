@@ -18,7 +18,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 - **Unified Diff Structural Mapping:** Automatically detects git diffs and PR diffs (`gh pr diff`, `git show`, `git diff`), parses modified files, additions/deletions, and generates a line-indexed file map in the summary.
 - **Smart Signal Filtering:** Scans command/build/test logs for diagnostic keywords, suppresses false positives in diffs and source code, and accurately captures test runner failures, unhandled exceptions, and merge conflicts. Use `content_type='log'` when a plain-text capture should be signal-scanned.
 - **Reciprocal Rank Fusion (RRF):** Blends lexical and semantic ranking for high precision retrieval.
-- **Ring Buffer Eviction:** Holds only the last $N$ captures (default: 10), ensuring zero persistent storage buildup or memory leaks.
+- **LRU Capture Eviction:** Holds up to 25 captures by default and evicts the least recently used capture when full, ensuring zero persistent storage buildup.
 
 ---
 
@@ -102,7 +102,7 @@ only the context it needs:
 - Use `clear_captures(capture_id)` when a capture is no longer needed; use
   `clear_captures("all")` between unrelated investigations.
 
-The buffer is intentionally transient and bounded by the ring-buffer limit,
+The buffer is intentionally transient and bounded by the LRU capture limit,
 but explicit cleanup prevents recent investigations from obscuring the active
 one before automatic eviction occurs.
 
