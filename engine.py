@@ -256,6 +256,7 @@ class EphemeralEngine:
             raise ValueError("max_buffer_bytes must be at least 1")
         self.max_captures = max_captures
         self.max_buffer_bytes = max_buffer_bytes
+        self._embedding_lock = threading.Lock()
         self.captures: Dict[str, Capture] = {}
         self.capture_order: List[str] = []
         self._total_bytes = 0
@@ -301,7 +302,6 @@ class EphemeralEngine:
             
         return chunks
 
-    @synchronized
     def ingest(
         self,
         text: str,
@@ -315,16 +315,20 @@ class EphemeralEngine:
         Automatically classifies content type (diff, log, text) and extracts structural metadata.
         """
         lines = text.splitlines()
-        capture_id = f"cap_{self._next_id}"
-        self._next_id += 1
-        
+        with self._lock:
+            capture_number = self._next_id
+            capture_id = f"cap_{capture_number}"
+            self._next_id += 1
+
         if not label:
-            label = f"Capture #{self._next_id - 1}"
+            label = f"Capture #{capture_number}"
 
         capture_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines)
-        if capture_bytes > self.max_buffer_bytes:
+        with self._lock:
+            max_buffer_bytes = self.max_buffer_bytes
+        if capture_bytes > max_buffer_bytes:
             raise ValueError(
-                f"Capture is {capture_bytes:,} bytes, exceeding the {self.max_buffer_bytes:,}-byte buffer limit"
+                f"Capture is {capture_bytes:,} bytes, exceeding the {max_buffer_bytes:,}-byte buffer limit"
             )
 
         classified_type, diff_meta = detect_content_type(lines, label=label, content_type_hint=content_type)
@@ -341,17 +345,18 @@ class EphemeralEngine:
             cur.execute("INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)", (c.chunk_id, c.text))
         fts_conn.commit()
 
-        # 2. Compute dense embeddings for chunks
-        if chunks:
-            chunk_texts = [c.text for c in chunks]
-            embed_list = list(self.embedding_model.embed(chunk_texts))
-            embeddings = np.array(embed_list, dtype=np.float32)
-            # Normalize embeddings for cosine similarity
-            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0
-            embeddings = embeddings / norms
-        else:
-            embeddings = np.empty((0, 384), dtype=np.float32)
+        # 2. Compute dense embeddings without holding the engine state lock.
+        with self._embedding_lock:
+            if chunks:
+                chunk_texts = [c.text for c in chunks]
+                embed_list = list(self.embedding_model.embed(chunk_texts))
+                embeddings = np.array(embed_list, dtype=np.float32)
+                # Normalize embeddings for cosine similarity
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+                norms[norms == 0] = 1.0
+                embeddings = embeddings / norms
+            else:
+                embeddings = np.empty((0, 384), dtype=np.float32)
 
         capture = Capture(
             capture_id=capture_id,
@@ -367,22 +372,23 @@ class EphemeralEngine:
             original_byte_size=original_byte_size
         )
 
-        # LRU eviction: capture_order is ordered from least to most recently used.
-        while self.capture_order and (
-            len(self.capture_order) >= self.max_captures
-            or self._total_bytes + capture.byte_size > self.max_buffer_bytes
-        ):
-            evicted_id = self.capture_order.pop(0)
-            if evicted_id in self.captures:
-                old_cap = self.captures.pop(evicted_id)
-                self._total_bytes -= old_cap.byte_size
-                if old_cap.fts_conn:
-                    old_cap.fts_conn.close()
+        with self._lock:
+            # LRU eviction: capture_order is ordered from least to most recently used.
+            while self.capture_order and (
+                len(self.capture_order) >= self.max_captures
+                or self._total_bytes + capture.byte_size > self.max_buffer_bytes
+            ):
+                evicted_id = self.capture_order.pop(0)
+                if evicted_id in self.captures:
+                    old_cap = self.captures.pop(evicted_id)
+                    self._total_bytes -= old_cap.byte_size
+                    if old_cap.fts_conn:
+                        old_cap.fts_conn.close()
 
-        self.captures[capture_id] = capture
-        self.capture_order.append(capture_id)
-        self._total_bytes += capture.byte_size
-        return capture
+            self.captures[capture_id] = capture
+            self.capture_order.append(capture_id)
+            self._total_bytes += capture.byte_size
+            return capture
 
     @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:

@@ -3,6 +3,7 @@ Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 """
 
 import sys
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from engine import EphemeralEngine
@@ -291,6 +292,31 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         if stats["process_rss_bytes"] is not None:
             self.assertGreater(stats["process_rss_bytes"], 0)
             self.assertGreaterEqual(stats["unaccounted_rss_bytes"], 0)
+
+    def test_12_reads_are_not_blocked_by_embedding(self):
+        class BlockingEmbedding:
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def embed(self, texts):
+                self.started.set()
+                self.release.wait(timeout=2)
+                return [[0.0] * 384 for _ in texts]
+
+        original_model = self.engine.embedding_model
+        blocker = BlockingEmbedding()
+        self.engine.embedding_model = blocker
+        worker = threading.Thread(target=self.engine.ingest, args=("blocked embedding",))
+        try:
+            worker.start()
+            self.assertTrue(blocker.started.wait(timeout=1))
+            stats = self.engine.get_buffer_stats()
+            self.assertIn("capture_count", stats)
+        finally:
+            blocker.release.set()
+            worker.join(timeout=2)
+            self.engine.embedding_model = original_model
 
 
 if __name__ == "__main__":
