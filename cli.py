@@ -20,6 +20,7 @@ import socket
 import json
 import argparse
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
+from config import positive_int_env
 
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
 
@@ -70,7 +71,12 @@ def main():
     )
     parser.add_argument("--label", "-l", default="", help="Optional descriptive label for this capture")
     parser.add_argument("--type", "-t", choices=["auto", "diff", "log", "text"], default="auto", help="Optional content type hint (default: auto)")
-    parser.add_argument("--max-output-bytes", type=int, default=int(os.environ.get("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_OUTPUT_BYTES)), help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)")
+    parser.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_OUTPUT_BYTES),
+        help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command to execute and capture")
 
     args = parser.parse_args()
