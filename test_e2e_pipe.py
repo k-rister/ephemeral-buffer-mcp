@@ -95,9 +95,10 @@ class TestEndToEndPipe(unittest.TestCase):
         finally:
             proc.terminate()
             try:
-                proc.wait(timeout=2)
+                proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.communicate()
             if os.path.exists(SOCKET_PATH):
                 try:
                     os.unlink(SOCKET_PATH)
