@@ -3,9 +3,7 @@
 import subprocess
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
-
-
-DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024 * 1024
+from config import DEFAULT_MAX_OUTPUT_BYTES
 
 
 def bound_chunks(chunks: Iterable[bytes], max_output_bytes: int) -> Tuple[str, bool, int]:

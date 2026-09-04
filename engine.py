@@ -14,9 +14,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from functools import wraps
 from fastembed import TextEmbedding
-
-DEFAULT_MAX_CAPTURES = 25
-DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
+from config import DEFAULT_MAX_BUFFER_BYTES, DEFAULT_MAX_CAPTURES
 
 
 def process_rss_bytes() -> Optional[int]:

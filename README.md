@@ -28,7 +28,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 ```mermaid
 flowchart TD
     subgraph Ingestion["1. Ingestion Paths"]
-        A["CLI Pipe: command 2>&1 | agy-cap"] --> D["Unix Socket (/tmp/ephemeral_buffer.sock)"]
+        A["CLI Pipe: command 2>&1 | agy-cap"] --> D["Unix Socket (platform temp dir)"]
         B["Agent Tool: execute_and_capture(cmd)"] --> E["Ephemeral Ring Buffer Engine"]
         C["Agent Tool: capture_text / capture_file"] --> E
         D --> E
@@ -118,8 +118,10 @@ content and embedding bytes from process RSS; the unaccounted RSS value includes
 model, index, and Python object overhead and is approximate.
 
 The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
-`EPHEMERAL_MAX_BUFFER_BYTES`. The byte limit accounts for captured UTF-8
-content; `get_buffer_stats` also reports embedding memory separately.
+`EPHEMERAL_MAX_BUFFER_BYTES`. Set `EPHEMERAL_SOCKET_PATH` when the default
+platform temporary-directory socket is unsuitable. The byte limit accounts for
+captured UTF-8 content; `get_buffer_stats` also reports embedding and process
+memory separately.
 `execute_and_capture` retains the beginning and end of oversized command
 output and marks the capture with its original byte count.
 

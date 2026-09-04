@@ -2,6 +2,18 @@
 
 import os
 import sys
+import tempfile
+
+
+DEFAULT_MAX_CAPTURES = 25
+DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
+DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
+
+
+def socket_path() -> str:
+    """Return the Unix socket path, allowing isolated deployments to override it."""
+    return os.environ.get("EPHEMERAL_SOCKET_PATH", DEFAULT_SOCKET_PATH)
 
 
 def positive_int_env(name: str, default: int) -> int:

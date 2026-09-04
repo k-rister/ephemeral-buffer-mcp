@@ -9,17 +9,20 @@ import time
 import subprocess
 import unittest
 import json
+from pathlib import Path
+from config import socket_path
 
-SERVER_PATH = "/home/krister/antigravity/ephemeral-buffer-mcp/run.sh"
-CLI_PATH = "/home/krister/antigravity/ephemeral-buffer-mcp/cli.py"
-SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
+PROJECT_ROOT = Path(__file__).resolve().parent
+SERVER_PATH = PROJECT_ROOT / "server.py"
+CLI_PATH = PROJECT_ROOT / "cli.py"
+SOCKET_PATH = socket_path()
 
 
 class TestEndToEndPipe(unittest.TestCase):
     def test_pipe_to_socket(self):
         # Start server as a subprocess
         proc = subprocess.Popen(
-            [SERVER_PATH],
+            [sys.executable, str(SERVER_PATH)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -48,7 +51,7 @@ class TestEndToEndPipe(unittest.TestCase):
             )
 
             pipe_proc = subprocess.run(
-                [sys.executable, CLI_PATH, "--label", "order-tests"],
+                [sys.executable, str(CLI_PATH), "--label", "order-tests"],
                 input=simulated_log,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

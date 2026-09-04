@@ -9,7 +9,7 @@ import json
 import asyncio
 import threading
 from typing import Optional
-from config import positive_int_env
+from config import positive_int_env, socket_path
 from mcp.server.fastmcp import FastMCP
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
@@ -18,7 +18,7 @@ from engine import (
 )
 from capture_utils import read_file_bounded, run_command_bounded
 
-SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
+SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 
 # Initialize FastMCP
@@ -379,7 +379,7 @@ def run_socket_server():
 
     async def _main():
         server = await asyncio.start_unix_server(handle_socket_client, path=SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o777)
+        os.chmod(SOCKET_PATH, 0o600)
         async with server:
             await server.serve_forever()
 

@@ -20,9 +20,9 @@ import socket
 import json
 import argparse
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
-from config import positive_int_env
+from config import positive_int_env, socket_path
 
-SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
+SOCKET_PATH = socket_path()
 
 
 def send_to_mcp(

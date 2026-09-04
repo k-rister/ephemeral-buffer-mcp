@@ -5,6 +5,7 @@ import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from config import DEFAULT_MAX_CAPTURES
 from engine import EphemeralEngine
 
 
@@ -16,7 +17,7 @@ def main() -> None:
     if args.captures < 1 or args.workers < 1:
         parser.error("--captures and --workers must be positive")
 
-    engine = EphemeralEngine(max_captures=max(args.captures, 25))
+    engine = EphemeralEngine(max_captures=max(args.captures, DEFAULT_MAX_CAPTURES))
     payload = "benchmark line with representative output\n" * 20
 
     started = time.perf_counter()
