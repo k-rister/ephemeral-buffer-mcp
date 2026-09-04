@@ -16,7 +16,7 @@ from engine import (
     DEFAULT_MAX_CAPTURES,
     EphemeralEngine,
 )
-from capture_utils import run_command_bounded
+from capture_utils import read_file_bounded, run_command_bounded
 
 SOCKET_PATH = "/tmp/ephemeral_buffer.sock"
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
@@ -78,11 +78,7 @@ def capture_file(
         read_limit = engine.max_buffer_bytes if max_bytes is None else max_bytes
         if read_limit < 1:
             return "Error: max_bytes must be at least 1."
-        with open(file_path, "rb") as f:
-            content_bytes = f.read(read_limit + 1)
-        if len(content_bytes) > read_limit:
-            return f"Error: File exceeds the {read_limit:,}-byte capture limit."
-        content = content_bytes.decode("utf-8", errors="replace")
+        content = read_file_bounded(file_path, read_limit)
         if not label:
             label = os.path.basename(file_path)
         return capture_text(content, label=label, content_type=content_type)

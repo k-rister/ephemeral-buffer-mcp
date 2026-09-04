@@ -2,9 +2,10 @@
 
 import shlex
 import sys
+import tempfile
 import unittest
 
-from capture_utils import bound_chunks, run_command_bounded
+from capture_utils import bound_chunks, read_file_bounded, run_command_bounded
 
 
 class TestBoundedCommandCapture(unittest.TestCase):
@@ -41,6 +42,13 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertEqual(original_size, 1400)
         self.assertLessEqual(len(output.encode("utf-8")), 1024)
         self.assertIn("output truncated", output)
+
+    def test_file_read_rejects_oversized_content(self):
+        with tempfile.NamedTemporaryFile() as file_handle:
+            file_handle.write(b"x" * 1024)
+            file_handle.flush()
+            with self.assertRaisesRegex(ValueError, "exceeds"):
+                read_file_bounded(file_handle.name, 512)
 
 
 if __name__ == "__main__":

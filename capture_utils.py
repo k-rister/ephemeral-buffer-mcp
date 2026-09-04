@@ -1,6 +1,7 @@
 """Utilities for bounded command and stream output capture."""
 
 import subprocess
+from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 
@@ -75,3 +76,14 @@ def run_command_bounded(
             proc.stdout.close()
         exit_code = proc.wait()
     return output, exit_code, truncated, total_bytes
+
+
+def read_file_bounded(file_path: str, max_bytes: int) -> str:
+    """Read a UTF-8 file only when it fits within the configured byte limit."""
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be at least 1")
+    with Path(file_path).open("rb") as stream:
+        content = stream.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError(f"File exceeds the {max_bytes:,}-byte capture limit")
+    return content.decode("utf-8", errors="replace")

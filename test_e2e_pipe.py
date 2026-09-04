@@ -3,6 +3,7 @@ Test the end-to-end socket IPC and CLI piping against the running server.
 """
 
 import os
+import socket
 import sys
 import time
 import subprocess
@@ -22,7 +23,8 @@ class TestEndToEndPipe(unittest.TestCase):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            env={**os.environ, "EPHEMERAL_MAX_BUFFER_BYTES": "1024"},
         )
 
         try:
@@ -74,6 +76,18 @@ class TestEndToEndPipe(unittest.TestCase):
             self.assertEqual(bounded_proc.returncode, 0)
             self.assertIn("Successfully captured", bounded_proc.stderr)
             self.assertIn("bounded-pipe", bounded_proc.stderr)
+
+            oversized_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            oversized_socket.connect(SOCKET_PATH)
+            try:
+                oversized_socket.sendall(b"x" * (1024 + 64 * 1024 + 1))
+            except BrokenPipeError:
+                # The server may close as soon as it observes the bounded read.
+                pass
+            response = oversized_socket.recv(4096).decode("utf-8")
+            oversized_socket.close()
+            self.assertIn('"status": "error"', response)
+            self.assertIn("exceeds", response)
 
         finally:
             proc.terminate()
