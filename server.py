@@ -9,6 +9,7 @@ import json
 import asyncio
 import threading
 from typing import Optional
+from config import positive_int_env
 from mcp.server.fastmcp import FastMCP
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
@@ -24,23 +25,9 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 mcp = FastMCP("ephemeral-buffer")
 
 
-def _positive_int_env(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-        if parsed < 1:
-            raise ValueError
-        return parsed
-    except ValueError:
-        print(f"Ignoring invalid {name}={value!r}; using {default}", file=sys.stderr)
-        return default
-
-
 engine = EphemeralEngine(
-    max_captures=_positive_int_env("EPHEMERAL_MAX_CAPTURES", DEFAULT_MAX_CAPTURES),
-    max_buffer_bytes=_positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
+    max_captures=positive_int_env("EPHEMERAL_MAX_CAPTURES", DEFAULT_MAX_CAPTURES),
+    max_buffer_bytes=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
 )
 
 

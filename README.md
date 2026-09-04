@@ -125,4 +125,10 @@ output and marks the capture with its original byte count.
 Run the test suite:
 ```bash
 ./venv/bin/python test_engine.py
+./venv/bin/python -m unittest test_config.py test_capture_utils.py
+```
+
+Run the concurrency benchmark:
+```bash
+./venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
 ```
