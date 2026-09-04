@@ -19,6 +19,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 - **Smart Signal Filtering:** Scans command/build/test logs for diagnostic keywords, suppresses false positives in diffs and source code, and accurately captures test runner failures, unhandled exceptions, and merge conflicts. Use `content_type='log'` when a plain-text capture should be signal-scanned.
 - **Reciprocal Rank Fusion (RRF):** Blends lexical and semantic ranking for high precision retrieval.
 - **LRU Capture Eviction:** Holds up to 25 captures by default and evicts the least recently used capture when full, ensuring zero persistent storage buildup.
+- **Thread-Safe Shared Engine:** Serializes ingestion, search, LRU updates, eviction, and cleanup across MCP requests and CLI socket clients.
 
 ---
 

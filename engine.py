@@ -7,10 +7,21 @@ import sys
 import time
 import re
 import sqlite3
+import threading
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
+from functools import wraps
 from fastembed import TextEmbedding
+
+
+def synchronized(method):
+    """Serialize access to shared engine state, including nested calls."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
 
 DIFF_GIT_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -211,6 +222,7 @@ class Capture:
 
 class EphemeralEngine:
     def __init__(self, max_captures: int = 25, embedding_model_name: str = "BAAI/bge-small-en-v1.5"):
+        self._lock = threading.RLock()
         self.max_captures = max_captures
         self.captures: Dict[str, Capture] = {}
         self.capture_order: List[str] = []
@@ -256,6 +268,7 @@ class EphemeralEngine:
             
         return chunks
 
+    @synchronized
     def ingest(self, text: str, label: str = "", content_type: str = "auto") -> Capture:
         """
         Ingests text, chunks it, builds SQLite FTS5 BM25 index and FastEmbed dense vector embeddings.
@@ -318,6 +331,7 @@ class EphemeralEngine:
         self.capture_order.append(capture_id)
         return capture
 
+    @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
         if not self.captures:
             return None
@@ -335,6 +349,7 @@ class EphemeralEngine:
             self.capture_order.remove(capture_id)
             self.capture_order.append(capture_id)
 
+    @synchronized
     def search_bm25(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
         Search using SQLite FTS5 BM25. Returns list of (chunk_id, score).
@@ -362,6 +377,7 @@ class EphemeralEngine:
         except sqlite3.OperationalError:
             return []
 
+    @synchronized
     def search_semantic(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
         Dense vector cosine similarity search. Returns list of (chunk_id, score).
@@ -379,6 +395,7 @@ class EphemeralEngine:
         top_indices = np.argsort(similarities)[::-1][:top_k]
         return [(int(idx), float(similarities[idx])) for idx in top_indices if similarities[idx] > 0.0]
 
+    @synchronized
     def search(
         self,
         query: str,
@@ -477,6 +494,7 @@ class EphemeralEngine:
             "matches": matches
         }
 
+    @synchronized
     def get_slice(self, start_line: int, end_line: int, capture_id: str = "latest") -> Dict[str, Any]:
         """
         Retrieves an exact slice of lines from a capture.
@@ -509,6 +527,7 @@ class EphemeralEngine:
             "content": "\n".join(lines_with_numbers)
         }
 
+    @synchronized
     def get_summary(self, capture_id: str = "latest") -> Dict[str, Any]:
         """
         Generates a quick diagnostic summary of the capture.
@@ -552,6 +571,7 @@ class EphemeralEngine:
             "tail_preview": "\n".join(tail_preview)
         }
 
+    @synchronized
     def list_captures(self) -> List[Dict[str, Any]]:
         """
         Lists all active captures in the ring buffer.
@@ -568,6 +588,7 @@ class EphemeralEngine:
             })
         return result
 
+    @synchronized
     def clear(self, capture_id: str = "all") -> str:
         """
         Clears one or all captures from the buffer.

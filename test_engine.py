@@ -4,6 +4,7 @@ Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from engine import EphemeralEngine
 
 
@@ -232,6 +233,27 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIn("timeout", summary_fail["keyword_signals"])
         print("\n[Log Signal Scanner Passed] Benign zeros ignored, real errors/failures captured:")
         print(summary_fail["signals_summary"])
+
+    def test_09_thread_safe_ingest_and_reads(self):
+        self.engine.clear("all")
+
+        def ingest_capture(index):
+            return self.engine.ingest(f"Concurrent capture {index}\nDone", label=f"thread-{index}").capture_id
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            capture_ids = list(executor.map(ingest_capture, range(12)))
+
+        self.assertEqual(len(capture_ids), len(set(capture_ids)))
+        self.assertEqual(len(self.engine.list_captures()), 3)
+
+        latest_id = self.engine.list_captures()[0]["capture_id"]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            statuses = list(executor.map(
+                lambda _: self.engine.get_summary(latest_id)["status"],
+                range(16)
+            ))
+        self.assertEqual(statuses, ["ok"] * 16)
+        print("\n[Thread Safety Passed] Concurrent ingest and reads remained consistent.")
 
 
 if __name__ == "__main__":
