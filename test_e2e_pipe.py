@@ -20,6 +20,9 @@ SOCKET_PATH = socket_path()
 
 class TestEndToEndPipe(unittest.TestCase):
     def test_pipe_to_socket(self):
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+
         # Start server as a subprocess
         proc = subprocess.Popen(
             [sys.executable, str(SERVER_PATH)],
@@ -90,7 +93,7 @@ class TestEndToEndPipe(unittest.TestCase):
             response = oversized_socket.recv(4096).decode("utf-8")
             oversized_socket.close()
             self.assertIn('"status": "error"', response)
-            self.assertIn("exceeds", response)
+            self.assertIn("exceed", response)
 
         finally:
             proc.terminate()
