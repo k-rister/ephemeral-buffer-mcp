@@ -14,10 +14,19 @@ shared by the server and CLI processes:
 export EPHEMERAL_SOCKET_PATH=/run/user/1000/ephemeral-buffer.sock
 ```
 
-The server removes a stale socket at startup and creates the new socket with
-owner-only permissions (`0600`). The parent directory must already exist and
-be writable by the account running the server. Keep the socket in a private
-directory when multiple users share a host.
+The server probes an existing socket before startup: a live socket is preserved
+and the new instance exits with an error, while a stale socket is removed. The
+new socket is created with owner-only permissions (`0600`). The parent
+directory must already exist and be writable by the account running the server.
+
+When running multiple sessions as the same user, give each server/CLI pair its
+own path rather than relying on the shared default:
+
+```bash
+export EPHEMERAL_SOCKET_PATH="${XDG_RUNTIME_DIR}/ephbuf-${SESSION_ID}.sock"
+```
+
+Keep the socket in a private directory when multiple users share a host.
 
 ## Capture limits and eviction
 

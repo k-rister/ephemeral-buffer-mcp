@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import asyncio
+import socket
 import threading
 from typing import Optional
 from config import positive_int_env, socket_path
@@ -371,19 +372,32 @@ def run_socket_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    if os.path.exists(SOCKET_PATH):
-        try:
-            os.unlink(SOCKET_PATH)
-        except OSError:
-            pass
-
-    async def _main():
-        server = await asyncio.start_unix_server(handle_socket_client, path=SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o600)
-        async with server:
-            await server.serve_forever()
-
     try:
+        if os.path.lexists(SOCKET_PATH):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(SOCKET_PATH)
+            except ConnectionRefusedError:
+                # No listener accepted the connection, so this is a stale socket.
+                try:
+                    os.unlink(SOCKET_PATH)
+                except FileNotFoundError:
+                    pass
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RuntimeError(f"Unable to verify existing socket {SOCKET_PATH}: {exc}") from exc
+            else:
+                raise RuntimeError(f"Socket already in use at {SOCKET_PATH}")
+            finally:
+                probe.close()
+
+        async def _main():
+            server = await asyncio.start_unix_server(handle_socket_client, path=SOCKET_PATH)
+            os.chmod(SOCKET_PATH, 0o600)
+            async with server:
+                await server.serve_forever()
+
         loop.run_until_complete(_main())
     except Exception as e:
         print(f"Socket server error: {e}", file=sys.stderr)
