@@ -134,6 +134,8 @@ def execute_and_capture(
             content_type=content_type,
             truncated=truncated,
             original_byte_size=original_byte_size if truncated else None,
+            command_exit_code=exit_code,
+            timed_out=timed_out,
         )
         summary = engine.get_summary(cap.capture_id)
         
@@ -338,12 +340,16 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 content_type = payload.get("content_type", "auto")
                 truncated = bool(payload.get("truncated", False))
                 original_byte_size = payload.get("original_byte_size")
+                command_exit_code = payload.get("command_exit_code")
+                timed_out = bool(payload.get("timed_out", False))
             except Exception:
                 label = "CLI pipe"
                 text = data.decode("utf-8", errors="replace")
                 content_type = "auto"
                 truncated = False
                 original_byte_size = None
+                command_exit_code = None
+                timed_out = False
 
             cap = engine.ingest(
                 text,
@@ -351,6 +357,8 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 content_type=content_type,
                 truncated=truncated,
                 original_byte_size=original_byte_size,
+                command_exit_code=command_exit_code,
+                timed_out=timed_out,
             )
             resp = {
                 "status": "ok",

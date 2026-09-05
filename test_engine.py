@@ -213,9 +213,11 @@ tests/test_api.py .........................                              [100%]
 passed: 25, failed: 0, errors: 0
 no errors encountered.
 """
-        cap_clean = self.engine.ingest(clean_log.strip(), label="pytest-clean-run")
+        cap_clean = self.engine.ingest(
+            clean_log.strip(), label="pytest-clean-run", command_exit_code=0
+        )
         summary_clean = self.engine.get_summary(cap_clean.capture_id)
-        self.assertEqual(summary_clean["signals_summary"], "None detected")
+        self.assertEqual(summary_clean["signals_summary"], "None (successful test run)")
         self.assertEqual(len(summary_clean["keyword_signals"]), 0)
 
         # 2. Failing run with actual errors

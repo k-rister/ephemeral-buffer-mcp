@@ -80,6 +80,8 @@ class TestCliConfiguration(unittest.TestCase):
                 "content_type": "log",
                 "truncated": True,
                 "original_byte_size": 100,
+                "command_exit_code": None,
+                "timed_out": False,
             },
         )
 
