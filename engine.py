@@ -60,6 +60,14 @@ LOG_SIGNAL_PATTERNS = {
     "failure": re.compile(r"\b(FAILED|FAILURES?)\b", re.IGNORECASE),
     "timeout": re.compile(r"\b(TIMED\s*OUT|TIMEOUT)\b", re.IGNORECASE),
 }
+SUCCESS_TEST_RE = re.compile(
+    r"(?:^\s*OK\s*$|\b\d+\s+(?:tests?|cases?)\s+.*\bOK\b|\b\d+\s+(?:tests?|cases?)\s+passed\b|\b\d+\s+passed\b)",
+    re.IGNORECASE,
+)
+NONZERO_TEST_FAILURE_RE = re.compile(
+    r"(?:\b[1-9]\d*\s+(?:failed|failures?|errors?)\b|\b(?:failed|failures?|errors?)\s*[:=]\s*[1-9]\d*)",
+    re.IGNORECASE,
+)
 
 
 def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
@@ -181,7 +189,13 @@ def detect_content_type(lines: List[str], label: str = "", content_type_hint: st
     return ("text", None)
 
 
-def detect_signals(lines: List[str], content_type: str, diff_meta: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, int], str]:
+def detect_signals(
+    lines: List[str],
+    content_type: str,
+    diff_meta: Optional[Dict[str, Any]] = None,
+    command_exit_code: Optional[int] = None,
+    timed_out: bool = False,
+) -> Tuple[Dict[str, int], str]:
     """
     Extracts high-signal diagnostic indicators according to content type.
     Avoids false alarms on code/diff lines.
@@ -196,6 +210,14 @@ def detect_signals(lines: List[str], content_type: str, diff_meta: Optional[Dict
     # noisy matches for words such as "error" and "failure".
     if content_type != "log":
         return ({}, "None (non-log content)")
+
+    if (
+        not timed_out
+        and command_exit_code in (None, 0)
+        and any(SUCCESS_TEST_RE.search(line) for line in lines)
+        and not any(NONZERO_TEST_FAILURE_RE.search(line) for line in lines)
+    ):
+        return ({}, "None (successful test run)")
 
     detected = {}
     for name, pat in LOG_SIGNAL_PATTERNS.items():
@@ -237,6 +259,8 @@ class Capture:
     diff_meta: Optional[Dict[str, Any]] = None
     truncated: bool = False
     original_byte_size: Optional[int] = None
+    command_exit_code: Optional[int] = None
+    timed_out: bool = False
 
     @property
     def line_count(self) -> int:
@@ -326,7 +350,9 @@ class EphemeralEngine:
         label: str = "",
         content_type: str = "auto",
         truncated: bool = False,
-        original_byte_size: Optional[int] = None
+        original_byte_size: Optional[int] = None,
+        command_exit_code: Optional[int] = None,
+        timed_out: bool = False,
     ) -> Capture:
         """
         Ingests text, chunks it, builds SQLite FTS5 BM25 index and FastEmbed dense vector embeddings.
@@ -387,7 +413,9 @@ class EphemeralEngine:
             content_type=classified_type,
             diff_meta=diff_meta,
             truncated=truncated,
-            original_byte_size=original_byte_size
+            original_byte_size=original_byte_size,
+            command_exit_code=command_exit_code,
+            timed_out=timed_out,
         )
 
         with self._lock:
@@ -612,7 +640,13 @@ class EphemeralEngine:
         if not capture:
             return {"status": "error", "message": f"Capture '{capture_id}' not found."}
 
-        signals, signals_str = detect_signals(capture.raw_lines, capture.content_type, capture.diff_meta)
+        signals, signals_str = detect_signals(
+            capture.raw_lines,
+            capture.content_type,
+            capture.diff_meta,
+            capture.command_exit_code,
+            capture.timed_out,
+        )
 
         head_preview = [f"  {i+1:5d} | {line}" for i, line in enumerate(capture.raw_lines[:5])]
         tail_preview = [f"  {capture.line_count - len(capture.raw_lines[-5:]) + i + 1:5d} | {line}" for i, line in enumerate(capture.raw_lines[-5:])]
@@ -643,6 +677,8 @@ class EphemeralEngine:
             "byte_size": capture.byte_size,
             "truncated": capture.truncated,
             "original_byte_size": capture.original_byte_size,
+            "command_exit_code": capture.command_exit_code,
+            "timed_out": capture.timed_out,
             "keyword_signals": signals,
             "signals_summary": signals_str,
             "head_preview": "\n".join(head_preview),

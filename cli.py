@@ -31,6 +31,8 @@ def send_to_mcp(
     content_type: str = "auto",
     truncated: bool = False,
     original_byte_size: int = 0,
+    command_exit_code: int | None = None,
+    timed_out: bool = False,
 ) -> dict:
     if not os.path.exists(SOCKET_PATH):
         return {
@@ -48,6 +50,8 @@ def send_to_mcp(
             "content_type": content_type,
             "truncated": truncated,
             "original_byte_size": original_byte_size if truncated else None,
+            "command_exit_code": command_exit_code,
+            "timed_out": timed_out,
         }).encode("utf-8")
         sock.sendall(payload)
         sock.shutdown(socket.SHUT_WR)
@@ -113,6 +117,8 @@ def main():
             content_type=args.type,
             truncated=truncated,
             original_byte_size=original_byte_size,
+            command_exit_code=exit_code,
+            timed_out=timed_out,
         )
         if res.get("status") == "ok":
             print(f"\n[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)

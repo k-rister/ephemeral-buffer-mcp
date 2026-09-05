@@ -71,6 +71,10 @@ Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 terminated as a process group, its output collected so far is retained, and it
 returns exit status 124.
 
+Signal summaries recognize successful test-run markers and avoid treating
+example error text inside a passing test run as an active failure. The complete
+captured output remains available through search and slices.
+
 Use `clear_captures("all")` between unrelated investigations when the active
 buffer should be released immediately instead of waiting for LRU eviction.
 
