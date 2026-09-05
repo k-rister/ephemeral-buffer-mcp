@@ -6,6 +6,7 @@ import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from engine import EphemeralEngine
 
 
@@ -317,6 +318,15 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             blocker.release.set()
             worker.join(timeout=2)
             self.engine.embedding_model = original_model
+
+
+class TestEmbeddingStartup(unittest.TestCase):
+    def test_embedding_model_loads_lazily(self):
+        with patch("engine.TextEmbedding") as embedding:
+            engine = EphemeralEngine(max_captures=1)
+
+        embedding.assert_not_called()
+        self.assertIsNone(engine.embedding_model)
 
 
 if __name__ == "__main__":

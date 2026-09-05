@@ -49,6 +49,11 @@ index, Python objects, and process RSS are reported separately by
 `get_buffer_stats`; process RSS is an approximate operational metric rather
 than an allocation limit.
 
+FastEmbed is loaded lazily on the first capture or semantic search. Set
+`EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
+`EPHEMERAL_FASTEMBED_CACHE_DIR` to place its downloaded model files in a
+controlled cache directory.
+
 Override the limits before starting the server:
 
 ```bash

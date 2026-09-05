@@ -14,6 +14,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      EPHEMERAL_FASTEMBED_CACHE_DIR: /tmp/fastembed_cache
     strategy:
       fail-fast: false
       matrix:
@@ -77,6 +79,8 @@ jobs:
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    env:
+      EPHEMERAL_FASTEMBED_CACHE_DIR: /tmp/fastembed_cache
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

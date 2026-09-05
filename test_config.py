@@ -6,7 +6,14 @@ import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
 
-from config import DEFAULT_SOCKET_PATH, positive_int_env, socket_path
+from config import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_SOCKET_PATH,
+    embedding_cache_dir,
+    embedding_model_name,
+    positive_int_env,
+    socket_path,
+)
 
 
 class TestPositiveIntEnv(unittest.TestCase):
@@ -49,6 +56,23 @@ class TestPositiveIntEnv(unittest.TestCase):
         ):
             self.assertEqual(socket_path(), "/tmp/explicit.sock")
         self.assertTrue(DEFAULT_SOCKET_PATH)
+
+    def test_embedding_defaults(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(embedding_model_name(), DEFAULT_EMBEDDING_MODEL)
+            self.assertIsNone(embedding_cache_dir())
+
+    def test_embedding_settings_can_be_overridden(self):
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_EMBEDDING_MODEL": "custom/model",
+                "EPHEMERAL_FASTEMBED_CACHE_DIR": "/tmp/fastembed",
+            },
+            clear=True,
+        ):
+            self.assertEqual(embedding_model_name(), "custom/model")
+            self.assertEqual(embedding_cache_dir(), "/tmp/fastembed")
 
 
 if __name__ == "__main__":

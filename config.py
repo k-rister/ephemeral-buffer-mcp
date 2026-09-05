@@ -9,6 +9,7 @@ import hashlib
 DEFAULT_MAX_CAPTURES = 25
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
 
@@ -25,6 +26,16 @@ def socket_path() -> str:
         return os.path.join(tempfile.gettempdir(), f"{SESSION_SOCKET_PREFIX}{digest}.sock")
 
     return DEFAULT_SOCKET_PATH
+
+
+def embedding_model_name() -> str:
+    """Return the configured FastEmbed model name."""
+    return os.environ.get("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+
+
+def embedding_cache_dir() -> str | None:
+    """Return the optional FastEmbed model cache directory."""
+    return os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR") or None
 
 
 def positive_int_env(name: str, default: int) -> int:

@@ -14,7 +14,13 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from functools import wraps
 from fastembed import TextEmbedding
-from config import DEFAULT_MAX_BUFFER_BYTES, DEFAULT_MAX_CAPTURES
+from config import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_MAX_BUFFER_BYTES,
+    DEFAULT_MAX_CAPTURES,
+    embedding_cache_dir,
+    embedding_model_name as configured_embedding_model_name,
+)
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -245,7 +251,8 @@ class EphemeralEngine:
         self,
         max_captures: int = DEFAULT_MAX_CAPTURES,
         max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
-        embedding_model_name: str = "BAAI/bge-small-en-v1.5"
+        embedding_model_name: Optional[str] = None,
+        embedding_cache_path: Optional[str] = None,
     ):
         self._lock = threading.RLock()
         if max_captures < 1:
@@ -254,18 +261,30 @@ class EphemeralEngine:
             raise ValueError("max_buffer_bytes must be at least 1")
         self.max_captures = max_captures
         self.max_buffer_bytes = max_buffer_bytes
-        self._embedding_lock = threading.Lock()
+        self._embedding_lock = threading.RLock()
         self.captures: Dict[str, Capture] = {}
         self.capture_order: List[str] = []
         self._total_bytes = 0
         self._next_id = 1
         
-        # Lazy or fast load embedding model
-        sys.stderr.write(f"Loading embedding model: {embedding_model_name}...\n")
-        sys.stderr.flush()
-        self.embedding_model = TextEmbedding(model_name=embedding_model_name)
-        sys.stderr.write("Embedding model ready.\n")
-        sys.stderr.flush()
+        self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
+        self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
+        self.embedding_model = None
+
+    def _get_embedding_model(self):
+        """Load FastEmbed once, on first operation that needs embeddings."""
+        if self.embedding_model is None:
+            with self._embedding_lock:
+                if self.embedding_model is None:
+                    sys.stderr.write(f"Loading embedding model: {self.embedding_model_name}...\n")
+                    sys.stderr.flush()
+                    kwargs = {"model_name": self.embedding_model_name}
+                    if self.embedding_cache_path:
+                        kwargs["cache_dir"] = self.embedding_cache_path
+                    self.embedding_model = TextEmbedding(**kwargs)
+                    sys.stderr.write("Embedding model ready.\n")
+                    sys.stderr.flush()
+        return self.embedding_model
 
     def _chunk_lines(self, lines: List[str], window_size: int = 4, step_size: int = 2) -> List[Chunk]:
         """
@@ -347,7 +366,7 @@ class EphemeralEngine:
         with self._embedding_lock:
             if chunks:
                 chunk_texts = [c.text for c in chunks]
-                embed_list = list(self.embedding_model.embed(chunk_texts))
+                embed_list = list(self._get_embedding_model().embed(chunk_texts))
                 embeddings = np.array(embed_list, dtype=np.float32)
                 # Normalize embeddings for cosine similarity
                 norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
@@ -442,7 +461,7 @@ class EphemeralEngine:
         if not capture.chunks or capture.embeddings is None or len(capture.embeddings) == 0:
             return []
             
-        query_embed = list(self.embedding_model.embed([query]))[0]
+        query_embed = list(self._get_embedding_model().embed([query]))[0]
         query_embed = np.array(query_embed, dtype=np.float32)
         norm = np.linalg.norm(query_embed)
         if norm > 0:
