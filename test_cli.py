@@ -63,6 +63,27 @@ class TestCliConfiguration(unittest.TestCase):
         run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES)
         self.assertEqual(send.call_args.kwargs["label"], "build")
 
+    def test_wrapped_command_reports_capture_warning(self):
+        response = {"status": "error", "message": "socket unavailable"}
+        with patch.object(cli, "run_command_bounded", return_value=("output", 0, False, 6)), \
+                patch.object(cli, "send_to_mcp", return_value=response), \
+                patch.object(sys, "argv", ["cli.py", "--", "echo", "ok"]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertIn("socket unavailable", stderr.getvalue())
+
+    def test_wrapped_command_reports_invalid_output_limit(self):
+        with patch.object(cli, "run_command_bounded", side_effect=ValueError("limit too small")), \
+                patch.object(sys, "argv", ["cli.py", "--", "echo", "ok"]):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,12 @@
 """Unit tests for MCP tool validation, response formatting, and socket IPC."""
 
 import asyncio
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import server
 
@@ -131,6 +133,28 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(writer.writes, [])
         self.assertTrue(writer.closed)
+
+    async def test_malformed_payload_falls_back_to_plain_text(self):
+        writer = await self.run_handler(b"not-json")
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["label"], "CLI pipe")
+
+
+class TestSocketServerStartup(unittest.TestCase):
+    def test_startup_failure_is_reported(self):
+        class FailingLoop:
+            def run_until_complete(self, coroutine):
+                coroutine.close()
+                raise RuntimeError("socket unavailable")
+
+        with patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                patch.object(server.asyncio, "set_event_loop"), \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            server.run_socket_server()
+
+        self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
 
 
 if __name__ == "__main__":
