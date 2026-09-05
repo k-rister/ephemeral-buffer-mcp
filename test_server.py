@@ -58,6 +58,20 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("exceeds the configured buffer limit", result)
 
+    def test_capture_file_rejects_non_positive_limit(self):
+        with tempfile.NamedTemporaryFile() as file_handle:
+            result = server.capture_file(file_handle.name, max_bytes=0)
+
+        self.assertIn("max_bytes must be at least 1", result)
+
+    def test_capture_file_reports_read_failure(self):
+        with tempfile.NamedTemporaryFile() as file_handle, \
+                patch.object(server, "read_file_bounded", side_effect=OSError("permission denied")):
+            result = server.capture_file(file_handle.name)
+
+        self.assertIn("Error reading file", result)
+        self.assertIn("permission denied", result)
+
     def test_execute_rejects_limit_above_buffer_budget(self):
         server.engine.max_buffer_bytes = 1024
 
@@ -70,6 +84,13 @@ class TestServerTools(unittest.TestCase):
         result = server.execute_and_capture("printf output", max_output_bytes=100)
 
         self.assertIn("at least 512", result)
+
+    def test_execute_reports_command_failure(self):
+        with patch.object(server, "run_command_bounded", side_effect=OSError("unable to start command")):
+            result = server.execute_and_capture("missing-command")
+
+        self.assertIn("Error executing command", result)
+        self.assertIn("unable to start command", result)
 
     def test_buffer_stats_formats_memory_metrics(self):
         server.capture_text("server stats payload", label="server-test")
@@ -140,6 +161,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = json.loads(writer.writes[0])
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "CLI pipe")
+
+    async def test_ingest_failure_returns_error_response(self):
+        with patch.object(server.engine, "ingest", side_effect=ValueError("invalid capture")):
+            writer = await self.run_handler(json.dumps({"text": "payload"}).encode())
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "error")
+        self.assertIn("invalid capture", response["message"])
 
 
 class TestSocketServerStartup(unittest.TestCase):
