@@ -156,6 +156,8 @@ vulnerabilities are found.
 Pushing a version tag such as `v0.1.0` runs the release workflow, which builds
 wheel and source distributions, verifies the installed CLI, and uploads the
 artifacts for review. The tag must match the version in `pyproject.toml`.
+The workflow also uploads `SHA256SUMS`; verify a downloaded artifact with
+`sha256sum --check SHA256SUMS` from the directory containing the files.
 Publishing to PyPI is intentionally not automated.
 
 Run the concurrency benchmark:

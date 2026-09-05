@@ -43,6 +43,9 @@ jobs:
           /tmp/release-package-venv/bin/python -m pip install --no-deps dist/*.whl
           /tmp/release-package-venv/bin/agy-cap --help
 
+      - name: Generate distribution checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+
       - name: Upload distributions
         uses: actions/upload-artifact@v6
         with:
