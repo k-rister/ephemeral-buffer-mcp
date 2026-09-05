@@ -67,7 +67,7 @@ jobs:
         run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py
 
       - name: Run focused tests
-        run: python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+        run: python -u -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest -v test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 
       - name: Report coverage
         run: |
