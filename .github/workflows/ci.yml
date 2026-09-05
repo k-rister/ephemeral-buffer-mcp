@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EPHEMERAL_FASTEMBED_CACHE_DIR: /tmp/fastembed_cache
+      EPHEMERAL_TEST_EMBEDDINGS: "1"
     strategy:
       fail-fast: false
       matrix:

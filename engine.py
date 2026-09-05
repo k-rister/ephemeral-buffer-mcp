@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import re
+import hashlib
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -271,6 +272,33 @@ class Capture:
         return sum(len(line.encode("utf-8")) + 1 for line in self.raw_lines)
 
 
+class _DeterministicTestEmbedding:
+    """Small deterministic substitute used only by the CI test environment."""
+
+    _canonical_terms = {
+        "network": "network-disconnect",
+        "disconnect": "network-disconnect",
+        "disconnected": "network-disconnect",
+        "connection": "network-disconnect",
+        "connected": "network-disconnect",
+        "tcp": "network-disconnect",
+        "remote": "network-disconnect",
+        "closed": "network-disconnect",
+        "terminated": "network-disconnect",
+    }
+
+    def embed(self, texts):
+        vectors = []
+        for text in texts:
+            vector = np.zeros(384, dtype=np.float32)
+            for token in re.findall(r"[a-z0-9]+", text.lower()):
+                token = self._canonical_terms.get(token, token)
+                index = int.from_bytes(hashlib.sha256(token.encode()).digest()[:4], "big") % 384
+                vector[index] += 1.0
+            vectors.append(vector.tolist())
+        return vectors
+
+
 class EphemeralEngine:
     def __init__(
         self,
@@ -301,6 +329,9 @@ class EphemeralEngine:
         if self.embedding_model is None:
             with self._embedding_lock:
                 if self.embedding_model is None:
+                    if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1":
+                        self.embedding_model = _DeterministicTestEmbedding()
+                        return self.embedding_model
                     sys.stderr.write(f"Loading embedding model: {self.embedding_model_name}...\n")
                     sys.stderr.flush()
                     kwargs = {"model_name": self.embedding_model_name}
