@@ -169,3 +169,7 @@ Run the concurrency benchmark:
 ```bash
 ./venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
 ```
+The benchmark accepts `--min-ingest-per-second` and `--min-reads-per-second`
+thresholds for regression checks. GitHub Actions runs it as an optional weekly
+or manually dispatched job and uploads the results; it is not part of the
+required pull-request checks.
