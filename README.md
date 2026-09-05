@@ -158,6 +158,7 @@ wheel and source distributions, verifies the installed CLI, and uploads the
 artifacts for review. The tag must match the version in `pyproject.toml`.
 The workflow also uploads `SHA256SUMS`; verify a downloaded artifact with
 `sha256sum --check SHA256SUMS` from the directory containing the files.
+Release distributions also receive a GitHub build-provenance attestation.
 Publishing to PyPI is intentionally not automated.
 
 Run the concurrency benchmark:
