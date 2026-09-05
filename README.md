@@ -147,7 +147,8 @@ The current focused-test baseline is 58%; CI reports and uploads coverage but
 does not enforce a threshold yet.
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
-Python 3.10 and 3.12 for pushes to `main` and pull requests.
+Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed
+model cache is retained between CI runs to reduce startup time.
 
 Run the concurrency benchmark:
 ```bash
