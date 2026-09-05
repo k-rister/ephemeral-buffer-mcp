@@ -153,6 +153,10 @@ It also builds the wheel and verifies the installed `agy-cap` entry point.
 CI audits the declared dependencies with `pip-audit` and fails if known
 vulnerabilities are found.
 
+Pushing a version tag such as `v0.1.0` runs the release workflow, which builds
+wheel and source distributions, verifies the installed CLI, and uploads the
+artifacts for review. Publishing to PyPI is intentionally not automated.
+
 Run the concurrency benchmark:
 ```bash
 ./venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
