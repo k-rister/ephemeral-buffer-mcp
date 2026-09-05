@@ -419,6 +419,8 @@ def run_socket_server():
         loop.run_until_complete(_main())
     except Exception as e:
         print(f"Socket server error: {e}", file=sys.stderr)
+    finally:
+        loop.close()
 
 
 # Start IPC socket background listener thread

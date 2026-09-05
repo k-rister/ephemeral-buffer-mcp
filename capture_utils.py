@@ -82,6 +82,7 @@ def _run_command_bounded(
 ) -> Tuple[str, int, bool, int, bool]:
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than 0")
+    capture = _BoundedCapture(max_output_bytes)
     proc = subprocess.Popen(
         command,
         shell=True,
@@ -90,7 +91,6 @@ def _run_command_bounded(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    capture = _BoundedCapture(max_output_bytes)
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
