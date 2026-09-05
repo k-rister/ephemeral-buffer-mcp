@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tooling
-        run: python -m pip install build twine
+        run: python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
 
       - name: Verify tag matches package version
         env:
