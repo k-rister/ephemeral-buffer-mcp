@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ephemeral-buffer-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Ephemeral in-memory command output capture and hybrid search MCP server for coding agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,11 +12,25 @@ license = "Apache-2.0"
 authors = [
     { name = "Karl Rister", email = "krister@redhat.com" }
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "mcp<2",
     "fastembed>=0.7.0",
     "numpy>=1.24.0"
 ]
+
+[project.urls]
+Homepage = "https://github.com/k-rister/ephemeral-buffer-mcp"
+Repository = "https://github.com/k-rister/ephemeral-buffer-mcp"
+Issues = "https://github.com/k-rister/ephemeral-buffer-mcp/issues"
 
 [project.scripts]
 ephbuf = "cli:main"
