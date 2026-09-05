@@ -309,11 +309,16 @@ def get_buffer_stats() -> str:
         if unaccounted is None
         else f"Unaccounted RSS bytes: {unaccounted:,}"
     )
+    model_state = "loaded" if stats["embedding_model_loaded"] else "not loaded"
+    model_line = f"Embedding model: {stats['embedding_model']} ({model_state})"
+    cache_line = f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}"
     return (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
         f"Lines: {stats['total_lines']:,}\n"
         f"Chunks: {stats['total_chunks']:,}\n"
+        f"{model_line}\n"
+        f"{cache_line}\n"
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"
         f"Accounted bytes: {stats['accounted_bytes']:,}\n"
         f"{rss_line}\n"
