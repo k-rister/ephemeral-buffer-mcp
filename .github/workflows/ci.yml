@@ -27,7 +27,7 @@ jobs:
           cache: pip
 
       - name: Cache FastEmbed model
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/fastembed_cache
           key: fastembed-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'engine.py') }}
@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload coverage reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-python-${{ matrix.python-version }}
           path: |
