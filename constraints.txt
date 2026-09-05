@@ -1,0 +1,7 @@
+# Tested direct dependency constraints for CI and release validation.
+# Keep requirements.txt flexible for downstream users; update these pins only
+# after the focused and end-to-end test suites pass on both CI Python versions.
+mcp==1.29.1
+fastembed==0.8.0
+numpy==2.2.6; python_version < "3.11"
+numpy==2.5.2; python_version >= "3.11"
