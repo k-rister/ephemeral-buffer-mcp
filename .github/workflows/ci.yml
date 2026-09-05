@@ -55,7 +55,7 @@ jobs:
 
       - name: Report coverage
         run: |
-          python -m coverage report --fail-under=80
+          python -m coverage report --fail-under=82
           python -m coverage xml
           python -m coverage html
 

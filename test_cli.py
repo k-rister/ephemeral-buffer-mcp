@@ -1,6 +1,7 @@
 """CLI configuration regression tests."""
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -35,6 +36,61 @@ class TestCliConfiguration(unittest.TestCase):
 
         self.assertEqual(result["status"], "error")
         self.assertIn("socket not found", result["message"])
+
+    def test_send_to_mcp_serializes_payload_and_reads_response(self):
+        class FakeSocket:
+            def __init__(self):
+                self.sent = None
+                self.shutdown_mode = None
+                self.closed = False
+                self.responses = [b'{"status":"ok"}', b""]
+
+            def connect(self, path):
+                self.path = path
+
+            def sendall(self, payload):
+                self.sent = payload
+
+            def shutdown(self, mode):
+                self.shutdown_mode = mode
+
+            def recv(self, _size):
+                return self.responses.pop(0)
+
+            def close(self):
+                self.closed = True
+
+        fake_socket = FakeSocket()
+        with patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
+                patch.object(cli.os.path, "exists", return_value=True), \
+                patch.object(cli.socket, "socket", return_value=fake_socket):
+            result = cli.send_to_mcp(
+                "output", label="build", content_type="log", truncated=True, original_byte_size=100
+            )
+
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(fake_socket.path, "/tmp/ephemeral.sock")
+        self.assertEqual(fake_socket.shutdown_mode, cli.socket.SHUT_WR)
+        self.assertTrue(fake_socket.closed)
+        self.assertEqual(
+            json.loads(fake_socket.sent),
+            {
+                "label": "build",
+                "text": "output",
+                "content_type": "log",
+                "truncated": True,
+                "original_byte_size": 100,
+            },
+        )
+
+    def test_send_to_mcp_reports_transport_failure(self):
+        with patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
+                patch.object(cli.os.path, "exists", return_value=True), \
+                patch.object(cli.socket, "socket", side_effect=OSError("connection refused")):
+            result = cli.send_to_mcp("output")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("connection refused", result["message"])
 
     def test_stdin_capture_forwards_truncation_metadata(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "Piped STDIN"}
