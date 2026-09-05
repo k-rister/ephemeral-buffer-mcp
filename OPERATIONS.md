@@ -5,10 +5,17 @@ running `ephemeral-buffer` outside of a local development session.
 
 ## Socket configuration
 
-The CLI communicates with the server over a Unix domain socket. By default,
-the socket is created as `ephemeral_buffer.sock` in the platform temporary
-directory. Override that location when the default temporary directory is not
-shared by the server and CLI processes:
+The CLI communicates with the server over a Unix domain socket. If the session
+launcher sets `EPHEMERAL_SESSION_ID`, the server and CLI deterministically use
+a separate socket for that session:
+
+```bash
+export EPHEMERAL_SESSION_ID="agent-session-1"
+```
+
+The session ID is hashed before it is included in the socket filename. This
+keeps concurrent sessions isolated while allowing both processes to derive the
+same path. An explicit path takes precedence when needed:
 
 ```bash
 export EPHEMERAL_SOCKET_PATH=/run/user/1000/ephemeral-buffer.sock
@@ -19,8 +26,9 @@ and the new instance exits with an error, while a stale socket is removed. The
 new socket is created with owner-only permissions (`0600`). The parent
 directory must already exist and be writable by the account running the server.
 
-When running multiple sessions as the same user, give each server/CLI pair its
-own path rather than relying on the shared default:
+If neither variable is set, the legacy shared default is used. When running
+multiple sessions without a session-aware launcher, give each server/CLI pair
+its own explicit path rather than relying on that default:
 
 ```bash
 export EPHEMERAL_SOCKET_PATH="${XDG_RUNTIME_DIR}/ephbuf-${SESSION_ID}.sock"

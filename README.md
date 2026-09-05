@@ -120,8 +120,10 @@ content and embedding bytes from process RSS; the unaccounted RSS value includes
 model, index, and Python object overhead and is approximate.
 
 The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
-`EPHEMERAL_MAX_BUFFER_BYTES`. Set `EPHEMERAL_SOCKET_PATH` when the default
-platform temporary-directory socket is unsuitable. The byte limit accounts for
+`EPHEMERAL_MAX_BUFFER_BYTES`. Session-aware launchers can set
+`EPHEMERAL_SESSION_ID` so each server/CLI pair automatically derives a unique
+socket path; `EPHEMERAL_SOCKET_PATH` remains an explicit override. The byte
+limit accounts for
 captured UTF-8 content; `get_buffer_stats` also reports embedding and process
 memory separately.
 `execute_and_capture` retains the beginning and end of oversized command
