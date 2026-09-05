@@ -172,13 +172,15 @@ vulnerabilities are found.
 CI resolves the runtime dependencies through `constraints.txt`; the direct
 pins are updated only after the full test matrix passes.
 
-Pushing a version tag such as `v0.1.0` runs the release workflow, which builds
-wheel and source distributions, verifies the installed CLI, and uploads the
-artifacts for review. The tag must match the version in `pyproject.toml`.
+Pushing a version tag such as `v0.1.1` runs the release workflow, which builds
+wheel and source distributions, validates their metadata, verifies the
+installed package, and uploads the artifacts for review. The tag must match
+the version in `pyproject.toml`.
 The workflow also uploads `SHA256SUMS`; verify a downloaded artifact with
 `sha256sum --check SHA256SUMS` from the directory containing the files.
 Release distributions also receive a GitHub build-provenance attestation.
-Publishing to PyPI is intentionally not automated.
+After the repository's `pypi` environment is configured with a PyPI trusted
+publisher, the workflow publishes the distributions to PyPI automatically.
 
 Run the concurrency benchmark:
 ```bash

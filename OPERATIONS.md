@@ -81,10 +81,11 @@ buffer should be released immediately instead of waiting for LRU eviction.
 
 ## Release verification
 
-Releases are currently distributed as GitHub Actions artifacts; PyPI
-publishing is intentionally deferred.
+Releases are distributed as GitHub Actions artifacts and, once the trusted
+publisher is registered, PyPI distributions.
 
-1. Update the version in `pyproject.toml`.
+1. Update the version in `pyproject.toml` and add release notes to
+   `CHANGELOG.md`.
 2. Run the focused and end-to-end test suites locally.
 3. Create and push an annotated `vX.Y.Z` tag. The tag must match the project
    version exactly.
@@ -105,9 +106,26 @@ publishing is intentionally deferred.
    /tmp/ephbuf-release-check/bin/ephbuf --help
    ```
 
+8. Confirm the package is available from PyPI and that its published metadata
+   and files match the verified workflow artifacts.
+
 The release workflow also checks the tag/version match and generates a GitHub
 build-provenance attestation. Treat a failed check, checksum mismatch, or
 missing attestation as a release blocker.
+
+### PyPI trusted publishing setup
+
+The PyPI project owner must register a pending publisher for this GitHub
+repository before the first publish:
+
+- Owner: `k-rister`
+- Repository: `ephemeral-buffer-mcp`
+- Workflow: `release.yml`
+- Environment: `pypi`
+
+The workflow uses the `pypi` GitHub environment and OIDC trusted publishing;
+no long-lived PyPI token is stored in GitHub. PyPI rejects reuse of an
+already-published version, so each release must use a new version number.
 
 ## CI and branch protection
 
