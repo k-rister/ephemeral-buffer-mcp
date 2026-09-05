@@ -45,7 +45,7 @@ jobs:
         run: |
           python -m venv /tmp/ephemeral-package-venv
           /tmp/ephemeral-package-venv/bin/python -m pip install --no-deps dist/*.whl
-          /tmp/ephemeral-package-venv/bin/agy-cap --help
+          /tmp/ephemeral-package-venv/bin/ephbuf --help
 
       - name: Compile sources
         run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py
