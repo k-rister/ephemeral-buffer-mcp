@@ -1,11 +1,14 @@
 """CLI configuration regression tests."""
 
+import io
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import cli
 
 CLI_PATH = Path(__file__).with_name("cli.py")
 
@@ -25,6 +28,40 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--max-output-bytes", result.stdout)
         self.assertIn("Ignoring invalid EPHEMERAL_MAX_BUFFER_BYTES", result.stderr)
+
+    def test_send_to_mcp_reports_missing_socket(self):
+        with patch.object(cli, "SOCKET_PATH", "/tmp/does-not-exist.sock"):
+            result = cli.send_to_mcp("output")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("socket not found", result["message"])
+
+    def test_stdin_capture_forwards_truncation_metadata(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "Piped STDIN"}
+        with patch.object(cli, "send_to_mcp", return_value=response) as send, \
+                patch.object(sys, "argv", ["cli.py", "--max-output-bytes", "1024"]), \
+                patch.object(sys, "stdin", io.StringIO("x" * 2000)):
+            cli.main()
+
+        payload = send.call_args.args[0]
+        kwargs = send.call_args.kwargs
+        self.assertTrue(kwargs["truncated"])
+        self.assertEqual(kwargs["original_byte_size"], 2000)
+        self.assertLessEqual(len(payload.encode("utf-8")), 1024)
+
+    def test_wrapped_command_forwards_exit_code_and_label(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
+        with patch.object(cli, "run_command_bounded", return_value=("command output", 3, False, 14)) as run, \
+                patch.object(cli, "send_to_mcp", return_value=response) as send, \
+                patch.object(sys, "argv", ["cli.py", "--label", "build", "--", "echo", "ok"]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 3)
+        run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES)
+        self.assertEqual(send.call_args.kwargs["label"], "build")
 
 
 if __name__ == "__main__":
