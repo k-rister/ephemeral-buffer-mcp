@@ -136,21 +136,25 @@ release verification, and repository maintenance procedures.
 
 ## 🛠 Testing the Server
 
+Set up a local development environment from a fresh checkout:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
 Run the test suite:
 ```bash
-./venv/bin/python test_engine.py
-./venv/bin/python -m unittest test_config.py test_capture_utils.py
-./venv/bin/python -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
-./venv/bin/python -m unittest test_e2e_pipe.py
+.venv/bin/python -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
 Measure focused-test coverage locally:
 ```bash
-./venv/bin/python -m pip install coverage
-./venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
-./venv/bin/python -m coverage report
+.venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m coverage report
 ```
-The current focused-test baseline is 82%; CI enforces an 80% minimum and uploads
+The current focused-test baseline is 82%; CI enforces an 82% minimum and uploads
 the coverage reports for inspection.
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
@@ -172,7 +176,7 @@ Publishing to PyPI is intentionally not automated.
 
 Run the concurrency benchmark:
 ```bash
-./venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
+.venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
 ```
 The benchmark accepts `--min-ingest-per-second` and `--min-reads-per-second`
 thresholds for regression checks. GitHub Actions runs it as an optional weekly
