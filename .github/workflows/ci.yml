@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 0"
 
 permissions:
   contents: read
@@ -70,3 +73,41 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
+
+  benchmark:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache FastEmbed model
+        uses: actions/cache@v5
+        with:
+          path: /tmp/fastembed_cache
+          key: benchmark-fastembed-${{ runner.os }}-python-3.12-${{ hashFiles('requirements.txt', 'engine.py') }}
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -c constraints.txt
+
+      - name: Run concurrency benchmark
+        run: |
+          python benchmark_concurrency.py \
+            --captures 32 \
+            --workers 8 \
+            --min-ingest-per-second 1.0 \
+            --min-reads-per-second 1000 \
+            | tee benchmark-concurrency.txt
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: concurrency-benchmark-${{ github.run_number }}
+          path: benchmark-concurrency.txt
