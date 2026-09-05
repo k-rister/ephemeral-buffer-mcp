@@ -63,6 +63,14 @@ jobs:
           name: ephemeral-buffer-mcp-${{ github.ref_name }}
           path: dist/
 
+      - name: Upload PyPI distributions
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ephemeral-buffer-mcp-${{ github.ref_name }}-pypi
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+
   publish:
     name: Publish to PyPI
     needs: build
@@ -76,7 +84,7 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ephemeral-buffer-mcp-${{ github.ref_name }}
+          name: ephemeral-buffer-mcp-${{ github.ref_name }}-pypi
           path: dist/
 
       - name: Publish distributions to PyPI
