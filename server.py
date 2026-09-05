@@ -98,7 +98,8 @@ def execute_and_capture(
     cwd: Optional[str] = None,
     label: str = "",
     content_type: str = "auto",
-    max_output_bytes: Optional[int] = None
+    max_output_bytes: Optional[int] = None,
+    timeout_seconds: Optional[float] = None
 ) -> str:
     """
     Runs a shell command, captures stdout/stderr, indexes it, and returns a concise summary
@@ -111,6 +112,7 @@ def execute_and_capture(
         label: Optional human-readable description/label for this capture.
         content_type: Content type hint - 'auto' (default, detects diff/log/text), 'diff', 'log', or 'text'.
         max_output_bytes: Maximum command output retained (default: configured buffer byte limit).
+        timeout_seconds: Optional maximum runtime; timed-out commands return exit code 124.
     """
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
@@ -122,8 +124,8 @@ def execute_and_capture(
                 f"buffer limit ({engine.max_buffer_bytes:,})."
             )
         output_limit = engine.max_buffer_bytes if max_output_bytes is None else max_output_bytes
-        output, exit_code, truncated, original_byte_size = run_command_bounded(
-            command, cwd, output_limit
+        output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
+            command, cwd, output_limit, timeout_seconds
         )
         
         cap = engine.ingest(
@@ -135,7 +137,10 @@ def execute_and_capture(
         )
         summary = engine.get_summary(cap.capture_id)
         
-        status_str = "SUCCESS" if exit_code == 0 else f"FAILED (Exit Code {exit_code})"
+        if timed_out:
+            status_str = f"TIMED OUT after {timeout_seconds:g}s"
+        else:
+            status_str = "SUCCESS" if exit_code == 0 else f"FAILED (Exit Code {exit_code})"
         truncation_str = ""
         if summary.get("truncated"):
             truncation_str = f"\nOutput: truncated from {summary['original_byte_size']:,} bytes\n"
