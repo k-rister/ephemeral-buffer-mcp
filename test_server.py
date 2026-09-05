@@ -127,15 +127,126 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Captured into ID", result)
         self.assertIn("capture.log", result)
 
+    def test_capture_text_formats_diff_metadata(self):
+        diff = """diff --git a/old.txt b/new.txt
+--- a/old.txt
++++ b/new.txt
+@@ -1 +1 @@
+-old
++new
+"""
+        result = server.capture_text(diff, label="patch", content_type="diff")
+
+        self.assertIn("Unified Diff", result)
+        self.assertIn("new.txt", result)
+
+    def test_execute_reports_failed_and_truncated_command(self):
+        output = "x" * 700
+        with patch.object(
+            server,
+            "run_command_bounded",
+            return_value=(output, 7, True, 700, False),
+        ):
+            result = server.execute_and_capture("failing-command", max_output_bytes=1024)
+
+        self.assertIn("FAILED (Exit Code 7)", result)
+        self.assertIn("truncated from 700 bytes", result)
+
+    def test_search_and_read_tools_report_missing_and_empty_results(self):
+        self.assertIn("Search Error", server.search_capture("query", capture_id="missing"))
+        with patch.object(
+            server.engine,
+            "search",
+            return_value={"status": "ok", "capture_id": "cap", "label": "label", "matches": []},
+        ):
+            self.assertIn("No matches found", server.search_capture("query"))
+        self.assertIn("Error:", server.get_capture_slice(1, 1, capture_id="missing"))
+        self.assertIn("Error:", server.get_capture_summary(capture_id="missing"))
+
+    def test_search_and_read_tools_format_matches_and_diff_summary(self):
+        with patch.object(
+            server.engine,
+            "search",
+            return_value={
+                "status": "ok",
+                "mode": "bm25",
+                "capture_id": "cap",
+                "label": "label",
+                "total_lines": 2,
+                "matches": [{
+                    "score": 1.0,
+                    "matched_range": "1-1",
+                    "context_range": "1-2",
+                    "snippet": "match",
+                }],
+            },
+        ):
+            result = server.search_capture("query", mode="bm25")
+        self.assertIn("Match #1", result)
+        self.assertIn("match", result)
+
+        with patch.object(
+            server.engine,
+            "get_slice",
+            return_value={
+                "status": "ok", "capture_id": "cap", "label": "label",
+                "start_line": 1, "end_line": 1, "total_lines": 1, "content": "line",
+            },
+        ):
+            self.assertIn("Lines 1 to 1", server.get_capture_slice(1, 1))
+        with patch.object(
+            server.engine,
+            "get_summary",
+            return_value={
+                "status": "ok", "capture_id": "cap", "label": "diff",
+                "content_type": "diff", "file_map": "new.txt [MODIFIED]",
+                "diff_stats": "1 file", "timestamp": 1, "total_lines": 3,
+                "byte_size": 10, "truncated": True, "original_byte_size": 20,
+                "signals_summary": "None (Clean patch)",
+            },
+        ):
+            summary = server.get_capture_summary("cap")
+        self.assertIn("Modified Files Map", summary)
+        self.assertIn("truncated from 20 bytes", summary)
+
+    def test_empty_and_populated_capture_listing(self):
+        self.assertIn("buffer is empty", server.list_captures())
+        server.capture_text("one line", label="listed")
+        self.assertIn("listed", server.list_captures())
+
+    def test_buffer_stats_handles_unavailable_memory_metrics(self):
+        with patch.object(
+            server.engine,
+            "get_buffer_stats",
+            return_value={
+                "capture_count": 0, "max_captures": 25, "total_bytes": 0,
+                "max_buffer_bytes": 50, "total_lines": 0, "total_chunks": 0,
+                "embedding_model": "model", "embedding_model_loaded": False,
+                "embedding_cache_dir": None, "embedding_bytes": 0,
+                "accounted_bytes": 0, "process_rss_bytes": None,
+                "unaccounted_rss_bytes": None,
+            },
+        ):
+            result = server.get_buffer_stats()
+        self.assertIn("Process RSS: unavailable", result)
+        self.assertIn("Unaccounted RSS bytes: unavailable", result)
+
 
 class TestServerSocket(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         server.engine.clear("all")
         self.original_limit = server.engine.max_buffer_bytes
+        self.original_model = server.engine.embedding_model
         server.engine.max_buffer_bytes = 1024
+        server.engine.embedding_model = type(
+            "TestEmbedding",
+            (),
+            {"embed": lambda _self, texts: [[0.0] * 384 for _ in texts]},
+        )()
 
     def tearDown(self):
         server.engine.max_buffer_bytes = self.original_limit
+        server.engine.embedding_model = self.original_model
         server.engine.clear("all")
 
     async def run_handler(self, payload):
@@ -211,7 +322,11 @@ class TestSocketServerStartup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            listener.bind(socket_path)
+            try:
+                listener.bind(socket_path)
+            except PermissionError as exc:
+                listener.close()
+                self.skipTest(f"Unix socket bind unavailable: {exc}")
             listener.listen()
             try:
                 class FailingLoop:
@@ -237,7 +352,11 @@ class TestSocketServerStartup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
             stale_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            stale_listener.bind(socket_path)
+            try:
+                stale_listener.bind(socket_path)
+            except PermissionError as exc:
+                stale_listener.close()
+                self.skipTest(f"Unix socket bind unavailable: {exc}")
             stale_listener.close()
 
             class FailingLoop:
@@ -273,6 +392,16 @@ class TestSocketServerStartup(unittest.TestCase):
                 server.run_socket_server()
 
         self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
+
+    def test_socket_probe_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "not-a-socket")
+            Path(socket_path).write_text("occupied", encoding="utf-8")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+        self.assertIn("Unable to verify existing socket", stderr.getvalue())
 
 
 if __name__ == "__main__":

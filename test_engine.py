@@ -321,6 +321,35 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             worker.join(timeout=2)
             self.engine.embedding_model = original_model
 
+    def test_13_rejects_invalid_buffer_limits(self):
+        with self.assertRaisesRegex(ValueError, "max_captures"):
+            EphemeralEngine(max_captures=0)
+        with self.assertRaisesRegex(ValueError, "max_buffer_bytes"):
+            EphemeralEngine(max_buffer_bytes=0)
+
+    def test_14_empty_and_missing_capture_paths(self):
+        empty = EphemeralEngine(max_captures=1)
+        capture = empty.ingest("", label="empty")
+
+        self.assertEqual(empty.search("anything")["status"], "ok")
+        self.assertEqual(empty.search_bm25(capture, "anything"), [])
+        self.assertEqual(empty.search_bm25(capture, '"'), [])
+        self.assertEqual(empty.search_semantic(capture, "anything"), [])
+        self.assertEqual(empty.get_slice(1, 1, capture_id="missing")["status"], "error")
+        self.assertEqual(empty.get_slice(2, 1, capture_id=capture.capture_id)["status"], "error")
+        self.assertEqual(empty.get_summary("missing")["status"], "error")
+
+    def test_15_embedding_failure_is_not_cached_as_ready(self):
+        class FailingEmbedding:
+            def embed(self, _texts):
+                raise RuntimeError("model unavailable")
+
+        engine = EphemeralEngine(max_captures=1)
+        engine.embedding_model = FailingEmbedding()
+        with self.assertRaisesRegex(RuntimeError, "model unavailable"):
+            engine.ingest("payload", label="embedding-failure")
+        self.assertEqual(engine.captures, {})
+
 
 class TestEmbeddingStartup(unittest.TestCase):
     def test_embedding_model_loads_lazily(self):
