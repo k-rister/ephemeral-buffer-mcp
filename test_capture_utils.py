@@ -4,6 +4,7 @@ import shlex
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from capture_utils import bound_chunks, read_file_bounded, run_command_bounded
 
@@ -49,6 +50,13 @@ class TestBoundedCommandCapture(unittest.TestCase):
     def test_timeout_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "timeout_seconds"):
             run_command_bounded("true", None, 1024, timeout_seconds=0)
+
+    def test_invalid_output_limit_does_not_start_process(self):
+        with patch("capture_utils.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "max_output_bytes"):
+                run_command_bounded("echo should-not-run", None, 100)
+
+        popen.assert_not_called()
 
     def test_stream_chunks_are_bounded(self):
         output, truncated, original_size = bound_chunks(

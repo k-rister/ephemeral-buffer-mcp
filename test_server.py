@@ -194,6 +194,9 @@ class TestSocketServerStartup(unittest.TestCase):
             listener.listen()
             try:
                 class FailingLoop:
+                    def close(self):
+                        pass
+
                     def run_until_complete(self, coroutine):
                         coroutine.close()
                         raise AssertionError("startup should stop before event loop execution")
@@ -217,6 +220,9 @@ class TestSocketServerStartup(unittest.TestCase):
             stale_listener.close()
 
             class FailingLoop:
+                def close(self):
+                    pass
+
                 def run_until_complete(self, coroutine):
                     coroutine.close()
                     raise RuntimeError("socket unavailable")
@@ -231,6 +237,9 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_startup_failure_is_reported(self):
         class FailingLoop:
+            def close(self):
+                pass
+
             def run_until_complete(self, coroutine):
                 coroutine.close()
                 raise RuntimeError("socket unavailable")
