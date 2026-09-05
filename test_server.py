@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import server
 
 
