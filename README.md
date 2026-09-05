@@ -149,6 +149,7 @@ the coverage reports for inspection.
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
 Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed
 model cache is retained between CI runs to reduce startup time.
+It also builds the wheel and verifies the installed `agy-cap` entry point.
 
 Run the concurrency benchmark:
 ```bash
