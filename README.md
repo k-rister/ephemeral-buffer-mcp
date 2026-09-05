@@ -154,6 +154,8 @@ model cache is retained between CI runs to reduce startup time.
 It also builds the wheel and verifies the installed `ephbuf` entry point.
 CI audits the declared dependencies with `pip-audit` and fails if known
 vulnerabilities are found.
+CI resolves the runtime dependencies through `constraints.txt`; the direct
+pins are updated only after the full test matrix passes.
 
 Pushing a version tag such as `v0.1.0` runs the release workflow, which builds
 wheel and source distributions, verifies the installed CLI, and uploads the
