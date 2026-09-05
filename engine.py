@@ -9,6 +9,7 @@ import time
 import re
 import sqlite3
 import threading
+from collections import OrderedDict
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -263,7 +264,7 @@ class EphemeralEngine:
         self.max_buffer_bytes = max_buffer_bytes
         self._embedding_lock = threading.RLock()
         self.captures: Dict[str, Capture] = {}
-        self.capture_order: List[str] = []
+        self.capture_order: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
         self._next_id = 1
         
@@ -395,7 +396,7 @@ class EphemeralEngine:
                 len(self.capture_order) >= self.max_captures
                 or self._total_bytes + capture.byte_size > self.max_buffer_bytes
             ):
-                evicted_id = self.capture_order.pop(0)
+                evicted_id, _ = self.capture_order.popitem(last=False)
                 if evicted_id in self.captures:
                     old_cap = self.captures.pop(evicted_id)
                     self._total_bytes -= old_cap.byte_size
@@ -403,7 +404,7 @@ class EphemeralEngine:
                         old_cap.fts_conn.close()
 
             self.captures[capture_id] = capture
-            self.capture_order.append(capture_id)
+            self.capture_order[capture_id] = None
             self._total_bytes += capture.byte_size
             return capture
 
@@ -412,7 +413,7 @@ class EphemeralEngine:
         if not self.captures:
             return None
         if capture_id == "latest" or not capture_id:
-            capture = self.captures[self.capture_order[-1]]
+            capture = self.captures[next(reversed(self.capture_order))]
         else:
             capture = self.captures.get(capture_id)
         if capture:
@@ -422,8 +423,7 @@ class EphemeralEngine:
     def _touch_capture(self, capture_id: str) -> None:
         """Marks a capture as recently used for LRU eviction."""
         if capture_id in self.capture_order:
-            self.capture_order.remove(capture_id)
-            self.capture_order.append(capture_id)
+            self.capture_order.move_to_end(capture_id)
 
     @synchronized
     def search_bm25(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
@@ -710,8 +710,7 @@ class EphemeralEngine:
             self._total_bytes -= cap.byte_size
             if cap.fts_conn:
                 cap.fts_conn.close()
-            if capture_id in self.capture_order:
-                self.capture_order.remove(capture_id)
+            self.capture_order.pop(capture_id, None)
             return f"Cleared capture '{capture_id}'."
         else:
             return f"Capture '{capture_id}' not found."
