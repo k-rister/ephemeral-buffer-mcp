@@ -356,7 +356,8 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 command_exit_code = None
                 timed_out = False
 
-            cap = engine.ingest(
+            cap = await asyncio.to_thread(
+                engine.ingest,
                 text,
                 label=label,
                 content_type=content_type,

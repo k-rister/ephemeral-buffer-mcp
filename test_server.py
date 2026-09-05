@@ -7,8 +7,9 @@ import os
 import socket
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import server
 
@@ -140,7 +141,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
     async def run_handler(self, payload):
         writer = FakeWriter()
         server.handle_socket_client(FakeReader(payload), writer)
-        await asyncio.sleep(0.01)
+        for _ in range(100):
+            if writer.closed or writer.writes:
+                break
+            await asyncio.sleep(0.01)
         return writer
 
     async def test_json_payload_returns_success_response(self):
@@ -152,6 +156,23 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "socket-test")
         self.assertTrue(writer.closed)
+
+    async def test_ingest_is_offloaded_from_event_loop(self):
+        payload = json.dumps({"label": "offload-test", "text": "hello"}).encode()
+        capture = SimpleNamespace(
+            capture_id="cap_offload",
+            label="offload-test",
+            line_count=1,
+            byte_size=5,
+        )
+        with patch.object(
+            server.asyncio,
+            "to_thread",
+            new=AsyncMock(return_value=capture),
+        ) as offload:
+            await self.run_handler(payload)
+
+        offload.assert_awaited_once()
 
     async def test_oversized_payload_returns_error_response(self):
         payload = b"x" * (server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD)
