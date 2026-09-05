@@ -9,6 +9,7 @@ import json
 import asyncio
 import socket
 import threading
+from asyncio import to_thread
 from typing import Optional
 from config import positive_int_env, socket_path
 from mcp.server.fastmcp import FastMCP
@@ -356,7 +357,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 command_exit_code = None
                 timed_out = False
 
-            cap = await asyncio.to_thread(
+            cap = await to_thread(
                 engine.ingest,
                 text,
                 label=label,
@@ -383,7 +384,9 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             writer.close()
             await writer.wait_closed()
 
-    asyncio.create_task(_handle())
+    # Return the task as well as scheduling it so embedders and tests can
+    # await completion when they need deterministic cleanup.
+    return asyncio.create_task(_handle())
 
 
 def run_socket_server():

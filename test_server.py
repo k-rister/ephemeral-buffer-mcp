@@ -44,9 +44,16 @@ class TestServerTools(unittest.TestCase):
     def setUp(self):
         server.engine.clear("all")
         self.original_limit = server.engine.max_buffer_bytes
+        self.original_model = server.engine.embedding_model
+        server.engine.embedding_model = type(
+            "TestEmbedding",
+            (),
+            {"embed": lambda _self, texts: [[0.0] * 384 for _ in texts]},
+        )()
 
     def tearDown(self):
         server.engine.max_buffer_bytes = self.original_limit
+        server.engine.embedding_model = self.original_model
         server.engine.clear("all")
 
     def test_capture_file_reports_missing_path(self):
@@ -251,17 +258,20 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def run_handler(self, payload):
         writer = FakeWriter()
-        server.handle_socket_client(FakeReader(payload), writer)
-        for _ in range(100):
-            if writer.closed or writer.writes:
-                break
-            await asyncio.sleep(0.01)
+        task = server.handle_socket_client(FakeReader(payload), writer)
+        await task
         return writer
 
     async def test_json_payload_returns_success_response(self):
         payload = json.dumps({"label": "socket-test", "text": "hello"}).encode()
-
-        writer = await self.run_handler(payload)
+        capture = SimpleNamespace(
+            capture_id="cap_socket",
+            label="socket-test",
+            line_count=1,
+            byte_size=5,
+        )
+        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+            writer = await self.run_handler(payload)
 
         response = json.loads(writer.writes[0])
         self.assertEqual(response["status"], "ok")
@@ -277,7 +287,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             byte_size=5,
         )
         with patch.object(
-            server.asyncio,
+            server,
             "to_thread",
             new=AsyncMock(return_value=capture),
         ) as offload:
@@ -302,14 +312,25 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer.closed)
 
     async def test_malformed_payload_falls_back_to_plain_text(self):
-        writer = await self.run_handler(b"not-json")
+        capture = SimpleNamespace(
+            capture_id="cap_plain",
+            label="CLI pipe",
+            line_count=1,
+            byte_size=8,
+        )
+        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+            writer = await self.run_handler(b"not-json")
 
         response = json.loads(writer.writes[0])
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "CLI pipe")
 
     async def test_ingest_failure_returns_error_response(self):
-        with patch.object(server.engine, "ingest", side_effect=ValueError("invalid capture")):
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=ValueError("invalid capture")),
+        ):
             writer = await self.run_handler(json.dumps({"text": "payload"}).encode())
 
         response = json.loads(writer.writes[0])

@@ -175,7 +175,7 @@ Measure focused-test coverage locally:
 .venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 .venv/bin/python -m coverage report
 ```
-The current focused-test baseline is 87%; CI enforces an 87% minimum after
+The current focused-test baseline is 91%; CI enforces a 91% minimum after
 adding coverage for defensive command, limit, cleanup, embedding, and socket
 handling paths. Coverage reports are uploaded for inspection, and future
 threshold increases should follow similarly targeted test additions.
