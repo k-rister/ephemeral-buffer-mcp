@@ -185,7 +185,10 @@ Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed
 model is loaded on the first capture or semantic search rather than during
 server import. Set `EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
 `EPHEMERAL_FASTEMBED_CACHE_DIR` to control its cache directory. The model cache
-is retained between CI runs to reduce startup time.
+is retained between CI runs to reduce startup time. CI unit and end-to-end
+tests set the internal `EPHEMERAL_TEST_EMBEDDINGS=1` flag, which uses a small
+deterministic embedding substitute so test execution does not depend on a
+model download; release and benchmark jobs continue to exercise FastEmbed.
 It also builds the wheel and verifies the installed `ephbuf` entry point.
 CI audits the declared dependencies with `pip-audit` and fails if known
 vulnerabilities are found.
