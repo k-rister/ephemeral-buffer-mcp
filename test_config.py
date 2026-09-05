@@ -27,6 +27,27 @@ class TestPositiveIntEnv(unittest.TestCase):
     def test_socket_path_can_be_overridden(self):
         with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/test-ephemeral.sock"}):
             self.assertEqual(socket_path(), "/tmp/test-ephemeral.sock")
+
+    def test_session_id_derives_stable_socket_path(self):
+        with patch.dict(os.environ, {"EPHEMERAL_SESSION_ID": "agent-session-1"}, clear=True):
+            first_path = socket_path()
+            second_path = socket_path()
+
+        self.assertEqual(first_path, second_path)
+        self.assertIn("ephemeral_buffer-", first_path)
+        self.assertTrue(first_path.endswith(".sock"))
+        self.assertNotEqual(first_path, DEFAULT_SOCKET_PATH)
+
+    def test_explicit_socket_path_takes_precedence(self):
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_SOCKET_PATH": "/tmp/explicit.sock",
+                "EPHEMERAL_SESSION_ID": "agent-session-1",
+            },
+            clear=True,
+        ):
+            self.assertEqual(socket_path(), "/tmp/explicit.sock")
         self.assertTrue(DEFAULT_SOCKET_PATH)
 
 
