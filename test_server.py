@@ -3,6 +3,8 @@
 import asyncio
 import io
 import json
+import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -172,16 +174,61 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_live_socket_is_not_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(socket_path)
+            listener.listen()
+            try:
+                class FailingLoop:
+                    def run_until_complete(self, coroutine):
+                        coroutine.close()
+                        raise AssertionError("startup should stop before event loop execution")
+
+                with patch.object(server, "SOCKET_PATH", socket_path), \
+                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(server.asyncio, "set_event_loop"), \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    server.run_socket_server()
+                self.assertIn("Socket already in use", stderr.getvalue())
+            finally:
+                listener.close()
+
+            self.assertTrue(os.path.exists(socket_path))
+
+    def test_stale_socket_is_removed_before_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            stale_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale_listener.bind(socket_path)
+            stale_listener.close()
+
+            class FailingLoop:
+                def run_until_complete(self, coroutine):
+                    coroutine.close()
+                    raise RuntimeError("socket unavailable")
+
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                server.run_socket_server()
+
+            self.assertFalse(os.path.exists(socket_path))
+
     def test_startup_failure_is_reported(self):
         class FailingLoop:
             def run_until_complete(self, coroutine):
                 coroutine.close()
                 raise RuntimeError("socket unavailable")
 
-        with patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                patch.object(server.asyncio, "set_event_loop"), \
-                patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            server.run_socket_server()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(server, "SOCKET_PATH", os.path.join(directory, "ephemeral.sock")), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
 
         self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
 
