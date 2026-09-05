@@ -82,7 +82,10 @@ missing attestation as a release blocker.
 Changes to `main` must come through a pull request. The required checks are
 `test (3.10)` and `test (3.12)`, and linear history is required. Reviews are
 not currently required. The concurrency benchmark is optional and runs only
-on its weekly schedule or through manual workflow dispatch.
+on its weekly schedule or through manual workflow dispatch. All GitHub Actions
+are pinned to full commit SHAs; when updating an action, resolve the intended
+release tag to its commit, retain the version comment beside the pin, and let
+the required CI checks validate the change.
 
 Repository administrators retain an explicit emergency bypass: an admin may
 merge a pull request despite a failed required check when necessary. This is
