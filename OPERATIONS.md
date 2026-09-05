@@ -52,7 +52,8 @@ than an allocation limit.
 FastEmbed is loaded lazily on the first capture or semantic search. Set
 `EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
 `EPHEMERAL_FASTEMBED_CACHE_DIR` to place its downloaded model files in a
-controlled cache directory.
+controlled cache directory. Use `get_buffer_stats` to see the configured model
+and whether it has been loaded yet.
 
 Override the limits before starting the server:
 

@@ -721,6 +721,9 @@ class EphemeralEngine:
             "total_bytes": self._total_bytes,
             "max_buffer_bytes": self.max_buffer_bytes,
             "embedding_bytes": embedding_bytes,
+            "embedding_model": self.embedding_model_name,
+            "embedding_model_loaded": self.embedding_model is not None,
+            "embedding_cache_dir": self.embedding_cache_path,
             "accounted_bytes": accounted_bytes,
             "process_rss_bytes": rss_bytes,
             "unaccounted_rss_bytes": (

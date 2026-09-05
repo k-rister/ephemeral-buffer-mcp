@@ -95,7 +95,7 @@ The agent has access to the following tools:
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
-| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding bytes, accounted bytes, and process RSS. |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
@@ -127,8 +127,8 @@ The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
 `EPHEMERAL_SESSION_ID` so each server/CLI pair automatically derives a unique
 socket path; `EPHEMERAL_SOCKET_PATH` remains an explicit override. The byte
 limit accounts for
-captured UTF-8 content; `get_buffer_stats` also reports embedding and process
-memory separately.
+captured UTF-8 content; `get_buffer_stats` also reports embedding model
+readiness, embedding/cache settings, and process memory separately.
 `execute_and_capture` retains the beginning and end of oversized command
 output and marks the capture with its original byte count.
 

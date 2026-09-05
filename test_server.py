@@ -112,6 +112,7 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Captures:", result)
         self.assertIn("Embedding bytes:", result)
+        self.assertIn("Embedding model:", result)
         self.assertIn("Process RSS:", result)
         self.assertIn("Unaccounted RSS bytes:", result)
 
