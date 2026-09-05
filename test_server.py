@@ -1,10 +1,38 @@
-"""Unit tests for MCP tool validation and response formatting."""
+"""Unit tests for MCP tool validation, response formatting, and socket IPC."""
 
+import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import server
+
+
+class FakeReader:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def read(self, _limit):
+        return self.payload
+
+
+class FakeWriter:
+    def __init__(self):
+        self.writes = []
+        self.closed = False
+
+    def write(self, payload):
+        self.writes.append(payload)
+
+    async def drain(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        return None
 
 
 class TestServerTools(unittest.TestCase):
@@ -60,6 +88,49 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Captured into ID", result)
         self.assertIn("capture.log", result)
+
+
+class TestServerSocket(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        server.engine.clear("all")
+        self.original_limit = server.engine.max_buffer_bytes
+        server.engine.max_buffer_bytes = 1024
+
+    def tearDown(self):
+        server.engine.max_buffer_bytes = self.original_limit
+        server.engine.clear("all")
+
+    async def run_handler(self, payload):
+        writer = FakeWriter()
+        server.handle_socket_client(FakeReader(payload), writer)
+        await asyncio.sleep(0.01)
+        return writer
+
+    async def test_json_payload_returns_success_response(self):
+        payload = json.dumps({"label": "socket-test", "text": "hello"}).encode()
+
+        writer = await self.run_handler(payload)
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["label"], "socket-test")
+        self.assertTrue(writer.closed)
+
+    async def test_oversized_payload_returns_error_response(self):
+        payload = b"x" * (server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD)
+
+        writer = await self.run_handler(payload)
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "error")
+        self.assertIn("exceeds", response["message"])
+        self.assertTrue(writer.closed)
+
+    async def test_empty_payload_closes_without_response(self):
+        writer = await self.run_handler(b"")
+
+        self.assertEqual(writer.writes, [])
+        self.assertTrue(writer.closed)
 
 
 if __name__ == "__main__":
