@@ -137,6 +137,15 @@ Run the test suite:
 ./venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
+Measure focused-test coverage locally:
+```bash
+./venv/bin/python -m pip install coverage
+./venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py
+./venv/bin/python -m coverage report
+```
+The current focused-test baseline is 58%; CI reports and uploads coverage but
+does not enforce a threshold yet.
+
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
 Python 3.10 and 3.12 for pushes to `main` and pull requests.
 
