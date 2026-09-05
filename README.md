@@ -143,8 +143,8 @@ Measure focused-test coverage locally:
 ./venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 ./venv/bin/python -m coverage report
 ```
-The current focused-test baseline is 70%; CI reports and uploads coverage but
-does not enforce a threshold yet.
+The current focused-test baseline is 70%; CI enforces a 65% minimum and uploads
+the coverage reports for inspection.
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
 Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed
