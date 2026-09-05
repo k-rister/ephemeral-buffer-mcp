@@ -76,6 +76,15 @@ class TestBoundedCommandCapture(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exceeds"):
                 read_file_bounded(file_handle.name, 512)
 
+    def test_file_read_rejects_non_positive_limit(self):
+        with tempfile.NamedTemporaryFile() as file_handle:
+            with self.assertRaisesRegex(ValueError, "at least 1"):
+                read_file_bounded(file_handle.name, 0)
+
+    def test_bound_chunks_rejects_non_positive_limit(self):
+        with self.assertRaisesRegex(ValueError, "max_output_bytes"):
+            bound_chunks([b"payload"], 100)
+
 
 if __name__ == "__main__":
     unittest.main()
