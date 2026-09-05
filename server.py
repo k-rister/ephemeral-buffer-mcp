@@ -429,7 +429,10 @@ def run_socket_server():
 
 # Start IPC socket background listener thread
 socket_thread = threading.Thread(target=run_socket_server, daemon=True)
-socket_thread.start()
+# Unit tests can disable the listener because they exercise the handler and
+# startup paths directly; real server and end-to-end processes leave it on.
+if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
+    socket_thread.start()
 
 
 if __name__ == "__main__":
