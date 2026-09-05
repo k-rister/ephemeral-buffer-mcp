@@ -66,6 +66,11 @@ configured byte budget. Oversized command output is retained as a bounded
 head/tail sample and marked as truncated. Use `get_capture_summary` to inspect
 the original size and truncation state.
 
+Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
+`ephbuf` when a command might block or run indefinitely. A timed-out command is
+terminated as a process group, its output collected so far is retained, and it
+returns exit status 124.
+
 Use `clear_captures("all")` between unrelated investigations when the active
 buffer should be released immediately instead of waiting for LRU eviction.
 

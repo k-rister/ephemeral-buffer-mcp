@@ -14,10 +14,11 @@ class TestBoundedCommandCapture(unittest.TestCase):
             f"{shlex.quote(sys.executable)} -c "
             "\"import sys; sys.stdout.write('HEAD' * 1000); sys.stdout.write('TAIL')\""
         )
-        output, exit_code, truncated, original_size = run_command_bounded(command, None, 1024)
+        output, exit_code, truncated, original_size, timed_out = run_command_bounded(command, None, 1024)
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(truncated)
+        self.assertFalse(timed_out)
         self.assertGreater(original_size, len(output.encode("utf-8")))
         self.assertLessEqual(len(output.encode("utf-8")), 1024)
         self.assertIn("output truncated", output)
@@ -25,12 +26,29 @@ class TestBoundedCommandCapture(unittest.TestCase):
 
     def test_small_output_is_complete(self):
         command = f"{shlex.quote(sys.executable)} -c \"print('complete')\""
-        output, exit_code, truncated, original_size = run_command_bounded(command, None, 1024)
+        output, exit_code, truncated, original_size, timed_out = run_command_bounded(command, None, 1024)
 
         self.assertEqual(exit_code, 0)
         self.assertFalse(truncated)
+        self.assertFalse(timed_out)
         self.assertEqual(original_size, len(output.encode("utf-8")))
         self.assertEqual(output, "complete\n")
+
+    def test_command_timeout_terminates_process_group(self):
+        command = f"{shlex.quote(sys.executable)} -c \"import time; print('started', flush=True); time.sleep(10)\""
+        output, exit_code, truncated, original_size, timed_out = run_command_bounded(
+            command, None, 1024, timeout_seconds=0.1
+        )
+
+        self.assertEqual(exit_code, 124)
+        self.assertTrue(timed_out)
+        self.assertIn("started", output)
+        self.assertFalse(truncated)
+        self.assertGreater(original_size, 0)
+
+    def test_timeout_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "timeout_seconds"):
+            run_command_bounded("true", None, 1024, timeout_seconds=0)
 
     def test_stream_chunks_are_bounded(self):
         output, truncated, original_size = bound_chunks(

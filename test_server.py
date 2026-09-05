@@ -94,6 +94,17 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Error executing command", result)
         self.assertIn("unable to start command", result)
 
+    def test_execute_reports_timeout(self):
+        with patch.object(
+            server,
+            "run_command_bounded",
+            return_value=("partial output", 124, False, 14, True),
+        ) as run:
+            result = server.execute_and_capture("sleep 10", timeout_seconds=0.5)
+
+        self.assertIn("TIMED OUT after 0.5s", result)
+        run.assert_called_once()
+
     def test_buffer_stats_formats_memory_metrics(self):
         server.capture_text("server stats payload", label="server-test")
 

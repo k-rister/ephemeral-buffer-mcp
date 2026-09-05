@@ -107,7 +107,7 @@ class TestCliConfiguration(unittest.TestCase):
 
     def test_wrapped_command_forwards_exit_code_and_label(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
-        with patch.object(cli, "run_command_bounded", return_value=("command output", 3, False, 14)) as run, \
+        with patch.object(cli, "run_command_bounded", return_value=("command output", 3, False, 14, False)) as run, \
                 patch.object(cli, "send_to_mcp", return_value=response) as send, \
                 patch.object(sys, "argv", ["cli.py", "--label", "build", "--", "echo", "ok"]), \
                 patch.object(sys, "stdout", io.StringIO()), \
@@ -116,12 +116,12 @@ class TestCliConfiguration(unittest.TestCase):
                 cli.main()
 
         self.assertEqual(exit_result.exception.code, 3)
-        run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES)
+        run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES, None)
         self.assertEqual(send.call_args.kwargs["label"], "build")
 
     def test_wrapped_command_reports_capture_warning(self):
         response = {"status": "error", "message": "socket unavailable"}
-        with patch.object(cli, "run_command_bounded", return_value=("output", 0, False, 6)), \
+        with patch.object(cli, "run_command_bounded", return_value=("output", 0, False, 6, False)), \
                 patch.object(cli, "send_to_mcp", return_value=response), \
                 patch.object(sys, "argv", ["cli.py", "--", "echo", "ok"]), \
                 patch.object(sys, "stdout", io.StringIO()), \

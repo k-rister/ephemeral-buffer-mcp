@@ -76,6 +76,8 @@ content and label.
 `ephbuf` also bounds wrapped-command and piped-stdin capture with
 `--max-output-bytes`; it defaults to `EPHEMERAL_MAX_BUFFER_BYTES` or 50 MiB and
 retains the beginning and end of oversized output.
+Use `--timeout-seconds` to stop a wrapped command after a bounded runtime; timed
+out commands retain the output collected so far and exit with status 124.
 Requested `max_output_bytes` and `capture_file` `max_bytes` values may not
 exceed the configured buffer byte limit; the tools return a validation error
 instead of silently clamping them.
@@ -86,7 +88,7 @@ The agent has access to the following tools:
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None)` | Executes a shell command with bounded head/tail capture and returns a compact diagnostic summary (exit code, diff file map, error signals, and truncation status) to the agent context. |
+| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None)` | Executes a shell command with bounded head/tail capture, optional timeout, and a compact diagnostic summary (exit code, diff file map, error signals, and truncation status) to the agent context. |
 | `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None)` | Ingests a bounded log/output file from disk; defaults to the configured buffer byte limit. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |

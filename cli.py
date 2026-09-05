@@ -77,6 +77,12 @@ def main():
         default=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_OUTPUT_BYTES),
         help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)",
     )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help="Maximum runtime for a wrapped command; timed-out commands exit with status 124",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command to execute and capture")
 
     args = parser.parse_args()
@@ -92,8 +98,8 @@ def main():
         print(f"[ephbuf] Executing: {cmd_str}")
         
         try:
-            output, exit_code, truncated, original_byte_size = run_command_bounded(
-                cmd_str, None, args.max_output_bytes
+            output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
+                cmd_str, None, args.max_output_bytes, args.timeout_seconds
             )
         except ValueError as e:
             parser.error(str(e))
@@ -112,6 +118,8 @@ def main():
             print(f"\n[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
             print(f"\n[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
+        if timed_out:
+            print(f"\n[ephbuf] Command timed out after {args.timeout_seconds:g}s", file=sys.stderr)
         sys.exit(exit_code)
 
     # Otherwise read from stdin (piped input)
