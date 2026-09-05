@@ -42,7 +42,7 @@ class TestEndToEndPipe(unittest.TestCase):
 
             self.assertTrue(os.path.exists(SOCKET_PATH), "Socket should be created by server")
 
-            # Pipe a simulated big test output to agy-cap
+            # Pipe a simulated big test output to ephbuf
             simulated_log = (
                 "Running test suite: OrderService\n"
                 "✓ test_create_order passed (12ms)\n"

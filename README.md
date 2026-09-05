@@ -28,7 +28,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 ```mermaid
 flowchart TD
     subgraph Ingestion["1. Ingestion Paths"]
-        A["CLI Pipe: command 2>&1 | agy-cap"] --> D["Unix Socket (platform temp dir)"]
+        A["CLI Pipe: command 2>&1 | ephbuf"] --> D["Unix Socket (platform temp dir)"]
         B["Agent Tool: execute_and_capture(cmd)"] --> E["Ephemeral Ring Buffer Engine"]
         C["Agent Tool: capture_text / capture_file"] --> E
         D --> E
@@ -52,18 +52,18 @@ flowchart TD
 
 ## 🚀 How to Use It
 
-### 1. From the Terminal (CLI Pipe via `agy-cap`)
+### 1. From the Terminal (CLI Pipe via `ephbuf`)
 You can pipe command output directly into the running MCP server:
 
 ```bash
 # Pipe any command output into the buffer
-pytest -v 2>&1 | agy-cap --label "pytest run"
+pytest -v 2>&1 | ephbuf --label "pytest run"
 
 # Pipe git diffs directly
-git diff HEAD~3 | agy-cap --label "feature diff" --type diff
+git diff HEAD~3 | ephbuf --label "feature diff" --type diff
 
 # Or wrap command execution
-agy-cap --label "backend build" -- cargo build --verbose
+ephbuf --label "backend build" -- cargo build --verbose
 ```
 
 The optional `--type`/`-t` hint accepts `auto` (the default), `diff`, `log`, or
@@ -71,7 +71,7 @@ The optional `--type`/`-t` hint accepts `auto` (the default), `diff`, `log`, or
 otherwise `auto` classifies diffs, build/test logs, and plain text from the
 content and label.
 
-`agy-cap` also bounds wrapped-command and piped-stdin capture with
+`ephbuf` also bounds wrapped-command and piped-stdin capture with
 `--max-output-bytes`; it defaults to `EPHEMERAL_MAX_BUFFER_BYTES` or 50 MiB and
 retains the beginning and end of oversized output.
 Requested `max_output_bytes` and `capture_file` `max_bytes` values may not
@@ -149,7 +149,7 @@ the coverage reports for inspection.
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
 Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed
 model cache is retained between CI runs to reduce startup time.
-It also builds the wheel and verifies the installed `agy-cap` entry point.
+It also builds the wheel and verifies the installed `ephbuf` entry point.
 CI audits the declared dependencies with `pip-audit` and fails if known
 vulnerabilities are found.
 

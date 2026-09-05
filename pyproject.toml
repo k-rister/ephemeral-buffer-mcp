@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agy-cap = "cli:main"
+ephbuf = "cli:main"
 
 [tool.setuptools]
 py-modules = ["capture_utils", "cli", "config", "engine", "server"]

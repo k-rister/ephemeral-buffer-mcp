@@ -313,7 +313,7 @@ def get_buffer_stats() -> str:
     )
 
 
-# --- Unix Domain Socket IPC for CLI piping (agy-cap) ---
+# --- Unix Domain Socket IPC for CLI piping (ephbuf) ---
 
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     async def _handle():

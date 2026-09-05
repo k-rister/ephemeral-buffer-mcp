@@ -3,13 +3,13 @@
 CLI Helper tool for piping command output into Ephemeral Buffer MCP Server.
 Usage:
   # Pipe stdout/stderr directly:
-  pytest -v 2>&1 | agy-cap --label "pytest run"
+  pytest -v 2>&1 | ephbuf --label "pytest run"
 
   # Force unified-diff parsing when automatic detection is ambiguous:
-  git diff HEAD~3 | agy-cap --label "feature diff" --type diff
+  git diff HEAD~3 | ephbuf --label "feature diff" --type diff
   
   # Or wrap a command execution:
-  agy-cap --label "build" -- make all
+  ephbuf --label "build" -- make all
 
   --type accepts: auto (default), diff, log, or text.
 """
@@ -89,7 +89,7 @@ def main():
             
         cmd_str = " ".join(cmd_list)
         label = args.label or cmd_str
-        print(f"[agy-cap] Executing: {cmd_str}")
+        print(f"[ephbuf] Executing: {cmd_str}")
         
         try:
             output, exit_code, truncated, original_byte_size = run_command_bounded(
@@ -109,9 +109,9 @@ def main():
             original_byte_size=original_byte_size,
         )
         if res.get("status") == "ok":
-            print(f"\n[agy-cap] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
+            print(f"\n[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
-            print(f"\n[agy-cap] Warning: {res.get('message')}", file=sys.stderr)
+            print(f"\n[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
         sys.exit(exit_code)
 
     # Otherwise read from stdin (piped input)
@@ -131,9 +131,9 @@ def main():
             original_byte_size=original_byte_size,
         )
         if res.get("status") == "ok":
-            print(f"[agy-cap] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
+            print(f"[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
-            print(f"[agy-cap] Warning: {res.get('message')}", file=sys.stderr)
+            print(f"[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
     else:
         parser.print_help()
 
