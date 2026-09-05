@@ -1,5 +1,7 @@
 -r requirements.txt
 -c constraints.txt
+# Keep this input file readable and reviewable. The Python 3.12 lock file is
+# generated from it for deterministic development and release environments.
 coverage
 build
 pip-audit

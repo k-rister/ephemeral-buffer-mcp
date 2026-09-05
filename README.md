@@ -142,9 +142,27 @@ release verification, and repository maintenance procedures.
 Set up a local development environment from a fresh checkout:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
 ```
+
+The committed `requirements-dev-lock-py312.txt` file is the reproducible
+Python 3.12 development and release environment. Python 3.10 remains
+supported through the direct requirements and tested `constraints.txt` file;
+the CI matrix exercises both paths. Keep `requirements.txt` and
+`requirements-dev.txt` as the reviewable dependency inputs, and regenerate the
+Python 3.12 locks with `pip-tools` after an intentional dependency update:
+
+```bash
+.venv/bin/python -m pip install pip-tools
+.venv/bin/pip-compile --generate-hashes --output-file=requirements-lock-py312.txt requirements.txt
+.venv/bin/pip-compile --generate-hashes --output-file=requirements-dev-lock-py312.txt requirements-dev.txt
+```
+
+Review the resulting changes, run the full test matrix, and run `pip-audit`
+before merging. Downstream users install the package normally; its compatible
+dependency ranges in `pyproject.toml` are intentionally not replaced by the
+development locks.
 
 Run the test suite:
 ```bash
@@ -169,8 +187,10 @@ is retained between CI runs to reduce startup time.
 It also builds the wheel and verifies the installed `ephbuf` entry point.
 CI audits the declared dependencies with `pip-audit` and fails if known
 vulnerabilities are found.
-CI resolves the runtime dependencies through `constraints.txt`; the direct
-pins are updated only after the full test matrix passes.
+CI installs the hashed Python 3.12 development/runtime locks and uses the
+tested `constraints.txt` path for Python 3.10. The direct requirements and
+constraints are updated only after the full test matrix passes; lock updates
+must be reviewed together with their resolver output and audit results.
 
 Pushing a version tag such as `v0.1.1` runs the release workflow, which builds
 wheel and source distributions, validates their metadata, verifies the

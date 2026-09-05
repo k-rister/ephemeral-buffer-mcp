@@ -38,10 +38,20 @@ jobs:
           key: fastembed-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'engine.py') }}
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+            python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
+          else
+            python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit
+          fi
 
       - name: Audit dependencies
-        run: python -m pip_audit -r requirements.txt
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+            python -m pip_audit -r requirements-lock-py312.txt
+          else
+            python -m pip_audit -r requirements.txt
+          fi
 
       - name: Build wheel
         run: python -m build --wheel
@@ -98,7 +108,7 @@ jobs:
           key: benchmark-fastembed-${{ runner.os }}-python-3.12-${{ hashFiles('requirements.txt', 'engine.py') }}
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt -c constraints.txt
+        run: python -m pip install --require-hashes -r requirements-lock-py312.txt
 
       - name: Run concurrency benchmark
         run: |
