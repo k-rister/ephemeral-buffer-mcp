@@ -127,6 +127,9 @@ memory separately.
 `execute_and_capture` retains the beginning and end of oversized command
 output and marks the capture with its original byte count.
 
+See [OPERATIONS.md](OPERATIONS.md) for deployment settings, troubleshooting,
+release verification, and repository maintenance procedures.
+
 ---
 
 ## 🛠 Testing the Server
