@@ -2,12 +2,15 @@
 Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 """
 
+import io
+import sqlite3
 import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import patch
-from engine import EphemeralEngine
+from engine import EphemeralEngine, process_rss_bytes
 
 
 class TestEphemeralEngine(unittest.TestCase):
@@ -349,6 +352,68 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with self.assertRaisesRegex(RuntimeError, "model unavailable"):
             engine.ingest("payload", label="embedding-failure")
         self.assertEqual(engine.captures, {})
+
+    def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("searchable payload", label="search-errors")
+
+        self.assertEqual(engine.search_bm25(capture, "!!!"), [])
+
+        class BrokenCursor:
+            def execute(self, *_args):
+                raise sqlite3.OperationalError("fts unavailable")
+
+        class BrokenConnection:
+            def cursor(self):
+                return BrokenCursor()
+
+        capture.fts_conn = BrokenConnection()
+        self.assertEqual(engine.search_bm25(capture, "searchable"), [])
+
+    def test_clear_single_and_missing_capture_paths(self):
+        engine = EphemeralEngine(max_captures=2)
+        capture = engine.ingest("cleanup payload", label="cleanup")
+
+        self.assertEqual(
+            engine.clear(capture.capture_id),
+            f"Cleared capture '{capture.capture_id}'.",
+        )
+        self.assertEqual(engine.clear(capture.capture_id), f"Capture '{capture.capture_id}' not found.")
+
+    def test_embedding_load_success_and_failure_diagnostics(self):
+        class FakeEmbedding:
+            pass
+
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                patch("engine.TextEmbedding", return_value=FakeEmbedding()) as embedding, \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            engine = EphemeralEngine(max_captures=1, embedding_cache_path="/cache")
+            loaded = engine._get_embedding_model()
+
+        self.assertIsInstance(loaded, FakeEmbedding)
+        embedding.assert_called_once_with(model_name=engine.embedding_model_name, cache_dir="/cache")
+        self.assertIn("Loading embedding model", stderr.getvalue())
+        self.assertIn("Embedding model ready", stderr.getvalue())
+
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                patch("engine.TextEmbedding", side_effect=RuntimeError("load failed")):
+            failing = EphemeralEngine(max_captures=1)
+            with self.assertRaisesRegex(RuntimeError, "load failed"):
+                failing._get_embedding_model()
+        self.assertIsNone(failing.embedding_model)
+
+    def test_process_rss_falls_back_to_resource_and_can_be_unavailable(self):
+        resource_module = SimpleNamespace(
+            RUSAGE_SELF=object(),
+            getrusage=lambda _kind: SimpleNamespace(ru_maxrss=4),
+        )
+        with patch("builtins.open", side_effect=OSError("statm unavailable")), \
+                patch.dict(sys.modules, {"resource": resource_module}):
+            self.assertEqual(process_rss_bytes(), 4096)
+
+        with patch("builtins.open", side_effect=OSError("statm unavailable")), \
+                patch.dict(sys.modules, {"resource": None}):
+            self.assertIsNone(process_rss_bytes())
 
 
 class TestEmbeddingStartup(unittest.TestCase):
