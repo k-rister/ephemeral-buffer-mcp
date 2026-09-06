@@ -5,6 +5,7 @@ from pathlib import Path
 from release_checks import (
     ReleaseCheckError,
     changelog_version,
+    extract_changelog_notes,
     tag_version,
     validate_metadata,
     validate_source_state,
@@ -29,6 +30,14 @@ class TestReleaseChecks(unittest.TestCase):
 
     def test_bracketed_changelog_heading_is_supported(self):
         changelog_version("## [1.2.3] - 2026-09-06", "1.2.3")
+
+    def test_release_notes_are_limited_to_the_requested_section(self):
+        changelog = "## 1.2.3 - 2026-09-06\n\n- First note\n\n## 1.2.2 - 2026-08-01\n\n- Older note\n"
+
+        self.assertEqual(
+            extract_changelog_notes(changelog, "1.2.3"),
+            "## 1.2.3 - 2026-09-06\n\n- First note",
+        )
 
     def test_source_state_requires_clean_main_ancestry(self):
         validate_source_state("tag", "main", True, "")

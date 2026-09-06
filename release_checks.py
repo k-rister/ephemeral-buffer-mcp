@@ -45,19 +45,31 @@ def package_version(path: Path) -> str:
 
 def changelog_version(changelog: str, version: str) -> None:
     """Require a dated/non-unreleased changelog section for the version."""
-    for line in changelog.splitlines():
+    extract_changelog_notes(changelog, version)
+
+
+def extract_changelog_notes(changelog: str, version: str) -> str:
+    """Return the release heading and notes for a validated version."""
+    lines = changelog.splitlines()
+    for index, line in enumerate(lines):
         match = CHANGELOG_HEADING.fullmatch(line)
         if not match:
             continue
         heading_version = match.group("bracketed") or match.group("plain")
+        if heading_version != version:
+            continue
         label = (match.group("label") or "").strip().lower()
-        if heading_version == version:
-            if "unreleased" in label:
-                raise ReleaseCheckError(
-                    f"CHANGELOG.md section for {version} is still marked Unreleased; "
-                    "replace it with release notes or a release date"
-                )
-            return
+        if "unreleased" in label:
+            raise ReleaseCheckError(
+                f"CHANGELOG.md section for {version} is still marked Unreleased; "
+                "replace it with release notes or a release date"
+            )
+        end = next(
+            (candidate for candidate in range(index + 1, len(lines))
+             if lines[candidate].startswith("## ")),
+            len(lines),
+        )
+        return "\n".join(lines[index:end]).strip()
     raise ReleaseCheckError(
         f"CHANGELOG.md has no release section for {version}; add a heading such as "
         f"## {version} - YYYY-MM-DD"

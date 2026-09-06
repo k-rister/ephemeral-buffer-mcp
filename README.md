@@ -204,9 +204,12 @@ default branch, and starts from a clean checkout. It also requires the tag,
 workflow then builds wheel and source distributions, validates their metadata,
 verifies the installed package, and uploads the artifacts for review. A failed
 guardrail reports the mismatched value or source-state problem before building.
-The workflow also uploads `SHA256SUMS`; verify a downloaded artifact with
-`sha256sum --check SHA256SUMS` from the directory containing the files.
-Release distributions also receive a GitHub build-provenance attestation.
+The workflow creates a GitHub Release using the matching changelog section,
+attaches the wheel, source distribution, and `SHA256SUMS`, and links back to
+the workflow run containing the build-provenance attestation. Verify a
+downloaded artifact with `sha256sum --check SHA256SUMS` from the directory
+containing the files. The same verified distributions are then published to
+PyPI through trusted publishing.
 After the repository's `pypi` environment is configured with a PyPI trusted
 publisher, the workflow publishes the distributions to PyPI automatically.
 

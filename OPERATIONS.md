@@ -92,8 +92,9 @@ publisher is registered, PyPI distributions.
    must match the project version exactly and point to a commit contained in
    the default branch.
 4. Wait for the tagged release workflow to finish.
-5. Download the wheel, source distribution, `SHA256SUMS`, and provenance
-   attestation from the workflow run.
+5. Review the automatically created GitHub Release. It contains the wheel,
+   source distribution, `SHA256SUMS`, release notes from `CHANGELOG.md`, and a
+   link to the workflow run containing the provenance attestation.
 6. Verify the checksums from the directory containing the distributions:
 
    ```bash
@@ -112,9 +113,10 @@ publisher is registered, PyPI distributions.
    and files match the verified workflow artifacts.
 
 The release workflow also checks tag format, package/changelog consistency,
-clean source state, and tag ancestry before building. It generates a GitHub
-build-provenance attestation. Treat a failed check, checksum mismatch, or
-missing attestation as a release blocker.
+clean source state, and tag ancestry before building. GitHub Release creation
+must succeed before the PyPI publish job is allowed to run. Treat a failed
+check, checksum mismatch, missing release asset, or missing attestation as a
+release blocker.
 
 ### PyPI trusted publishing setup
 
