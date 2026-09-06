@@ -10,7 +10,79 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
-from engine import EphemeralEngine, process_rss_bytes
+from engine import (
+    EphemeralEngine,
+    detect_content_type,
+    detect_signals,
+    parse_unified_diff,
+    process_rss_bytes,
+)
+
+
+class TestEngineClassification(unittest.TestCase):
+    def test_empty_and_non_diff_input_has_no_diff_metadata(self):
+        self.assertIsNone(parse_unified_diff([]))
+        self.assertIsNone(parse_unified_diff(["ordinary text", "with no patch markers"]))
+
+    def test_parse_unified_diff_handles_fallback_and_file_statuses(self):
+        fallback = parse_unified_diff([
+            "--- a/fallback.py",
+            "+++ b/fallback.py",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+        self.assertEqual(fallback["total_files"], 1)
+        self.assertEqual(fallback["files"][0]["path"], "fallback.py")
+        self.assertEqual(fallback["total_additions"], 1)
+        self.assertEqual(fallback["total_deletions"], 1)
+
+        statuses = parse_unified_diff([
+            "diff --git a/added.py b/added.py",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/added.py",
+            "@@ -0,0 +1 @@",
+            "+added",
+            "diff --git a/deleted.py b/deleted.py",
+            "deleted file mode 100644",
+            "--- a/deleted.py",
+            "+++ /dev/null",
+            "@@ -1 +0,0 @@",
+            "-deleted",
+            "diff --git a/old.py b/new.py",
+            "similarity index 90%",
+            "rename from old.py",
+            "rename to new.py",
+        ])
+        self.assertEqual(
+            [item["status"] for item in statuses["files"]],
+            ["added", "deleted", "renamed"],
+        )
+        self.assertEqual(statuses["files"][0]["path"], "added.py")
+        self.assertEqual(statuses["files"][1]["path"], "deleted.py")
+
+    def test_content_type_hints_and_label_detection(self):
+        self.assertEqual(detect_content_type(["error"], content_type_hint="log"), ("log", None))
+        self.assertEqual(detect_content_type(["source"], content_type_hint="text"), ("text", None))
+        self.assertEqual(detect_content_type(["not a patch"], label="git diff command")[0], "diff")
+        self.assertEqual(detect_content_type(["build complete"], label="nightly build")[0], "log")
+        self.assertEqual(detect_content_type(["plain source"])[0], "text")
+
+    def test_signal_detection_covers_success_timeout_and_non_log_paths(self):
+        self.assertEqual(
+            detect_signals(["2 tests passed", "OK"], "log"),
+            ({}, "None (successful test run)"),
+        )
+        timeout_signals, timeout_summary = detect_signals(
+            ["command stopped"], "log", command_exit_code=0, timed_out=True
+        )
+        self.assertEqual(timeout_signals, {})
+        self.assertEqual(timeout_summary, "None detected")
+        self.assertEqual(
+            detect_signals(["error in source"], "text"),
+            ({}, "None (non-log content)"),
+        )
 
 
 class TestEphemeralEngine(unittest.TestCase):
