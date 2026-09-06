@@ -206,6 +206,23 @@ class TestBoundedCommandCapture(unittest.TestCase):
         killpg.assert_called_once()
         self.assertEqual(killpg.call_args.args, (42, 15))
 
+    def test_process_group_cleanup_escalates_to_group_kill_after_wait_timeout(self):
+        class SlowProcess:
+            pid = 42
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("ignored", timeout)
+
+            def kill(self):
+                self.killed = True
+
+        process = SlowProcess()
+        with patch("capture_utils.os.killpg") as killpg:
+            _terminate_process_group(process)
+
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual(killpg.call_args_list[1].args, (42, 9))
+
     def test_invalid_output_limit_does_not_start_process(self):
         with patch("capture_utils.subprocess.Popen") as popen:
             with self.assertRaisesRegex(ValueError, "max_output_bytes"):
