@@ -114,6 +114,10 @@ buffer limits, embedding readiness, and process memory. Use
 `get_buffer_stats` and `get_capture_summary` for more focused aggregate
 diagnostics. The runtime report is opt-in and does not include captured text,
 labels, command arguments, or the session ID value.
+When the server is launched directly from a checkout, its reported version is
+read from that checkout's `pyproject.toml`; installed distributions use their
+package metadata. Restarting a checkout-launched server therefore picks up a
+version change without reinstalling the package.
 When command output is needed, provide only a sanitized excerpt or line range;
 do not attach an entire capture by default. Remove credentials, tokens,
 private paths, source code, and user data before sharing diagnostics. A useful
