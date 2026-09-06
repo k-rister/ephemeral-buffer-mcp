@@ -1,0 +1,6 @@
+{
+  "ingest_per_second": 1.0,
+  "minimum_ratio": 0.8,
+  "reads_per_second": 1000.0,
+  "schema_version": 1
+}

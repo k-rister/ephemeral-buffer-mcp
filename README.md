@@ -212,6 +212,11 @@ Run the concurrency benchmark:
 .venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
 ```
 The benchmark accepts `--min-ingest-per-second` and `--min-reads-per-second`
-thresholds for regression checks. GitHub Actions runs it as an optional weekly
-or manually dispatched job and uploads the results; it is not part of the
-required pull-request checks.
+thresholds for direct checks. For repeatable regression checks, pass
+`--baseline benchmark_baseline.json --output benchmark-concurrency.json`.
+The checked-in baseline uses a 20% tolerance: a run fails only when ingest or
+read throughput drops below 80% of its baseline. Each scheduled or manually
+dispatched GitHub Actions run records the raw JSON result as an artifact and
+adds the measurements and regression status to the workflow summary. This
+benchmark remains optional and is not part of the required pull-request checks;
+update the baseline deliberately when the runner or benchmark workload changes.
