@@ -125,6 +125,25 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Process RSS:", result)
         self.assertIn("Unaccounted RSS bytes:", result)
 
+    def test_runtime_diagnostics_reports_content_free_metadata(self):
+        server.capture_text("secret command output", label="private-label")
+
+        with patch.dict(
+            os.environ,
+            {"EPHEMERAL_SESSION_ID": "diagnostic-session"},
+            clear=False,
+        ):
+            result = server.get_runtime_diagnostics()
+
+        self.assertIn("Runtime diagnostics (content-free):", result)
+        self.assertIn("Python:", result)
+        self.assertIn("Socket mode: session-derived path", result)
+        self.assertIn("Session ID configured: yes", result)
+        self.assertIn("Captures: 1/", result)
+        self.assertIn("Embedding model:", result)
+        self.assertNotIn("secret command output", result)
+        self.assertNotIn("private-label", result)
+
     def test_capture_file_reads_and_labels_content(self):
         with tempfile.TemporaryDirectory() as directory:
             file_path = Path(directory) / "capture.log"

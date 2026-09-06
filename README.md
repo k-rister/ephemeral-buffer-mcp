@@ -96,6 +96,7 @@ The agent has access to the following tools:
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. |
+| `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
@@ -131,6 +132,11 @@ captured UTF-8 content; `get_buffer_stats` also reports embedding model
 readiness, embedding/cache settings, and process memory separately.
 `execute_and_capture` retains the beginning and end of oversized command
 output and marks the capture with its original byte count.
+
+Call `get_runtime_diagnostics()` when reporting a field observation. It is
+explicitly opt-in and returns operational metadata only; captured content,
+labels, command arguments, and session ID values are excluded. Sanitize any
+additional output before sharing it.
 
 See [OPERATIONS.md](OPERATIONS.md) for deployment settings, troubleshooting,
 release verification, and repository maintenance procedures.
