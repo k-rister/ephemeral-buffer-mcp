@@ -11,9 +11,11 @@ import socket
 import threading
 import logging
 import platform
+import re
 import time
 from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
+from pathlib import Path
 from typing import Optional
 from config import positive_int_env, socket_path
 from mcp.server.fastmcp import FastMCP
@@ -32,6 +34,23 @@ LOGGER = get_logger("server")
 
 # Initialize FastMCP
 mcp = FastMCP("ephemeral-buffer")
+
+
+def _runtime_package_version() -> str:
+    """Return the version for the source or installed server being run."""
+    pyproject = Path(__file__).with_name("pyproject.toml")
+    try:
+        source_text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        source_text = ""
+    match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']\s*$', source_text, re.MULTILINE)
+    if match:
+        return match.group(1)
+
+    try:
+        return package_version("ephemeral-buffer-mcp")
+    except PackageNotFoundError:
+        return "source checkout"
 
 
 engine = EphemeralEngine(
@@ -353,10 +372,7 @@ def get_buffer_stats() -> str:
 def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""
     stats = engine.get_buffer_stats()
-    try:
-        installed_version = package_version("ephemeral-buffer-mcp")
-    except PackageNotFoundError:
-        installed_version = "source checkout"
+    installed_version = _runtime_package_version()
 
     if os.environ.get("EPHEMERAL_SOCKET_PATH"):
         socket_mode = "explicit path"

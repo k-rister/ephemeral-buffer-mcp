@@ -136,6 +136,7 @@ class TestServerTools(unittest.TestCase):
             result = server.get_runtime_diagnostics()
 
         self.assertIn("Runtime diagnostics (content-free):", result)
+        self.assertIn("Package version: 0.1.2", result)
         self.assertIn("Python:", result)
         self.assertIn("Socket mode: session-derived path", result)
         self.assertIn("Session ID configured: yes", result)
