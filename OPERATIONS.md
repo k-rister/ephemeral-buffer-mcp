@@ -87,8 +87,10 @@ publisher is registered, PyPI distributions.
 1. Update the version in `pyproject.toml` and add release notes to
    `CHANGELOG.md`.
 2. Run the focused and end-to-end test suites locally.
-3. Create and push an annotated `vX.Y.Z` tag. The tag must match the project
-   version exactly.
+3. Replace the matching `Unreleased` changelog heading with dated release
+   notes, then create and push an annotated `vX.Y.Z` tag from `main`. The tag
+   must match the project version exactly and point to a commit contained in
+   the default branch.
 4. Wait for the tagged release workflow to finish.
 5. Download the wheel, source distribution, `SHA256SUMS`, and provenance
    attestation from the workflow run.
@@ -109,7 +111,8 @@ publisher is registered, PyPI distributions.
 8. Confirm the package is available from PyPI and that its published metadata
    and files match the verified workflow artifacts.
 
-The release workflow also checks the tag/version match and generates a GitHub
+The release workflow also checks tag format, package/changelog consistency,
+clean source state, and tag ancestry before building. It generates a GitHub
 build-provenance attestation. Treat a failed check, checksum mismatch, or
 missing attestation as a release blocker.
 
