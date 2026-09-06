@@ -160,6 +160,19 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("FAILED (Exit Code 7)", result)
         self.assertIn("truncated from 700 bytes", result)
 
+    def test_execute_formats_diff_command_response(self):
+        diff = "diff --git a/old.txt b/new.txt\n--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        with patch.object(
+            server,
+            "run_command_bounded",
+            return_value=(diff, 0, False, len(diff.encode()), False),
+        ):
+            result = server.execute_and_capture("git diff", max_output_bytes=1024)
+
+        self.assertIn("Type: Unified Diff", result)
+        self.assertIn("Modified Files Map", result)
+        self.assertIn("new.txt", result)
+
     def test_search_and_read_tools_report_missing_and_empty_results(self):
         self.assertIn("Search Error", server.search_capture("query", capture_id="missing"))
         with patch.object(
@@ -217,10 +230,32 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Modified Files Map", summary)
         self.assertIn("truncated from 20 bytes", summary)
 
+        with patch.object(
+            server.engine,
+            "get_summary",
+            return_value={
+                "status": "ok", "capture_id": "cap", "label": "log",
+                "timestamp": 1, "total_lines": 2, "byte_size": 10,
+                "truncated": False, "signals_summary": "None detected",
+                "head_preview": "head", "tail_preview": "tail",
+            },
+        ):
+            regular = server.get_capture_summary("cap")
+        self.assertIn("Head (First 5 lines)", regular)
+        self.assertIn("tail", regular)
+
     def test_empty_and_populated_capture_listing(self):
         self.assertIn("buffer is empty", server.list_captures())
         server.capture_text("one line", label="listed")
         self.assertIn("listed", server.list_captures())
+
+    def test_clear_capture_delegates_success_and_missing_results(self):
+        with patch.object(server.engine, "clear", return_value="Cleared capture 'cap'.") as clear:
+            self.assertEqual(server.clear_captures("cap"), "Cleared capture 'cap'.")
+        clear.assert_called_once_with("cap")
+
+        with patch.object(server.engine, "clear", return_value="Capture 'missing' not found."):
+            self.assertIn("not found", server.clear_captures("missing"))
 
     def test_buffer_stats_handles_unavailable_memory_metrics(self):
         with patch.object(
@@ -340,6 +375,56 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def _run_with_existing_socket(self, probe_error, unlink=None):
+        class FailingLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                coroutine.close()
+                raise RuntimeError("socket unavailable")
+
+        class Probe:
+            def connect(self, _path):
+                if probe_error is not None:
+                    raise probe_error
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "existing.sock")
+            Path(socket_path).write_text("occupied", encoding="utf-8")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.socket, "socket", return_value=Probe()), \
+                    patch.object(server.os, "unlink", side_effect=unlink) as unlink_mock, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+        return stderr.getvalue(), unlink_mock
+
+    def test_socket_probe_stale_cleanup_tolerates_missing_path(self):
+        stderr, unlink = self._run_with_existing_socket(
+            ConnectionRefusedError(),
+            FileNotFoundError(),
+        )
+
+        unlink.assert_called_once()
+        self.assertIn("Socket server error: socket unavailable", stderr)
+
+    def test_socket_probe_file_disappears_during_probe(self):
+        stderr, unlink = self._run_with_existing_socket(FileNotFoundError())
+
+        unlink.assert_not_called()
+        self.assertIn("Socket server error: socket unavailable", stderr)
+
+    def test_socket_probe_reports_live_listener(self):
+        stderr, unlink = self._run_with_existing_socket(None)
+
+        unlink.assert_not_called()
+        self.assertIn("Socket already in use", stderr)
+
     def test_live_socket_is_not_removed(self):
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")

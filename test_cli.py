@@ -7,6 +7,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cli
@@ -106,6 +107,48 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertTrue(kwargs["truncated"])
         self.assertEqual(kwargs["original_byte_size"], 2000)
         self.assertLessEqual(len(payload.encode("utf-8")), 1024)
+
+    def test_binary_stdin_capture_uses_buffer(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_binary", "label": "Piped STDIN"}
+        stdin = SimpleNamespace(isatty=lambda: False, buffer=io.BytesIO(b"binary input"))
+        with patch.object(cli, "send_to_mcp", return_value=response) as send, \
+                patch.object(sys, "argv", ["cli.py"]), \
+                patch.object(sys, "stdin", stdin):
+            cli.main()
+
+        self.assertEqual(send.call_args.args[0], "binary input")
+
+    def test_wrapped_command_reports_timeout(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_timeout", "label": "sleep"}
+        with patch.object(cli, "run_command_bounded", return_value=("partial", 124, False, 7, True)), \
+                patch.object(cli, "send_to_mcp", return_value=response), \
+                patch.object(sys, "argv", ["cli.py", "--timeout-seconds", "0.5", "--", "sleep", "10"]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 124)
+        self.assertIn("timed out after 0.5s", stderr.getvalue())
+
+    def test_stdin_capture_reports_warning(self):
+        response = {"status": "error", "message": "socket unavailable"}
+        with patch.object(cli, "send_to_mcp", return_value=response), \
+                patch.object(sys, "argv", ["cli.py"]), \
+                patch.object(sys, "stdin", io.StringIO("input")), \
+                patch.object(sys, "stderr", io.StringIO()) as stderr:
+            cli.main()
+
+        self.assertIn("socket unavailable", stderr.getvalue())
+
+    def test_tty_without_command_prints_help(self):
+        stdin = SimpleNamespace(isatty=lambda: True)
+        with patch.object(sys, "argv", ["cli.py"]), \
+                patch.object(sys, "stdin", stdin), \
+                patch.object(sys, "stdout", io.StringIO()) as stdout:
+            cli.main()
+
+        self.assertIn("Pipe output into Ephemeral Buffer", stdout.getvalue())
 
     def test_wrapped_command_forwards_exit_code_and_label(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
