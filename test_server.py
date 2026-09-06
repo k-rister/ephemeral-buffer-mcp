@@ -145,6 +145,20 @@ class TestServerTools(unittest.TestCase):
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
 
+    def test_runtime_diagnostics_reports_explicit_and_default_socket_modes(self):
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/diagnostic.sock"}, clear=True):
+            explicit = server.get_runtime_diagnostics()
+        with patch.dict(os.environ, {}, clear=True):
+            default = server.get_runtime_diagnostics()
+
+        self.assertIn("Socket mode: explicit path", explicit)
+        self.assertIn("Socket mode: shared default path", default)
+
+    def test_runtime_package_version_falls_back_to_source_checkout(self):
+        with patch.object(server.Path, "read_text", side_effect=OSError("missing metadata")), \
+                patch.object(server, "package_version", side_effect=server.PackageNotFoundError()):
+            self.assertEqual(server._runtime_package_version(), "source checkout")
+
     def test_capture_file_reads_and_labels_content(self):
         with tempfile.TemporaryDirectory() as directory:
             file_path = Path(directory) / "capture.log"

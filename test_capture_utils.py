@@ -197,6 +197,15 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertTrue(process.killed)
 
+    def test_process_group_cleanup_uses_group_termination_when_available(self):
+        process = type("Process", (), {"pid": 42, "wait": lambda _self, timeout=None: None})()
+
+        with patch("capture_utils.os.killpg") as killpg:
+            _terminate_process_group(process)
+
+        killpg.assert_called_once()
+        self.assertEqual(killpg.call_args.args, (42, 15))
+
     def test_invalid_output_limit_does_not_start_process(self):
         with patch("capture_utils.subprocess.Popen") as popen:
             with self.assertRaisesRegex(ValueError, "max_output_bytes"):
