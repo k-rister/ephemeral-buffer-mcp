@@ -416,10 +416,24 @@ class TestSocketServerStartup(unittest.TestCase):
         self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
 
     def test_socket_probe_failure_is_reported(self):
+        class FailingLoop:
+            def close(self):
+                pass
+
+        class FailingProbe:
+            def connect(self, _path):
+                raise OSError("probe failed")
+
+            def close(self):
+                pass
+
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "not-a-socket")
             Path(socket_path).write_text("occupied", encoding="utf-8")
             with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.socket, "socket", return_value=FailingProbe()), \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 server.run_socket_server()
 
