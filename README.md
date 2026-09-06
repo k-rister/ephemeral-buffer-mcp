@@ -172,7 +172,7 @@ Run the test suite:
 
 Measure focused-test coverage locally:
 ```bash
-.venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_release_checks.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 .venv/bin/python -m coverage report
 ```
 The current focused-test baseline is 91%; CI enforces a 91% minimum after
@@ -197,10 +197,13 @@ tested `constraints.txt` path for Python 3.10. The direct requirements and
 constraints are updated only after the full test matrix passes; lock updates
 must be reviewed together with their resolver output and audit results.
 
-Pushing a version tag such as `v0.1.1` runs the release workflow, which builds
-wheel and source distributions, validates their metadata, verifies the
-installed package, and uploads the artifacts for review. The tag must match
-the version in `pyproject.toml`.
+Pushing a version tag such as `v0.1.1` runs the release workflow, which first
+verifies that the tag is valid SemVer, points to a commit contained in the
+default branch, and starts from a clean checkout. It also requires the tag,
+`pyproject.toml`, and a dated matching `CHANGELOG.md` section to agree. The
+workflow then builds wheel and source distributions, validates their metadata,
+verifies the installed package, and uploads the artifacts for review. A failed
+guardrail reports the mismatched value or source-state problem before building.
 The workflow also uploads `SHA256SUMS`; verify a downloaded artifact with
 `sha256sum --check SHA256SUMS` from the directory containing the files.
 Release distributions also receive a GitHub build-provenance attestation.
