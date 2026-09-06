@@ -179,6 +179,12 @@ The current focused-test baseline is 91%; CI enforces a 91% minimum after
 adding coverage for defensive command, limit, cleanup, embedding, and socket
 handling paths. Coverage reports are uploaded for inspection, and future
 threshold increases should follow similarly targeted test additions.
+The release guardrail utility is measured separately because it is a workflow
+utility rather than application runtime code:
+```bash
+COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage run --source=. -m unittest test_release_checks.py
+COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report --include='release_checks.py'
+```
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
 Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed

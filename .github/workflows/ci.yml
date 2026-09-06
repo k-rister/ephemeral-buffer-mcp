@@ -75,6 +75,12 @@ jobs:
           python -m coverage xml
           python -m coverage html
 
+      - name: Report release guardrail coverage
+        run: |
+          rm -f .coverage.release
+          COVERAGE_FILE=.coverage.release python -m coverage run --source=. -m unittest test_release_checks.py
+          COVERAGE_FILE=.coverage.release python -m coverage report --include='release_checks.py' --fail-under=90
+
       - name: Run end-to-end test
         run: python -m unittest test_e2e_pipe.py
 
