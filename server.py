@@ -495,6 +495,9 @@ def run_socket_server():
     except Exception as e:
         log_event(LOGGER, logging.ERROR, "socket_server_failed", error_type=type(e).__name__)
         LOGGER.exception("socket_server_exception")
+        # Preserve the established stderr diagnostic for callers and tests
+        # that capture the server's direct error stream.
+        print(f"Socket server error: {e}", file=sys.stderr)
     finally:
         loop.close()
 

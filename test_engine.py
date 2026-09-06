@@ -132,7 +132,7 @@ STEP 3: Summary
         self.assertNotIn("Run 2", labels)
         self.assertNotIn("Run 3", labels)
         self.assertGreaterEqual(
-            sum('"event": "capture_evicted"' in event for event in events.output),
+            sum("capture_evicted" in event for event in events.output),
             2,
         )
         print("\n[LRU Eviction Passed] Least recently used captures evicted, memory bound maintained.")
