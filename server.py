@@ -9,6 +9,9 @@ import json
 import asyncio
 import socket
 import threading
+import platform
+import time
+from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
 from typing import Optional
 from config import positive_int_env, socket_path
@@ -22,6 +25,7 @@ from capture_utils import read_file_bounded, run_command_bounded
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
+SERVER_STARTED_AT = time.time()
 
 # Initialize FastMCP
 mcp = FastMCP("ephemeral-buffer")
@@ -325,6 +329,45 @@ def get_buffer_stats() -> str:
         f"{rss_line}\n"
         f"{unaccounted_line}"
     )
+
+
+@mcp.tool()
+def get_runtime_diagnostics() -> str:
+    """Returns opt-in runtime metadata without exposing captured content."""
+    stats = engine.get_buffer_stats()
+    try:
+        installed_version = package_version("ephemeral-buffer-mcp")
+    except PackageNotFoundError:
+        installed_version = "source checkout"
+
+    if os.environ.get("EPHEMERAL_SOCKET_PATH"):
+        socket_mode = "explicit path"
+    elif os.environ.get("EPHEMERAL_SESSION_ID"):
+        socket_mode = "session-derived path"
+    else:
+        socket_mode = "shared default path"
+
+    uptime_seconds = max(0, int(time.time() - SERVER_STARTED_AT))
+    rss = stats["process_rss_bytes"]
+    unaccounted = stats["unaccounted_rss_bytes"]
+    lines = [
+        "Runtime diagnostics (content-free):",
+        f"Package version: {installed_version}",
+        f"Python: {platform.python_version()}",
+        f"Platform: {platform.platform()}",
+        f"Uptime: {uptime_seconds:,} seconds",
+        f"Socket mode: {socket_mode}",
+        f"Socket path: {SOCKET_PATH}",
+        f"Session ID configured: {'yes' if os.environ.get('EPHEMERAL_SESSION_ID') else 'no'}",
+        f"Captures: {stats['capture_count']}/{stats['max_captures']}",
+        f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
+        f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",
+        f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}",
+        f"Process RSS: {'unavailable' if rss is None else f'{rss:,} bytes'}",
+        f"Unaccounted RSS: {'unavailable' if unaccounted is None else f'{unaccounted:,} bytes'}",
+        "Captured content, labels, and command arguments are not included.",
+    ]
+    return "\n".join(lines)
 
 
 # --- Unix Domain Socket IPC for CLI piping (ephbuf) ---

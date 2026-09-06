@@ -108,7 +108,12 @@ For the behavior being investigated, record:
 - expected behavior versus observed behavior
 - timeout, readiness, socket, embedding, cleanup, or eviction symptoms
 
-Use `get_buffer_stats` and `get_capture_summary` for aggregate diagnostics.
+Use `get_runtime_diagnostics()` for a content-free report of the running
+version, Python/platform details, uptime, socket mode, effective socket path,
+buffer limits, embedding readiness, and process memory. Use
+`get_buffer_stats` and `get_capture_summary` for more focused aggregate
+diagnostics. The runtime report is opt-in and does not include captured text,
+labels, command arguments, or the session ID value.
 When command output is needed, provide only a sanitized excerpt or line range;
 do not attach an entire capture by default. Remove credentials, tokens,
 private paths, source code, and user data before sharing diagnostics. A useful
