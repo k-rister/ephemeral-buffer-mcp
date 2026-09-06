@@ -1,0 +1,97 @@
+name: Field observation
+description: Report unexpected or noteworthy behavior observed while using ephbuf.
+title: "[Observation]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an observation. Please remove captured command
+        output, credentials, tokens, private paths, source code, and user data
+        before submitting. Use `get_runtime_diagnostics()` for content-free
+        runtime metadata when available.
+
+  - type: input
+    id: version
+    attributes:
+      label: ephbuf version or commit
+      description: Include the package version or commit being used.
+      placeholder: "0.1.1 or 4bd6a4a"
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Python version and operating system
+      placeholder: "Python 3.12.4 on Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: textarea
+    id: installation
+    attributes:
+      label: Installation and runtime context
+      description: Explain how ephbuf is installed and how the server is launched.
+      placeholder: "Installed from PyPI; launched by an MCP client..."
+
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Relevant configuration
+      description: List relevant environment variables and limits, but never include session ID values, credentials, or secrets.
+      placeholder: |
+        EPHEMERAL_MAX_CAPTURES=25
+        EPHEMERAL_MAX_BUFFER_BYTES=52428800
+        EPHEMERAL_SESSION_ID=(configured; value omitted)
+
+  - type: dropdown
+    id: operation
+    attributes:
+      label: Operation involved
+      options:
+        - execute_and_capture
+        - capture_text
+        - capture_file
+        - search_capture
+        - get_runtime_diagnostics
+        - CLI (ephbuf)
+        - Server startup or socket connection
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include sanitized error messages or diagnostic events, not the original capture.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe and repeatable reproduction. Replace command text with placeholders when necessary.
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste sanitized output from get_runtime_diagnostics(), get_buffer_stats(), or structured logs. Remove private paths and sensitive values.
+      render: text
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed captured content, credentials, tokens, private paths, source code, and user data.
+          required: true
