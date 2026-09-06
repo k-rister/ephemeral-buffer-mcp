@@ -119,6 +119,21 @@ do not attach an entire capture by default. Remove credentials, tokens,
 private paths, source code, and user data before sharing diagnostics. A useful
 report should be actionable without requiring access to the original capture.
 
+## Operational logging
+
+Runtime events are emitted as one privacy-safe JSON object per stderr line.
+Warnings and errors are enabled by default. Set `EPHEMERAL_LOG_LEVEL=INFO` to
+include normal embedding readiness, capture eviction, and process lifecycle
+events. Logged fields describe event types, IDs, sizes, limits, signal names,
+and error classes; captured content, labels, command text, and secrets are not
+logged.
+
+Important events include command timeouts and termination, rejected capture or
+socket payload limits, embedding load failures, capture eviction, storage
+cleanup failures, and socket conflicts. Treat repeated cleanup, readiness, or
+socket events as an investigation signal and pair them with the runtime
+diagnostics report.
+
 ## Release verification
 
 Releases are distributed as GitHub Actions artifacts and, once the trusted

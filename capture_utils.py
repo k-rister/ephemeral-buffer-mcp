@@ -1,6 +1,7 @@
 """Utilities for bounded command and stream output capture."""
 
 import os
+import logging
 import selectors
 import signal
 import subprocess
@@ -8,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 from config import DEFAULT_MAX_OUTPUT_BYTES
+from logging_utils import get_logger, log_event
+
+
+LOGGER = get_logger("capture")
 
 
 class _BoundedCapture:
@@ -113,10 +118,19 @@ def _run_command_bounded(
                     selector.unregister(key.fileobj)
     finally:
         if timed_out:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "command_timeout",
+                pid=getattr(proc, "pid", None),
+                timeout_seconds=timeout_seconds,
+                output_bytes=capture.total_bytes,
+            )
             _terminate_process_group(proc)
         try:
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
+            log_event(LOGGER, logging.WARNING, "process_wait_timeout", pid=getattr(proc, "pid", None))
             proc.kill()
             proc.wait()
         selector.close()
@@ -128,16 +142,21 @@ def _run_command_bounded(
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
     """Terminate a shell command and all children started in its process group."""
+    process_id = getattr(proc, "pid", None)
     try:
         os.killpg(proc.pid, signal.SIGTERM)
+        log_event(LOGGER, logging.INFO, "process_group_terminate", pid=process_id, signal="SIGTERM")
     except (ProcessLookupError, OSError):
+        log_event(LOGGER, logging.INFO, "process_terminate_fallback", pid=process_id)
         proc.terminate()
     try:
         proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
+            log_event(LOGGER, logging.WARNING, "process_group_kill", pid=process_id, signal="SIGKILL")
         except (ProcessLookupError, OSError):
+            log_event(LOGGER, logging.WARNING, "process_kill_fallback", pid=process_id)
             proc.kill()
 
 
