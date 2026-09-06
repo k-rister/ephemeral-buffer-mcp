@@ -79,6 +79,41 @@ captured output remains available through search and slices.
 Use `clear_captures("all")` between unrelated investigations when the active
 buffer should be released immediately instead of waiting for LRU eviction.
 
+## Field-observation checklist
+
+When investigating behavior from a real MCP session, collect operational
+metadata rather than captured command content. This keeps reports useful while
+avoiding accidental disclosure of source code, logs, credentials, or other
+sensitive data.
+
+Record the following before changing configuration:
+
+- ephbuf version or commit, Python version, operating system, and installation
+  method
+- whether the server is running in a single session or alongside other
+  sessions
+- effective socket configuration, including whether
+  `EPHEMERAL_SESSION_ID` or `EPHEMERAL_SOCKET_PATH` is set
+- embedding model and cache configuration, without including cache contents
+- buffer configuration: maximum captures, byte limit, and observed eviction
+  behavior
+
+For the behavior being investigated, record:
+
+- the operation involved (`execute_and_capture`, `capture_text`, search, or
+  another tool)
+- approximate startup, first-capture, and subsequent-operation latency when
+  relevant
+- whether the issue is reproducible, and the smallest safe reproduction
+- expected behavior versus observed behavior
+- timeout, readiness, socket, embedding, cleanup, or eviction symptoms
+
+Use `get_buffer_stats` and `get_capture_summary` for aggregate diagnostics.
+When command output is needed, provide only a sanitized excerpt or line range;
+do not attach an entire capture by default. Remove credentials, tokens,
+private paths, source code, and user data before sharing diagnostics. A useful
+report should be actionable without requiring access to the original capture.
+
 ## Release verification
 
 Releases are distributed as GitHub Actions artifacts and, once the trusted
