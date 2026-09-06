@@ -23,6 +23,7 @@ class TestEngineClassification(unittest.TestCase):
     def test_empty_and_non_diff_input_has_no_diff_metadata(self):
         self.assertIsNone(parse_unified_diff([]))
         self.assertIsNone(parse_unified_diff(["ordinary text", "with no patch markers"]))
+        self.assertIsNone(parse_unified_diff(["@@ -1 +1 @@", "context without a file header"]))
 
     def test_parse_unified_diff_handles_fallback_and_file_statuses(self):
         fallback = parse_unified_diff([
@@ -83,6 +84,20 @@ class TestEngineClassification(unittest.TestCase):
             detect_signals(["error in source"], "text"),
             ({}, "None (non-log content)"),
         )
+
+    def test_storage_cleanup_logs_and_swallows_close_failure(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("cleanup failure payload", label="cleanup-failure")
+
+        class BrokenStorage:
+            def close(self):
+                raise RuntimeError("close failed")
+
+        capture.fts_conn = BrokenStorage()
+        with self.assertLogs("ephemeral_buffer.engine", level="ERROR") as events:
+            engine._close_capture_storage(capture)
+
+        self.assertTrue(any("capture_storage_cleanup_failed" in event for event in events.output))
 
 
 class TestEphemeralEngine(unittest.TestCase):
