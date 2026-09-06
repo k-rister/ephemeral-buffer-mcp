@@ -64,10 +64,10 @@ jobs:
           /tmp/ephemeral-package-venv/bin/ephbuf --help
 
       - name: Compile sources
-        run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py
+        run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py benchmark_concurrency.py
 
       - name: Run focused tests
-        run: python -u -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest -v test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+        run: python -u -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py' -m unittest -v test_benchmark_concurrency.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 
       - name: Report coverage
         run: |
@@ -113,16 +113,47 @@ jobs:
 
       - name: Run concurrency benchmark
         run: |
+          set -o pipefail
           python benchmark_concurrency.py \
             --captures 32 \
             --workers 8 \
-            --min-ingest-per-second 1.0 \
-            --min-reads-per-second 1000 \
+            --baseline benchmark_baseline.json \
+            --output benchmark-concurrency.json \
             | tee benchmark-concurrency.txt
+
+      - name: Add benchmark summary
+        if: always()
+        run: |
+          {
+            echo '## Concurrency benchmark'
+            echo
+            if [ -f benchmark-concurrency.json ]; then
+              python - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path("benchmark-concurrency.json").read_text())
+          status = "passed" if result["passed"] else "failed"
+          print(f"- Captures/workers: `{result['captures']}/{result['workers']}`")
+          print(f"- Ingest: `{result['ingest_per_second']:.2f}/s`")
+          print(f"- Reads: `{result['reads_per_second']:.2f}/s`")
+          print(f"- Regression policy: `{status}`")
+          if result["regressions"]:
+              print("- Details:")
+              for failure in result["regressions"]:
+                  print(f"  - {failure}")
+          PY
+            else
+              echo '- No result JSON was produced.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: concurrency-benchmark-${{ github.run_number }}
-          path: benchmark-concurrency.txt
+          retention-days: 90
+          path: |
+            benchmark-concurrency.txt
+            benchmark-concurrency.json
