@@ -6,6 +6,7 @@ Provides hybrid search (BM25 lexical + dense semantic embeddings) with RRF ranki
 import os
 import sys
 import time
+import logging
 import re
 import hashlib
 import sqlite3
@@ -15,6 +16,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from functools import wraps
+from logging_utils import get_logger, log_event
 from fastembed import TextEmbedding
 from config import (
     DEFAULT_EMBEDDING_MODEL,
@@ -23,6 +25,9 @@ from config import (
     embedding_cache_dir,
     embedding_model_name as configured_embedding_model_name,
 )
+
+
+LOGGER = get_logger("engine")
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -331,15 +336,35 @@ class EphemeralEngine:
                 if self.embedding_model is None:
                     if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1":
                         self.embedding_model = _DeterministicTestEmbedding()
+                        log_event(LOGGER, logging.INFO, "embedding_model_ready", model="deterministic-test")
                         return self.embedding_model
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "embedding_model_load_started",
+                        model=self.embedding_model_name,
+                        cache_dir=self.embedding_cache_path or "default",
+                    )
                     sys.stderr.write(f"Loading embedding model: {self.embedding_model_name}...\n")
                     sys.stderr.flush()
                     kwargs = {"model_name": self.embedding_model_name}
                     if self.embedding_cache_path:
                         kwargs["cache_dir"] = self.embedding_cache_path
-                    self.embedding_model = TextEmbedding(**kwargs)
+                    try:
+                        self.embedding_model = TextEmbedding(**kwargs)
+                    except Exception:
+                        log_event(
+                            LOGGER,
+                            logging.ERROR,
+                            "embedding_model_load_failed",
+                            model=self.embedding_model_name,
+                            cache_dir=self.embedding_cache_path or "default",
+                        )
+                        LOGGER.exception("embedding_model_load_exception")
+                        raise
                     sys.stderr.write("Embedding model ready.\n")
                     sys.stderr.flush()
+                    log_event(LOGGER, logging.INFO, "embedding_model_ready", model=self.embedding_model_name)
         return self.embedding_model
 
     def _chunk_lines(self, lines: List[str], window_size: int = 4, step_size: int = 2) -> List[Chunk]:
@@ -402,6 +427,14 @@ class EphemeralEngine:
         with self._lock:
             max_buffer_bytes = self.max_buffer_bytes
         if capture_bytes > max_buffer_bytes:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "capture_rejected_limit",
+                capture_id=capture_id,
+                capture_bytes=capture_bytes,
+                max_buffer_bytes=max_buffer_bytes,
+            )
             raise ValueError(
                 f"Capture is {capture_bytes:,} bytes, exceeding the {max_buffer_bytes:,}-byte buffer limit"
             )
@@ -459,13 +492,34 @@ class EphemeralEngine:
                 if evicted_id in self.captures:
                     old_cap = self.captures.pop(evicted_id)
                     self._total_bytes -= old_cap.byte_size
-                    if old_cap.fts_conn:
-                        old_cap.fts_conn.close()
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "capture_evicted",
+                        capture_id=evicted_id,
+                        capture_bytes=old_cap.byte_size,
+                    )
+                    self._close_capture_storage(old_cap)
 
             self.captures[capture_id] = capture
             self.capture_order[capture_id] = None
             self._total_bytes += capture.byte_size
             return capture
+
+    def _close_capture_storage(self, capture: Capture) -> None:
+        """Close per-capture search storage and report cleanup failures."""
+        if not capture.fts_conn:
+            return
+        try:
+            capture.fts_conn.close()
+        except Exception:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "capture_storage_cleanup_failed",
+                capture_id=capture.capture_id,
+            )
+            LOGGER.exception("capture_storage_cleanup_exception")
 
     @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
@@ -769,8 +823,7 @@ class EphemeralEngine:
         """
         if capture_id == "all":
             for cap in self.captures.values():
-                if cap.fts_conn:
-                    cap.fts_conn.close()
+                self._close_capture_storage(cap)
             self.captures.clear()
             self.capture_order.clear()
             self._total_bytes = 0
@@ -778,8 +831,7 @@ class EphemeralEngine:
         elif capture_id in self.captures:
             cap = self.captures.pop(capture_id)
             self._total_bytes -= cap.byte_size
-            if cap.fts_conn:
-                cap.fts_conn.close()
+            self._close_capture_storage(cap)
             self.capture_order.pop(capture_id, None)
             return f"Cleared capture '{capture_id}'."
         else:

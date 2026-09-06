@@ -69,15 +69,18 @@ class TestBoundedCommandCapture(unittest.TestCase):
 
     def test_command_timeout_terminates_process_group(self):
         command = f"{shlex.quote(sys.executable)} -c \"import time; print('started', flush=True); time.sleep(10)\""
-        output, exit_code, truncated, original_size, timed_out = run_command_bounded(
-            command, None, 1024, timeout_seconds=0.1
-        )
+        with self.assertLogs("ephemeral_buffer.capture", level="WARNING") as events:
+            output, exit_code, truncated, original_size, timed_out = run_command_bounded(
+                command, None, 1024, timeout_seconds=0.1
+            )
 
         self.assertEqual(exit_code, 124)
         self.assertTrue(timed_out)
         self.assertIn("started", output)
         self.assertFalse(truncated)
         self.assertGreater(original_size, 0)
+        self.assertTrue(any("command_timeout" in event for event in events.output))
+        self.assertTrue(all(command not in event for event in events.output))
 
     def test_timeout_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "timeout_seconds"):

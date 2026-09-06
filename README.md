@@ -138,6 +138,11 @@ explicitly opt-in and returns operational metadata only; captured content,
 labels, command arguments, and session ID values are excluded. Sanitize any
 additional output before sharing it.
 
+Operational events are written as privacy-safe JSON lines to stderr. Warnings
+and errors are enabled by default; set `EPHEMERAL_LOG_LEVEL=INFO` to include
+normal readiness, eviction, and process lifecycle events. Logs never include
+captured content or command text.
+
 See [OPERATIONS.md](OPERATIONS.md) for deployment settings, troubleshooting,
 release verification, and repository maintenance procedures.
 

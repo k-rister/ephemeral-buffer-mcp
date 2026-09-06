@@ -9,6 +9,7 @@ import json
 import asyncio
 import socket
 import threading
+import logging
 import platform
 import time
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -22,10 +23,12 @@ from engine import (
     EphemeralEngine,
 )
 from capture_utils import read_file_bounded, run_command_bounded
+from logging_utils import get_logger, log_event
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SERVER_STARTED_AT = time.time()
+LOGGER = get_logger("server")
 
 # Initialize FastMCP
 mcp = FastMCP("ephemeral-buffer")
@@ -82,6 +85,13 @@ def capture_file(
         return f"Error: File '{file_path}' does not exist."
     try:
         if max_bytes is not None and max_bytes > engine.max_buffer_bytes:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "capture_file_limit_rejected",
+                requested_bytes=max_bytes,
+                max_buffer_bytes=engine.max_buffer_bytes,
+            )
             return (
                 f"Error: max_bytes ({max_bytes:,}) exceeds the configured "
                 f"buffer limit ({engine.max_buffer_bytes:,})."
@@ -124,6 +134,13 @@ def execute_and_capture(
         
     try:
         if max_output_bytes is not None and max_output_bytes > engine.max_buffer_bytes:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "command_output_limit_rejected",
+                requested_bytes=max_output_bytes,
+                max_buffer_bytes=engine.max_buffer_bytes,
+            )
             return (
                 f"Error: max_output_bytes ({max_output_bytes:,}) exceeds the configured "
                 f"buffer limit ({engine.max_buffer_bytes:,})."
@@ -179,6 +196,7 @@ def execute_and_capture(
             f"Query details using `search_capture(query='...', capture_id='{cap.capture_id}')`."
         )
     except Exception as e:
+        log_event(LOGGER, logging.ERROR, "command_execution_failed", error_type=type(e).__name__)
         return f"Error executing command: {str(e)}"
 
 
@@ -381,6 +399,13 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             if not data:
                 return
             if len(data) >= read_limit:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "socket_payload_limit_rejected",
+                    payload_bytes=len(data),
+                    max_payload_bytes=read_limit,
+                )
                 raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
             try:
                 payload = json.loads(data.decode("utf-8"))
@@ -420,6 +445,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             writer.write(json.dumps(resp).encode("utf-8"))
             await writer.drain()
         except Exception as e:
+            log_event(LOGGER, logging.ERROR, "socket_client_failed", error_type=type(e).__name__)
             err_resp = {"status": "error", "message": str(e)}
             writer.write(json.dumps(err_resp).encode("utf-8"))
             await writer.drain()
@@ -451,8 +477,10 @@ def run_socket_server():
             except FileNotFoundError:
                 pass
             except OSError as exc:
+                log_event(LOGGER, logging.ERROR, "socket_probe_failed", socket_path=SOCKET_PATH, error_type=type(exc).__name__)
                 raise RuntimeError(f"Unable to verify existing socket {SOCKET_PATH}: {exc}") from exc
             else:
+                log_event(LOGGER, logging.ERROR, "socket_conflict", socket_path=SOCKET_PATH)
                 raise RuntimeError(f"Socket already in use at {SOCKET_PATH}")
             finally:
                 probe.close()
@@ -465,7 +493,8 @@ def run_socket_server():
 
         loop.run_until_complete(_main())
     except Exception as e:
-        print(f"Socket server error: {e}", file=sys.stderr)
+        log_event(LOGGER, logging.ERROR, "socket_server_failed", error_type=type(e).__name__)
+        LOGGER.exception("socket_server_exception")
     finally:
         loop.close()
 

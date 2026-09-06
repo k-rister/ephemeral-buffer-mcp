@@ -118,8 +118,9 @@ STEP 3: Summary
 
         # Refresh Run 1 so Run 2 becomes the least recently used capture.
         self.engine.get_summary(initial_captures[0].capture_id)
-        self.engine.ingest("Content for run 4\nDone 4", label="Run 4")
-        self.engine.ingest("Content for run 5\nDone 5", label="Run 5")
+        with self.assertLogs("ephemeral_buffer.engine", level="INFO") as events:
+            self.engine.ingest("Content for run 4\nDone 4", label="Run 4")
+            self.engine.ingest("Content for run 5\nDone 5", label="Run 5")
 
         active_caps = self.engine.list_captures()
         self.assertEqual(len(active_caps), 3)
@@ -130,6 +131,10 @@ STEP 3: Summary
         self.assertIn("Run 1", labels)
         self.assertNotIn("Run 2", labels)
         self.assertNotIn("Run 3", labels)
+        self.assertGreaterEqual(
+            sum('"event": "capture_evicted"' in event for event in events.output),
+            2,
+        )
         print("\n[LRU Eviction Passed] Least recently used captures evicted, memory bound maintained.")
 
     def test_06_non_log_text_does_not_emit_keyword_signals(self):
