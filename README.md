@@ -334,6 +334,37 @@ this harness does not invoke a model. Fixtures contain no project content and
 are generated in code, so runs are reproducible. This is a server-side smoke
 evaluation, not a claim about any particular coding agent or model.
 
+#### Example benchmark results
+
+The reproducible paired evaluation was run on 2026-09-07 with five
+repetitions, seed `20260907`, and deterministic test embeddings. Across four
+synthetic scenarios, both the direct-output baseline and the MCP workflow
+completed all 20 tasks, and every MCP search was useful. The MCP workflow
+examined 68–90% fewer bytes than the baseline per scenario (81% on average):
+
+| Scenario | Bytes examined reduction | Completion |
+| :--- | ---: | ---: |
+| Large build output | 90% | 5/5 |
+| Failure log | 83% | 5/5 |
+| Review diff | 68% | 5/5 |
+| Timeout log | 85% | 5/5 |
+
+The consolidation evaluation, using the same seed and five repetitions,
+reduced the initial multi-result overview from an average of 4,298 bytes to
+213 bytes (95% fewer overview bytes), while preserving a 100% targeted
+retrieval success rate. These measurements quantify the MCP data path: fewer
+bytes need to be returned to the agent before it asks for targeted detail.
+
+They are not universal performance guarantees. The fixtures are synthetic,
+the harness does not invoke a model, and the byte reduction is not a direct
+token-savings measurement. In this run, consolidated processing also took
+about 10 times longer locally than sequential processing, while retrieving
+similar detail. The benchmark therefore demonstrates context-size and
+workflow-shaping benefits, not that every workload will be faster or that
+search results will be relevant for arbitrary repositories. Re-run the
+commands below with representative, privacy-reviewed tasks before making
+project-specific claims.
+
 Run a controlled local A/B evaluation with repeated paired measurements:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
