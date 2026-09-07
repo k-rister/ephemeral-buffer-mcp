@@ -1,9 +1,12 @@
 import io
+import runpy
 import subprocess
+import sys
 import tempfile
 import unittest
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+from pathlib import Path
 
 from release_checks import (
     ReleaseCheckError,
@@ -20,6 +23,23 @@ from release_checks import (
 
 
 class TestReleaseChecks(unittest.TestCase):
+    def test_changelog_parser_skips_non_heading_lines(self):
+        changelog_version("# Changelog\n\n## 1.2.3 - 2026-09-06", "1.2.3")
+
+    def test_python_310_tomli_fallback_imports(self):
+        source = Path(__file__).with_name("release_checks.py")
+        original_import = __import__
+
+        def block_tomllib(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("tomllib unavailable")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=block_tomllib):
+            namespace = runpy.run_path(str(source), run_name="release_checks_fallback")
+
+        self.assertEqual(namespace["tomllib"].__name__, "tomli")
+
     def test_tag_version_requires_semver(self):
         self.assertEqual(tag_version("v1.2.3"), "1.2.3")
         with self.assertRaises(ReleaseCheckError):
@@ -174,6 +194,26 @@ class TestReleaseChecks(unittest.TestCase):
     def test_cli_requires_a_tag(self):
         with self.assertRaises(SystemExit):
             run([])
+
+    def test_script_entrypoint_runs_successfully(self):
+        def fake_git(command, *args, **kwargs):
+            if command[:2] == ["git", "merge-base"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            outputs = {
+                ("git", "rev-parse", "--verify", "v0.1.2^{commit}"): "tag",
+                ("git", "rev-parse", "--verify", "main"): "main",
+                ("git", "status", "--porcelain=v1", "--untracked-files=all"): "",
+            }
+            return SimpleNamespace(returncode=0, stdout=outputs[tuple(command)].strip() + "\n", stderr="")
+
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", ["release_checks.py", "--tag", "v0.1.2", "--main-ref", "main"]), \
+                patch.object(sys, "stdout", stdout), \
+                patch.object(subprocess, "run", side_effect=fake_git):
+            with self.assertRaisesRegex(SystemExit, "0"):
+                runpy.run_path(str(Path(__file__).with_name("release_checks.py")), run_name="__main__")
+
+        self.assertIn("Release guardrails passed", stdout.getvalue())
 
 
 if __name__ == "__main__":
