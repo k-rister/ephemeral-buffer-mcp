@@ -260,3 +260,17 @@ dispatched GitHub Actions run records the raw JSON result as an artifact and
 adds the measurements and regression status to the workflow summary. This
 benchmark remains optional and is not part of the required pull-request checks;
 update the baseline deliberately when the runner or benchmark workload changes.
+
+Measure command-output handling effectiveness with deterministic synthetic data:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+  --mode both --output benchmark-effectiveness.json
+```
+The effectiveness harness compares a full-output baseline with an
+engine-backed MCP workflow across large output, failure logs, diffs, and
+follow-up searches. It reports per-scenario success, search usefulness,
+retrievals, bytes examined, resolution time, and an aggregate comparison as
+machine-readable JSON. Token usage is explicitly marked unavailable because
+this harness does not invoke a model. Fixtures contain no project content and
+are generated in code, so runs are reproducible. This is a server-side smoke
+evaluation, not a claim about any particular coding agent or model.
