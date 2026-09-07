@@ -96,6 +96,7 @@ The agent has access to the following tools:
 | `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None)` | Executes a shell command with bounded head/tail capture, optional timeout, and a compact diagnostic summary (exit code, diff file map, error signals, and truncation status) to the agent context. |
 | `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None)` | Ingests a bounded log/output file from disk; defaults to the configured buffer byte limit. |
+| `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
@@ -107,6 +108,32 @@ The agent has access to the following tools:
 For diff captures, `get_capture_summary` reports the detected file map,
 addition/deletion statistics, line ranges, and merge-conflict signals. Use
 `get_capture_slice` with those ranges to retrieve the complete file context.
+
+### Consolidating multi-result workflows
+
+When a workflow produces several captures—for example, one command per
+repository—use `consolidate_captures` to give the agent one bounded overview:
+
+```text
+consolidate_captures(
+  capture_ids=["cap_1", "cap_2", "cap_3"],
+  label="organization activity",
+  max_captures=25,
+  max_bytes=20000
+)
+```
+
+The resulting capture is JSON with source metadata and records containing the
+original `capture_id` and `source_line`. It can be searched normally with
+`search_capture`, and exact consolidated context can be retrieved with
+`get_capture_slice`. The response reports omitted records, missing IDs, and
+the original source IDs; use those original IDs to retrieve complete detail
+when the consolidated byte budget is reached. Calling the tool without
+`capture_ids` consolidates the currently active captures, up to
+`max_captures`.
+
+This workflow keeps the server responsible for bounded execution, storage, and
+retrieval while leaving prioritization and interpretation to the coding agent.
 
 ### 3. Capture Hygiene
 

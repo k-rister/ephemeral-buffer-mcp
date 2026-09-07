@@ -116,6 +116,56 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("TIMED OUT after 0.5s", result)
         run.assert_called_once()
 
+    def test_consolidate_captures_preserves_sources_and_is_searchable(self):
+        server.capture_text("alpha failure\nalpha detail", label="repo-a")
+        server.capture_text("beta success\nbeta detail", label="repo-b")
+        source_ids = [item["capture_id"] for item in reversed(server.engine.list_captures())]
+
+        result = json.loads(server.consolidate_captures(source_ids, max_bytes=2048))
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["source_capture_ids"], source_ids)
+        self.assertEqual(result["source_count"], 2)
+        self.assertEqual(result["record_count"], 4)
+        self.assertIn(source_ids[0], server.search_capture("alpha", capture_id=result["capture_id"]))
+        self.assertIn("source_line", server.get_capture_slice(1, 100, capture_id=result["capture_id"]))
+
+    def test_consolidate_captures_reports_omitted_records_and_missing_ids(self):
+        server.capture_text("important failure " * 20, label="large")
+        source_id = server.engine.list_captures()[0]["capture_id"]
+
+        result = json.loads(server.consolidate_captures(
+            [source_id, "missing"], max_bytes=512, max_captures=2,
+        ))
+
+        self.assertEqual(result["selected_capture_count"], 2)
+        self.assertEqual(result["source_count"], 1)
+        self.assertEqual(result["missing_capture_ids"], ["missing"])
+        self.assertGreater(result["omitted_record_count"], 0)
+        self.assertEqual(result["byte_size"] <= 512, True)
+
+    def test_consolidate_captures_validates_limits(self):
+        self.assertIn("max_captures must be at least 1", server.consolidate_captures(max_captures=0))
+        self.assertIn("max_bytes must be at least 512", server.consolidate_captures(max_bytes=511))
+        server.engine.max_buffer_bytes = 512
+        self.assertIn("exceeds the configured buffer limit", server.consolidate_captures(max_bytes=513))
+
+    def test_consolidate_uses_compact_payload_when_pretty_payload_is_too_large(self):
+        server.capture_text("compact payload", label="compact")
+        source_id = server.engine.list_captures()[0]["capture_id"]
+
+        result = server._consolidated_jsonl([source_id], max_captures=1, max_bytes=512)
+
+        self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
+        self.assertNotIn("\n  ", result["content"])
+
+    def test_consolidate_reports_ingest_failure(self):
+        with patch.object(server.engine, "ingest", side_effect=RuntimeError("storage unavailable")):
+            result = server.consolidate_captures([])
+
+        self.assertIn("Error consolidating captures", result)
+        self.assertIn("storage unavailable", result)
+
     def test_buffer_stats_formats_memory_metrics(self):
         server.capture_text("server stats payload", label="server-test")
 
