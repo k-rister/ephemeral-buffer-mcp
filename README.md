@@ -147,6 +147,16 @@ and errors are enabled by default; set `EPHEMERAL_LOG_LEVEL=INFO` to include
 normal readiness, eviction, and process lifecycle events. Logs never include
 captured content or command text.
 
+### Optional local usage metrics
+
+Set `EPHEMERAL_METRICS=1` to collect content-free, in-process usage metrics.
+The metrics include per-tool call counts, success/failure counts, duration
+totals, and aggregate capture/search/retrieval, empty-search, eviction, and
+cleanup events. They are disabled by default, are never sent anywhere, and do
+not retain captured content, labels, commands, or query text. When enabled,
+`get_runtime_diagnostics()` includes the aggregate metrics. Restarting the
+server clears them.
+
 See [OPERATIONS.md](OPERATIONS.md) for deployment settings, troubleshooting,
 release verification, and repository maintenance procedures.
 

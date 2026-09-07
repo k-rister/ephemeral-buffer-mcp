@@ -13,6 +13,7 @@ import logging
 import platform
 import re
 import time
+from functools import wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
 from pathlib import Path
@@ -26,11 +27,27 @@ from engine import (
 )
 from capture_utils import read_file_bounded, run_command_bounded
 from logging_utils import get_logger, log_event
+from metrics import LocalMetrics
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
+METRICS = LocalMetrics()
+
+
+def _instrument_tool(name):
+    """Decorate a tool with opt-in content-free call metrics."""
+    def decorator(function):
+        @wraps(function)
+        def wrapper(*args, **kwargs):
+            with METRICS.measure(name) as state:
+                result = function(*args, **kwargs)
+                if isinstance(result, str) and result.startswith(("Error", "Search Error")):
+                    state["success"] = False
+                return result
+        return wrapper
+    return decorator
 
 # Initialize FastMCP
 mcp = FastMCP("ephemeral-buffer")
@@ -56,13 +73,13 @@ def _runtime_package_version() -> str:
 engine = EphemeralEngine(
     max_captures=positive_int_env("EPHEMERAL_MAX_CAPTURES", DEFAULT_MAX_CAPTURES),
     max_buffer_bytes=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
+    metrics=METRICS,
 )
 
 
 # --- MCP Tools ---
 
-@mcp.tool()
-def capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
+def _capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
     """
     Ingests raw text output directly into the ephemeral search index.
     Automatically detects diffs, logs, and text structures.
@@ -91,6 +108,14 @@ def capture_text(content: str, label: str = "", content_type: str = "auto") -> s
 
 
 @mcp.tool()
+@_instrument_tool("capture_text")
+def capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
+    """Ingest raw text and return capture metadata."""
+    return _capture_text(content, label=label, content_type=content_type)
+
+
+@mcp.tool()
+@_instrument_tool("capture_file")
 def capture_file(
     file_path: str,
     label: str = "",
@@ -121,12 +146,13 @@ def capture_file(
         content = read_file_bounded(file_path, read_limit)
         if not label:
             label = os.path.basename(file_path)
-        return capture_text(content, label=label, content_type=content_type)
+        return _capture_text(content, label=label, content_type=content_type)
     except Exception as e:
         return f"Error reading file '{file_path}': {str(e)}"
 
 
 @mcp.tool()
+@_instrument_tool("execute_and_capture")
 def execute_and_capture(
     command: str,
     cwd: Optional[str] = None,
@@ -220,6 +246,7 @@ def execute_and_capture(
 
 
 @mcp.tool()
+@_instrument_tool("search_capture")
 def search_capture(
     query: str,
     mode: str = "hybrid",
@@ -249,6 +276,7 @@ def search_capture(
         return f"Search Error: {res.get('message')}"
         
     matches = res.get("matches", [])
+    METRICS.record_result_count("search_capture", len(matches))
     if not matches:
         return f"No matches found for '{query}' in capture '{res.get('capture_id')}' ({res.get('label')})."
         
@@ -268,6 +296,7 @@ def search_capture(
 
 
 @mcp.tool()
+@_instrument_tool("get_capture_slice")
 def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest") -> str:
     """
     Fetches an exact range of lines (1-indexed) from a capture to inspect full context around a match.
@@ -283,6 +312,7 @@ def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest"
 
 
 @mcp.tool()
+@_instrument_tool("get_capture_summary")
 def get_capture_summary(capture_id: str = "latest") -> str:
     """
     Returns quick diagnostics for a capture: total lines, byte size, diff file map or error signals, and previews.
@@ -317,6 +347,7 @@ def get_capture_summary(capture_id: str = "latest") -> str:
 
 
 @mcp.tool()
+@_instrument_tool("list_captures")
 def list_captures() -> str:
     """
     Lists all captures currently retained in the ephemeral ring buffer.
@@ -332,6 +363,7 @@ def list_captures() -> str:
 
 
 @mcp.tool()
+@_instrument_tool("clear_captures")
 def clear_captures(capture_id: str = "all") -> str:
     """
     Clears all or a specific capture from the ephemeral buffer to free memory.
@@ -340,6 +372,7 @@ def clear_captures(capture_id: str = "all") -> str:
 
 
 @mcp.tool()
+@_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
     """Returns aggregate capture, accounting, and process RSS metrics."""
     stats = engine.get_buffer_stats()
@@ -369,6 +402,7 @@ def get_buffer_stats() -> str:
 
 
 @mcp.tool()
+@_instrument_tool("get_runtime_diagnostics")
 def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""
     stats = engine.get_buffer_stats()
@@ -399,8 +433,11 @@ def get_runtime_diagnostics() -> str:
         f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}",
         f"Process RSS: {'unavailable' if rss is None else f'{rss:,} bytes'}",
         f"Unaccounted RSS: {'unavailable' if unaccounted is None else f'{unaccounted:,} bytes'}",
+        f"Local metrics: {'enabled' if METRICS.enabled else 'disabled'}",
         "Captured content, labels, and command arguments are not included.",
     ]
+    if METRICS.enabled:
+        lines.append(f"Metrics summary: {json.dumps(METRICS.snapshot(), sort_keys=True)}")
     return "\n".join(lines)
 
 
