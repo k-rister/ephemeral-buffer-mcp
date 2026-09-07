@@ -250,70 +250,8 @@ def _consolidated_jsonl(
     max_captures: int,
     max_bytes: int,
 ) -> Dict[str, Any]:
-    """Build a bounded, searchable JSONL view over active captures."""
-    requested_ids = capture_ids or [item["capture_id"] for item in engine.list_captures()]
-    selected_ids = list(dict.fromkeys(requested_ids))[:max_captures]
-    sources: List[Dict[str, Any]] = []
-    records: List[Dict[str, Any]] = []
-    missing_ids: List[str] = []
-
-    for capture_id in selected_ids:
-        capture = engine.get_capture(capture_id)
-        if not capture:
-            missing_ids.append(capture_id)
-            continue
-        sources.append({
-            "capture_id": capture.capture_id,
-            "label": capture.label,
-            "content_type": capture.content_type,
-            "total_lines": capture.line_count,
-            "byte_size": capture.byte_size,
-            "truncated": capture.truncated,
-            "original_byte_size": capture.original_byte_size,
-            "command_exit_code": capture.command_exit_code,
-            "timed_out": capture.timed_out,
-        })
-        for line_number, line in enumerate(capture.raw_lines, start=1):
-            records.append({
-                "capture_id": capture.capture_id,
-                "source_line": line_number,
-                "text": line,
-            })
-
-    payload: Dict[str, Any] = {
-        "schema_version": 1,
-        "sources": sources,
-        "records": [],
-        "requested_capture_count": len(requested_ids),
-        "selected_capture_count": len(selected_ids),
-        "missing_capture_ids": missing_ids,
-        "omitted_record_count": 0,
-    }
-    for index, record in enumerate(records):
-        candidate = dict(payload)
-        candidate["records"] = payload["records"] + [record]
-        candidate["omitted_record_count"] = len(records) - index - 1
-        encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
-        if len(encoded.encode("utf-8")) > max_bytes:
-            payload["omitted_record_count"] = len(records) - index
-            break
-        payload["records"].append(record)
-
-    encoded = json.dumps(payload, ensure_ascii=False, indent=2)
-    # The compact form is the authoritative size check; indentation is only for
-    # human inspection in exact slices and may be omitted when the budget is tight.
-    if len(encoded.encode("utf-8")) > max_bytes:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return {
-        "content": encoded,
-        "source_capture_ids": [item["capture_id"] for item in sources],
-        "source_count": len(sources),
-        "record_count": len(payload["records"]),
-        "omitted_record_count": payload["omitted_record_count"],
-        "missing_capture_ids": missing_ids,
-        "requested_capture_count": len(requested_ids),
-        "selected_capture_count": len(selected_ids),
-    }
+    """Compatibility wrapper around the engine's consolidation implementation."""
+    return engine.consolidate(capture_ids, max_captures, max_bytes)
 
 
 @mcp.tool()
@@ -330,19 +268,8 @@ def consolidate_captures(
     If records do not fit, the complete source captures remain available through
     their original IDs and the response reports how many records were omitted.
     """
-    if max_captures < 1:
-        return "Error: max_captures must be at least 1."
-    output_limit = engine.max_buffer_bytes if max_bytes is None else max_bytes
-    if output_limit < 512:
-        return "Error: max_bytes must be at least 512."
-    if output_limit > engine.max_buffer_bytes:
-        return (
-            f"Error: max_bytes ({output_limit:,}) exceeds the configured "
-            f"buffer limit ({engine.max_buffer_bytes:,})."
-        )
-
     try:
-        result = _consolidated_jsonl(capture_ids, max_captures, output_limit)
+        result = engine.consolidate(capture_ids, max_captures, max_bytes)
         capture = engine.ingest(
             result["content"],
             label=label,

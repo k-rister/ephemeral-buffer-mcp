@@ -114,6 +114,179 @@ def run_mcp(scenario: Dict[str, Any], engine: EphemeralEngine) -> Dict[str, Any]
     return result
 
 
+def _run_sequential_workflow(selected: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Measure one capture/search/slice path per synthetic repository."""
+    started = time.perf_counter()
+    engine = EphemeralEngine(max_captures=len(selected))
+    overview_bytes = 0
+    retrieval_bytes = 0
+    successes = 0
+    searches = 0
+    retrievals = 0
+    for scenario in selected:
+        capture = engine.ingest(
+            "\n".join(scenario["lines"]),
+            label=f"benchmark-{scenario['id']}",
+            content_type=scenario["content_type"],
+        )
+        summary = engine.get_summary(capture.capture_id)
+        overview_bytes += len(json.dumps(summary, sort_keys=True).encode("utf-8"))
+        search = engine.search(
+            scenario["query"], mode="bm25", capture_id=capture.capture_id,
+            top_k=3, context_lines=CONTEXT_LINES,
+        )
+        searches += 1
+        retrieval_bytes += len(json.dumps(search, sort_keys=True).encode("utf-8"))
+        useful = next((match for match in search.get("matches", [])
+                       if scenario["marker"] in match["snippet"]), None)
+        slice_result: Dict[str, Any] = {}
+        if useful:
+            line_range = _matched_range(useful.get("matched_range", ""))
+            if line_range:
+                slice_result = engine.get_slice(*line_range, capture_id=capture.capture_id)
+                retrievals += 1
+                retrieval_bytes += len(json.dumps(slice_result, sort_keys=True).encode("utf-8"))
+        successes += int(bool(useful and scenario["marker"] in slice_result.get("content", "")))
+    return {
+        "mode": "sequential",
+        "successes": successes,
+        "scenario_count": len(selected),
+        "searches": searches,
+        "retrievals": retrievals,
+        "overview_bytes": overview_bytes,
+        "retrieval_bytes": retrieval_bytes,
+        "time_seconds": time.perf_counter() - started,
+    }
+
+
+def _run_consolidated_workflow(selected: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Measure one consolidated overview followed by targeted retrievals."""
+    started = time.perf_counter()
+    engine = EphemeralEngine(max_captures=len(selected) + 1)
+    capture_ids = [
+        engine.ingest(
+            "\n".join(scenario["lines"]),
+            label=f"benchmark-{scenario['id']}",
+            content_type=scenario["content_type"],
+        ).capture_id
+        for scenario in selected
+    ]
+    # Keep the benchmark's source fixture complete; the MCP tool still exposes
+    # bounded omission behavior independently through its caller-provided limit.
+    consolidated = engine.consolidate(capture_ids, max_captures=len(selected), max_bytes=100000)
+    consolidated_capture = engine.ingest(
+        consolidated["content"], label="benchmark-consolidated", content_type="text"
+    )
+    overview = {
+        key: value for key, value in consolidated.items() if key != "content"
+    }
+    overview_bytes = len(json.dumps(overview, sort_keys=True).encode("utf-8"))
+    retrieval_bytes = 0
+    successes = 0
+    searches = 0
+    retrievals = 0
+    consolidated_id = consolidated_capture.capture_id
+    for scenario in selected:
+        search = engine.search(
+            scenario["query"], mode="bm25", capture_id=consolidated_id,
+            top_k=3, context_lines=CONTEXT_LINES,
+        )
+        searches += 1
+        retrieval_bytes += len(json.dumps(search, sort_keys=True).encode("utf-8"))
+        useful = next((match for match in search.get("matches", [])
+                       if scenario["marker"] in match["snippet"]), None)
+        slice_result: Dict[str, Any] = {}
+        if useful:
+            line_range = _matched_range(useful.get("matched_range", ""))
+            if line_range:
+                slice_result = engine.get_slice(*line_range, capture_id=consolidated_id)
+                retrievals += 1
+                retrieval_bytes += len(json.dumps(slice_result, sort_keys=True).encode("utf-8"))
+        successes += int(bool(useful and scenario["marker"] in slice_result.get("content", "")))
+    return {
+        "mode": "consolidated",
+        "successes": successes,
+        "scenario_count": len(selected),
+        "searches": searches,
+        "retrievals": retrievals,
+        "overview_bytes": overview_bytes,
+        "retrieval_bytes": retrieval_bytes,
+        "consolidated_bytes": len(consolidated["content"].encode("utf-8")),
+        "omitted_record_count": consolidated["omitted_record_count"],
+        "time_seconds": time.perf_counter() - started,
+    }
+
+
+def run_consolidation_benchmark(repetitions: int = 5, seed: int = 20260907) -> Dict[str, Any]:
+    """Compare sequential per-capture retrieval with consolidated retrieval."""
+    if repetitions < 1:
+        raise ValueError("repetitions must be positive")
+    import random
+
+    selected = scenarios()
+    rng = random.Random(seed)
+    records: List[Dict[str, Any]] = []
+    schedules: List[Dict[str, Any]] = []
+    for repetition in range(1, repetitions + 1):
+        ordered = list(selected)
+        rng.shuffle(ordered)
+        modes = ["sequential", "consolidated"]
+        rng.shuffle(modes)
+        schedules.append({
+            "repetition": repetition,
+            "task_order": [scenario["id"] for scenario in ordered],
+            "mode_order": modes,
+        })
+        for mode in modes:
+            result = (_run_sequential_workflow(ordered) if mode == "sequential"
+                      else _run_consolidated_workflow(ordered))
+            result["repetition"] = repetition
+            records.append(result)
+
+    summaries: Dict[str, Dict[str, Any]] = {}
+    for mode in ("sequential", "consolidated"):
+        mode_records = [record for record in records if record["mode"] == mode]
+        summaries[mode] = {
+            "runs": len(mode_records),
+            "success_rate": sum(record["successes"] for record in mode_records)
+            / (len(mode_records) * len(selected)),
+            "mean_time_seconds": statistics.mean(record["time_seconds"] for record in mode_records),
+            "mean_overview_bytes": statistics.mean(record["overview_bytes"] for record in mode_records),
+            "mean_retrieval_bytes": statistics.mean(record["retrieval_bytes"] for record in mode_records),
+            "mean_searches": statistics.mean(record["searches"] for record in mode_records),
+            "mean_retrievals": statistics.mean(record["retrievals"] for record in mode_records),
+        }
+    return {
+        "schema_version": 1,
+        "benchmark": "mcp-effectiveness",
+        "evaluation": "sequential-vs-consolidated",
+        "repetitions": repetitions,
+        "seed": seed,
+        "controls": {
+            "fixtures": "deterministic synthetic scenarios as repository results",
+            "task_order": "seeded shuffle per repetition",
+            "mode_order": "seeded shuffle per repetition",
+            "model": "none; the harness does not invoke a model",
+            "telemetry": "none; all measurements are local",
+        },
+        "records": records,
+        "schedules": schedules,
+        "summaries": summaries,
+        "comparison": {
+            "overview_bytes_reduction": 1 - (
+                summaries["consolidated"]["mean_overview_bytes"]
+                / summaries["sequential"]["mean_overview_bytes"]
+            ),
+            "retrieval_bytes_reduction": 1 - (
+                summaries["consolidated"]["mean_retrieval_bytes"]
+                / summaries["sequential"]["mean_retrieval_bytes"]
+            ),
+            "time_ratio": summaries["consolidated"]["mean_time_seconds"]
+            / summaries["sequential"]["mean_time_seconds"],
+        },
+    }
+
+
 def _aggregate(results: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     records = list(results)
     baseline = {record["scenario"]: record for record in records if record["mode"] == "baseline"}
@@ -277,10 +450,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("baseline", "mcp", "both"), default="both")
     parser.add_argument("--ab-runs", type=int, help="Run paired A/B evaluation this many times")
+    parser.add_argument(
+        "--consolidation-runs", type=int,
+        help="Run sequential-vs-consolidated evaluation this many times",
+    )
     parser.add_argument("--seed", type=int, default=20260907, help="Seed for paired A/B task and mode order")
     parser.add_argument("--output", type=Path, help="Write machine-readable results to this JSON file")
     args = parser.parse_args()
-    record = run_ab_evaluation(args.ab_runs, args.seed) if args.ab_runs is not None else run_benchmark(args.mode)
+    if args.consolidation_runs is not None:
+        record = run_consolidation_benchmark(args.consolidation_runs, args.seed)
+    elif args.ab_runs is not None:
+        record = run_ab_evaluation(args.ab_runs, args.seed)
+    else:
+        record = run_benchmark(args.mode)
     if args.output:
         write_results(args.output, record)
     print(json.dumps(record, indent=2, sort_keys=True))
