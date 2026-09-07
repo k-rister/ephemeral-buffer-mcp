@@ -171,6 +171,24 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Local metrics: enabled", result)
         self.assertIn('"enabled": true', result)
 
+    def test_buffer_stats_includes_enabled_local_metrics_without_content(self):
+        original_metrics = server.METRICS
+        original_engine_metrics = server.engine.metrics
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        server.engine.metrics = metrics
+        try:
+            server.capture_text("secret metrics payload", label="private metrics label")
+            result = server.get_buffer_stats()
+        finally:
+            server.METRICS = original_metrics
+            server.engine.metrics = original_engine_metrics
+
+        self.assertIn("Local metrics: {", result)
+        self.assertIn('"captures": 1', result)
+        self.assertNotIn("secret metrics payload", result)
+        self.assertNotIn("private metrics label", result)
+
     def test_runtime_package_version_falls_back_to_source_checkout(self):
         with patch.object(server.Path, "read_text", side_effect=OSError("missing metadata")), \
                 patch.object(server, "package_version", side_effect=server.PackageNotFoundError()):

@@ -99,7 +99,7 @@ The agent has access to the following tools:
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. Returns matching chunks with surrounding context lines and exact line numbers. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
-| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
@@ -154,8 +154,11 @@ The metrics include per-tool call counts, success/failure counts, duration
 totals, and aggregate capture/search/retrieval, empty-search, eviction, and
 cleanup events. They are disabled by default, are never sent anywhere, and do
 not retain captured content, labels, commands, or query text. When enabled,
-`get_runtime_diagnostics()` includes the aggregate metrics. Restarting the
-server clears them.
+both `get_runtime_diagnostics()` and `get_buffer_stats()` include the same
+aggregate metrics snapshot. The event keys are stable and zero-filled when no
+event has occurred. Metrics are process-lifetime state: restarting the server
+clears them, while capture-associated correlation state is released when a
+capture is evicted or explicitly cleared.
 
 See [OPERATIONS.md](OPERATIONS.md) for deployment settings, troubleshooting,
 release verification, and repository maintenance procedures.

@@ -10,6 +10,18 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 
+EVENT_NAMES = (
+    "captures",
+    "searches",
+    "empty_searches",
+    "capture_to_search",
+    "retrievals",
+    "search_to_retrieval",
+    "evictions",
+    "cleanups",
+)
+
+
 def metrics_enabled() -> bool:
     """Return whether local metrics were explicitly enabled."""
     return os.environ.get("EPHEMERAL_METRICS", "").strip().lower() in {
@@ -82,7 +94,7 @@ class LocalMetrics:
             with self._lock:
                 if capture_id in self._captured:
                     self._events["capture_to_search"] += 1
-                self._searched.add(capture_id)
+                    self._searched.add(capture_id)
                 self._events["searches"] += 1
                 self._events["empty_searches"] += int(match_count == 0)
 
@@ -114,5 +126,5 @@ class LocalMetrics:
                     }
                     for name, stats in self._tools.items()
                 },
-                "events": dict(self._events),
+                "events": {name: self._events[name] for name in EVENT_NAMES},
             }
