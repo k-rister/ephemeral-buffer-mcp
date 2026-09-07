@@ -187,6 +187,38 @@ event has occurred. Metrics are process-lifetime state: restarting the server
 clears them, while capture-associated correlation state is released when a
 capture is evicted or explicitly cleared.
 
+### Effectiveness metrics and privacy
+
+The built-in metrics are local, opt-in operational telemetry. Set
+`EPHEMERAL_METRICS=1` only when you want measurements for the current server
+process; nothing is uploaded or shared by the server. The metrics contain
+counts, durations, byte sizes, and bounded lifecycle outcomes, but do not
+retain captured content, labels, command arguments, or query text. Runtime
+logs follow the same privacy model. Treat any captured output or diagnostic
+excerpt as potentially sensitive and sanitize it before sharing.
+
+Interpret the measurements in two separate layers:
+
+| Layer | What it answers | What it cannot establish |
+| :--- | :--- | :--- |
+| Operational health | Did the server accept, store, search, retrieve, evict, and clean up requests? Were calls successful and how much local time or memory did they use? | That a search result was relevant, that the agent saw the right context, or that the user's task was completed. |
+| Task-level effectiveness | Did a representative agent workflow find the needed signal, retrieve the right context, and complete its task? | A universal result from synthetic fixtures or a server-only benchmark. |
+
+The effectiveness harness measures server-side behavior with deterministic
+fixtures and does not invoke a coding-agent model. A successful targeted
+retrieval means only that the fixture's expected marker was found. It is not a
+measure of answer quality, search relevance in a real repository, token cost,
+or end-to-end task completion. Use representative, privacy-reviewed tasks for
+those questions and report the fixture, seed, repetition count, success rate,
+useful-search rate, byte measurements, and local timing separately.
+
+For a reproducible local diagnostic, start the server with
+`EPHEMERAL_METRICS=1`, exercise the workflow, then request
+`get_runtime_diagnostics()` and `get_buffer_stats()`. A safe bug report
+includes the version/commit, Python/platform, configuration limits, operation
+name, reproduction steps, and sanitized metric output; it excludes captures,
+credentials, tokens, private paths, source code, user data, and raw queries.
+
 See [OPERATIONS.md](OPERATIONS.md) for deployment settings, troubleshooting,
 release verification, and repository maintenance procedures.
 
@@ -328,3 +360,9 @@ success, search/retrieval counts, local processing time, and omitted records.
 It models each synthetic scenario as a repository result and does not invoke a
 coding-agent model; response-byte reductions therefore describe the MCP data
 path, not end-to-end agent performance.
+
+When sharing a result, include the command, seed, repetitions, benchmark
+evaluation name, success rate, useful-search rate, byte reduction, and timing
+scope. Do not attach generated captures or paste raw command output. Check any
+surrounding report or wrapper for repository-specific content before sharing
+the benchmark JSON.

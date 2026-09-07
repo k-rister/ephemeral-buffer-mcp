@@ -86,6 +86,13 @@ metadata rather than captured command content. This keeps reports useful while
 avoiding accidental disclosure of source code, logs, credentials, or other
 sensitive data.
 
+The privacy model is local and opt-in: `EPHEMERAL_METRICS=1` enables aggregate
+measurements in the current process, but the server does not transmit them.
+Metrics and runtime logs are metadata-only by default. They may include counts,
+durations, sizes, IDs, limits, and error classes, but must not include captured
+content, command arguments, labels, query text, credentials, or session ID
+values. Keep this boundary when adding integrations or preparing a report.
+
 Record the following before changing configuration:
 
 - ephbuf version or commit, Python version, operating system, and installation
@@ -132,6 +139,44 @@ When command output is needed, provide only a sanitized excerpt or line range;
 do not attach an entire capture by default. Remove credentials, tokens,
 private paths, source code, and user data before sharing diagnostics. A useful
 report should be actionable without requiring access to the original capture.
+
+## Interpreting effectiveness
+
+Operational metrics describe service behavior: whether calls succeeded, how
+many captures/searches/retrievals occurred, whether searches were empty, and
+how much local time or memory the server used. They do not prove that a search
+was relevant or that an agent completed its task.
+
+Task-level effectiveness requires an evaluation that defines the task's
+expected signal and completion criteria. The repository's effectiveness
+benchmarks are server-side evaluations over deterministic synthetic fixtures;
+they do not invoke a model, measure answer quality, or establish real-agent
+performance. In particular:
+
+- `success` means the expected fixture marker was found in the final retrieved
+  result.
+- `search_useful` means a search result contained that marker.
+- byte reductions describe the MCP data path, not tokens saved or end-to-end
+  latency.
+- local timing covers capture, indexing, search, and retrieval only.
+
+For a reproducible local report, run the benchmark with a fixed seed and keep
+the JSON output:
+
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+  --ab-runs 5 --seed 20260907 --output benchmark-effectiveness-ab.json
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+  --consolidation-runs 5 --seed 20260907 \
+  --output benchmark-effectiveness-consolidation.json
+```
+
+Report the evaluation name, seed, repetitions, scenario count, success rate,
+useful-search rate, byte measurements, and timing scope. Pair those results
+with `get_runtime_diagnostics()` or `get_buffer_stats()` when investigating a
+real session, and sanitize all shared output. Never include an entire capture
+or raw query merely to make a report reproducible; provide the smallest safe
+excerpt or line range only when it is necessary.
 
 ## Operational logging
 
