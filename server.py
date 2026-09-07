@@ -387,7 +387,7 @@ def get_buffer_stats() -> str:
     model_state = "loaded" if stats["embedding_model_loaded"] else "not loaded"
     model_line = f"Embedding model: {stats['embedding_model']} ({model_state})"
     cache_line = f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}"
-    return (
+    result = (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
         f"Lines: {stats['total_lines']:,}\n"
@@ -399,6 +399,9 @@ def get_buffer_stats() -> str:
         f"{rss_line}\n"
         f"{unaccounted_line}"
     )
+    if METRICS.enabled:
+        result += f"\nLocal metrics: {json.dumps(METRICS.snapshot(), sort_keys=True)}"
+    return result
 
 
 @mcp.tool()

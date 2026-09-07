@@ -63,6 +63,31 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(snapshot["events"]["evictions"], 1)
         self.assertNotIn("private", repr(snapshot))
 
+    def test_snapshot_has_stable_zero_filled_event_schema(self):
+        metrics = LocalMetrics(enabled=True)
+
+        self.assertEqual(
+            metrics.snapshot()["events"],
+            {
+                "captures": 0,
+                "searches": 0,
+                "empty_searches": 0,
+                "capture_to_search": 0,
+                "retrievals": 0,
+                "search_to_retrieval": 0,
+                "evictions": 0,
+                "cleanups": 0,
+            },
+        )
+
+    def test_search_correlation_state_only_tracks_active_captures(self):
+        metrics = LocalMetrics(enabled=True)
+        metrics.record_search("unknown-capture", 0)
+
+        self.assertEqual(metrics.snapshot()["events"]["searches"], 1)
+        self.assertEqual(metrics.snapshot()["events"]["capture_to_search"], 0)
+        self.assertEqual(metrics._searched, set())
+
 
 if __name__ == "__main__":
     unittest.main()
