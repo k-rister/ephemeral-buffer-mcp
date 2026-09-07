@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import runpy
 import subprocess
 import sys
 import unittest
@@ -147,6 +148,15 @@ class TestCliConfiguration(unittest.TestCase):
                 patch.object(sys, "stdin", stdin), \
                 patch.object(sys, "stdout", io.StringIO()) as stdout:
             cli.main()
+
+        self.assertIn("Pipe output into Ephemeral Buffer", stdout.getvalue())
+
+    def test_module_entrypoint_runs_main(self):
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", [str(CLI_PATH)]), \
+                patch.object(sys, "stdin", SimpleNamespace(isatty=lambda: True)), \
+                patch.object(sys, "stdout", stdout):
+            runpy.run_path(str(CLI_PATH), run_name="__main__")
 
         self.assertIn("Pipe output into Ephemeral Buffer", stdout.getvalue())
 

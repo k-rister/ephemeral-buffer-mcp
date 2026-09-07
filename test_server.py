@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import runpy
 import socket
 import tempfile
 import unittest
@@ -534,6 +535,38 @@ class TestSocketServerStartup(unittest.TestCase):
 
         self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
 
+    def test_successful_startup_runs_listener_until_shutdown(self):
+        class Listener:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise RuntimeError("listener stopped")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())) as start, \
+                    patch.object(server.os, "chmod") as chmod, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+        start.assert_awaited_once_with(server.handle_socket_client, path=socket_path)
+        chmod.assert_called_once_with(socket_path, 0o600)
+        self.assertIn("listener stopped", stderr.getvalue())
+
     def test_socket_probe_failure_is_reported(self):
         class FailingLoop:
             def close(self):
@@ -557,6 +590,21 @@ class TestSocketServerStartup(unittest.TestCase):
                 server.run_socket_server()
 
         self.assertIn("Unable to verify existing socket", stderr.getvalue())
+
+    def test_module_entrypoint_starts_listener_and_runs_mcp(self):
+        class FakeThread:
+            def start(self):
+                self.started = True
+
+        fake_thread = FakeThread()
+        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
+                patch.object(server.threading, "Thread", return_value=fake_thread), \
+                patch("mcp.server.fastmcp.FastMCP", return_value=server.mcp), \
+                patch.object(server.mcp, "run") as mcp_run:
+            runpy.run_path(server.__file__, run_name="__main__")
+
+        self.assertTrue(fake_thread.started)
+        mcp_run.assert_called_once_with()
 
 
 if __name__ == "__main__":
