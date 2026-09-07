@@ -156,8 +156,8 @@ def _recommendations(comparisons: List[Dict[str, Any]]) -> List[str]:
     useful = [comparison for comparison in comparisons if comparison["mcp_useful_search_rate"] > 0]
     if useful:
         recommendations.append("Use MCP for noisy output when targeted search is expected to reduce context size.")
-    if any(comparison["mcp_overhead_ratio"] is not None and comparison["mcp_overhead_ratio"] > 1.0 for comparison in comparisons):
-        recommendations.append("Review MCP timing overhead on scenarios where capture and search cost exceeds baseline processing.")
+    if any(comparison["local_mcp_overhead_ratio"] is not None and comparison["local_mcp_overhead_ratio"] > 1.0 for comparison in comparisons):
+        recommendations.append("Review local MCP processing overhead where capture, indexing, and search cost exceeds baseline processing.")
     else:
         recommendations.append("No measured MCP timing regression exceeded the baseline in this synthetic run.")
     recommendations.append("Repeat on representative real agent tasks before generalizing these synthetic-fixture results.")
@@ -217,7 +217,7 @@ def run_ab_evaluation(repetitions: int = 5, seed: int = 20260907) -> Dict[str, A
             "mcp": mcp,
             "mcp_useful_search_rate": sum(record["search_useful"] is True for record in mcp_records) / len(mcp_records),
             "mean_bytes_reduction": 1 - (mcp["mean_bytes_examined"] / baseline["mean_bytes_examined"]),
-            "mcp_overhead_ratio": mcp["mean_time_seconds"] / baseline["mean_time_seconds"] if baseline["mean_time_seconds"] else None,
+            "local_mcp_overhead_ratio": mcp["mean_time_seconds"] / baseline["mean_time_seconds"] if baseline["mean_time_seconds"] else None,
         })
     return {
         "schema_version": 1,

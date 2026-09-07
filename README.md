@@ -283,7 +283,9 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
 The A/B report uses the same deterministic fixtures in both modes, seeded task
 and mode ordering, and local-only measurements. It reports completion rate,
 mean/min/max time, standard deviation, repeated commands, search usefulness,
-byte reduction, and MCP timing overhead for each scenario. Since no model is
-invoked, token usage is unavailable. Treat the recommendations as synthetic
-benchmark guidance and repeat the evaluation with representative agent tasks
-before generalizing the results.
+byte reduction, and local MCP processing overhead for each scenario. The timing
+ratio covers only local capture, indexing, search, and retrieval; it is not an
+agent-level performance measurement. Since no model is invoked, token usage is
+unavailable. Treat the recommendations as synthetic benchmark guidance and
+repeat the evaluation with representative agent tasks before generalizing the
+results.
