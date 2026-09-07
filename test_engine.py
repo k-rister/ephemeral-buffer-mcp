@@ -85,6 +85,20 @@ class TestEngineClassification(unittest.TestCase):
             ({}, "None (non-log content)"),
         )
 
+        signals, summary = detect_signals(
+            ["0 errors", "ERROR: command crashed"], "log"
+        )
+        self.assertEqual(signals, {"error": 1})
+        self.assertEqual(summary, "error: 1")
+
+    def test_storage_cleanup_ignores_captures_without_storage(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("no storage payload", label="no-storage")
+        capture.fts_conn = None
+
+        engine._close_capture_storage(capture)
+        self.assertIsNone(capture.fts_conn)
+
     def test_storage_cleanup_logs_and_swallows_close_failure(self):
         engine = EphemeralEngine(max_captures=1)
         capture = engine.ingest("cleanup failure payload", label="cleanup-failure")
