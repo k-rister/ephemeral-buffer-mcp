@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from functools import wraps
 from logging_utils import get_logger, log_event
+from metrics import LocalMetrics
 from fastembed import TextEmbedding
 from config import (
     DEFAULT_EMBEDDING_MODEL,
@@ -311,6 +312,7 @@ class EphemeralEngine:
         max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
         embedding_model_name: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
+        metrics: Optional[LocalMetrics] = None,
     ):
         self._lock = threading.RLock()
         if max_captures < 1:
@@ -328,6 +330,7 @@ class EphemeralEngine:
         self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
         self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
         self.embedding_model = None
+        self.metrics = metrics or LocalMetrics(enabled=False)
 
     def _get_embedding_model(self):
         """Load FastEmbed once, on first operation that needs embeddings."""
@@ -500,10 +503,13 @@ class EphemeralEngine:
                         capture_bytes=old_cap.byte_size,
                     )
                     self._close_capture_storage(old_cap)
+                    self.metrics.record_event("evictions")
+                    self.metrics.forget_capture(evicted_id)
 
             self.captures[capture_id] = capture
             self.capture_order[capture_id] = None
             self._total_bytes += capture.byte_size
+            self.metrics.record_capture(capture_id)
             return capture
 
     def _close_capture_storage(self, capture: Capture) -> None:
@@ -604,6 +610,7 @@ class EphemeralEngine:
             }
 
         if capture.line_count == 0:
+            self.metrics.record_search(capture.capture_id, 0)
             return {
                 "status": "ok",
                 "capture_id": capture.capture_id,
@@ -672,6 +679,7 @@ class EphemeralEngine:
                 "snippet": snippet
             })
 
+        self.metrics.record_search(capture.capture_id, len(matches))
         return {
             "status": "ok",
             "capture_id": capture.capture_id,
@@ -691,6 +699,8 @@ class EphemeralEngine:
         capture = self.get_capture(capture_id)
         if not capture:
             return {"status": "error", "message": f"Capture '{capture_id}' not found."}
+
+        self.metrics.record_retrieval(capture.capture_id)
 
         start = max(1, start_line)
         end = min(capture.line_count, end_line)
@@ -822,17 +832,23 @@ class EphemeralEngine:
         Clears one or all captures from the buffer.
         """
         if capture_id == "all":
+            capture_ids = list(self.captures)
             for cap in self.captures.values():
                 self._close_capture_storage(cap)
             self.captures.clear()
             self.capture_order.clear()
             self._total_bytes = 0
+            self.metrics.record_event("cleanups")
+            for current_id in capture_ids:
+                self.metrics.forget_capture(current_id)
             return "Cleared all captures from ephemeral buffer."
         elif capture_id in self.captures:
             cap = self.captures.pop(capture_id)
             self._total_bytes -= cap.byte_size
             self._close_capture_storage(cap)
             self.capture_order.pop(capture_id, None)
+            self.metrics.record_event("cleanups")
+            self.metrics.forget_capture(capture_id)
             return f"Cleared capture '{capture_id}'."
         else:
             return f"Capture '{capture_id}' not found."

@@ -114,6 +114,14 @@ buffer limits, embedding readiness, and process memory. Use
 `get_buffer_stats` and `get_capture_summary` for more focused aggregate
 diagnostics. The runtime report is opt-in and does not include captured text,
 labels, command arguments, or the session ID value.
+For local workflow measurement, set `EPHEMERAL_METRICS=1` before starting the
+server. This keeps aggregate per-tool counters and timers in process memory and
+adds capture-to-search, search-to-retrieval, empty-search, eviction, and
+cleanup counts to `get_runtime_diagnostics()`. Metrics are disabled by default,
+never leave the process, and contain no captured content, labels, commands, or
+queries. Treat the counters as operational signals rather than measures of
+task success; task completion and agent usefulness require an external,
+privacy-reviewed evaluation.
 When the server is launched directly from a checkout, its reported version is
 read from that checkout's `pyproject.toml`; installed distributions use their
 package metadata. Restarting a checkout-launched server therefore picks up a

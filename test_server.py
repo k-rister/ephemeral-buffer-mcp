@@ -11,6 +11,7 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from metrics import LocalMetrics
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import server
@@ -154,6 +155,21 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Socket mode: explicit path", explicit)
         self.assertIn("Socket mode: shared default path", default)
+
+    def test_runtime_diagnostics_includes_enabled_local_metrics(self):
+        original_metrics = server.METRICS
+        original_engine_metrics = server.engine.metrics
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        server.engine.metrics = metrics
+        try:
+            result = server.get_runtime_diagnostics()
+        finally:
+            server.METRICS = original_metrics
+            server.engine.metrics = original_engine_metrics
+
+        self.assertIn("Local metrics: enabled", result)
+        self.assertIn('"enabled": true', result)
 
     def test_runtime_package_version_falls_back_to_source_checkout(self):
         with patch.object(server.Path, "read_text", side_effect=OSError("missing metadata")), \
