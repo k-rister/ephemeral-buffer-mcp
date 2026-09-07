@@ -3,7 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmark_effectiveness import run_ab_evaluation, run_baseline, run_benchmark, run_mcp, scenarios, write_results
+from benchmark_effectiveness import (
+    run_ab_evaluation,
+    run_baseline,
+    run_benchmark,
+    run_consolidation_benchmark,
+    run_mcp,
+    scenarios,
+    write_results,
+)
 from engine import EphemeralEngine
 
 
@@ -60,6 +68,21 @@ class TestEffectivenessBenchmark(unittest.TestCase):
     def test_ab_evaluation_rejects_non_positive_repetitions(self):
         with self.assertRaises(ValueError):
             run_ab_evaluation(repetitions=0)
+
+    def test_consolidation_benchmark_is_paired_and_successful(self):
+        first = run_consolidation_benchmark(repetitions=2, seed=17)
+        second = run_consolidation_benchmark(repetitions=2, seed=17)
+
+        self.assertEqual(first["schedules"], second["schedules"])
+        self.assertEqual(len(first["records"]), 4)
+        self.assertEqual(first["summaries"]["sequential"]["success_rate"], 1.0)
+        self.assertEqual(first["summaries"]["consolidated"]["success_rate"], 1.0)
+        self.assertGreater(first["comparison"]["overview_bytes_reduction"], 0)
+        self.assertTrue(all(record["retrievals"] == len(scenarios()) for record in first["records"]))
+
+    def test_consolidation_benchmark_rejects_non_positive_repetitions(self):
+        with self.assertRaises(ValueError):
+            run_consolidation_benchmark(repetitions=0)
 
 
 if __name__ == "__main__":

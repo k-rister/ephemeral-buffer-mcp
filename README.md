@@ -316,3 +316,15 @@ agent-level performance measurement. Since no model is invoked, token usage is
 unavailable. Treat the recommendations as synthetic benchmark guidance and
 repeat the evaluation with representative agent tasks before generalizing the
 results.
+
+Compare sequential per-capture retrieval with the consolidated workflow:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+  --consolidation-runs 5 --seed 20260907 \
+  --output benchmark-effectiveness-consolidation.json
+```
+This report measures overview and retrieval response bytes, targeted retrieval
+success, search/retrieval counts, local processing time, and omitted records.
+It models each synthetic scenario as a repository result and does not invoke a
+coding-agent model; response-byte reductions therefore describe the MCP data
+path, not end-to-end agent performance.
