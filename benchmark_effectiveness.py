@@ -5,11 +5,12 @@ import argparse
 import json
 import platform
 import re
+import statistics
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from engine import EphemeralEngine
+from engine import EphemeralEngine, process_rss_bytes
 
 
 SCHEMA_VERSION = 1
@@ -129,6 +130,118 @@ def _aggregate(results: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _mode_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize repeated records while preserving run-to-run variation."""
+    times = [record["time_seconds"] for record in records]
+    rss_deltas = [record["rss_delta_bytes"] for record in records if record["rss_delta_bytes"] is not None]
+    return {
+        "runs": len(records),
+        "successes": sum(record["success"] for record in records),
+        "success_rate": sum(record["success"] for record in records) / len(records),
+        "mean_time_seconds": statistics.mean(times),
+        "stdev_time_seconds": statistics.stdev(times) if len(times) > 1 else 0.0,
+        "min_time_seconds": min(times),
+        "max_time_seconds": max(times),
+        "mean_bytes_examined": statistics.mean(record["bytes_examined"] for record in records),
+        "mean_repeated_commands": statistics.mean(record["reruns"] for record in records),
+        "mean_rss_delta_bytes": statistics.mean(rss_deltas) if rss_deltas else None,
+    }
+
+
+def _recommendations(comparisons: List[Dict[str, Any]]) -> List[str]:
+    """Turn the paired measurements into concrete, conservative guidance."""
+    recommendations: List[str] = []
+    if all(comparison["baseline"]["success_rate"] == comparison["mcp"]["success_rate"] for comparison in comparisons):
+        recommendations.append("MCP preserved the baseline completion rate for every scenario.")
+    useful = [comparison for comparison in comparisons if comparison["mcp_useful_search_rate"] > 0]
+    if useful:
+        recommendations.append("Use MCP for noisy output when targeted search is expected to reduce context size.")
+    if any(comparison["mcp_overhead_ratio"] is not None and comparison["mcp_overhead_ratio"] > 1.0 for comparison in comparisons):
+        recommendations.append("Review MCP timing overhead on scenarios where capture and search cost exceeds baseline processing.")
+    else:
+        recommendations.append("No measured MCP timing regression exceeded the baseline in this synthetic run.")
+    recommendations.append("Repeat on representative real agent tasks before generalizing these synthetic-fixture results.")
+    return recommendations
+
+
+def run_ab_evaluation(repetitions: int = 5, seed: int = 20260907) -> Dict[str, Any]:
+    """Run paired, deterministic A/B measurements with controlled task order.
+
+    The harness does not invoke a model, so token usage remains unavailable.
+    Each repetition uses the same fixtures and a seeded task/mode order, while
+    baseline and MCP records remain paired by repetition and scenario.
+    """
+    if repetitions < 1:
+        raise ValueError("repetitions must be positive")
+    import random
+
+    selected = scenarios()
+    rng = random.Random(seed)
+    records: List[Dict[str, Any]] = []
+    schedules: List[Dict[str, Any]] = []
+    engine = EphemeralEngine(max_captures=len(selected) * repetitions)
+    for repetition in range(1, repetitions + 1):
+        ordered = list(selected)
+        rng.shuffle(ordered)
+        task_order = [scenario["id"] for scenario in ordered]
+        mode_orders: Dict[str, List[str]] = {}
+        for scenario in ordered:
+            modes = ["baseline", "mcp"]
+            rng.shuffle(modes)
+            mode_orders[scenario["id"]] = modes
+            for mode in modes:
+                rss_before = process_rss_bytes()
+                result = (run_baseline(scenario) if mode == "baseline" else run_mcp(scenario, engine))
+                rss_after = process_rss_bytes()
+                result.update({
+                    "repetition": repetition,
+                    "task_order": len(task_order) - len(ordered) + ordered.index(scenario) + 1,
+                    "paired_mode_order": modes,
+                    "rss_before_bytes": rss_before,
+                    "rss_after_bytes": rss_after,
+                    "rss_delta_bytes": (rss_after - rss_before) if rss_before is not None and rss_after is not None else None,
+                })
+                records.append(result)
+        schedules.append({"repetition": repetition, "task_order": task_order, "mode_orders": mode_orders})
+
+    comparisons: List[Dict[str, Any]] = []
+    for scenario in selected:
+        scenario_records = [record for record in records if record["scenario"] == scenario["id"]]
+        baseline_records = [record for record in scenario_records if record["mode"] == "baseline"]
+        mcp_records = [record for record in scenario_records if record["mode"] == "mcp"]
+        baseline = _mode_summary(baseline_records)
+        mcp = _mode_summary(mcp_records)
+        comparisons.append({
+            "scenario": scenario["id"],
+            "baseline": baseline,
+            "mcp": mcp,
+            "mcp_useful_search_rate": sum(record["search_useful"] is True for record in mcp_records) / len(mcp_records),
+            "mean_bytes_reduction": 1 - (mcp["mean_bytes_examined"] / baseline["mean_bytes_examined"]),
+            "mcp_overhead_ratio": mcp["mean_time_seconds"] / baseline["mean_time_seconds"] if baseline["mean_time_seconds"] else None,
+        })
+    return {
+        "schema_version": 1,
+        "benchmark": "mcp-effectiveness",
+        "evaluation": "paired-ab",
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "repetitions": repetitions,
+        "seed": seed,
+        "controls": {
+            "fixtures": "deterministic synthetic scenarios",
+            "task_order": "seeded shuffle per repetition",
+            "mode_order": "seeded shuffle per scenario and repetition",
+            "model": "none; the harness does not invoke a model",
+            "telemetry": "none; all measurements are local",
+            "resource_measurement": "process RSS before and after each paired run",
+        },
+        "records": records,
+        "schedules": schedules,
+        "comparisons": comparisons,
+        "recommendations": _recommendations(comparisons),
+    }
+
+
 def run_benchmark(mode: str = "both") -> Dict[str, Any]:
     """Run the selected deterministic baseline and/or MCP scenarios."""
     selected = scenarios()
@@ -163,9 +276,11 @@ def write_results(path: Path, record: Dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("baseline", "mcp", "both"), default="both")
+    parser.add_argument("--ab-runs", type=int, help="Run paired A/B evaluation this many times")
+    parser.add_argument("--seed", type=int, default=20260907, help="Seed for paired A/B task and mode order")
     parser.add_argument("--output", type=Path, help="Write machine-readable results to this JSON file")
     args = parser.parse_args()
-    record = run_benchmark(args.mode)
+    record = run_ab_evaluation(args.ab_runs, args.seed) if args.ab_runs is not None else run_benchmark(args.mode)
     if args.output:
         write_results(args.output, record)
     print(json.dumps(record, indent=2, sort_keys=True))

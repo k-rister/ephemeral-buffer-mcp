@@ -96,6 +96,9 @@ jobs:
       - name: Run effectiveness smoke evaluation
         run: python benchmark_effectiveness.py --mode both --output benchmark-effectiveness.json > /dev/null
 
+      - name: Run paired effectiveness evaluation
+        run: python benchmark_effectiveness.py --ab-runs 5 --output benchmark-effectiveness-ab.json > /dev/null
+
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -105,6 +108,7 @@ jobs:
             coverage.xml
             htmlcov/
             benchmark-effectiveness.json
+            benchmark-effectiveness-ab.json
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'

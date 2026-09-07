@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmark_effectiveness import run_baseline, run_benchmark, run_mcp, scenarios, write_results
+from benchmark_effectiveness import run_ab_evaluation, run_baseline, run_benchmark, run_mcp, scenarios, write_results
 from engine import EphemeralEngine
 
 
@@ -40,6 +40,26 @@ class TestEffectivenessBenchmark(unittest.TestCase):
             record = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(record["mode"], "baseline")
         self.assertIsNone(record["aggregate"])
+
+    def test_ab_evaluation_is_reproducible_and_paired(self):
+        first = run_ab_evaluation(repetitions=3, seed=17)
+        second = run_ab_evaluation(repetitions=3, seed=17)
+        self.assertEqual(first["schedules"], second["schedules"])
+        self.assertEqual(len(first["records"]), 3 * len(scenarios()) * 2)
+        self.assertTrue(all(comparison["baseline"]["runs"] == 3 for comparison in first["comparisons"]))
+        self.assertTrue(all(comparison["mcp"]["runs"] == 3 for comparison in first["comparisons"]))
+        self.assertEqual(first["controls"]["telemetry"], "none; all measurements are local")
+
+    def test_ab_evaluation_reports_variation_and_recommendations(self):
+        record = run_ab_evaluation(repetitions=2)
+        comparison = record["comparisons"][0]
+        self.assertIn("stdev_time_seconds", comparison["baseline"])
+        self.assertIn("mean_bytes_reduction", comparison)
+        self.assertTrue(record["recommendations"])
+
+    def test_ab_evaluation_rejects_non_positive_repetitions(self):
+        with self.assertRaises(ValueError):
+            run_ab_evaluation(repetitions=0)
 
 
 if __name__ == "__main__":

@@ -274,3 +274,16 @@ machine-readable JSON. Token usage is explicitly marked unavailable because
 this harness does not invoke a model. Fixtures contain no project content and
 are generated in code, so runs are reproducible. This is a server-side smoke
 evaluation, not a claim about any particular coding agent or model.
+
+Run a controlled local A/B evaluation with repeated paired measurements:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+  --ab-runs 5 --seed 20260907 --output benchmark-effectiveness-ab.json
+```
+The A/B report uses the same deterministic fixtures in both modes, seeded task
+and mode ordering, and local-only measurements. It reports completion rate,
+mean/min/max time, standard deviation, repeated commands, search usefulness,
+byte reduction, and MCP timing overhead for each scenario. Since no model is
+invoked, token usage is unavailable. Treat the recommendations as synthetic
+benchmark guidance and repeat the evaluation with representative agent tasks
+before generalizing the results.
