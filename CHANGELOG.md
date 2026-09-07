@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 - 2026-09-07
+
+- Add bounded `consolidate_captures` support for building one searchable JSON
+  view over multiple active captures while preserving source IDs and line
+  numbers.
+- Add opt-in, content-free local usage metrics and aggregate diagnostics for
+  observing capture, search, retrieval, eviction, cleanup, and process events.
+- Add paired and consolidated effectiveness benchmarks, including reproducible
+  README results that quantify context-size reductions and document benchmark
+  limitations.
+
 ## 0.1.2 - 2026-09-06
 
 - Add opt-in runtime diagnostics for content-free version, platform, socket,
