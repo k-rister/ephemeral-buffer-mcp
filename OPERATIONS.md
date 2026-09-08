@@ -79,6 +79,27 @@ captured output remains available through search and slices.
 Use `clear_captures("all")` between unrelated investigations when the active
 buffer should be released immediately instead of waiting for LRU eviction.
 
+## Agent-visible command and path guidance
+
+MCP clients receive tool names, argument schemas, and tool descriptions; they
+do not automatically read this document. The corresponding routing and path
+validation reminders are therefore also kept in the `server.py` tool
+docstrings.
+
+Use direct command execution for small, bounded inspections. Use
+`execute_and_capture` for noisy tests, builds, and logs where bounded output,
+search, and follow-up retrieval are useful. Use `capture_text` for output
+already held by the caller and `capture_file` only after intentionally selecting
+and checking the file.
+
+Before repository-sensitive work, confirm the intended repository and working
+directory, pass an explicit `cwd`, and resolve symlinks when path identity
+matters. Remember that an omitted `cwd` inherits the server process directory.
+Shell expansion and symlinks can target a different location than expected.
+The MCP server bounds captured output but does not validate command intent,
+filesystem safety, or path identity; the calling agent remains responsible for
+those checks.
+
 ## Field-observation checklist
 
 When investigating behavior from a real MCP session, collect operational

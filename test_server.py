@@ -59,6 +59,18 @@ class TestServerTools(unittest.TestCase):
         server.engine.embedding_model = self.original_model
         server.engine.clear("all")
 
+    def test_tool_descriptions_include_agent_routing_and_path_guidance(self):
+        capture_text_doc = server.capture_text.__doc__
+        capture_file_doc = server.capture_file.__doc__
+        execute_doc = server.execute_and_capture.__doc__
+
+        self.assertIn("already-collected text", capture_text_doc)
+        self.assertIn("resolve symlinks", capture_file_doc)
+        self.assertIn("small, targeted inspection", execute_doc)
+        self.assertIn("omitted ``cwd``", execute_doc)
+        self.assertIn("inherits the server process directory", execute_doc)
+        self.assertIn("filesystem safety", execute_doc)
+
     def test_capture_file_reports_missing_path(self):
         result = server.capture_file("/does/not/exist")
 

@@ -246,6 +246,22 @@ The agent has access to the following tools:
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
+Choose the execution path based on the output and inspection goal:
+
+- Use direct command execution for a small, targeted inspection where the
+  output is already bounded and immediate terminal feedback is sufficient.
+- Use `execute_and_capture` for tests, builds, logs, and other noisy commands;
+  it bounds output and makes later search and exact retrieval available.
+- Use `capture_text` when output is already in hand, or `capture_file` for a
+  file that has been checked and intentionally selected for ingestion.
+
+Before any repository-sensitive command or file capture, verify the intended
+working directory and target path. Prefer an explicit `cwd`, confirm the
+repository identity, and resolve symlinks when path identity matters. Shell
+expansion, inherited working directories, and symlinks can target a different
+location than the spelling suggests. Capture limits protect context size; they
+do not validate command intent, path identity, or filesystem safety.
+
 For diff captures, `get_capture_summary` reports the detected file map,
 addition/deletion statistics, line ranges, and merge-conflict signals. Use
 `get_capture_slice` with those ranges to retrieve the complete file context.
