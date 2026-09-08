@@ -110,7 +110,12 @@ def _capture_text(content: str, label: str = "", content_type: str = "auto") -> 
 @mcp.tool()
 @_instrument_tool("capture_text")
 def capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
-    """Ingest raw text and return capture metadata."""
+    """Ingest already-collected text and return capture metadata.
+
+    Use this when the caller already has output to index. For a noisy or
+    potentially long command, use ``execute_and_capture`` so output remains
+    bounded before it reaches the agent context.
+    """
     return _capture_text(content, label=label, content_type=content_type)
 
 
@@ -124,6 +129,11 @@ def capture_file(
 ) -> str:
     """
     Reads a file or log output from disk and ingests it into the ephemeral search index.
+
+    Validate the intended file path before calling: resolve symlinks when path
+    identity matters, confirm the file belongs to the expected workspace, and
+    use an explicit bounded ``max_bytes`` for large or untrusted files. Capture
+    limits control output handling; they do not validate filesystem intent.
     """
     if not os.path.exists(file_path):
         return f"Error: File '{file_path}' does not exist."
@@ -165,10 +175,19 @@ def execute_and_capture(
     Runs a shell command, captures stdout/stderr, indexes it, and returns a concise summary
     (exit code, line count, diff map or error signals, head/tail preview) WITHOUT flooding
     your prompt context with thousands of lines.
+
+    Use this for noisy tests, builds, logs, and other output that benefits from
+    bounded capture and later search. Direct command execution is usually
+    faster for a small, targeted inspection. Before running, verify the
+    command, intended repository, and working directory: an omitted ``cwd``
+    inherits the server process directory, and symlinks or shell expansion can
+    target a different path than expected. This tool bounds output but does
+    not validate command intent, path identity, or filesystem safety.
     
     Args:
         command: Shell command line to execute.
-        cwd: Optional working directory for command execution.
+        cwd: Optional working directory for command execution; pass an explicit
+            validated path for repository-sensitive commands.
         label: Optional human-readable description/label for this capture.
         content_type: Content type hint - 'auto' (default, detects diff/log/text), 'diff', 'log', or 'text'.
         max_output_bytes: Maximum command output retained (default: configured buffer byte limit).
