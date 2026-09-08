@@ -30,6 +30,8 @@ from config import (
 
 
 LOGGER = get_logger("engine")
+SEARCH_MODES = ("hybrid", "bm25", "semantic")
+HYBRID_LEXICAL_WEIGHT = 2.0
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -548,15 +550,19 @@ class EphemeralEngine:
     @synchronized
     def search_bm25(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
-        Search using SQLite FTS5 BM25. Returns list of (chunk_id, score).
+        Search using SQLite FTS5 BM25. Query punctuation is treated as a
+        separator; terms are combined with OR. Returns (chunk_id, score).
         """
         if not capture.chunks or not capture.fts_conn:
             return []
-            
-        tokens = [t.replace('"', '""') for t in query.split() if t.isalnum() or '_' in t or '-' in t]
+
+        # FTS5 syntax is intentionally not exposed: regex-like characters,
+        # quotes, and operators are treated as punctuation rather than query
+        # language. This keeps keyword search predictable and injection-safe.
+        tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
         if not tokens:
             return []
-            
+
         fts_query = " OR ".join(f'"{t}"' for t in tokens)
         
         cur = capture.fts_conn.cursor()
@@ -603,6 +609,12 @@ class EphemeralEngine:
         """
         Performs BM25, Semantic, or Hybrid (Reciprocal Rank Fusion) search across the capture.
         """
+        if mode not in SEARCH_MODES:
+            return {
+                "status": "error",
+                "message": f"Unsupported search mode '{mode}'. Choose one of: {', '.join(SEARCH_MODES)}.",
+            }
+
         capture = self.get_capture(capture_id)
         if not capture:
             return {
@@ -640,7 +652,7 @@ class EphemeralEngine:
                 rrf_scores[cid] = score
         else: # hybrid
             for rank, (cid, _) in enumerate(bm25_results):
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k_const + rank + 1)
+                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + HYBRID_LEXICAL_WEIGHT / (k_const + rank + 1)
             for rank, (cid, _) in enumerate(semantic_results):
                 rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k_const + rank + 1)
 

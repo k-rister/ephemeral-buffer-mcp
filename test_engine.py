@@ -190,6 +190,31 @@ STEP 3: Summary
         print("\n[Hybrid Test Passed] Hybrid RRF successfully retrieved failing test context:")
         print(best["snippet"])
 
+    def test_search_query_semantics_and_mode_validation(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest(
+            "alpha beta\nECONNREFUSED: port=5432\nfoo.bar literal\n",
+            label="query-semantics",
+        )
+
+        self.assertGreater(len(engine.search_bm25(capture, "foo.*")), 0)
+        self.assertGreater(len(engine.search_bm25(capture, "foo.bar")), 0)
+        self.assertEqual(engine.search_bm25(capture, "!!!"), [])
+
+        invalid = engine.search("alpha", mode="regex")
+        self.assertEqual(invalid["status"], "error")
+        self.assertIn("Unsupported search mode", invalid["message"])
+
+    def test_hybrid_prioritizes_lexical_matches(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("noise line\n" * 8, label="hybrid-ranking")
+
+        with patch.object(engine, "search_bm25", return_value=[(1, 0.1)]), \
+                patch.object(engine, "search_semantic", return_value=[(0, 0.9)]):
+            result = engine.search("exact error", mode="hybrid", capture_id=capture.capture_id, top_k=1)
+
+        self.assertEqual(result["matches"][0]["chunk_id"], 1)
+
     def test_04_slice_and_summary(self):
         lines = [f"Log line number {i}" for i in range(1, 101)]
         lines[49] = "FATAL: System ran out of file descriptors"
