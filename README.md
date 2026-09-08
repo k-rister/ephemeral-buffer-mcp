@@ -30,6 +30,147 @@ When coding agents run commands that generate large outputs (thousands of lines 
 
 ---
 
+## 📦 Installation
+
+### Requirements
+
+- Python 3.10 or newer
+- A supported MCP client if you want to use the server from an AI coding assistant
+- Network access on first use if FastEmbed needs to download its embedding model
+
+The package is installed from PyPI as `ephemeral-buffer-mcp`. It provides both
+the MCP server and the `ephbuf` command-line client.
+
+### Recommended: install from PyPI
+
+Create an isolated virtual environment and install the latest published
+package:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install ephemeral-buffer-mcp
+```
+
+Verify that the CLI is available:
+
+```bash
+.venv/bin/ephbuf --help
+```
+
+On Windows, use the equivalent commands from the virtual environment's
+`Scripts` directory:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install ephemeral-buffer-mcp
+.venv\Scripts\ephbuf.exe --help
+```
+
+To upgrade or remove the package:
+
+```bash
+.venv/bin/python -m pip install --upgrade ephemeral-buffer-mcp
+.venv/bin/python -m pip uninstall ephemeral-buffer-mcp
+```
+
+### Install from a source checkout
+
+Use an editable install when developing or testing local changes:
+
+```bash
+git clone https://github.com/k-rister/ephemeral-buffer-mcp.git
+cd ephemeral-buffer-mcp
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e .
+```
+
+The editable install exposes the same `ephbuf` command and MCP server as the
+PyPI installation. The reproducible, locked contributor environment is
+documented in [Testing the Server](#-testing-the-server).
+
+### Start the MCP server manually
+
+The MCP server uses stdio for communication with the MCP host. Start it with
+the Python interpreter from the environment where the package was installed:
+
+```bash
+.venv/bin/python -m server
+```
+
+Normally you should let your MCP client start this process automatically. Do
+not start a separate server for every shell command: the `ephbuf` CLI sends
+captures to the running server over its local Unix socket.
+
+### Configure an MCP client
+
+MCP clients generally need the command, arguments, and environment used to
+start a stdio server. A portable configuration looks like this:
+
+```json
+{
+  "mcpServers": {
+    "ephemeral-buffer": {
+      "command": "/absolute/path/to/ephemeral-buffer-mcp/.venv/bin/python",
+      "args": ["-m", "server"]
+    }
+  }
+}
+```
+
+Replace the command with the absolute path to the virtual-environment Python
+interpreter. Using an absolute path avoids differences between GUI-launched
+clients and interactive shells. On Windows, use a path such as
+`C:\\path\\to\\ephemeral-buffer-mcp\\.venv\\Scripts\\python.exe`.
+
+For clients that provide a command-line registration command, register the
+same executable and arguments conceptually as:
+
+```text
+command: /absolute/path/to/.venv/bin/python
+arguments: -m server
+```
+
+After saving the configuration, restart or reload the MCP client and confirm
+that the `ephemeral-buffer` tools appear. The server exposes capture, search,
+summary, slice, consolidation, diagnostics, and cleanup tools; the `ephbuf`
+CLI is a separate convenience client for shell output.
+
+### First-use model initialization
+
+FastEmbed loads the embedding model lazily on the first capture or semantic
+search, rather than when the server process imports. The first operation may
+therefore take longer and may download model files. Subsequent operations use
+the local model cache. To select a compatible model or move the cache, set:
+
+```bash
+export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5"
+export EPHEMERAL_FASTEMBED_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
+```
+
+The exact model and cache location can also be supplied in the MCP client's
+`env` configuration. Keep the model cache writable by the user running the
+MCP client.
+
+### Installation choices at a glance
+
+| Use case | Recommended installation |
+| :--- | :--- |
+| Normal user | PyPI install in a virtual environment |
+| MCP host | PyPI install, then configure `python -m server` |
+| Shell/CLI use | PyPI install, then run `ephbuf` |
+| Contributor | Source checkout with `pip install -e .` |
+| Release validation | Follow the procedures in [OPERATIONS.md](OPERATIONS.md) |
+
+If the MCP client cannot find the server, check the absolute interpreter path,
+the selected Python environment, and the client's server logs. For socket,
+capture-limit, logging, and deployment troubleshooting, see
+[OPERATIONS.md](OPERATIONS.md).
+
+---
+
 ## 🏗 Architecture & Flow
 
 ```mermaid
