@@ -215,6 +215,24 @@ STEP 3: Summary
 
         self.assertEqual(result["matches"][0]["chunk_id"], 1)
 
+    def test_search_context_is_exact_and_bounded(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("first\nMATCH alpha\nthird\nfourth\nfifth", label="context-boundaries")
+
+        result = engine.search("MATCH", mode="bm25", capture_id=capture.capture_id, top_k=1, context_lines=0)
+        match = result["matches"][0]
+        self.assertEqual(match["context_start_line"], 1)
+        self.assertEqual(match["context_end_line"], 4)
+        self.assertEqual(match["context"], "first\nMATCH alpha\nthird\nfourth")
+
+        edge = engine.search("fifth", mode="bm25", capture_id=capture.capture_id, top_k=1, context_lines=1)
+        self.assertEqual(edge["matches"][0]["context_start_line"], 2)
+        self.assertEqual(edge["matches"][0]["context_end_line"], 5)
+        self.assertEqual(edge["matches"][0]["context"], "MATCH alpha\nthird\nfourth\nfifth")
+
+        self.assertEqual(engine.search("MATCH", context_lines=-1)["status"], "error")
+        self.assertEqual(engine.search("MATCH", top_k=0)["status"], "error")
+
     def test_04_slice_and_summary(self):
         lines = [f"Log line number {i}" for i in range(1, 101)]
         lines[49] = "FATAL: System ran out of file descriptors"

@@ -614,6 +614,10 @@ class EphemeralEngine:
                 "status": "error",
                 "message": f"Unsupported search mode '{mode}'. Choose one of: {', '.join(SEARCH_MODES)}.",
             }
+        if top_k < 1:
+            return {"status": "error", "message": "top_k must be at least 1."}
+        if context_lines < 0:
+            return {"status": "error", "message": "context_lines must be non-negative."}
 
         capture = self.get_capture(capture_id)
         if not capture:
@@ -689,6 +693,9 @@ class EphemeralEngine:
                 "score": round(score, 4),
                 "matched_range": f"L{chunk.start_line}-L{chunk.end_line}",
                 "context_range": f"L{ctx_start}-L{ctx_end}",
+                "context_start_line": ctx_start,
+                "context_end_line": ctx_end,
+                "context": "\n".join(capture.raw_lines[ctx_start - 1:ctx_end]),
                 "snippet": snippet
             })
 
