@@ -461,6 +461,18 @@ adds the measurements and regression status to the workflow summary. This
 benchmark remains optional and is not part of the required pull-request checks;
 update the baseline deliberately when the runner or benchmark workload changes.
 
+Measure command-capture latency by output size and pipeline phase:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
+  --samples 5 --output benchmark-latency.json
+```
+The latency harness reports cold-start time plus warm median and p95 timings
+for command execution, capture/indexing (including embeddings), summary
+generation, and the combined pipeline. Use it to separate process or model
+startup cost from steady-state capture overhead before changing performance-
+critical code. It is diagnostic and optional, not a required pull-request
+check.
+
 Measure command-output handling effectiveness with deterministic synthetic data:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
