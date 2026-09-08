@@ -140,9 +140,9 @@ CLI is a separate convenience client for shell output.
 
 ### First-use model initialization
 
-FastEmbed loads the embedding model lazily on the first capture or semantic
-search, rather than when the server process imports. The first operation may
-therefore take longer and may download model files. Subsequent operations use
+FastEmbed loads the embedding model lazily on the first semantic or hybrid
+search, rather than during capture or when the server process imports. The
+first semantic operation may therefore take longer and may download model files. Subsequent operations use
 the local model cache. To select a compatible model or move the cache, set:
 
 ```bash
@@ -483,11 +483,11 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
   --samples 5 --output benchmark-latency.json
 ```
 The latency harness reports cold-start time plus warm median and p95 timings
-for command execution, capture/indexing (including embeddings), summary
-generation, and the combined pipeline. Use it to separate process or model
-startup cost from steady-state capture overhead before changing performance-
-critical code. It is diagnostic and optional, not a required pull-request
-check.
+for command execution, BM25 capture/indexing, deferred semantic indexing,
+summary generation, and the combined pipeline. Semantic embeddings are now
+materialized when semantic or hybrid search first needs them, so use the
+separate semantic-index phase when evaluating end-to-end costs. The benchmark
+is diagnostic and optional, not a required pull-request check.
 
 Measure command-output handling effectiveness with deterministic synthetic data:
 ```bash

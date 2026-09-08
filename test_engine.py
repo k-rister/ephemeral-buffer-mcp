@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import threading
 import unittest
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -462,7 +463,8 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         original_model = self.engine.embedding_model
         blocker = BlockingEmbedding()
         self.engine.embedding_model = blocker
-        worker = threading.Thread(target=self.engine.ingest, args=("blocked embedding",))
+        capture = self.engine.ingest("blocked embedding")
+        worker = threading.Thread(target=self.engine.search_semantic, args=(capture, "blocked"))
         try:
             worker.start()
             self.assertTrue(blocker.started.wait(timeout=1))
@@ -498,9 +500,35 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         engine = EphemeralEngine(max_captures=1)
         engine.embedding_model = FailingEmbedding()
+        capture = engine.ingest("payload", label="embedding-failure")
         with self.assertRaisesRegex(RuntimeError, "model unavailable"):
-            engine.ingest("payload", label="embedding-failure")
-        self.assertEqual(engine.captures, {})
+            engine.search_semantic(capture, "payload")
+        self.assertIn(capture.capture_id, engine.captures)
+
+    def test_lazy_embedding_cache_and_empty_embedding_paths(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("searchable payload", label="lazy-embedding")
+        capture.embeddings = np.empty((0, 384), dtype=np.float32)
+        self.assertEqual(engine.search_semantic(capture, "payload"), [])
+
+        capture.embeddings = np.ones((1, 384), dtype=np.float32)
+        engine._ensure_embeddings(capture)
+
+        class EmbeddingPublishedWhileWaiting:
+            def __enter__(self):
+                capture.embeddings = np.ones((1, 384), dtype=np.float32)
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        capture.embeddings = None
+        original_lock = engine._embedding_lock
+        engine._embedding_lock = EmbeddingPublishedWhileWaiting()
+        try:
+            engine._ensure_embeddings(capture)
+        finally:
+            engine._embedding_lock = original_lock
 
     def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
         engine = EphemeralEngine(max_captures=1)
