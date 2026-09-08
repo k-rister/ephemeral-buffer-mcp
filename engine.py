@@ -417,8 +417,10 @@ class EphemeralEngine:
         timed_out: bool = False,
     ) -> Capture:
         """
-        Ingests text, chunks it, builds SQLite FTS5 BM25 index and FastEmbed dense vector embeddings.
-        Automatically classifies content type (diff, log, text) and extracts structural metadata.
+        Ingests text, chunks it, and builds the SQLite FTS5 BM25 index.
+        FastEmbed dense vector embeddings are materialized lazily when semantic
+        or hybrid search first needs them. Automatically classifies content
+        type (diff, log, text) and extracts structural metadata.
         """
         lines = text.splitlines()
         with self._lock:
@@ -459,18 +461,10 @@ class EphemeralEngine:
             cur.execute("INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)", (c.chunk_id, c.text))
         fts_conn.commit()
 
-        # 2. Compute dense embeddings without holding the engine state lock.
-        with self._embedding_lock:
-            if chunks:
-                chunk_texts = [c.text for c in chunks]
-                embed_list = list(self._get_embedding_model().embed(chunk_texts))
-                embeddings = np.array(embed_list, dtype=np.float32)
-                # Normalize embeddings for cosine similarity
-                norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-                norms[norms == 0] = 1.0
-                embeddings = embeddings / norms
-            else:
-                embeddings = np.empty((0, 384), dtype=np.float32)
+        # Semantic embeddings are materialized lazily by the first semantic or
+        # hybrid search. Ingestion remains useful for fast BM25 search without
+        # paying the model/indexing cost when semantic ranking is unnecessary.
+        embeddings = np.empty((0, 384), dtype=np.float32) if not chunks else None
 
         capture = Capture(
             capture_id=capture_id,
@@ -584,7 +578,11 @@ class EphemeralEngine:
         """
         Dense vector cosine similarity search. Returns list of (chunk_id, score).
         """
-        if not capture.chunks or capture.embeddings is None or len(capture.embeddings) == 0:
+        if not capture.chunks:
+            return []
+
+        self._ensure_embeddings(capture)
+        if capture.embeddings is None or len(capture.embeddings) == 0:
             return []
             
         query_embed = list(self._get_embedding_model().embed([query]))[0]
@@ -596,6 +594,20 @@ class EphemeralEngine:
         similarities = np.dot(capture.embeddings, query_embed)
         top_indices = np.argsort(similarities)[::-1][:top_k]
         return [(int(idx), float(similarities[idx])) for idx in top_indices if similarities[idx] > 0.0]
+
+    def _ensure_embeddings(self, capture: Capture) -> None:
+        """Materialize and cache dense embeddings for a captured chunk set."""
+        if capture.embeddings is not None:
+            return
+        with self._embedding_lock:
+            if capture.embeddings is not None:
+                return
+            chunk_texts = [chunk.text for chunk in capture.chunks]
+            embed_list = list(self._get_embedding_model().embed(chunk_texts))
+            embeddings = np.array(embed_list, dtype=np.float32)
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            capture.embeddings = embeddings / norms
 
     @synchronized
     def search(

@@ -43,6 +43,10 @@ def _measure_once(line_count: int, engine: EphemeralEngine) -> dict[str, float |
     ingest_seconds = time.perf_counter() - started
 
     started = time.perf_counter()
+    engine._ensure_embeddings(capture)
+    semantic_index_seconds = time.perf_counter() - started
+
+    started = time.perf_counter()
     engine.get_summary(capture.capture_id)
     summary_seconds = time.perf_counter() - started
 
@@ -51,14 +55,15 @@ def _measure_once(line_count: int, engine: EphemeralEngine) -> dict[str, float |
         "output_bytes": len(output.encode("utf-8")),
         "command_seconds": command_seconds,
         "ingest_seconds": ingest_seconds,
+        "semantic_index_seconds": semantic_index_seconds,
         "summary_seconds": summary_seconds,
-        "total_seconds": command_seconds + ingest_seconds + summary_seconds,
+        "total_seconds": command_seconds + ingest_seconds + semantic_index_seconds + summary_seconds,
     }
 
 
 def _summary(samples: list[dict[str, float | int]]) -> dict[str, Any]:
     """Return median and p95 timings while retaining sample count and size."""
-    phases = ("command_seconds", "ingest_seconds", "summary_seconds", "total_seconds")
+    phases = ("command_seconds", "ingest_seconds", "semantic_index_seconds", "summary_seconds", "total_seconds")
     first = samples[0]
     result: dict[str, Any] = {
         "line_count": first["line_count"],
@@ -126,6 +131,7 @@ def main() -> None:
             f"total_median={measurement['total_seconds_median']:.6f}s "
             f"command_median={measurement['command_seconds_median']:.6f}s "
             f"ingest_median={measurement['ingest_seconds_median']:.6f}s "
+            f"semantic_index_median={measurement['semantic_index_seconds_median']:.6f}s "
             f"summary_median={measurement['summary_seconds_median']:.6f}s"
         )
     print(f"cold_start={results['cold_start_seconds']:.6f}s")
