@@ -312,7 +312,7 @@ def search_capture(
     
     Args:
         query: Search keywords or natural language question (e.g. 'auth failure', 'ECONNREFUSED', 'why did the build fail?').
-        mode: Search mode - 'hybrid' (recommended, combines BM25 + Semantic), 'bm25' (exact keywords/errors), or 'semantic' (vector concepts).
+        mode: Search mode - 'hybrid' (recommended, lexically weighted BM25 + Semantic), 'bm25' (keyword terms), or 'semantic' (vector concepts).
         capture_id: The capture ID to query (defaults to 'latest').
         top_k: Number of matching snippets to return (default: 5).
         context_lines: Number of surrounding lines of context to include with each match (default: 3).
