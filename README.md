@@ -400,7 +400,7 @@ Run the test suite:
 
 Measure focused-test coverage locally:
 ```bash
-.venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_release_checks.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_release_checks.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 .venv/bin/python -m coverage report
 ```
 The current focused-test baseline is 91%; CI enforces a 91% minimum after
