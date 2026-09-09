@@ -621,6 +621,28 @@ unavailable. Treat the recommendations as synthetic benchmark guidance and
 repeat the evaluation with representative agent tasks before generalizing the
 results.
 
+For an end-to-end coding-agent evaluation, generate a counterbalanced,
+privacy-safe schedule:
+```bash
+.venv/bin/python benchmark_agent_ab.py \
+  --schedule-output agent-ab-schedule.json --repetitions 5 --seed 20260909
+```
+Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
+the same model configuration, repository fixture, environment, and reset policy.
+Have an external agent adapter write a records envelope containing only the
+schedule, non-secret protocol identifiers, and per-run fields: completion,
+signal retrieval, duration, tool calls, repeated commands, context bytes, and
+peak RSS bytes. Summarize it with:
+```bash
+.venv/bin/python benchmark_agent_ab.py \
+  --records agent-ab-records.json --output agent-ab-summary.json
+```
+The analyzer validates balanced paired runs, reports per-mode aggregates and
+MCP-minus-control deltas with uncertainty, and emits recommendations. It does
+not invoke a model, require credentials, or accept raw prompts, transcripts,
+commands, captures, or user content. Do not commit agent records or generated
+captures; share only the aggregate summary after privacy review.
+
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
