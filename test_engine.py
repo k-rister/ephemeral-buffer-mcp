@@ -6,6 +6,7 @@ import io
 import sqlite3
 import sys
 import threading
+import time
 import unittest
 import numpy as np
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -567,9 +568,10 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         engine.embedding_model = FailingEmbedding()
         try:
             capture = engine.ingest("prefetch failure", label="prefetch-failure")
-            future = engine._prefetch_futures[capture.capture_id]
-            with self.assertRaisesRegex(RuntimeError, "prefetch unavailable"):
-                future.result(timeout=2)
+            deadline = time.time() + 2
+            while capture.semantic_index_state == "pending" and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(capture.semantic_index_state, "failed")
             engine._wait_for_prefetch(capture)
             self.assertEqual(capture.semantic_index_state, "failed")
             with self.assertRaisesRegex(RuntimeError, "prefetch unavailable"):
