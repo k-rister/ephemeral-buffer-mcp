@@ -103,7 +103,41 @@ jobs:
         run: python benchmark_effectiveness.py --consolidation-runs 5 --output benchmark-effectiveness-consolidation.json > /dev/null
 
       - name: Run search relevance evaluation
-        run: python benchmark_relevance.py --output search-relevance.json > /dev/null
+        run: python benchmark_relevance.py --baseline benchmark_relevance_baseline.json --fail-on-regression --output search-relevance.json > /dev/null
+
+      - name: Run capture latency evaluation
+        run: python benchmark_latency.py --samples 3 --output benchmark-latency.json > /dev/null
+
+      - name: Add relevance baseline summary
+        if: always()
+        run: |
+          {
+            echo '## Search relevance baseline'
+            echo
+            if [ -f search-relevance.json ]; then
+              python - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path("search-relevance.json").read_text())
+          comparison = result.get("baseline_comparison")
+          if comparison is None:
+              print("- No baseline comparison was produced.")
+          else:
+              print(f"- Status: `{'passed' if comparison['passed'] else 'failed'}`")
+              for mode, metrics in comparison["comparisons"].items():
+                  values = ", ".join(
+                      f"{metric}={data['current']:.3f} (Δ {data['delta']:+.3f})"
+                      for metric, data in metrics.items()
+                  )
+                  print(f"- `{mode}`: {values}")
+              for regression in comparison["regressions"]:
+                  print(f"- Regression: {regression}")
+          PY
+            else
+              echo '- No relevance result JSON was produced.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage reports
         if: always()
@@ -117,6 +151,7 @@ jobs:
             benchmark-effectiveness-ab.json
             benchmark-effectiveness-consolidation.json
             search-relevance.json
+            benchmark-latency.json
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -151,6 +186,14 @@ jobs:
             --baseline benchmark_baseline.json \
             --output benchmark-concurrency.json \
             | tee benchmark-concurrency.txt
+
+      - name: Run capture latency benchmark
+        run: |
+          set -o pipefail
+          python benchmark_latency.py \
+            --samples 5 \
+            --output benchmark-latency.json \
+            | tee benchmark-latency.txt
 
       - name: Add benchmark summary
         if: always()
@@ -188,3 +231,5 @@ jobs:
           path: |
             benchmark-concurrency.txt
             benchmark-concurrency.json
+            benchmark-latency.txt
+            benchmark-latency.json

@@ -204,8 +204,21 @@ BM25, semantic, and hybrid search against explicit synthetic markers. It
 reports hit@1, hit@k, and mean reciprocal rank (MRR). These are retrieval
 metrics only: they do not measure agent answer quality, token usage, or
 performance on arbitrary repositories. Run it with `EPHEMERAL_TEST_EMBEDDINGS=1`
-for deterministic results and review the fixture scope before generalizing
-the measurements.
+for deterministic results and compare it with the checked-in baseline:
+
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
+  --baseline benchmark_relevance_baseline.json \
+  --fail-on-regression --output search-relevance.json
+```
+
+The baseline is compact and versioned: it stores aggregate scores, query
+counts, fixture/schema versions, embedding mode, and per-metric tolerances. A
+baseline update is a deliberate repository change and should explain the
+fixture or intended-behavior change in review. Never add captures, raw command
+output, or user queries to the baseline. CI retains relevance, latency, and
+effectiveness JSON outputs as machine-readable artifacts; timing artifacts are
+diagnostic and are not exact cross-run gates.
 
 For a reproducible local report, run the benchmark with a fixed seed and keep
 the JSON output:

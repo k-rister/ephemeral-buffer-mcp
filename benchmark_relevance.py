@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import platform
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,10 @@ from engine import EphemeralEngine
 
 
 SCHEMA_VERSION = 1
+FIXTURE_VERSION = 1
 MODES = ("bm25", "semantic", "hybrid")
+METRICS = ("hit_at_1", "hit_at_k", "mrr")
+DEFAULT_TOLERANCES = {metric: 0.05 for metric in METRICS}
 
 
 def relevance_cases() -> list[dict[str, Any]]:
@@ -120,8 +124,10 @@ def run_relevance_benchmark(top_k: int = 3) -> dict[str, Any]:
 
     return {
         "schema_version": SCHEMA_VERSION,
+        "fixture_version": FIXTURE_VERSION,
         "benchmark": "search-relevance",
         "evaluation": "deterministic-synthetic-corpus",
+        "embedding_mode": "deterministic-test" if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1" else "configured-model",
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "top_k": top_k,
@@ -136,19 +142,105 @@ def run_relevance_benchmark(top_k: int = 3) -> dict[str, Any]:
     }
 
 
+def load_baseline(path: Path) -> dict[str, Any]:
+    """Load and validate the compact checked-in relevance baseline."""
+    try:
+        baseline = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid relevance baseline {path}: {exc}") from exc
+    if baseline.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("relevance baseline schema_version does not match benchmark")
+    if baseline.get("fixture_version") != FIXTURE_VERSION:
+        raise ValueError("relevance baseline fixture_version does not match benchmark")
+    if baseline.get("benchmark") != "search-relevance":
+        raise ValueError("relevance baseline benchmark name is invalid")
+    if not isinstance(baseline.get("tolerances"), dict):
+        raise ValueError("relevance baseline tolerances are missing")
+    if not isinstance(baseline.get("summaries"), dict):
+        raise ValueError("relevance baseline summaries are missing")
+    for mode in MODES:
+        summary = baseline["summaries"].get(mode)
+        if not isinstance(summary, dict) or any(metric not in summary for metric in METRICS):
+            raise ValueError(f"relevance baseline is missing metrics for {mode}")
+        for metric in METRICS:
+            if not isinstance(summary[metric], (int, float)):
+                raise ValueError(f"relevance baseline metric {mode}.{metric} is not numeric")
+    return baseline
+
+
+def compare_relevance(result: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    """Compare deterministic relevance scores and report material regressions."""
+    regressions = []
+    comparisons: dict[str, dict[str, Any]] = {}
+    if result.get("fixture_version") != baseline.get("fixture_version"):
+        regressions.append("fixture_version changed")
+    if result.get("top_k") != baseline.get("top_k"):
+        regressions.append("top_k changed")
+    if result.get("embedding_mode") != baseline.get("embedding_mode"):
+        regressions.append(
+            f"embedding_mode changed from {baseline.get('embedding_mode')} to {result.get('embedding_mode')}"
+        )
+
+    tolerances = {**DEFAULT_TOLERANCES, **baseline.get("tolerances", {})}
+    for mode in MODES:
+        current_summary = result["summaries"][mode]
+        baseline_summary = baseline["summaries"][mode]
+        comparisons[mode] = {}
+        for metric in METRICS:
+            current = float(current_summary[metric])
+            expected = float(baseline_summary[metric])
+            delta = current - expected
+            allowed_drop = float(tolerances[metric])
+            passed = delta >= -allowed_drop
+            comparisons[mode][metric] = {
+                "baseline": expected,
+                "current": current,
+                "delta": delta,
+                "allowed_drop": allowed_drop,
+                "passed": passed,
+            }
+            if not passed:
+                regressions.append(
+                    f"{mode}.{metric} dropped from {expected:.4f} to {current:.4f} "
+                    f"(allowed drop {allowed_drop:.4f})"
+                )
+    return {
+        "baseline_fixture_version": baseline.get("fixture_version"),
+        "tolerances": tolerances,
+        "comparisons": comparisons,
+        "regressions": regressions,
+        "passed": not regressions,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--baseline", type=Path, help="Optional checked-in relevance baseline JSON")
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="Exit non-zero when the supplied baseline comparison has a material regression",
+    )
     args = parser.parse_args()
     try:
         result = run_relevance_benchmark(args.top_k)
     except ValueError as exc:
         parser.error(str(exc))
+    comparison = None
+    if args.baseline:
+        try:
+            comparison = compare_relevance(result, load_baseline(args.baseline))
+        except ValueError as exc:
+            parser.error(str(exc))
+        result["baseline_comparison"] = comparison
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2, sort_keys=True))
+    if args.fail_on_regression and comparison and not comparison["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
