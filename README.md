@@ -250,8 +250,10 @@ Choose the execution path based on the output and inspection goal:
 
 - Use direct command execution for a small, targeted inspection where the
   output is already bounded and immediate terminal feedback is sufficient.
-- Use `execute_and_capture` for tests, builds, logs, and other noisy commands;
-  it bounds output and makes later search and exact retrieval available.
+- Use `execute_and_capture` once output may be noisy, large, or uncertain—such
+  as tests, builds, and logs—because it bounds context and makes later search
+  and exact retrieval available. This is an advisory heuristic, not a hard
+  line-count policy.
 - Use `capture_text` when output is already in hand, or `capture_file` for a
   file that has been checked and intentionally selected for ingestion.
 
@@ -488,6 +490,19 @@ summary generation, and the combined pipeline. Semantic embeddings are now
 materialized when semantic or hybrid search first needs them, so use the
 separate semantic-index phase when evaluating end-to-end costs. The benchmark
 is diagnostic and optional, not a required pull-request check.
+
+Measure direct-versus-captured routing tradeoffs with synthetic output profiles:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_routing.py \
+  --samples 5 --output benchmark-routing.json
+```
+The routing harness compares direct command completion with bounded capture and
+summary generation for targeted (16 lines), test-like (256 lines), and
+build/log-like (2048 lines) output. Use the medians and p95 values to keep the
+heuristic honest: direct execution generally has lower latency for small,
+bounded output, while capture adds searchable context and bounded response
+size for noisy or uncertain output. These synthetic measurements are guidance,
+not universal thresholds or a required CI gate.
 
 Measure command-output handling effectiveness with deterministic synthetic data:
 ```bash
