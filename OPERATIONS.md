@@ -279,6 +279,19 @@ targeted-output control, and defines objective success criteria for each task.
 Keep generated fixtures, manifests, records, and captures outside the
 repository unless they have passed a separate privacy review.
 
+Repeat the complete synthetic five-repetition Codex run with:
+
+```bash
+CODEX_HOME=/path/to/writable/authenticated-codex-home \
+  ./run_agent_ab_experiment.sh
+```
+
+The script checks Codex authentication, creates a timestamped `/tmp` run
+directory, executes paired control and MCP sessions, and writes metadata
+records, an aggregate summary, and content-free lifecycle logs there. Set
+`AGENT_AB_RUN_DIR` to choose another output directory. Use the lower-level
+runner commands for privacy-reviewed repository fixtures.
+
 For issue #93, create a checked-in aggregate baseline only from a reviewed
 agent A/B summary:
 
