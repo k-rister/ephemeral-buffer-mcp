@@ -264,6 +264,21 @@ tool-call counts, and optional provider-reported input/output token counts.
 Version-1 records remain readable by the analyzer; unavailable provider
 metrics are distinct from zero values.
 
+Issue #92's deterministic fixture generator is
+`benchmark_agent_ab_fixtures.py`. Generate its synthetic fixture and private
+run manifest before an experiment:
+
+```bash
+.venv/bin/python benchmark_agent_ab_fixtures.py \
+  --fixture-output /tmp/agent-ab-fixture \
+  --manifest-output /tmp/agent-ab-tasks.json
+```
+
+It emits large test/build output only when a task runs, includes a small
+targeted-output control, and defines objective success criteria for each task.
+Keep generated fixtures, manifests, records, and captures outside the
+repository unless they have passed a separate privacy review.
+
 Example:
 
 ```bash

@@ -688,6 +688,19 @@ tool-call count, and provider-reported input/output token counts when Codex
 emits them. Older version-1 records remain readable; missing provider metrics
 are reported as unavailable rather than zero.
 
+Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
+
+```bash
+.venv/bin/python benchmark_agent_ab_fixtures.py \
+  --fixture-output /tmp/agent-ab-fixture \
+  --manifest-output /tmp/agent-ab-tasks.json
+```
+
+The fixture generates large test and build output at runtime, plus a small
+targeted-output task and a follow-up retrieval task. The manifest includes
+output-size bands, expected signals, and objective success criteria. It is
+synthetic and contains no user logs or captured output.
+
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
