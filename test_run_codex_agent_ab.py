@@ -44,7 +44,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             allow_mcp_approvals=False,
         )
         result = subprocess_result(stdout=json.dumps({"type": "command_execution", "command": "find"}) + "\nSUCCESS\n")
-        with tempfile.TemporaryDirectory() as directory, patch("run_codex_agent_ab.subprocess.run", return_value=result) as run:
+        with tempfile.TemporaryDirectory() as directory, patch("run_codex_agent_ab._run_codex_process", return_value=result) as run:
             repository = Path(directory) / "repo"
             repository.mkdir()
             (repository / "fixture.txt").write_text("fixture")
@@ -55,6 +55,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("--ephemeral", command)
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
         self.assertEqual(output["mcp_tool_calls"], 0)
         self.assertIsNone(output["input_tokens"])
 
