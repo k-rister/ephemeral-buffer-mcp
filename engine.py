@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import threading
 import json
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections import OrderedDict
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
@@ -26,6 +27,8 @@ from config import (
     DEFAULT_MAX_CAPTURES,
     embedding_cache_dir,
     embedding_model_name as configured_embedding_model_name,
+    semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
+    semantic_prefetch_workers as configured_semantic_prefetch_workers,
 )
 
 
@@ -271,6 +274,7 @@ class Capture:
     original_byte_size: Optional[int] = None
     command_exit_code: Optional[int] = None
     timed_out: bool = False
+    semantic_index_state: str = "not-requested"
 
     @property
     def line_count(self) -> int:
@@ -316,6 +320,8 @@ class EphemeralEngine:
         embedding_model_name: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
         metrics: Optional[LocalMetrics] = None,
+        semantic_prefetch: Optional[bool] = None,
+        semantic_prefetch_workers: Optional[int] = None,
     ):
         self._lock = threading.RLock()
         if max_captures < 1:
@@ -334,6 +340,27 @@ class EphemeralEngine:
         self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
         self.embedding_model = None
         self.metrics = metrics or LocalMetrics(enabled=False)
+        self.semantic_prefetch_enabled = (
+            configured_semantic_prefetch_enabled() if semantic_prefetch is None else semantic_prefetch
+        )
+        self.semantic_prefetch_workers = (
+            configured_semantic_prefetch_workers()
+            if semantic_prefetch_workers is None
+            else semantic_prefetch_workers
+        )
+        if self.semantic_prefetch_workers < 1:
+            raise ValueError("semantic_prefetch_workers must be at least 1")
+        self._prefetch_executor = (
+            ThreadPoolExecutor(
+                max_workers=self.semantic_prefetch_workers,
+                thread_name_prefix="semantic-prefetch",
+            )
+            if self.semantic_prefetch_enabled
+            else None
+        )
+        self._prefetch_futures: Dict[str, Future[None]] = {}
+        self._prefetch_slots = threading.BoundedSemaphore(self.semantic_prefetch_workers * 2)
+        self._shutdown = False
 
     def _get_embedding_model(self):
         """Load FastEmbed once, on first operation that needs embeddings."""
@@ -499,6 +526,8 @@ class EphemeralEngine:
                         capture_id=evicted_id,
                         capture_bytes=old_cap.byte_size,
                     )
+                    old_cap.semantic_index_state = "evicted"
+                    self._cancel_prefetch(evicted_id)
                     self._close_capture_storage(old_cap)
                     self.metrics.record_event("evictions")
                     self.metrics.forget_capture(evicted_id)
@@ -507,7 +536,69 @@ class EphemeralEngine:
             self.capture_order[capture_id] = None
             self._total_bytes += capture.byte_size
             self.metrics.record_capture(capture_id)
-            return capture
+        self._schedule_semantic_prefetch(capture)
+        return capture
+
+    def _schedule_semantic_prefetch(self, capture: Capture) -> None:
+        """Submit at most a bounded number of post-ingestion indexing jobs."""
+        if not self.semantic_prefetch_enabled or not capture.chunks:
+            return
+        with self._lock:
+            if self._shutdown or capture.capture_id not in self.captures:
+                return
+            if capture.capture_id in self._prefetch_futures or capture.embeddings is not None:
+                return
+            if not self._prefetch_slots.acquire(blocking=False):
+                return
+            capture.semantic_index_state = "pending"
+            try:
+                future = self._prefetch_executor.submit(self._prefetch_capture, capture)
+            except Exception:
+                self._prefetch_slots.release()
+                capture.semantic_index_state = "failed"
+                log_event(LOGGER, logging.ERROR, "semantic_prefetch_submit_failed", capture_id=capture.capture_id)
+                LOGGER.exception("semantic_prefetch_submit_exception")
+                return
+            self._prefetch_futures[capture.capture_id] = future
+            future.add_done_callback(
+                lambda completed, capture_id=capture.capture_id: self._prefetch_finished(capture_id, completed)
+            )
+
+    def _prefetch_capture(self, capture: Capture) -> None:
+        """Build one capture's semantic index in a background worker."""
+        try:
+            self._ensure_embeddings(capture)
+            capture.semantic_index_state = "ready"
+        except Exception:
+            capture.semantic_index_state = "failed"
+            log_event(LOGGER, logging.ERROR, "semantic_prefetch_failed", capture_id=capture.capture_id)
+            LOGGER.exception("semantic_prefetch_exception")
+            raise
+
+    def _prefetch_finished(self, capture_id: str, future: Future[None]) -> None:
+        """Release bounded worker capacity and retain a content-free state."""
+        with self._lock:
+            self._prefetch_futures.pop(capture_id, None)
+            capture = self.captures.get(capture_id)
+            if capture and future.cancelled():
+                capture.semantic_index_state = "not-requested"
+            elif capture and future.exception() is not None:
+                capture.semantic_index_state = "failed"
+            elif capture and capture.embeddings is not None:
+                capture.semantic_index_state = "ready"
+            self._prefetch_slots.release()
+
+    def _wait_for_prefetch(self, capture: Capture) -> None:
+        """Wait for a relevant prefetch, leaving lazy indexing as fallback."""
+        with self._lock:
+            future = self._prefetch_futures.get(capture.capture_id)
+        if future is not None:
+            try:
+                future.result()
+            except Exception:
+                # The synchronous path below retries failed work so search remains
+                # correct even when a background model operation fails.
+                pass
 
     def _close_capture_storage(self, capture: Capture) -> None:
         """Close per-capture search storage and report cleanup failures."""
@@ -523,6 +614,24 @@ class EphemeralEngine:
                 capture_id=capture.capture_id,
             )
             LOGGER.exception("capture_storage_cleanup_exception")
+
+    def _cancel_prefetch(self, capture_id: str) -> None:
+        """Cancel queued work for a capture; running work is allowed to finish."""
+        future = self._prefetch_futures.get(capture_id)
+        if future is not None:
+            future.cancel()
+
+    def shutdown(self) -> None:
+        """Stop background indexing without holding the engine lock while waiting."""
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            executor = self._prefetch_executor
+            for future in self._prefetch_futures.values():
+                future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
@@ -581,6 +690,7 @@ class EphemeralEngine:
         if not capture.chunks:
             return []
 
+        self._wait_for_prefetch(capture)
         self._ensure_embeddings(capture)
         if capture.embeddings is None or len(capture.embeddings) == 0:
             return []
@@ -608,6 +718,7 @@ class EphemeralEngine:
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             capture.embeddings = embeddings / norms
+            capture.semantic_index_state = "ready"
 
     @synchronized
     def search(
@@ -929,6 +1040,14 @@ class EphemeralEngine:
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
             "embedding_cache_dir": self.embedding_cache_path,
+            "semantic_prefetch_enabled": self.semantic_prefetch_enabled,
+            "semantic_prefetch_workers": self.semantic_prefetch_workers,
+            "semantic_prefetch_pending": sum(
+                1 for cap in self.captures.values() if cap.semantic_index_state == "pending"
+            ),
+            "semantic_prefetch_failed": sum(
+                1 for cap in self.captures.values() if cap.semantic_index_state == "failed"
+            ),
             "accounted_bytes": accounted_bytes,
             "process_rss_bytes": rss_bytes,
             "unaccounted_rss_bytes": (
@@ -944,6 +1063,8 @@ class EphemeralEngine:
         if capture_id == "all":
             capture_ids = list(self.captures)
             for cap in self.captures.values():
+                self._cancel_prefetch(cap.capture_id)
+                cap.semantic_index_state = "evicted"
                 self._close_capture_storage(cap)
             self.captures.clear()
             self.capture_order.clear()
@@ -954,6 +1075,8 @@ class EphemeralEngine:
             return "Cleared all captures from ephemeral buffer."
         elif capture_id in self.captures:
             cap = self.captures.pop(capture_id)
+            self._cancel_prefetch(capture_id)
+            cap.semantic_index_state = "evicted"
             self._total_bytes -= cap.byte_size
             self._close_capture_storage(cap)
             self.capture_order.pop(capture_id, None)

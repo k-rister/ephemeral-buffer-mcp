@@ -55,6 +55,15 @@ FastEmbed is loaded lazily on the first capture or semantic search. Set
 controlled cache directory. Use `get_buffer_stats` to see the configured model
 and whether it has been loaded yet.
 
+Semantic indexing prefetch is disabled by default. To opt in, set
+`EPHEMERAL_SEMANTIC_PREFETCH=1`; optionally set
+`EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` (default `1`) to a small positive value.
+The bounded worker pool indexes captures after ingestion. Semantic and hybrid
+search wait for an active job and retry failed jobs synchronously, preserving
+the lazy path as the correctness fallback. Eviction and explicit cleanup cancel
+queued work, and process shutdown waits for running jobs to finish. Use the
+content-free prefetch counts in runtime diagnostics when checking host impact.
+
 Override the limits before starting the server:
 
 ```bash

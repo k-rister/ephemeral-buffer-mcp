@@ -4,6 +4,7 @@ Supports stdio MCP protocol and Unix Domain Socket IPC for CLI piping.
 """
 
 import os
+import atexit
 import sys
 import json
 import asyncio
@@ -75,6 +76,7 @@ engine = EphemeralEngine(
     max_buffer_bytes=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
     metrics=METRICS,
 )
+atexit.register(engine.shutdown)
 
 
 # --- MCP Tools ---
@@ -330,6 +332,9 @@ def search_capture(
 ) -> str:
     """
     Searches the captured command output using BM25, Semantic embedding, or Hybrid (RRF) ranking.
+    When opt-in semantic prefetch is enabled, semantic and hybrid searches wait
+    for the relevant background index job; failed jobs fall back to synchronous
+    lazy indexing.
     
     Args:
         query: Search keywords or natural language question (e.g. 'auth failure', 'ECONNREFUSED', 'why did the build fail?').
@@ -448,7 +453,7 @@ def clear_captures(capture_id: str = "all") -> str:
 @mcp.tool()
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
-    """Returns aggregate capture, accounting, and process RSS metrics."""
+    """Returns aggregate capture, accounting, prefetch, and process RSS metrics."""
     stats = engine.get_buffer_stats()
     rss = stats["process_rss_bytes"]
     unaccounted = stats["unaccounted_rss_bytes"]
@@ -469,6 +474,8 @@ def get_buffer_stats() -> str:
         f"{model_line}\n"
         f"{cache_line}\n"
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"
+        f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
+        f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed)\n"
         f"Accounted bytes: {stats['accounted_bytes']:,}\n"
         f"{rss_line}\n"
         f"{unaccounted_line}"
@@ -508,6 +515,8 @@ def get_runtime_diagnostics() -> str:
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
         f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",
         f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}",
+        f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
+        f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed)",
         f"Process RSS: {'unavailable' if rss is None else f'{rss:,} bytes'}",
         f"Unaccounted RSS: {'unavailable' if unaccounted is None else f'{unaccounted:,} bytes'}",
         f"Local metrics: {'enabled' if METRICS.enabled else 'disabled'}",

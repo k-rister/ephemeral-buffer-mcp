@@ -150,6 +150,21 @@ export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5"
 export EPHEMERAL_FASTEMBED_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
 ```
 
+Semantic indexing can optionally be prefetched after ingestion:
+
+```bash
+export EPHEMERAL_SEMANTIC_PREFETCH=1
+export EPHEMERAL_SEMANTIC_PREFETCH_WORKERS=1
+```
+
+Prefetch is disabled by default. When enabled, the bounded worker pool indexes
+captures in the background while ingestion returns; semantic and hybrid search
+wait for a relevant in-progress job, and failed jobs retry through the normal
+lazy path. Evicted or cleared captures do not retain queued work. Keep the
+worker count small because embedding generation competes for host CPU and
+memory; `get_buffer_stats` and `get_runtime_diagnostics` expose only aggregate
+pending/failed counts.
+
 The exact model and cache location can also be supplied in the MCP client's
 `env` configuration. Keep the model cache writable by the user running the
 MCP client.
@@ -490,6 +505,16 @@ summary generation, and the combined pipeline. Semantic embeddings are now
 materialized when semantic or hybrid search first needs them, so use the
 separate semantic-index phase when evaluating end-to-end costs. The benchmark
 is diagnostic and optional, not a required pull-request check.
+
+Compare lazy semantic indexing with opt-in asynchronous prefetch:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_prefetch.py \
+  --line-count 256 --samples 5 --output benchmark-prefetch.json
+```
+The prefetch harness reports ingestion, first semantic search, and subsequent
+semantic search medians for both modes. Prefetch should reduce first-query
+latency when work completes during ingestion, while adding bounded background
+resource use; treat the output as deployment-specific diagnostic evidence.
 
 Measure direct-versus-captured routing tradeoffs with synthetic output profiles:
 ```bash
