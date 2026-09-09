@@ -10,6 +10,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+RECORDS_SCHEMA_VERSION = 2
 TASK_FIXTURE_VERSION = 1
 MODES = ("control", "mcp")
 TASKS = (
@@ -30,13 +31,22 @@ RUN_KEYS = {
     "context_bytes",
     "peak_rss_bytes",
 }
+RUN_KEYS_V2 = RUN_KEYS - {"context_bytes"} | {
+    "context_bytes_proxy",
+    "exit_code",
+    "failure_reason",
+    "mcp_tool_calls",
+    "input_tokens",
+    "output_tokens",
+}
 METRICS = (
     "completed",
     "signal_retrieved",
     "duration_seconds",
     "tool_calls",
+    "mcp_tool_calls",
     "repeated_commands",
-    "context_bytes",
+    "context_bytes_proxy",
     "peak_rss_bytes",
 )
 PROTOCOL_FIELDS = (
@@ -112,13 +122,17 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
     if payload.get("task_fixture_version") != schedule.get("task_fixture_version"):
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
+    records_schema_version = payload.get("records_schema_version", 1)
+    if records_schema_version not in (1, RECORDS_SCHEMA_VERSION):
+        raise ValueError("records schema version is unsupported")
+    run_keys = RUN_KEYS if records_schema_version == 1 else RUN_KEYS_V2
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
     if not isinstance(runs, list):
         raise ValueError("records runs must be a list")
     actual = {}
     for record in runs:
-        if not isinstance(record, dict) or set(record) != RUN_KEYS:
+        if not isinstance(record, dict) or set(record) != run_keys:
             raise ValueError("each run must contain exactly the documented metadata fields")
         key = _run_key(record)
         if key not in expected:
@@ -132,15 +146,42 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         for field in ("completed", "signal_retrieved"):
             if not isinstance(record[field], bool):
                 raise ValueError(f"{field} must be boolean in run: {key}")
-        for field in ("duration_seconds", "tool_calls", "repeated_commands", "context_bytes", "peak_rss_bytes"):
+        numeric_fields = ("duration_seconds", "tool_calls", "repeated_commands", "peak_rss_bytes")
+        numeric_fields += ("context_bytes",) if records_schema_version == 1 else ("context_bytes_proxy", "mcp_tool_calls")
+        for field in numeric_fields:
             value = record[field]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise ValueError(f"{field} must be a non-negative number in run: {key}")
+        if records_schema_version == RECORDS_SCHEMA_VERSION:
+            if record["exit_code"] is not None and (isinstance(record["exit_code"], bool) or not isinstance(record["exit_code"], int)):
+                raise ValueError(f"exit_code must be an integer or null in run: {key}")
+            if record["failure_reason"] is not None and not isinstance(record["failure_reason"], str):
+                raise ValueError(f"failure_reason must be a string or null in run: {key}")
+            for field in ("input_tokens", "output_tokens"):
+                value = record[field]
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
+                    raise ValueError(f"{field} must be a non-negative number or null in run: {key}")
         actual[key] = record
     missing = sorted(set(expected) - set(actual))
     if missing:
         raise ValueError(f"records are missing scheduled runs: {missing[0]}")
     return list(actual.values())
+
+
+def _metric_value(record: dict[str, Any], metric: str) -> float:
+    """Read a normalized metric from either records schema version."""
+    if metric == "context_bytes_proxy":
+        return float(record.get("context_bytes_proxy", record.get("context_bytes", 0)))
+    return float(record.get(metric, 0))
+
+
+def _optional_stats(records: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    values = [record[field] for record in records if record.get(field) is not None]
+    if not values:
+        return {"available": False, "count": 0}
+    result = _stats([float(value) for value in values])
+    result["available"] = True
+    return result
 
 
 def _stats(values: list[float]) -> dict[str, float | int]:
@@ -165,11 +206,18 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             "runs": len(selected),
             "completion_rate": sum(record["completed"] for record in selected) / len(selected),
             "signal_retrieval_rate": sum(record["signal_retrieved"] for record in selected) / len(selected),
-            "duration_seconds": _stats([float(record["duration_seconds"]) for record in selected]),
-            "tool_calls": _stats([float(record["tool_calls"]) for record in selected]),
-            "repeated_commands": _stats([float(record["repeated_commands"]) for record in selected]),
-            "context_bytes": _stats([float(record["context_bytes"]) for record in selected]),
-            "peak_rss_bytes": _stats([float(record["peak_rss_bytes"]) for record in selected]),
+            "duration_seconds": _stats([_metric_value(record, "duration_seconds") for record in selected]),
+            "tool_calls": _stats([_metric_value(record, "tool_calls") for record in selected]),
+            "mcp_tool_calls": _stats([_metric_value(record, "mcp_tool_calls") for record in selected]),
+            "repeated_commands": _stats([_metric_value(record, "repeated_commands") for record in selected]),
+            "context_bytes_proxy": _stats([_metric_value(record, "context_bytes_proxy") for record in selected]),
+            "peak_rss_bytes": _stats([_metric_value(record, "peak_rss_bytes") for record in selected]),
+            "input_tokens": _optional_stats(selected, "input_tokens"),
+            "output_tokens": _optional_stats(selected, "output_tokens"),
+            "failure_reasons": {
+                reason: sum(record.get("failure_reason") == reason for record in selected)
+                for reason in sorted({record.get("failure_reason") for record in selected if record.get("failure_reason")})
+            },
         }
 
     paired = {}
@@ -179,9 +227,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
-            control = pair["control"][metric]
-            mcp = pair["mcp"][metric]
-            deltas.append(float(mcp) - float(control))
+            control = _metric_value(pair["control"], metric)
+            mcp = _metric_value(pair["mcp"], metric)
+            deltas.append(mcp - control)
         paired[metric] = _stats(deltas)
 
     recommendations = [
@@ -196,6 +244,7 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": "agent-ab",
+        "records_schema_version": max(payload.get("records_schema_version", 1), 1),
         "task_fixture_version": schedule["task_fixture_version"],
         "seed": schedule["seed"],
         "repetitions": schedule["repetitions"],

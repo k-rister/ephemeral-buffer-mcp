@@ -676,12 +676,17 @@ Run the adapter from the repository checkout:
 
 The runner requires a locally authenticated `codex` CLI. It uses
 `codex exec --json --ephemeral`, disables approval prompts, and defaults to a
-read-only sandbox. `context_bytes` is an observable prompt/event-envelope
+read-only sandbox. `context_bytes_proxy` is an observable prompt/event-envelope
 proxy because the CLI does not expose the model's internal context size.
 When the fixture does not contain an importable `server` module, pass
 `--mcp-server-script /absolute/path/to/server.py`.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
+
+Runner records use version 2 and add exit code, failure reason, MCP-specific
+tool-call count, and provider-reported input/output token counts when Codex
+emits them. Older version-1 records remain readable; missing provider metrics
+are reported as unavailable rather than zero.
 
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
