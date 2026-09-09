@@ -66,10 +66,14 @@ class TestCodexAgentRunner(unittest.TestCase):
             codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
             allow_mcp_approvals=True, sandbox="read-only", timeout=10,
+            mcp_env={"EPHEMERAL_TEST_EMBEDDINGS": "1"},
         )
         self.assertIn("--approve-for-me", command)
         self.assertNotIn("--ask-for-approval", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+
+        env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
+        self.assertIn('EPHEMERAL_TEST_EMBEDDINGS="1"', env_config)
 
     def test_run_schedule_writes_balanced_records(self):
         schedule = build_schedule(repetitions=1, seed=3)

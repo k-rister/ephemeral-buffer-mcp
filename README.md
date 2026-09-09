@@ -358,6 +358,9 @@ events. Tool lifecycle events contain only a local call ID, tool name, duration,
 success state, and error class. Logs never include captured content, labels,
 query text, or command text. A start event without a matching completion or
 failure event identifies a stalled tool/session boundary.
+The Codex A/B adapter can persist these events per MCP run with
+`--diagnostic-log-dir /path/to/logs`; keep that directory outside the
+repository. The files contain lifecycle metadata only.
 
 ### Optional local usage metrics
 
