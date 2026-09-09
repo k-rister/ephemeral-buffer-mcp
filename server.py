@@ -13,6 +13,9 @@ import threading
 import logging
 import platform
 import re
+import shlex
+import shutil
+import subprocess
 import time
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -80,6 +83,118 @@ atexit.register(engine.shutdown)
 
 
 # --- MCP Tools ---
+
+
+def _resolve_preflight_cwd(cwd: Optional[str]) -> dict[str, Any]:
+    """Resolve a requested working directory without executing user commands."""
+    requested = cwd if cwd is not None else os.getcwd()
+    path = Path(requested).expanduser()
+    resolved = path.resolve(strict=False)
+    exists = os.path.lexists(path)
+    is_symlink = path.is_symlink()
+    target_exists = resolved.exists() if is_symlink else exists
+    if is_symlink and not target_exists:
+        status = "dangling-symlink"
+    elif not exists:
+        status = "missing"
+    elif not resolved.is_dir():
+        status = "not-a-directory"
+    else:
+        status = "ok"
+    return {
+        "input": requested,
+        "resolved": str(resolved),
+        "source": "explicit" if cwd is not None else "process-cwd",
+        "status": status,
+        "exists": exists,
+        "is_directory": resolved.is_dir(),
+        "is_symlink": is_symlink,
+        "symlink_target": str(resolved) if is_symlink else None,
+        "symlink_target_exists": target_exists if is_symlink else None,
+    }
+
+
+def _resolve_preflight_executable(tokens: list[str], resolved_cwd: str) -> dict[str, Any]:
+    """Resolve only the first parsed token; shell expansion remains out of scope."""
+    if not tokens:
+        return {"status": "unavailable", "reason": "command contains no parseable tokens"}
+    token = tokens[0]
+    if os.path.sep in token or (os.altsep and os.altsep in token):
+        candidate = Path(token)
+        if not candidate.is_absolute():
+            candidate = Path(resolved_cwd) / candidate
+        candidate = candidate.resolve(strict=False)
+        if candidate.exists() and candidate.is_file() and os.access(candidate, os.X_OK):
+            return {"status": "resolved", "requested": token, "resolved": str(candidate)}
+        return {"status": "unavailable", "requested": token, "reason": "path is not an executable file"}
+    resolved = shutil.which(token)
+    if resolved:
+        return {"status": "resolved", "requested": token, "resolved": str(Path(resolved).resolve(strict=False))}
+    return {"status": "unavailable", "requested": token, "reason": "executable was not found on PATH"}
+
+
+@mcp.tool()
+@_instrument_tool("preflight_command")
+def preflight_command(command: str, cwd: Optional[str] = None) -> str:
+    """Return content-free path and executable diagnostics without running ``command``.
+
+    This resolves the working directory, symlink target, detectable Git
+    repository root, and first executable token. Shell expansion, aliases,
+    pipelines, redirections, environment changes, and arbitrary shell logic
+    cannot be verified here. The requested command is never executed.
+    """
+    try:
+        working_directory = _resolve_preflight_cwd(cwd)
+        try:
+            tokens = shlex.split(command)
+            parse_status = "ok" if tokens else "empty"
+        except ValueError as exc:
+            tokens = []
+            parse_status = f"unavailable: {exc}"
+
+        executable = _resolve_preflight_executable(tokens, working_directory["resolved"])
+        repository: dict[str, Any] = {
+            "status": "unavailable",
+            "root": None,
+            "reason": "working directory is not an existing directory",
+        }
+        if working_directory["status"] == "ok":
+            try:
+                result = subprocess.run(
+                    ["git", "-C", working_directory["resolved"], "rev-parse", "--show-toplevel"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=2,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    repository = {"status": "detected", "root": str(Path(result.stdout.strip()).resolve())}
+                else:
+                    repository = {"status": "not-detected", "root": None, "reason": "not inside a Git work tree"}
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                repository = {"status": "unavailable", "root": None, "reason": type(exc).__name__}
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "command": {
+                    "parse_status": parse_status,
+                    "token_count": len(tokens),
+                    "executable": executable,
+                },
+                "working_directory": working_directory,
+                "repository": repository,
+                "limitations": [
+                    "The requested command was not executed.",
+                    "Shell expansion, aliases, pipelines, redirections, and environment changes are not resolved.",
+                    "Repository detection reports only a local Git work-tree root; it does not verify user intent or remotes.",
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    except Exception as exc:
+        return json.dumps({"status": "error", "reason": type(exc).__name__})
 
 def _capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
     """

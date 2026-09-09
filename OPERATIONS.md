@@ -118,6 +118,15 @@ The MCP server bounds captured output but does not validate command intent,
 filesystem safety, or path identity; the calling agent remains responsible for
 those checks.
 
+When those facts need a content-free diagnostic before execution, call
+`preflight_command(command, cwd)`. It reports the resolved working directory,
+symlink status and target, detectable local Git root, and first executable-token
+resolution. It never runs the requested command and does not expose captured
+output or environment data. A result marked unavailable means the check could
+not be established; it is not a safety approval. Shell expansion, aliases,
+pipelines, redirections, environment changes, and arbitrary shell logic remain
+outside preflight’s scope.
+
 ## Field-observation checklist
 
 When investigating behavior from a real MCP session, collect operational

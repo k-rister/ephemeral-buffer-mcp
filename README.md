@@ -250,6 +250,7 @@ The agent has access to the following tools:
 | Tool | Purpose |
 | :--- | :--- |
 | `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None)` | Executes a shell command with bounded head/tail capture, optional timeout, and a compact diagnostic summary (exit code, diff file map, error signals, and truncation status) to the agent context. |
+| `preflight_command(command, cwd=None)` | Performs content-free path, symlink, local Git-root, and executable-resolution diagnostics without executing the requested command. |
 | `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None)` | Ingests a bounded log/output file from disk; defaults to the configured buffer byte limit. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
@@ -271,6 +272,13 @@ Choose the execution path based on the output and inspection goal:
   line-count policy.
 - Use `capture_text` when output is already in hand, or `capture_file` for a
   file that has been checked and intentionally selected for ingestion.
+
+Use `preflight_command` when repository identity or path resolution is
+uncertain before a sensitive command. It reports resolved facts and explicit
+unavailable states without running the requested command or exposing command
+output. It cannot predict shell expansion, aliases, pipelines, redirections,
+environment changes, or arbitrary shell logic, so normal command validation
+and user intent checks remain necessary.
 
 Before any repository-sensitive command or file capture, verify the intended
 working directory and target path. Prefer an explicit `cwd`, confirm the
