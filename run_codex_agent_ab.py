@@ -9,6 +9,7 @@ manifest and are never copied to the output records.
 import argparse
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,44 @@ def _as_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    """Terminate Codex and any MCP children that inherited its output pipes."""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    else:  # pragma: no cover - Windows process-group behavior is platform-specific.
+        process.kill()
+
+
+def _run_codex_process(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run Codex with bounded cleanup for descendants holding output pipes."""
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name == "posix",
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process)
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _walk_dicts(value: Any):
@@ -200,14 +239,7 @@ def _run_one(
     exit_code = None
     failure_reason = None
     try:
-        completed = subprocess.run(
-            [*command, task["prompt"]],
-            cwd=fixture,
-            capture_output=True,
-            text=True,
-            timeout=args.timeout,
-            check=False,
-        )
+        completed = _run_codex_process([*command, task["prompt"]], cwd=fixture, timeout=args.timeout)
         output = completed.stdout + completed.stderr
         success = completed.returncode == 0
         exit_code = completed.returncode
