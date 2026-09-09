@@ -1,0 +1,32 @@
+{
+  "benchmark": "search-relevance",
+  "embedding_mode": "deterministic-test",
+  "fixture_version": 1,
+  "schema_version": 1,
+  "summaries": {
+    "bm25": {
+      "hit_at_1": 0.75,
+      "hit_at_k": 0.75,
+      "mrr": 0.75,
+      "queries": 4
+    },
+    "hybrid": {
+      "hit_at_1": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "queries": 4
+    },
+    "semantic": {
+      "hit_at_1": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "queries": 4
+    }
+  },
+  "tolerances": {
+    "hit_at_1": 0.05,
+    "hit_at_k": 0.05,
+    "mrr": 0.05
+  },
+  "top_k": 3
+}
