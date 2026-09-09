@@ -712,6 +712,21 @@ targeted-output task and a follow-up retrieval task. The manifest includes
 output-size bands, expected signals, and objective success criteria. It is
 synthetic and contains no user logs or captured output.
 
+Repeat the complete five-repetition Codex A/B run with the repository script.
+Set `CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
+records, and lifecycle logs remain under `/tmp` by default:
+
+```bash
+CODEX_HOME=/path/to/writable/authenticated-codex-home \
+  ./run_agent_ab_experiment.sh
+```
+
+Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
+`AGENT_AB_SEED`, or `AGENT_AB_TIMEOUT_SECONDS` to repeat a different
+experiment. The script runs the synthetic fixture; use the lower-level runner
+commands above for a privacy-reviewed repository fixture and private task
+manifest.
+
 Create and compare an aggregate agent A/B baseline after a privacy review:
 
 ```bash
