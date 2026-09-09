@@ -89,7 +89,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             dry_run=False,
         )
         result = subprocess_result(stdout=json.dumps({"type": "completed"}) + "\nok\n")
-        with patch("run_codex_agent_ab.subprocess.run", return_value=result):
+        with patch("run_codex_agent_ab._run_codex_process", return_value=result):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
