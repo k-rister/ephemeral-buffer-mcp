@@ -87,6 +87,17 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(command[:2], ["codex", "exec"])
         self.assertNotIn("--ask-for-approval", command)
 
+    def test_mcp_approval_flag_is_global_before_exec_subcommand(self):
+        from run_codex_agent_ab import _codex_command
+
+        command = _codex_command(
+            codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+            mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
+            allow_mcp_approvals=True, sandbox="read-only", timeout=10,
+        )
+
+        self.assertEqual(command[:3], ["codex", "--approve-for-me", "exec"])
+
     def test_run_schedule_writes_balanced_records(self):
         schedule = build_schedule(repetitions=1, seed=3)
         manifest = {
