@@ -503,6 +503,20 @@ this harness does not invoke a model. Fixtures contain no project content and
 are generated in code, so runs are reproducible. This is a server-side smoke
 evaluation, not a claim about any particular coding agent or model.
 
+Evaluate search relevance across supported modes with deterministic synthetic
+fixtures:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
+  --top-k 3 --output search-relevance.json
+```
+The relevance benchmark covers exact errors, punctuation-heavy queries,
+conceptual semantic queries, and lexical/semantic conflicts. It reports
+hit@1, hit@k, and mean reciprocal rank (MRR) for BM25, semantic, and hybrid
+search. The fixtures define expected retrieval markers, so this measures
+retrieval relevance only—not agent answer quality, token usage, or universal
+performance. The deterministic evaluation runs in CI and uploads its JSON
+result with the other benchmark artifacts.
+
 #### Example benchmark results
 
 The reproducible paired evaluation was run on 2026-09-07 with five
