@@ -249,6 +249,31 @@ and uncertainty. It does not invoke a model or collect telemetry. Keep records
 and captures out of the repository and perform a privacy review before sharing
 the aggregate summary.
 
+For Codex CLI experiments, use `run_codex_agent_ab.py` as the external
+adapter. It accepts a private task manifest, creates a fresh fixture copy per
+scheduled run, invokes `codex exec` with the selected model, and configures the
+ephemeral-buffer MCP server only for `mcp` runs. Control runs use an isolated
+Codex configuration with no MCP server. The adapter records metadata only and
+does not write transcripts or raw command output to the records file. Its
+`context_bytes` field is an observable prompt/event-envelope proxy, not a
+provider-reported model-context measurement.
+If the fixture does not contain an importable `server` module, provide the
+absolute server path with `--mcp-server-script`.
+
+Example:
+
+```bash
+.venv/bin/python run_codex_agent_ab.py \
+  --schedule agent-ab-schedule.json \
+  --tasks /path/to/private-agent-tasks.json \
+  --repository /path/to/privacy-reviewed-fixture \
+  --model gpt-5.6-luna \
+  --output /tmp/agent-ab-records.json
+```
+
+Use a synthetic or privacy-reviewed fixture and do not commit the task
+manifest, records, captures, or Codex transcripts.
+
 For a reproducible local report, run the benchmark with a fixed seed and keep
 the JSON output:
 

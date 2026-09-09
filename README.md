@@ -643,6 +643,46 @@ not invoke a model, require credentials, or accept raw prompts, transcripts,
 commands, captures, or user content. Do not commit agent records or generated
 captures; share only the aggregate summary after privacy review.
 
+The repository includes a Codex CLI adapter for executing that protocol. It
+uses the requested model explicitly, creates a fresh fixture copy for every
+run, isolates control and MCP configuration, and writes metadata-only records.
+Create a private task manifest (do not commit it) with one prompt and optional
+signal marker for each scheduled task:
+
+```json
+{
+  "tasks": {
+    "targeted-inspection": {"prompt": "Inspect the fixture and report the marker.", "signal_marker": "MARKER"},
+    "noisy-test-failure": {"prompt": "Run the fixture test and report the failure marker.", "signal_marker": "MARKER"},
+    "build-log-search": {"prompt": "Inspect the build log and report the marker.", "signal_marker": "MARKER"},
+    "follow-up-context": {"prompt": "Find the earlier marker and report it.", "signal_marker": "MARKER"}
+  }
+}
+```
+
+Run the adapter from the repository checkout:
+
+```bash
+.venv/bin/python run_codex_agent_ab.py \
+  --schedule agent-ab-schedule.json \
+  --tasks /path/to/private-agent-tasks.json \
+  --repository /path/to/privacy-reviewed-fixture \
+  --model gpt-5.6-luna \
+  --output /tmp/agent-ab-records.json
+.venv/bin/python benchmark_agent_ab.py \
+  --records /tmp/agent-ab-records.json \
+  --output /tmp/agent-ab-summary.json
+```
+
+The runner requires a locally authenticated `codex` CLI. It uses
+`codex exec --json --ephemeral`, disables approval prompts, and defaults to a
+read-only sandbox. `context_bytes` is an observable prompt/event-envelope
+proxy because the CLI does not expose the model's internal context size.
+When the fixture does not contain an importable `server` module, pass
+`--mcp-server-script /absolute/path/to/server.py`.
+Review prompts, fixtures, and generated records for privacy before sharing;
+the runner does not persist transcripts in its records output.
+
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
