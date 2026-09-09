@@ -139,13 +139,16 @@ def _codex_command(
     mcp_python: str,
     mcp_module: str,
     mcp_server_script: str | None,
+    allow_mcp_approvals: bool,
     sandbox: str,
     timeout: int,
 ) -> list[str]:
-    command = [
-        codex,
-        "--ask-for-approval",
-        "never",
+    command = [codex]
+    if mode == "mcp" and allow_mcp_approvals:
+        command.append("--approve-for-me")
+    else:
+        command.extend(["--ask-for-approval", "never"])
+    command.extend([
         "exec",
         "--model",
         model,
@@ -154,12 +157,12 @@ def _codex_command(
         "--ignore-user-config",
         "--skip-git-repo-check",
         "--sandbox",
-        sandbox,
+        "workspace-write" if mode == "mcp" and allow_mcp_approvals else sandbox,
         "--cd",
         str(fixture),
         "--config",
         "model=" + json.dumps(model),
-    ]
+    ])
     if mode == "mcp":
         mcp_args = [mcp_server_script] if mcp_server_script else ["-m", mcp_module]
         command.extend([
@@ -189,6 +192,7 @@ def _run_one(
         mcp_python=args.mcp_python,
         mcp_module=args.mcp_module,
         mcp_server_script=args.mcp_server_script,
+        allow_mcp_approvals=getattr(args, "allow_mcp_approvals", False),
         sandbox=args.sandbox,
         timeout=args.timeout,
     )
@@ -261,6 +265,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], 
         "environment": args.environment,
         "reset_policy": "fresh-copy-per-run",
         "agent_adapter": "codex-cli",
+        "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "never",
     }
     payload = {
         "schema_version": schedule["schema_version"],
@@ -289,6 +294,11 @@ def main() -> None:
     parser.add_argument("--mcp-python", default=sys.executable)
     parser.add_argument("--mcp-module", default="server")
     parser.add_argument("--mcp-server-script", help="Absolute server script when the fixture does not provide the MCP module")
+    parser.add_argument(
+        "--allow-mcp-approvals",
+        action="store_true",
+        help="Use Codex automatic review and workspace-write isolation for MCP runs",
+    )
     parser.add_argument("--sandbox", choices=("read-only", "workspace-write"), default="read-only")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--dry-run", action="store_true")

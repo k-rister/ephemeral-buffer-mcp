@@ -41,6 +41,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         args = argparse.Namespace(
             codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
             mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
         )
         result = subprocess_result(stdout=json.dumps({"type": "command_execution", "command": "find"}) + "\nSUCCESS\n")
         with tempfile.TemporaryDirectory() as directory, patch("run_codex_agent_ab.subprocess.run", return_value=result) as run:
@@ -57,6 +58,18 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(output["mcp_tool_calls"], 0)
         self.assertIsNone(output["input_tokens"])
 
+    def test_mcp_approval_mode_uses_automatic_review_and_isolated_write_sandbox(self):
+        from run_codex_agent_ab import _codex_command
+
+        command = _codex_command(
+            codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+            mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
+            allow_mcp_approvals=True, sandbox="read-only", timeout=10,
+        )
+        self.assertIn("--approve-for-me", command)
+        self.assertNotIn("--ask-for-approval", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+
     def test_run_schedule_writes_balanced_records(self):
         schedule = build_schedule(repetitions=1, seed=3)
         manifest = {
@@ -67,6 +80,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             repository=".", repository_fixture="fixture", environment="test", model="gpt-5.6-luna",
             codex="codex", mcp_python="python", mcp_module="server", mcp_server_script=None,
             sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
             dry_run=False,
         )
         result = subprocess_result(stdout=json.dumps({"type": "completed"}) + "\nok\n")

@@ -307,6 +307,12 @@ Example:
   --output /tmp/agent-ab-records.json
 ```
 
+If the MCP arm is expected to call the configured server, add
+`--allow-mcp-approvals`. The adapter then uses Codex automatic review and a
+`workspace-write` sandbox for MCP runs so approval policy does not silently
+force a shell fallback. Use this only with a disposable, privacy-reviewed
+fixture; control runs retain the no-approval policy.
+
 Use a synthetic or privacy-reviewed fixture and do not commit the task
 manifest, records, captures, or Codex transcripts.
 
