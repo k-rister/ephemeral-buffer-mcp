@@ -181,6 +181,14 @@ performance. In particular:
   latency.
 - local timing covers capture, indexing, search, and retrieval only.
 
+The separate `benchmark_relevance.py` harness evaluates retrieval quality for
+BM25, semantic, and hybrid search against explicit synthetic markers. It
+reports hit@1, hit@k, and mean reciprocal rank (MRR). These are retrieval
+metrics only: they do not measure agent answer quality, token usage, or
+performance on arbitrary repositories. Run it with `EPHEMERAL_TEST_EMBEDDINGS=1`
+for deterministic results and review the fixture scope before generalizing
+the measurements.
+
 For a reproducible local report, run the benchmark with a fixed seed and keep
 the JSON output:
 

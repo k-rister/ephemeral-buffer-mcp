@@ -64,10 +64,10 @@ jobs:
           /tmp/ephemeral-package-venv/bin/ephbuf --help
 
       - name: Compile sources
-        run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py release_checks.py
+        run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py benchmark_relevance.py release_checks.py
 
       - name: Run focused tests
-        run: python -u -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,release_checks.py' -m unittest -v test_benchmark_concurrency.py test_benchmark_effectiveness.py test_release_checks.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_metrics.py
+        run: python -u -m coverage run --source=. --omit='test_*.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,release_checks.py' -m unittest -v test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_relevance.py test_release_checks.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_metrics.py
 
       - name: Report coverage
         run: |
@@ -102,6 +102,9 @@ jobs:
       - name: Run consolidation effectiveness evaluation
         run: python benchmark_effectiveness.py --consolidation-runs 5 --output benchmark-effectiveness-consolidation.json > /dev/null
 
+      - name: Run search relevance evaluation
+        run: python benchmark_relevance.py --output search-relevance.json > /dev/null
+
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -113,6 +116,7 @@ jobs:
             benchmark-effectiveness.json
             benchmark-effectiveness-ab.json
             benchmark-effectiveness-consolidation.json
+            search-relevance.json
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
