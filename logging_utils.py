@@ -32,9 +32,19 @@ def get_logger(component: str) -> logging.Logger:
     """Return a configured component logger with JSON output to stderr."""
     logger = logging.getLogger(f"{LOGGER_NAME}.{component}")
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(_JsonFormatter())
-        logger.addHandler(handler)
+        formatter = _JsonFormatter()
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+        log_path = os.environ.get("EPHEMERAL_LOG_FILE", "").strip()
+        if log_path:
+            try:
+                file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            except OSError:
+                file_handler = None
+            if file_handler is not None:
+                file_handler.setFormatter(formatter)
+                logger.addHandler(file_handler)
         logger.propagate = False
         level_name = os.environ.get("EPHEMERAL_LOG_LEVEL", "WARNING").upper()
         logger.setLevel(getattr(logging, level_name, logging.WARNING))

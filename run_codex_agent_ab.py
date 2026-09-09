@@ -95,7 +95,9 @@ def _terminate_process_group(process: subprocess.Popen[str]) -> None:
         process.kill()
 
 
-def _run_codex_process(command: list[str], *, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_codex_process(
+    command: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run Codex with bounded cleanup for descendants holding output pipes."""
     process = subprocess.Popen(
         command,
@@ -103,6 +105,7 @@ def _run_codex_process(command: list[str], *, cwd: Path, timeout: int) -> subpro
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
         text=True,
         start_new_session=os.name == "posix",
     )
@@ -181,6 +184,7 @@ def _codex_command(
     allow_mcp_approvals: bool,
     sandbox: str,
     timeout: int,
+    mcp_env: dict[str, str] | None = None,
 ) -> list[str]:
     command = [codex]
     if mode == "mcp" and allow_mcp_approvals:
@@ -210,6 +214,14 @@ def _codex_command(
             "--config",
             "mcp_servers.ephemeral-buffer.args=" + json.dumps(mcp_args),
         ])
+        if mcp_env:
+            env_config = "{" + ", ".join(
+                f"{key}={json.dumps(value)}" for key, value in sorted(mcp_env.items())
+            ) + "}"
+            command.extend([
+                "--config",
+                "mcp_servers.ephemeral-buffer.env=" + env_config,
+            ])
     return command
 
 
@@ -223,6 +235,25 @@ def _run_one(
 ) -> dict[str, Any]:
     fixture = scratch / f"{item['sequence']}-{item['mode']}"
     _copy_fixture(repository, fixture)
+    diagnostic_log = None
+    diagnostic_log_dir = getattr(args, "diagnostic_log_dir", None)
+    if item["mode"] == "mcp" and diagnostic_log_dir:
+        diagnostic_log = Path(diagnostic_log_dir) / f"{item['sequence']:03d}-{item['mode']}.jsonl"
+        diagnostic_log.parent.mkdir(parents=True, exist_ok=True)
+    mcp_env = None
+    if diagnostic_log is not None:
+        mcp_env = {
+            "EPHEMERAL_LOG_LEVEL": "INFO",
+            "EPHEMERAL_LOG_FILE": str(diagnostic_log),
+        }
+    if item["mode"] == "mcp":
+        if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS"):
+            if mcp_env is None:
+                mcp_env = {}
+            mcp_env["EPHEMERAL_TEST_EMBEDDINGS"] = os.environ["EPHEMERAL_TEST_EMBEDDINGS"]
+        if mcp_env is None:
+            mcp_env = {}
+        mcp_env["EPHEMERAL_DISABLE_SOCKET_SERVER"] = "1"
     command = _codex_command(
         codex=args.codex,
         model=args.model,
@@ -234,12 +265,15 @@ def _run_one(
         allow_mcp_approvals=getattr(args, "allow_mcp_approvals", False),
         sandbox=args.sandbox,
         timeout=args.timeout,
+        mcp_env=mcp_env,
     )
     started = time.monotonic()
     exit_code = None
     failure_reason = None
     try:
-        completed = _run_codex_process([*command, task["prompt"]], cwd=fixture, timeout=args.timeout)
+        completed = _run_codex_process(
+            [*command, task["prompt"]], cwd=fixture, timeout=args.timeout
+        )
         output = completed.stdout + completed.stderr
         success = completed.returncode == 0
         exit_code = completed.returncode
@@ -333,6 +367,11 @@ def main() -> None:
     )
     parser.add_argument("--sandbox", choices=("read-only", "workspace-write"), default="read-only")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--diagnostic-log-dir",
+        type=Path,
+        help="Optional directory for content-free MCP lifecycle logs",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.timeout < 1:

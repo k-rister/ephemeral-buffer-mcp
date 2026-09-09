@@ -343,6 +343,9 @@ events. MCP tool lifecycle events include only a local call ID, tool name,
 duration, success state, and error class; captured content, labels, query text,
 command text, and secrets are not logged. A start event without a matching
 completion or failure event identifies a stalled tool/session boundary.
+For the Codex A/B adapter, pass `--diagnostic-log-dir /path/to/logs` to write
+one content-free lifecycle log per MCP run. Keep this directory outside the
+repository and review it as diagnostic data.
 
 Important events include command timeouts and termination, rejected capture or
 socket payload limits, embedding load failures, capture eviction, storage
