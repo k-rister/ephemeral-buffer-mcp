@@ -60,6 +60,39 @@ class TestServerTools(unittest.TestCase):
         server.engine.embedding_model = self.original_model
         server.engine.clear("all")
 
+    def test_tool_instrumentation_logs_content_free_lifecycle(self):
+        with patch.object(server, "log_event") as log:
+            @server._instrument_tool("probe_tool")
+            def successful_tool(query):
+                return f"result for {query}"
+
+            self.assertEqual(successful_tool("secret query"), "result for secret query")
+            self.assertEqual(
+                [call.args[2] for call in log.call_args_list],
+                ["mcp_tool_started", "mcp_tool_completed"],
+            )
+            completed = log.call_args_list[1].kwargs
+            self.assertEqual(completed["tool"], "probe_tool")
+            self.assertTrue(completed["success"])
+            self.assertIsInstance(completed["duration_ms"], float)
+            self.assertNotIn("secret query", str(log.call_args_list))
+
+            log.reset_mock()
+
+            @server._instrument_tool("failing_tool")
+            def failing_tool():
+                raise RuntimeError("private failure")
+
+            with self.assertRaisesRegex(RuntimeError, "private failure"):
+                failing_tool()
+            self.assertEqual(
+                [call.args[2] for call in log.call_args_list],
+                ["mcp_tool_started", "mcp_tool_failed"],
+            )
+            failed = log.call_args_list[1].kwargs
+            self.assertEqual(failed["error_type"], "RuntimeError")
+            self.assertNotIn("private failure", str(log.call_args_list))
+
     def test_tool_descriptions_include_agent_routing_and_path_guidance(self):
         capture_text_doc = server.capture_text.__doc__
         capture_file_doc = server.capture_file.__doc__

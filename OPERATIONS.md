@@ -339,9 +339,10 @@ excerpt or line range only when it is necessary.
 Runtime events are emitted as one privacy-safe JSON object per stderr line.
 Warnings and errors are enabled by default. Set `EPHEMERAL_LOG_LEVEL=INFO` to
 include normal embedding readiness, capture eviction, and process lifecycle
-events. Logged fields describe event types, IDs, sizes, limits, signal names,
-and error classes; captured content, labels, command text, and secrets are not
-logged.
+events. MCP tool lifecycle events include only a local call ID, tool name,
+duration, success state, and error class; captured content, labels, query text,
+command text, and secrets are not logged. A start event without a matching
+completion or failure event identifies a stalled tool/session boundary.
 
 Important events include command timeouts and termination, rejected capture or
 socket payload limits, embedding load failures, capture eviction, storage
