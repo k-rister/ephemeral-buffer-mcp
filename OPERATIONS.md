@@ -229,6 +229,26 @@ output, or user queries to the baseline. CI retains relevance, latency, and
 effectiveness JSON outputs as machine-readable artifacts; timing artifacts are
 diagnostic and are not exact cross-run gates.
 
+The separate `benchmark_agent_ab.py` harness defines the protocol for a real
+agent-level A/B evaluation. Generate its counterbalanced schedule, run matched
+`control` and `mcp` tasks through an external adapter, then analyze a
+metadata-only records envelope:
+
+```bash
+.venv/bin/python benchmark_agent_ab.py \
+  --schedule-output agent-ab-schedule.json --repetitions 5 --seed 20260909
+.venv/bin/python benchmark_agent_ab.py \
+  --records agent-ab-records.json --output agent-ab-summary.json
+```
+
+The protocol requires non-secret identifiers for model configuration,
+repository fixture, environment, reset policy, and adapter. Each run records
+only task outcome and resource metadata. The analyzer validates pairing and
+reports aggregate completion/retrieval outcomes, cost metrics, paired deltas,
+and uncertainty. It does not invoke a model or collect telemetry. Keep records
+and captures out of the repository and perform a privacy review before sharing
+the aggregate summary.
+
 For a reproducible local report, run the benchmark with a fixed seed and keep
 the JSON output:
 
