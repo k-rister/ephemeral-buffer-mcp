@@ -255,10 +255,14 @@ scheduled run, invokes `codex exec` with the selected model, and configures the
 ephemeral-buffer MCP server only for `mcp` runs. Control runs use an isolated
 Codex configuration with no MCP server. The adapter records metadata only and
 does not write transcripts or raw command output to the records file. Its
-`context_bytes` field is an observable prompt/event-envelope proxy, not a
+`context_bytes_proxy` field is an observable prompt/event-envelope proxy, not a
 provider-reported model-context measurement.
 If the fixture does not contain an importable `server` module, provide the
 absolute server path with `--mcp-server-script`.
+Records schema version 2 also includes exit code, failure reason, MCP-specific
+tool-call counts, and optional provider-reported input/output token counts.
+Version-1 records remain readable by the analyzer; unavailable provider
+metrics are distinct from zero values.
 
 Example:
 

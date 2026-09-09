@@ -18,7 +18,14 @@ class TestCodexAgentRunner(unittest.TestCase):
             json.dumps({"type": "command_execution", "command": "pytest"}),
             json.dumps({"type": "command_execution", "command": "pytest"}),
         ])
-        self.assertEqual(_event_metrics(output), (3, 2))
+        self.assertEqual(_event_metrics(output), (3, 0, 2, None, None))
+
+    def test_event_metrics_extracts_mcp_calls_and_usage(self):
+        output = "\n".join([
+            json.dumps({"type": "mcp_tool_call", "usage": {"input_tokens": 120, "output_tokens": 9}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 140, "output_tokens": 12}}),
+        ])
+        self.assertEqual(_event_metrics(output), (1, 1, 0, 140, 12))
 
     def test_manifest_requires_all_schedule_tasks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -47,6 +54,8 @@ class TestCodexAgentRunner(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("--ephemeral", command)
+        self.assertEqual(output["mcp_tool_calls"], 0)
+        self.assertIsNone(output["input_tokens"])
 
     def test_run_schedule_writes_balanced_records(self):
         schedule = build_schedule(repetitions=1, seed=3)

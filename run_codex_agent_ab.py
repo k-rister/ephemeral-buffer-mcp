@@ -18,7 +18,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from benchmark_agent_ab import MODES, TASKS, _read_json, validate_records
+from benchmark_agent_ab import MODES, RECORDS_SCHEMA_VERSION, TASKS, _read_json, validate_records
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
@@ -86,10 +86,13 @@ def _walk_dicts(value: Any):
             yield from _walk_dicts(child)
 
 
-def _event_metrics(output: str) -> tuple[int, int]:
-    """Return best-effort tool-call and repeated-command counts from JSONL."""
+def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None]:
+    """Return tool, MCP, duplicate-command, and usage metrics from JSONL."""
     tool_calls = 0
+    mcp_tool_calls = 0
     commands: list[str] = []
+    input_tokens = None
+    output_tokens = None
     for event in _event_objects(output):
         for item in _walk_dicts(event):
             event_type = item.get("type")
@@ -97,13 +100,23 @@ def _event_metrics(output: str) -> tuple[int, int]:
                 "tool_call" in event_type or event_type in {"command_execution", "function_call"}
             ):
                 tool_calls += 1
+            if isinstance(event_type, str) and "mcp" in event_type.lower() and (
+                "call" in event_type.lower() or "tool" in event_type.lower()
+            ):
+                mcp_tool_calls += 1
+            usage = item.get("usage")
+            if isinstance(usage, dict):
+                if isinstance(usage.get("input_tokens"), (int, float)):
+                    input_tokens = usage["input_tokens"]
+                if isinstance(usage.get("output_tokens"), (int, float)):
+                    output_tokens = usage["output_tokens"]
             for key in ("command", "cmd", "shell_command"):
                 command = item.get(key)
                 if isinstance(command, str) and command.strip():
                     commands.append(command.strip())
     counts = Counter(commands)
     repeated = sum(count - 1 for count in counts.values() if count > 1)
-    return tool_calls, repeated
+    return tool_calls, mcp_tool_calls, repeated, input_tokens, output_tokens
 
 
 def _peak_rss_bytes() -> int:
@@ -180,6 +193,8 @@ def _run_one(
         timeout=args.timeout,
     )
     started = time.monotonic()
+    exit_code = None
+    failure_reason = None
     try:
         completed = subprocess.run(
             [*command, task["prompt"]],
@@ -191,11 +206,15 @@ def _run_one(
         )
         output = completed.stdout + completed.stderr
         success = completed.returncode == 0
+        exit_code = completed.returncode
+        if not success:
+            failure_reason = "codex_exit_nonzero"
     except subprocess.TimeoutExpired as exc:
         output = _as_text(exc.stdout) + _as_text(exc.stderr)
         success = False
+        failure_reason = "timeout"
     duration = time.monotonic() - started
-    tool_calls, repeated_commands = _event_metrics(output)
+    tool_calls, mcp_tool_calls, repeated_commands, input_tokens, output_tokens = _event_metrics(output)
     marker = task["signal_marker"]
     return {
         "task_id": item["task_id"],
@@ -208,8 +227,13 @@ def _run_one(
         "repeated_commands": repeated_commands,
         # Codex CLI does not expose context bytes; this is the observable
         # prompt/event envelope, kept as a comparable proxy between modes.
-        "context_bytes": len(task["prompt"].encode()) + len(output.encode()),
+        "context_bytes_proxy": len(task["prompt"].encode()) + len(output.encode()),
         "peak_rss_bytes": _peak_rss_bytes(),
+        "exit_code": exit_code,
+        "failure_reason": failure_reason,
+        "mcp_tool_calls": mcp_tool_calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
     }
 
 
@@ -241,6 +265,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], 
     payload = {
         "schema_version": schedule["schema_version"],
         "benchmark": "agent-ab",
+        "records_schema_version": RECORDS_SCHEMA_VERSION,
         "task_fixture_version": schedule["task_fixture_version"],
         "protocol": protocol,
         "schedule": schedule,

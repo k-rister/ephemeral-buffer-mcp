@@ -2,7 +2,7 @@
 
 import unittest
 
-from benchmark_agent_ab import build_schedule, summarize_records, validate_records
+from benchmark_agent_ab import RECORDS_SCHEMA_VERSION, build_schedule, summarize_records, validate_records
 
 
 def _records_payload():
@@ -62,6 +62,33 @@ class TestAgentAbBenchmark(unittest.TestCase):
         payload["runs"] = payload["runs"][:-1]
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
+
+    def test_validation_accepts_version_two_records_and_summary_labels_proxy(self):
+        schedule, payload = _records_payload()
+        payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
+        payload["runs"] = [
+            {
+                "task_id": record["task_id"],
+                "repetition": record["repetition"],
+                "mode": record["mode"],
+                "completed": record["completed"],
+                "signal_retrieved": record["signal_retrieved"],
+                "duration_seconds": record["duration_seconds"],
+                "tool_calls": record["tool_calls"],
+                "repeated_commands": record["repeated_commands"],
+                "context_bytes_proxy": record["context_bytes"],
+                "peak_rss_bytes": record["peak_rss_bytes"],
+                "exit_code": 0,
+                "failure_reason": None,
+                "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+                "input_tokens": 100,
+                "output_tokens": 20,
+            }
+            for record in payload["runs"]
+        ]
+        summary = summarize_records(payload, schedule)
+        self.assertIn("context_bytes_proxy", summary["mode_summaries"]["mcp"])
+        self.assertEqual(summary["records_schema_version"], RECORDS_SCHEMA_VERSION)
         _, payload = _records_payload()
         payload["runs"][0]["raw_output"] = "forbidden"
         with self.assertRaises(ValueError):
