@@ -87,10 +87,19 @@ validation reminders are therefore also kept in the `server.py` tool
 docstrings.
 
 Use direct command execution for small, bounded inspections. Use
-`execute_and_capture` for noisy tests, builds, and logs where bounded output,
-search, and follow-up retrieval are useful. Use `capture_text` for output
+`execute_and_capture` when output may be noisy, large, or uncertain—especially
+tests, builds, and logs—where bounded output, search, and follow-up retrieval
+are useful. Use `capture_text` for output
 already held by the caller and `capture_file` only after intentionally selecting
 and checking the file.
+
+This routing rule is advisory. The synthetic `benchmark_routing.py` harness
+compares direct and captured execution for 16-line targeted output, 256-line
+test-like output, and 2048-line build/log-like output. Use its median and p95
+measurements to calibrate expectations for a deployment; do not treat them as
+portable hard thresholds. Direct execution usually minimizes latency for small
+bounded output, while capture trades some overhead for bounded context,
+searchability, and exact follow-up retrieval.
 
 Before repository-sensitive work, confirm the intended repository and working
 directory, pass an explicit `cwd`, and resolve symlinks when path identity

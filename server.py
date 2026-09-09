@@ -178,7 +178,9 @@ def execute_and_capture(
 
     Use this for noisy tests, builds, logs, and other output that benefits from
     bounded capture and later search. Direct command execution is usually
-    faster for a small, targeted inspection. Before running, verify the
+    faster for a small, targeted inspection; use capture once output may be
+    noisy, large, or uncertain. This is an advisory routing heuristic, not an
+    enforced threshold. Before running, verify the
     command, intended repository, and working directory: an omitted ``cwd``
     inherits the server process directory, and symlinks or shell expansion can
     target a different path than expected. This tool bounds output but does
