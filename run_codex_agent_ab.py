@@ -186,13 +186,10 @@ def _codex_command(
     timeout: int,
     mcp_env: dict[str, str] | None = None,
 ) -> list[str]:
-    command = [codex]
+    command = [codex, "exec"]
     if mode == "mcp" and allow_mcp_approvals:
         command.append("--approve-for-me")
-    else:
-        command.extend(["--ask-for-approval", "never"])
     command.extend([
-        "exec",
         "--model",
         model,
         "--json",
@@ -331,7 +328,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], 
         "environment": args.environment,
         "reset_policy": "fresh-copy-per-run",
         "agent_adapter": "codex-cli",
-        "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "never",
+        "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "read-only-sandbox",
     }
     payload = {
         "schema_version": schedule["schema_version"],

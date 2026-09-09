@@ -681,16 +681,16 @@ Run the adapter from the repository checkout:
 ```
 
 The runner requires a locally authenticated `codex` CLI. It uses
-`codex exec --json --ephemeral`, disables approval prompts, and defaults to a
-read-only sandbox. `context_bytes_proxy` is an observable prompt/event-envelope
+`codex exec --json --ephemeral`, uses a read-only sandbox by default. `context_bytes_proxy` is an observable prompt/event-envelope
 proxy because the CLI does not expose the model's internal context size.
 When the fixture does not contain an importable `server` module, pass
 `--mcp-server-script /absolute/path/to/server.py`.
 For MCP experiments where the client must be allowed to call the configured
 server, add `--allow-mcp-approvals`. This uses Codex automatic review with a
 `workspace-write` sandbox, and should only be used with a disposable,
-privacy-reviewed fixture. Control runs continue to use approval policy
-`never`; the records protocol identifies the selected policy.
+privacy-reviewed fixture. Control runs continue to use the read-only sandbox
+without MCP approval routing; the records protocol identifies the selected
+policy.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 

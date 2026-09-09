@@ -75,6 +75,18 @@ class TestCodexAgentRunner(unittest.TestCase):
         env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
         self.assertIn('EPHEMERAL_TEST_EMBEDDINGS="1"', env_config)
 
+    def test_codex_command_uses_current_exec_subcommand_syntax(self):
+        from run_codex_agent_ab import _codex_command
+
+        command = _codex_command(
+            codex="codex", model="gpt-5.6-luna", mode="control", fixture=Path("/tmp/fixture"),
+            mcp_python="python", mcp_module="server", mcp_server_script=None,
+            allow_mcp_approvals=False, sandbox="read-only", timeout=10,
+        )
+
+        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertNotIn("--ask-for-approval", command)
+
     def test_run_schedule_writes_balanced_records(self):
         schedule = build_schedule(repetitions=1, seed=3)
         manifest = {
