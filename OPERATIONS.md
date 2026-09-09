@@ -279,6 +279,23 @@ targeted-output control, and defines objective success criteria for each task.
 Keep generated fixtures, manifests, records, and captures outside the
 repository unless they have passed a separate privacy review.
 
+For issue #93, create a checked-in aggregate baseline only from a reviewed
+agent A/B summary:
+
+```bash
+.venv/bin/python benchmark_agent_ab_baseline.py \
+  --summary /tmp/agent-ab-summary.json \
+  --create-baseline \
+  --output benchmark_agent_ab_baseline.json
+```
+
+Compare later summaries with `--baseline` and `--fail-on-regression`. The
+baseline compares completion and retrieval as primary gated outcomes, latency
+and context/token metrics with tolerances, and MCP/tool usage as reported
+observations. Missing provider telemetry is unavailable rather than zero.
+Do not make live Codex calls part of required pull-request CI; run this manual
+workflow or an explicitly scheduled experiment after privacy review.
+
 Example:
 
 ```bash

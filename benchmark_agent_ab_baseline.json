@@ -1,0 +1,51 @@
+{
+  "benchmark": "agent-ab-baseline",
+  "metrics": {
+    "control": {
+      "completion_rate": 1.0,
+      "context_bytes_proxy": 9054.45,
+      "duration_seconds": 10.900053481048962,
+      "input_tokens": null,
+      "mcp_tool_calls": null,
+      "output_tokens": null,
+      "repeated_commands": 1.75,
+      "signal_retrieval_rate": 1.0,
+      "tool_calls": 3.5
+    },
+    "mcp": {
+      "completion_rate": 1.0,
+      "context_bytes_proxy": 13015.65,
+      "duration_seconds": 12.190853284148762,
+      "input_tokens": null,
+      "mcp_tool_calls": null,
+      "output_tokens": null,
+      "repeated_commands": 2.85,
+      "signal_retrieval_rate": 1.0,
+      "tool_calls": 5.5
+    }
+  },
+  "privacy": "aggregate metadata only; raw prompts, transcripts, commands, captures, and user content are excluded",
+  "protocol": {
+    "agent_adapter": "codex-cli",
+    "environment": "local-eb-heavy",
+    "model_config": "gpt-5.6-luna",
+    "repository_fixture": "synthetic-eb-heavy-v1",
+    "reset_policy": "fresh-copy-per-run"
+  },
+  "records_schema_version": 1,
+  "repetitions": 5,
+  "schema_version": 1,
+  "seed": 20260909,
+  "task_fixture_version": 1,
+  "thresholds": {
+    "completion_rate": {"absolute_tolerance": 0.05, "direction": "higher", "gate": true, "relative_tolerance": 0.0},
+    "context_bytes_proxy": {"absolute_tolerance": 0.0, "direction": "lower", "gate": true, "relative_tolerance": 0.25},
+    "duration_seconds": {"absolute_tolerance": 0.0, "direction": "lower", "gate": true, "relative_tolerance": 0.25},
+    "input_tokens": {"absolute_tolerance": 0.0, "direction": "lower", "gate": true, "relative_tolerance": 0.25},
+    "mcp_tool_calls": {"absolute_tolerance": 0.0, "direction": "informational", "gate": false, "relative_tolerance": 0.0},
+    "output_tokens": {"absolute_tolerance": 0.0, "direction": "lower", "gate": true, "relative_tolerance": 0.25},
+    "repeated_commands": {"absolute_tolerance": 0.5, "direction": "lower", "gate": true, "relative_tolerance": 0.25},
+    "signal_retrieval_rate": {"absolute_tolerance": 0.05, "direction": "higher", "gate": true, "relative_tolerance": 0.0},
+    "tool_calls": {"absolute_tolerance": 0.0, "direction": "lower", "gate": false, "relative_tolerance": 0.25}
+  }
+}

@@ -701,6 +701,26 @@ targeted-output task and a follow-up retrieval task. The manifest includes
 output-size bands, expected signals, and objective success criteria. It is
 synthetic and contains no user logs or captured output.
 
+Create and compare an aggregate agent A/B baseline after a privacy review:
+
+```bash
+.venv/bin/python benchmark_agent_ab_baseline.py \
+  --summary /tmp/agent-ab-summary.json \
+  --create-baseline \
+  --output benchmark_agent_ab_baseline.json
+.venv/bin/python benchmark_agent_ab_baseline.py \
+  --summary /tmp/agent-ab-summary.json \
+  --baseline benchmark_agent_ab_baseline.json \
+  --fail-on-regression \
+  --output /tmp/agent-ab-comparison.json
+```
+
+The baseline stores model, fixture, seed, repetition, aggregate metrics, and
+explicit tolerances only. It never stores prompts, transcripts, commands,
+captures, or user content. This comparison is a documented manual workflow;
+live model calls are not part of required pull-request CI. Update a checked-in
+baseline only when fixture or model changes are explained in review.
+
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
