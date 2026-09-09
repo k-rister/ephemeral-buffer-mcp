@@ -353,8 +353,11 @@ additional output before sharing it.
 
 Operational events are written as privacy-safe JSON lines to stderr. Warnings
 and errors are enabled by default; set `EPHEMERAL_LOG_LEVEL=INFO` to include
-normal readiness, eviction, and process lifecycle events. Logs never include
-captured content or command text.
+normal readiness, eviction, process lifecycle, and MCP tool start/completion
+events. Tool lifecycle events contain only a local call ID, tool name, duration,
+success state, and error class. Logs never include captured content, labels,
+query text, or command text. A start event without a matching completion or
+failure event identifies a stalled tool/session boundary.
 
 ### Optional local usage metrics
 

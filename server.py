@@ -11,6 +11,7 @@ import asyncio
 import socket
 import threading
 import logging
+import itertools
 import platform
 import re
 import shlex
@@ -38,18 +39,37 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
 METRICS = LocalMetrics()
+_TOOL_CALL_IDS = itertools.count(1)
 
 
 def _instrument_tool(name):
-    """Decorate a tool with opt-in content-free call metrics."""
+    """Decorate a tool with opt-in content-free call metrics and timing logs."""
     def decorator(function):
         @wraps(function)
         def wrapper(*args, **kwargs):
-            with METRICS.measure(name) as state:
-                result = function(*args, **kwargs)
-                if isinstance(result, str) and result.startswith(("Error", "Search Error")):
-                    state["success"] = False
+            call_id = next(_TOOL_CALL_IDS)
+            started = time.perf_counter()
+            log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
+            try:
+                with METRICS.measure(name) as state:
+                    result = function(*args, **kwargs)
+                    if isinstance(result, str) and result.startswith(("Error", "Search Error")):
+                        state["success"] = False
+                duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                log_event(
+                    LOGGER, logging.INFO, "mcp_tool_completed",
+                    call_id=call_id, duration_ms=duration_ms,
+                    success=state["success"], tool=name,
+                )
                 return result
+            except Exception as exc:
+                duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                log_event(
+                    LOGGER, logging.ERROR, "mcp_tool_failed",
+                    call_id=call_id, duration_ms=duration_ms,
+                    error_type=type(exc).__name__, tool=name,
+                )
+                raise
         return wrapper
     return decorator
 
