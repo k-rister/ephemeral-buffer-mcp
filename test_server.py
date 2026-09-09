@@ -6,6 +6,7 @@ import json
 import os
 import runpy
 import socket
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -63,6 +64,7 @@ class TestServerTools(unittest.TestCase):
         capture_text_doc = server.capture_text.__doc__
         capture_file_doc = server.capture_file.__doc__
         execute_doc = server.execute_and_capture.__doc__
+        preflight_doc = server.preflight_command.__doc__
 
         self.assertIn("already-collected text", capture_text_doc)
         self.assertIn("resolve symlinks", capture_file_doc)
@@ -70,6 +72,84 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("omitted ``cwd``", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
         self.assertIn("filesystem safety", execute_doc)
+        self.assertIn("never executed", preflight_doc)
+        self.assertIn("Shell expansion", preflight_doc)
+
+    def test_preflight_reports_repo_executable_and_does_not_run_command(self):
+        result = json.loads(server.preflight_command("printf 'secret output'", cwd=os.getcwd()))
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["working_directory"]["status"], "ok")
+        self.assertEqual(result["working_directory"]["source"], "explicit")
+        self.assertEqual(result["repository"]["status"], "detected")
+        self.assertEqual(result["command"]["executable"]["requested"], "printf")
+        self.assertNotIn("secret output", json.dumps(result))
+        self.assertIn("not executed", result["limitations"][0])
+
+    def test_preflight_reports_omitted_missing_and_symlinked_cwds(self):
+        omitted = json.loads(server.preflight_command("echo hello"))
+        self.assertEqual(omitted["working_directory"]["source"], "process-cwd")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            missing = root / "missing"
+            dangling = root / "dangling"
+            try:
+                link.symlink_to(target, target_is_directory=True)
+                dangling.symlink_to(root / "gone", target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks are unavailable on this platform")
+
+            linked = json.loads(server.preflight_command("echo hello", cwd=str(link)))
+            self.assertTrue(linked["working_directory"]["is_symlink"])
+            self.assertEqual(linked["working_directory"]["status"], "ok")
+            self.assertEqual(linked["working_directory"]["symlink_target"], str(target.resolve()))
+
+            missing_result = json.loads(server.preflight_command("echo hello", cwd=str(missing)))
+            self.assertEqual(missing_result["working_directory"]["status"], "missing")
+            self.assertEqual(missing_result["repository"]["status"], "unavailable")
+
+            dangling_result = json.loads(server.preflight_command("echo hello", cwd=str(dangling)))
+            self.assertEqual(dangling_result["working_directory"]["status"], "dangling-symlink")
+
+    def test_preflight_distinguishes_unavailable_command_resolution(self):
+        missing = json.loads(server.preflight_command("definitely-not-a-real-command"))
+        self.assertEqual(missing["command"]["executable"]["status"], "unavailable")
+
+        malformed = json.loads(server.preflight_command("'unterminated"))
+        self.assertIn("unavailable", malformed["command"]["parse_status"])
+        self.assertEqual(malformed["command"]["executable"]["status"], "unavailable")
+
+        absolute = json.loads(server.preflight_command(f"{sys.executable} --version"))
+        self.assertEqual(absolute["command"]["executable"]["status"], "resolved")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "tool"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            relative = json.loads(server.preflight_command("./tool", cwd=str(root)))
+            self.assertEqual(relative["command"]["executable"]["status"], "resolved")
+            unavailable = json.loads(server.preflight_command("./missing", cwd=str(root)))
+            self.assertEqual(unavailable["command"]["executable"]["status"], "unavailable")
+
+            regular_file = root / "regular-file"
+            regular_file.write_text("not a directory", encoding="utf-8")
+            not_directory = json.loads(server.preflight_command("echo hello", cwd=str(regular_file)))
+            self.assertEqual(not_directory["working_directory"]["status"], "not-a-directory")
+
+    def test_preflight_reports_repository_probe_and_unexpected_failures(self):
+        with patch.object(server.subprocess, "run", side_effect=OSError("git unavailable")):
+            unavailable = json.loads(server.preflight_command("echo hello", cwd=os.getcwd()))
+        self.assertEqual(unavailable["repository"]["status"], "unavailable")
+        self.assertEqual(unavailable["repository"]["reason"], "OSError")
+
+        with patch.object(server, "_resolve_preflight_cwd", side_effect=RuntimeError("unexpected")):
+            error = json.loads(server.preflight_command("echo hello"))
+        self.assertEqual(error, {"reason": "RuntimeError", "status": "error"})
 
     def test_capture_file_reports_missing_path(self):
         result = server.capture_file("/does/not/exist")
