@@ -186,9 +186,10 @@ def _codex_command(
     timeout: int,
     mcp_env: dict[str, str] | None = None,
 ) -> list[str]:
-    command = [codex, "exec"]
+    command = [codex]
     if mode == "mcp" and allow_mcp_approvals:
         command.append("--approve-for-me")
+    command.append("exec")
     command.extend([
         "--model",
         model,
