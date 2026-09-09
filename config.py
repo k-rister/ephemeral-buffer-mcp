@@ -10,6 +10,7 @@ DEFAULT_MAX_CAPTURES = 25
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
 
@@ -36,6 +37,18 @@ def embedding_model_name() -> str:
 def embedding_cache_dir() -> str | None:
     """Return the optional FastEmbed model cache directory."""
     return os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR") or None
+
+
+def semantic_prefetch_enabled() -> bool:
+    """Return whether post-ingestion semantic indexing is enabled."""
+    return os.environ.get("EPHEMERAL_SEMANTIC_PREFETCH", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def semantic_prefetch_workers() -> int:
+    """Return the bounded number of semantic prefetch workers."""
+    return positive_int_env("EPHEMERAL_SEMANTIC_PREFETCH_WORKERS", DEFAULT_SEMANTIC_PREFETCH_WORKERS)
 
 
 def positive_int_env(name: str, default: int) -> int:

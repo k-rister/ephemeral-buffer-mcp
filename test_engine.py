@@ -8,7 +8,7 @@ import sys
 import threading
 import unittest
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 from engine import (
@@ -529,6 +529,121 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine._ensure_embeddings(capture)
         finally:
             engine._embedding_lock = original_lock
+
+    def test_async_semantic_prefetch_materializes_once_and_search_waits(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            capture = engine.ingest("prefetch payload", label="prefetch")
+            self.assertTrue(started.wait(timeout=2))
+            self.assertEqual(capture.semantic_index_state, "pending")
+            self.assertIsNone(capture.embeddings)
+            engine._schedule_semantic_prefetch(capture)
+            self.assertEqual(len(engine._prefetch_futures), 1)
+
+            release.set()
+            self.assertTrue(engine.search_semantic(capture, "payload"))
+            self.assertEqual(capture.semantic_index_state, "ready")
+            self.assertIsNotNone(capture.embeddings)
+        finally:
+            release.set()
+            engine.shutdown()
+
+    def test_async_semantic_prefetch_failure_is_reported_and_lazy_search_retries(self):
+        class FailingEmbedding:
+            def embed(self, _texts):
+                raise RuntimeError("prefetch unavailable")
+
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine.embedding_model = FailingEmbedding()
+        try:
+            capture = engine.ingest("prefetch failure", label="prefetch-failure")
+            future = engine._prefetch_futures[capture.capture_id]
+            with self.assertRaisesRegex(RuntimeError, "prefetch unavailable"):
+                future.result(timeout=2)
+            engine._wait_for_prefetch(capture)
+            self.assertEqual(capture.semantic_index_state, "failed")
+            with self.assertRaisesRegex(RuntimeError, "prefetch unavailable"):
+                engine.search_semantic(capture, "failure")
+        finally:
+            engine.shutdown()
+
+    def test_async_prefetch_is_bounded_and_clear_cancels_queued_work(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            first = engine.ingest("first payload", label="first")
+            self.assertTrue(started.wait(timeout=2))
+            second = engine.ingest("second payload", label="second")
+            third = engine.ingest("third payload", label="third")
+            self.assertLessEqual(len(engine._prefetch_futures), 2)
+            self.assertEqual(engine.clear(second.capture_id), "Cleared capture 'cap_2'.")
+            self.assertNotIn(second.capture_id, engine._prefetch_futures)
+            self.assertEqual(first.semantic_index_state, "pending")
+            release.set()
+            engine.clear("all")
+        finally:
+            release.set()
+            engine.shutdown()
+
+    def test_async_prefetch_lifecycle_error_and_shutdown_paths(self):
+        with self.assertRaisesRegex(ValueError, "semantic_prefetch_workers"):
+            EphemeralEngine(semantic_prefetch=True, semantic_prefetch_workers=0)
+
+        submit_failure = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        try:
+            with patch.object(
+                submit_failure._prefetch_executor,
+                "submit",
+                side_effect=RuntimeError("executor closed"),
+            ):
+                capture = submit_failure.ingest("submit failure", label="submit-failure")
+            self.assertEqual(capture.semantic_index_state, "failed")
+            submit_failure.captures.clear()
+            submit_failure._schedule_semantic_prefetch(capture)
+        finally:
+            submit_failure.shutdown()
+            submit_failure.shutdown()
+
+        callback_engine = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        try:
+            capture = SimpleNamespace(
+                capture_id="cap-callback",
+                embeddings=None,
+                semantic_index_state="pending",
+            )
+            callback_engine.captures[capture.capture_id] = capture
+            future = Future()
+            callback_engine._prefetch_futures[capture.capture_id] = future
+            future.cancel()
+            callback_engine._prefetch_slots.acquire(blocking=False)
+            callback_engine._prefetch_finished(capture.capture_id, future)
+            self.assertEqual(capture.semantic_index_state, "not-requested")
+
+            failed_future = Future()
+            failed_future.set_exception(RuntimeError("background failure"))
+            callback_engine._prefetch_futures[capture.capture_id] = failed_future
+            callback_engine._wait_for_prefetch(capture)
+        finally:
+            callback_engine.shutdown()
 
     def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
         engine = EphemeralEngine(max_captures=1)

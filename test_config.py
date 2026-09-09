@@ -9,9 +9,12 @@ from unittest.mock import patch
 from config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_SOCKET_PATH,
+    DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     embedding_cache_dir,
     embedding_model_name,
     positive_int_env,
+    semantic_prefetch_enabled,
+    semantic_prefetch_workers,
     socket_path,
 )
 
@@ -73,6 +76,23 @@ class TestPositiveIntEnv(unittest.TestCase):
         ):
             self.assertEqual(embedding_model_name(), "custom/model")
             self.assertEqual(embedding_cache_dir(), "/tmp/fastembed")
+
+    def test_semantic_prefetch_defaults_disabled_and_one_worker(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(semantic_prefetch_enabled())
+            self.assertEqual(semantic_prefetch_workers(), DEFAULT_SEMANTIC_PREFETCH_WORKERS)
+
+    def test_semantic_prefetch_settings_can_be_overridden(self):
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_SEMANTIC_PREFETCH": "true",
+                "EPHEMERAL_SEMANTIC_PREFETCH_WORKERS": "2",
+            },
+            clear=True,
+        ):
+            self.assertTrue(semantic_prefetch_enabled())
+            self.assertEqual(semantic_prefetch_workers(), 2)
 
 
 if __name__ == "__main__":
