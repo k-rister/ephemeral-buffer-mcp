@@ -359,6 +359,12 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("startup must fail", instructions)
 
+    def test_mcp_instructions_report_failed_socket(self):
+        with patch.object(server, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
+            instructions = server._mcp_instructions()
+
+        self.assertIn("Socket lifecycle is failed (RuntimeError: unavailable)", instructions)
+
     def test_runtime_diagnostics_includes_enabled_local_metrics(self):
         original_metrics = server.METRICS
         original_engine_metrics = server.engine.metrics
@@ -679,6 +685,20 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_socket_startup_timeout_is_reported(self):
+        event = SimpleNamespace(wait=lambda timeout: False)
+        with patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
+                patch.object(server, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
+            with self.assertRaisesRegex(SystemExit, "did not become ready within 3 seconds"):
+                server._require_socket_ready()
+
+    def test_socket_startup_failure_is_reported_to_entrypoint(self):
+        event = SimpleNamespace(wait=lambda timeout: True)
+        with patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
+                patch.object(server, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
+            with self.assertRaisesRegex(SystemExit, "failed to start: RuntimeError: unavailable"):
+                server._require_socket_ready()
+
     def test_strict_isolation_rejects_unconfigured_startup(self):
         class FailingLoop:
             def close(self):
