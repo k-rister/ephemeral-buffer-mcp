@@ -259,11 +259,12 @@ does not write transcripts or raw command output to the records file. Its
 provider-reported model-context measurement.
 If the fixture does not contain an importable `server` module, provide the
 absolute server path with `--mcp-server-script`.
-Records schema version 3 also includes exit code, failure reason, MCP-specific
+Records schema version 4 also includes exit code, failure reason, MCP-specific
 tool-call counts, optional provider-reported input/output token counts, and
 the complete provider usage samples observed in the Codex JSONL stream.
-Version-1 and version-2 records remain readable by the analyzer; unavailable
-provider metrics are distinct from zero values.
+It separates the observable context proxy into prompt and output byte
+components. Version-1 through version-3 records remain readable by the
+analyzer; unavailable provider metrics are distinct from zero values.
 The aggregate summary reports usage sample counts, monotonicity observations,
 and first-to-last deltas. A monotonic sequence is not treated as proof of
 cumulative accounting; use a controlled calibration matrix to establish the
