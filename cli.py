@@ -114,6 +114,8 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command to execute and capture")
 
     args = parser.parse_args()
+    if args.max_output_bytes < 512:
+        parser.error("--max-output-bytes must be at least 512")
 
     # If a command was passed after '--'
     if args.command:

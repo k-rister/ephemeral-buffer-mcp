@@ -332,6 +332,20 @@ class TestCliConfiguration(unittest.TestCase):
 
         self.assertEqual(exit_result.exception.code, 2)
 
+    def test_stdin_reports_invalid_output_limit_without_traceback(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["cli.py", "--max-output-bytes", "511"],
+        ), patch.object(sys, "stdin", io.StringIO("input")), \
+                patch.object(sys, "stderr", io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 2)
+        self.assertIn("must be at least 512", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
