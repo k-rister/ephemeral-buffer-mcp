@@ -637,8 +637,9 @@ Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
 the same model configuration, repository fixture, environment, and reset policy.
 Have an external agent adapter write a records envelope containing only the
 schedule, non-secret protocol identifiers, and per-run fields: completion,
-signal retrieval, duration, tool calls, repeated commands, context bytes, and
-peak RSS bytes. Summarize it with:
+signal retrieval, duration, tool calls, repeated commands, context proxy bytes
+(total plus prompt/output components), provider usage samples, and peak RSS
+bytes. Summarize it with:
 ```bash
 .venv/bin/python benchmark_agent_ab.py \
   --records agent-ab-records.json --output agent-ab-summary.json
@@ -743,9 +744,10 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 
 Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
 `AGENT_AB_SEED`, or `AGENT_AB_TIMEOUT_SECONDS` to repeat a different
-experiment. The script runs the synthetic fixture; use the lower-level runner
-commands above for a privacy-reviewed repository fixture and private task
-manifest.
+experiment. The script uses the synthetic fixture by default; set
+`AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1` for the repository-shaped
+synthetic profile. Use the lower-level runner commands above for a
+privacy-reviewed production-repository fixture and private task manifest.
 
 Create and compare an aggregate agent A/B baseline after a privacy review:
 
@@ -766,6 +768,15 @@ explicit tolerances only. It never stores prompts, transcripts, commands,
 captures, or user content. This comparison is a documented manual workflow;
 live model calls are not part of required pull-request CI. Update a checked-in
 baseline only when fixture or model changes are explained in review.
+
+The current agent-level evaluation supports a provisional routing policy:
+prefer MCP for large noisy output and follow-up retrieval, and prefer direct
+execution for small targeted inspections. Do not treat this as a universal
+default or convert it into hard numeric thresholds yet. The repository-shaped
+profile is synthetic, so production-repository behavior should be validated
+separately before generalizing the result. Provider-reported token deltas are
+diagnostic until a calibration matrix establishes whether usage samples are
+cumulative or per-turn.
 
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
