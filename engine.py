@@ -27,6 +27,7 @@ from config import (
     DEFAULT_MAX_CAPTURES,
     embedding_cache_dir,
     embedding_model_name as configured_embedding_model_name,
+    max_indexed_chunks as configured_max_indexed_chunks,
     semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
     semantic_prefetch_workers as configured_semantic_prefetch_workers,
 )
@@ -317,6 +318,7 @@ class EphemeralEngine:
         self,
         max_captures: int = DEFAULT_MAX_CAPTURES,
         max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
+        max_indexed_chunks: Optional[int] = None,
         embedding_model_name: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
         metrics: Optional[LocalMetrics] = None,
@@ -328,12 +330,18 @@ class EphemeralEngine:
             raise ValueError("max_captures must be at least 1")
         if max_buffer_bytes < 1:
             raise ValueError("max_buffer_bytes must be at least 1")
+        self.max_indexed_chunks = (
+            configured_max_indexed_chunks() if max_indexed_chunks is None else max_indexed_chunks
+        )
+        if self.max_indexed_chunks < 1:
+            raise ValueError("max_indexed_chunks must be at least 1")
         self.max_captures = max_captures
         self.max_buffer_bytes = max_buffer_bytes
         self._embedding_lock = threading.RLock()
         self.captures: Dict[str, Capture] = {}
         self.capture_order: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
+        self._indexed_chunks = 0
         self._next_id = 1
         
         self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
@@ -433,6 +441,15 @@ class EphemeralEngine:
             
         return chunks
 
+    @staticmethod
+    def _chunk_count(line_count: int, window_size: int = 4, step_size: int = 2) -> int:
+        """Return the number of sliding chunks without materializing them."""
+        if line_count <= 0:
+            return 0
+        if line_count <= window_size:
+            return 1
+        return ((line_count - window_size + step_size - 1) // step_size) + 1
+
     def ingest(
         self,
         text: str,
@@ -475,18 +492,13 @@ class EphemeralEngine:
             )
 
         classified_type, diff_meta = detect_content_type(lines, label=label, content_type_hint=content_type)
+        required_chunks = self._chunk_count(len(lines))
+        if required_chunks > self.max_indexed_chunks:
+            raise ValueError(
+                f"Capture requires {required_chunks:,} indexed chunks, exceeding the "
+                f"{self.max_indexed_chunks:,}-chunk index budget"
+            )
         chunks = self._chunk_lines(lines)
-        
-        # 1. Setup SQLite FTS5 in-memory DB for this capture
-        # Captures may be ingested by the CLI socket listener thread and queried
-        # by the MCP thread, so allow the per-capture connection to cross threads.
-        fts_conn = sqlite3.connect(":memory:", check_same_thread=False)
-        cur = fts_conn.cursor()
-        cur.execute("CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61')")
-        
-        for c in chunks:
-            cur.execute("INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)", (c.chunk_id, c.text))
-        fts_conn.commit()
 
         # Semantic embeddings are materialized lazily by the first semantic or
         # hybrid search. Ingestion remains useful for fast BM25 search without
@@ -500,7 +512,7 @@ class EphemeralEngine:
             raw_lines=lines,
             chunks=chunks,
             embeddings=embeddings,
-            fts_conn=fts_conn,
+            fts_conn=None,
             content_type=classified_type,
             diff_meta=diff_meta,
             truncated=truncated,
@@ -514,11 +526,13 @@ class EphemeralEngine:
             while self.capture_order and (
                 len(self.capture_order) >= self.max_captures
                 or self._total_bytes + capture.byte_size > self.max_buffer_bytes
+                or self._indexed_chunks + len(capture.chunks) > self.max_indexed_chunks
             ):
                 evicted_id, _ = self.capture_order.popitem(last=False)
                 if evicted_id in self.captures:
                     old_cap = self.captures.pop(evicted_id)
                     self._total_bytes -= old_cap.byte_size
+                    self._indexed_chunks -= len(old_cap.chunks)
                     log_event(
                         LOGGER,
                         logging.INFO,
@@ -532,9 +546,25 @@ class EphemeralEngine:
                     self.metrics.record_event("evictions")
                     self.metrics.forget_capture(evicted_id)
 
+            # Captures may be ingested by the CLI socket listener thread and
+            # queried by the MCP thread, so allow this connection to cross
+            # threads. Build it after admission so rejected captures never
+            # allocate index storage and LRU eviction can make room first.
+            fts_conn = sqlite3.connect(":memory:", check_same_thread=False)
+            cur = fts_conn.cursor()
+            cur.execute("CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61')")
+            for chunk in capture.chunks:
+                cur.execute(
+                    "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
+                    (chunk.chunk_id, chunk.text),
+                )
+            fts_conn.commit()
+            capture.fts_conn = fts_conn
+
             self.captures[capture_id] = capture
             self.capture_order[capture_id] = None
             self._total_bytes += capture.byte_size
+            self._indexed_chunks += len(capture.chunks)
             self.metrics.record_capture(capture_id)
         self._schedule_semantic_prefetch(capture)
         return capture
@@ -1034,6 +1064,9 @@ class EphemeralEngine:
             "max_captures": self.max_captures,
             "total_lines": total_lines,
             "total_chunks": total_chunks,
+            "indexed_chunks": self._indexed_chunks,
+            "max_indexed_chunks": self.max_indexed_chunks,
+            "remaining_indexed_chunks": self.max_indexed_chunks - self._indexed_chunks,
             "total_bytes": self._total_bytes,
             "max_buffer_bytes": self.max_buffer_bytes,
             "embedding_bytes": embedding_bytes,
@@ -1069,6 +1102,7 @@ class EphemeralEngine:
             self.captures.clear()
             self.capture_order.clear()
             self._total_bytes = 0
+            self._indexed_chunks = 0
             self.metrics.record_event("cleanups")
             for current_id in capture_ids:
                 self.metrics.forget_capture(current_id)
@@ -1078,6 +1112,7 @@ class EphemeralEngine:
             self._cancel_prefetch(capture_id)
             cap.semantic_index_state = "evicted"
             self._total_bytes -= cap.byte_size
+            self._indexed_chunks -= len(cap.chunks)
             self._close_capture_storage(cap)
             self.capture_order.pop(capture_id, None)
             self.metrics.record_event("cleanups")

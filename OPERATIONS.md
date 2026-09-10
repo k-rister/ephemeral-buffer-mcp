@@ -68,6 +68,13 @@ The buffer is intentionally transient. The defaults are:
 - 50 MiB of captured UTF-8 content (`EPHEMERAL_MAX_BUFFER_BYTES`)
 - least-recently-used (LRU) eviction when either limit is reached
 
+Semantic and BM25 indexes have a separate total limit of 32,768 indexed
+chunks, configurable with `EPHEMERAL_MAX_INDEXED_CHUNKS`. LRU eviction also
+makes room under this limit. If one capture requires more indexed chunks than
+the entire configured index budget, ingestion is rejected instead of creating
+a partial index; this preserves complete search coverage for retained
+captures.
+
 The byte budget covers retained capture content. Embedding storage, the search
 index, Python objects, and process RSS are reported separately by
 `get_buffer_stats`; process RSS is an approximate operational metric rather

@@ -366,6 +366,12 @@ socket path; `EPHEMERAL_SOCKET_PATH` remains an explicit override. The byte
 limit accounts for
 captured UTF-8 content; `get_buffer_stats` also reports embedding model
 readiness, embedding/cache settings, and process memory separately.
+
+Indexed chunks are bounded separately by `EPHEMERAL_MAX_INDEXED_CHUNKS`, which
+defaults to 32,768 total chunks across retained captures. LRU eviction makes
+room for a new capture when possible. A capture that exceeds the entire index
+budget is rejected rather than partially indexed, so accepted captures remain
+fully searchable and cannot produce silent semantic false negatives.
 `execute_and_capture` retains the beginning and end of oversized command
 output and marks the capture with its original byte count.
 
