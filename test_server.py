@@ -685,6 +685,19 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_import_does_not_start_socket_listener(self):
+        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
+                patch.object(server.threading, "Thread") as thread:
+            runpy.run_path(server.__file__, run_name="server_import")
+
+        thread.assert_not_called()
+
+    def test_explicit_socket_startup_honors_disabled_mode(self):
+        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}):
+            self.assertIsNone(server.start_socket_server())
+
+        self.assertEqual(server._socket_lifecycle()[0], "disabled")
+
     def test_socket_startup_timeout_is_reported(self):
         event = SimpleNamespace(wait=lambda timeout: False)
         with patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
@@ -901,6 +914,9 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_module_entrypoint_starts_listener_and_runs_mcp(self):
         class ReadyEvent:
+            def clear(self):
+                pass
+
             def wait(self, timeout):
                 self.timeout = timeout
                 return True

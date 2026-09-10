@@ -42,7 +42,7 @@ LOGGER = get_logger("server")
 METRICS = LocalMetrics()
 _TOOL_CALL_IDS = itertools.count(1)
 _SOCKET_STATE_LOCK = threading.Lock()
-_SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "starting"
+_SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "not-started"
 _SOCKET_FAILURE = None
 _SOCKET_STARTUP_EVENT = threading.Event()
 if _SOCKET_STATE == "disabled":
@@ -863,12 +863,15 @@ def run_socket_server():
         loop.close()
 
 
-# Start IPC socket background listener thread
-socket_thread = threading.Thread(target=run_socket_server, daemon=True)
-# Unit tests can disable the listener because they exercise the handler and
-# startup paths directly; real server and end-to-end processes leave it on.
-if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
+def start_socket_server():
+    """Start the IPC listener explicitly and return its background thread."""
+    if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1":
+        _set_socket_state("disabled")
+        return None
+    _set_socket_state("starting")
+    socket_thread = threading.Thread(target=run_socket_server, daemon=True)
     socket_thread.start()
+    return socket_thread
 
 
 if __name__ == "__main__":
@@ -877,5 +880,6 @@ if __name__ == "__main__":
             "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
         )
     if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
+        start_socket_server()
         _require_socket_ready()
     mcp.run()
