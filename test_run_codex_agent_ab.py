@@ -98,6 +98,24 @@ class TestCodexAgentRunner(unittest.TestCase):
 
         self.assertEqual(command[:3], ["codex", "--approve-for-me", "exec"])
 
+    def test_required_mcp_usage_marks_mcp_bypass_as_incomplete(self):
+        item = {"sequence": 1, "repetition": 1, "task_id": "noisy-test-failure", "mode": "mcp"}
+        task = {"prompt": "inspect the fixture", "signal_marker": "SUCCESS"}
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=True, require_mcp_calls=True,
+        )
+        result = subprocess_result(stdout="SUCCESS\n")
+        with tempfile.TemporaryDirectory() as directory, patch("run_codex_agent_ab._run_codex_process", return_value=result) as run:
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            output = _run_one(item, task, args=args, repository=repository, scratch=Path(directory))
+
+        self.assertFalse(output["completed"])
+        self.assertEqual(output["failure_reason"], "mcp_not_used")
+        self.assertIn("must use the configured ephemeral-buffer MCP tools", run.call_args.args[0][-1])
+
     def test_run_schedule_writes_balanced_records(self):
         schedule = build_schedule(repetitions=1, seed=3)
         manifest = {

@@ -292,6 +292,10 @@ records, an aggregate summary, and content-free lifecycle logs there. Set
 `AGENT_AB_RUN_DIR` to choose another output directory. Use the lower-level
 runner commands for privacy-reviewed repository fixtures.
 
+The repeatable script enables `--require-mcp-calls`, so a run that completes
+without any MCP tool call is recorded as `mcp_not_used` rather than being
+accepted as MCP evidence.
+
 For issue #93, create a checked-in aggregate baseline only from a reviewed
 agent A/B summary:
 

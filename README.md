@@ -690,7 +690,9 @@ server, add `--allow-mcp-approvals`. This uses Codex automatic review with a
 `workspace-write` sandbox, and should only be used with a disposable,
 privacy-reviewed fixture. Control runs continue to use the read-only sandbox
 without MCP approval routing; the records protocol identifies the selected
-policy.
+policy. Add `--require-mcp-calls` when the MCP arm must exercise at least one
+MCP tool; runs that bypass MCP are then marked incomplete with reason
+`mcp_not_used`.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
