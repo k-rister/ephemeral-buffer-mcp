@@ -24,6 +24,13 @@ from release_checks import (
 
 
 class TestReleaseChecks(unittest.TestCase):
+    def test_license_metadata_uses_compatible_file_table(self):
+        project = Path(__file__).with_name("pyproject.toml")
+        with project.open("rb") as stream:
+            license_metadata = release_checks.tomllib.load(stream)["project"]["license"]
+
+        self.assertEqual(license_metadata, {"file": "LICENSE"})
+
     def test_wheel_runtime_modules_include_metrics(self):
         project = Path(__file__).with_name("pyproject.toml")
         with project.open("rb") as stream:
