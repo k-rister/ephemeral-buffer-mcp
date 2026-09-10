@@ -21,7 +21,13 @@ import json
 import argparse
 import shlex
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
-from config import positive_int_env, socket_isolation_configured, socket_isolation_required, socket_path
+from config import (
+    positive_int_env,
+    socket_isolation_configured,
+    socket_isolation_required,
+    socket_path,
+    socket_timeout_seconds,
+)
 
 SOCKET_PATH = socket_path()
 
@@ -46,8 +52,10 @@ def send_to_mcp(
             "message": f"MCP server socket not found at {SOCKET_PATH}. Is the ephemeral-buffer MCP server running?"
         }
 
+    sock = None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(socket_timeout_seconds())
         sock.connect(SOCKET_PATH)
         
         payload = json.dumps({
@@ -69,10 +77,20 @@ def send_to_mcp(
                 break
             resp_data += chunk
             
-        sock.close()
         return json.loads(resp_data.decode("utf-8"))
+    except socket.timeout:
+        return {
+            "status": "error",
+            "message": (
+                "Timed out communicating with MCP server after "
+                f"{socket_timeout_seconds():g}s"
+            ),
+        }
     except Exception as e:
         return {"status": "error", "message": f"Failed to communicate with MCP server: {e}"}
+    finally:
+        if sock is not None:
+            sock.close()
 
 
 def main():
@@ -132,7 +150,7 @@ def main():
             print(f"\n[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
         if timed_out:
             print(f"\n[ephbuf] Command timed out after {args.timeout_seconds:g}s", file=sys.stderr)
-        sys.exit(exit_code)
+        sys.exit(exit_code if res.get("status") == "ok" else max(exit_code, 1))
 
     # Otherwise read from stdin (piped input)
     if not sys.stdin.isatty():
@@ -154,6 +172,7 @@ def main():
             print(f"[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
         else:
             print(f"[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
+            sys.exit(1)
     else:
         parser.print_help()
 

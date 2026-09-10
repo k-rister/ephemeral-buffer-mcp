@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import hashlib
+import math
 
 
 DEFAULT_MAX_CAPTURES = 25
@@ -12,6 +13,7 @@ DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
+DEFAULT_SOCKET_TIMEOUT_SECONDS = 10.0
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
 
 
@@ -25,6 +27,25 @@ def socket_isolation_required() -> bool:
     return os.environ.get("EPHEMERAL_REQUIRE_ISOLATION", "0").strip().lower() in {
         "1", "true", "yes", "on"
     }
+
+
+def socket_timeout_seconds() -> float:
+    """Return the bounded CLI socket operation timeout in seconds."""
+    name = "EPHEMERAL_SOCKET_TIMEOUT_SECONDS"
+    value = os.environ.get(name)
+    if value is None:
+        return DEFAULT_SOCKET_TIMEOUT_SECONDS
+    try:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError
+        return parsed
+    except ValueError:
+        print(
+            f"Ignoring invalid {name}={value!r}; using {DEFAULT_SOCKET_TIMEOUT_SECONDS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_SOCKET_TIMEOUT_SECONDS
 
 
 def socket_path() -> str:
