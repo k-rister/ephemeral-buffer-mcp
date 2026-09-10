@@ -308,8 +308,11 @@ def _run_one(
         mcp_env=mcp_env,
     )
     started = time.monotonic()
+    output = ""
+    success = False
     exit_code = None
     failure_reason = None
+    peak_rss_bytes = 0
     require_mcp_calls = item["mode"] == "mcp" and getattr(args, "require_mcp_calls", False)
     prompt = task["prompt"]
     if require_mcp_calls:
@@ -326,6 +329,7 @@ def _run_one(
         output = completed.stdout + completed.stderr
         success = completed.returncode == 0
         exit_code = completed.returncode
+        peak_rss_bytes = getattr(completed, "peak_rss_bytes", 0)
         if not success:
             failure_reason = "codex_exit_nonzero"
     except subprocess.TimeoutExpired as exc:
@@ -360,7 +364,7 @@ def _run_one(
         "context_bytes_proxy": len(prompt.encode()) + len(output.encode()),
         "prompt_bytes_proxy": len(prompt.encode()),
         "output_bytes_proxy": len(output.encode()),
-        "peak_rss_bytes": getattr(completed, "peak_rss_bytes", 0),
+        "peak_rss_bytes": peak_rss_bytes,
         "exit_code": exit_code,
         "failure_reason": failure_reason,
         "mcp_tool_calls": mcp_tool_calls,
