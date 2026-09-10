@@ -214,6 +214,16 @@ def _optional_stats(records: list[dict[str, Any]], field: str) -> dict[str, Any]
     return result
 
 
+def _optional_positive_stats(records: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    """Summarize measurements where zero is the documented unavailable sentinel."""
+    values = [record[field] for record in records if record.get(field, 0) > 0]
+    if not values:
+        return {"available": False, "count": 0}
+    result = _stats([float(value) for value in values])
+    result["available"] = True
+    return result
+
+
 def _stats(values: list[float]) -> dict[str, float | int]:
     count = len(values)
     mean = statistics.mean(values) if values else 0.0
@@ -281,7 +291,7 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             "context_bytes_proxy": _stats([_metric_value(record, "context_bytes_proxy") for record in selected]),
             "prompt_bytes_proxy": _optional_stats(selected, "prompt_bytes_proxy"),
             "output_bytes_proxy": _optional_stats(selected, "output_bytes_proxy"),
-            "peak_rss_bytes": _stats([_metric_value(record, "peak_rss_bytes") for record in selected]),
+            "peak_rss_bytes": _optional_positive_stats(selected, "peak_rss_bytes"),
             "input_tokens": _optional_stats(selected, "input_tokens"),
             "output_tokens": _optional_stats(selected, "output_tokens"),
             "usage_accounting": {
@@ -301,10 +311,16 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
+            if metric == "peak_rss_bytes" and (
+                pair["control"].get(metric, 0) <= 0 or pair["mcp"].get(metric, 0) <= 0
+            ):
+                continue
             control = _metric_value(pair["control"], metric)
             mcp = _metric_value(pair["mcp"], metric)
             deltas.append(mcp - control)
         paired[metric] = _stats(deltas)
+        if metric == "peak_rss_bytes":
+            paired[metric]["available"] = bool(deltas)
     for metric in ("prompt_bytes_proxy", "output_bytes_proxy"):
         if all(metric in record for record in runs):
             deltas = []
