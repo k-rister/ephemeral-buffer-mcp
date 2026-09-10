@@ -294,6 +294,7 @@ class Capture:
     label: str
     timestamp: float
     raw_lines: List[str]
+    input_byte_size: int
     chunks: List[Chunk] = field(default_factory=list)
     embeddings: Optional[np.ndarray] = None
     fts_conn: Optional[sqlite3.Connection] = None
@@ -311,7 +312,7 @@ class Capture:
 
     @property
     def byte_size(self) -> int:
-        return sum(len(line.encode("utf-8")) + 1 for line in self.raw_lines)
+        return self.input_byte_size
 
 
 class _DeterministicTestEmbedding:
@@ -504,7 +505,7 @@ class EphemeralEngine:
         if not label:
             label = f"Capture #{capture_number}"
 
-        capture_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines)
+        capture_bytes = len(text.encode("utf-8"))
         with self._lock:
             max_buffer_bytes = self.max_buffer_bytes
         if capture_bytes > max_buffer_bytes:
@@ -539,6 +540,7 @@ class EphemeralEngine:
             label=label,
             timestamp=time.time(),
             raw_lines=lines,
+            input_byte_size=capture_bytes,
             chunks=chunks,
             embeddings=embeddings,
             fts_conn=None,
