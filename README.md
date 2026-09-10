@@ -673,7 +673,9 @@ Have an external agent adapter write a records envelope containing only the
 schedule, non-secret protocol identifiers, and per-run fields: completion,
 signal retrieval, duration, tool calls, repeated commands, context proxy bytes
 (total plus prompt/output components), provider usage samples, and peak RSS
-bytes. Summarize it with:
+bytes sampled from that invocation's process. On hosts without a supported
+per-process RSS interface, peak RSS is recorded as zero and should be treated
+as unavailable. Summarize it with:
 ```bash
 .venv/bin/python benchmark_agent_ab.py \
   --records agent-ab-records.json --output agent-ab-summary.json
