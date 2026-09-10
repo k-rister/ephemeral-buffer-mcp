@@ -57,6 +57,35 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertEqual(summary["paired_deltas_mcp_minus_control"]["completed"]["mean"], 1.0)
         self.assertTrue(summary["recommendations"])
 
+    def test_summary_excludes_unavailable_rss_measurements(self):
+        schedule, payload = _records_payload()
+        for record in payload["runs"]:
+            if record["mode"] == "control":
+                record["peak_rss_bytes"] = 2000
+            elif record["repetition"] == 1:
+                record["peak_rss_bytes"] = 0
+            else:
+                record["peak_rss_bytes"] = 3000
+
+        summary = summarize_records(payload, schedule)
+        mcp_rss = summary["mode_summaries"]["mcp"]["peak_rss_bytes"]
+        paired_rss = summary["paired_deltas_mcp_minus_control"]["peak_rss_bytes"]
+        self.assertTrue(mcp_rss["available"])
+        self.assertEqual(mcp_rss["count"], 4)
+        self.assertEqual(mcp_rss["mean"], 3000.0)
+        self.assertTrue(paired_rss["available"])
+        self.assertEqual(paired_rss["count"], 4)
+        self.assertEqual(paired_rss["mean"], 1000.0)
+
+        for record in payload["runs"]:
+            record["peak_rss_bytes"] = 0
+        unavailable = summarize_records(payload, schedule)
+        self.assertEqual(
+            unavailable["mode_summaries"]["mcp"]["peak_rss_bytes"],
+            {"available": False, "count": 0},
+        )
+        self.assertFalse(unavailable["paired_deltas_mcp_minus_control"]["peak_rss_bytes"]["available"])
+
     def test_validation_rejects_missing_runs_and_raw_fields(self):
         schedule, payload = _records_payload()
         payload["runs"] = payload["runs"][:-1]
