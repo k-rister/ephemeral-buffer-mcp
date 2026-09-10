@@ -452,6 +452,22 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.engine.clear("all")
         print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
 
+    def test_byte_budget_uses_actual_utf8_input_bytes(self):
+        engine = EphemeralEngine(max_captures=3, max_buffer_bytes=5)
+        try:
+            no_trailing_newline = engine.ingest("abc", label="no-trailing-newline")
+            multibyte = engine.ingest("é", label="multibyte")
+
+            self.assertEqual(no_trailing_newline.byte_size, len("abc".encode("utf-8")))
+            self.assertEqual(multibyte.byte_size, len("é".encode("utf-8")))
+            self.assertEqual(engine.get_buffer_stats()["total_bytes"], 5)
+            self.assertEqual(len(engine.captures), 2)
+
+            with self.assertRaises(ValueError):
+                engine.ingest("ééé", label="over-limit")
+        finally:
+            engine.shutdown()
+
     def test_11_buffer_stats_separate_accounted_and_process_memory(self):
         self.engine.ingest("stats payload", label="stats")
 
