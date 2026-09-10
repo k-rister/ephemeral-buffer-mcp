@@ -21,9 +21,21 @@ import server
 class FakeReader:
     def __init__(self, payload):
         self.payload = payload
+        self.consumed = False
 
     async def read(self, _limit):
+        if self.consumed:
+            return b""
+        self.consumed = True
         return self.payload
+
+
+class ChunkedReader:
+    def __init__(self, *chunks):
+        self.chunks = iter(chunks)
+
+    async def read(self, _limit):
+        return next(self.chunks, b"")
 
 
 class FakeWriter:
@@ -557,6 +569,38 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "socket-test")
         self.assertTrue(writer.closed)
+
+    async def test_json_payload_is_reassembled_across_socket_reads(self):
+        payload = json.dumps({"label": "chunked", "text": "complete payload"}).encode()
+        capture = SimpleNamespace(
+            capture_id="cap_chunked",
+            label="chunked",
+            line_count=1,
+            byte_size=16,
+        )
+        writer = FakeWriter()
+        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+            await server.handle_socket_client(
+                ChunkedReader(payload[:7], payload[7:]),
+                writer,
+            )
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["label"], "chunked")
+
+    async def test_oversized_payload_is_rejected_across_socket_reads(self):
+        payload = b"x" * (server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD)
+        writer = FakeWriter()
+
+        await server.handle_socket_client(
+            ChunkedReader(payload[:128], payload[128:]),
+            writer,
+        )
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "error")
+        self.assertIn("exceeds", response["message"])
 
     async def test_ingest_is_offloaded_from_event_loop(self):
         payload = json.dumps({"label": "offload-test", "text": "hello"}).encode()

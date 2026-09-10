@@ -664,23 +664,36 @@ def get_runtime_diagnostics() -> str:
 
 # --- Unix Domain Socket IPC for CLI piping (ephbuf) ---
 
+async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) -> bytes:
+    """Read one EOF-delimited request while enforcing the payload limit."""
+    chunks = []
+    payload_bytes = 0
+    while True:
+        chunk = await reader.read(min(65536, read_limit - payload_bytes + 1))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        payload_bytes += len(chunk)
+        if payload_bytes >= read_limit:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "socket_payload_limit_rejected",
+                payload_bytes=payload_bytes,
+                max_payload_bytes=read_limit,
+            )
+            raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
+    return b"".join(chunks)
+
+
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     async def _handle():
         try:
-            # Read payload (simple json line or framed message)
+            # Read the EOF-delimited payload completely before decoding it.
             read_limit = engine.max_buffer_bytes + SOCKET_PAYLOAD_OVERHEAD
-            data = await reader.read(read_limit)
+            data = await _read_socket_payload(reader, read_limit)
             if not data:
                 return
-            if len(data) >= read_limit:
-                log_event(
-                    LOGGER,
-                    logging.WARNING,
-                    "socket_payload_limit_rejected",
-                    payload_bytes=len(data),
-                    max_payload_bytes=read_limit,
-                )
-                raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
             try:
                 payload = json.loads(data.decode("utf-8"))
                 label = payload.get("label", "CLI pipe")
