@@ -128,13 +128,15 @@ def _walk_dicts(value: Any):
             yield from _walk_dicts(child)
 
 
-def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None]:
+def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, list[int | float], list[int | float]]:
     """Return tool, MCP, duplicate-command, and usage metrics from JSONL."""
     tool_calls = 0
     mcp_tool_calls = 0
     commands: list[str] = []
     input_tokens = None
     output_tokens = None
+    input_token_samples = []
+    output_token_samples = []
     for event in _event_objects(output):
         for item in _walk_dicts(event):
             event_type = item.get("type")
@@ -150,15 +152,25 @@ def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None]:
             if isinstance(usage, dict):
                 if isinstance(usage.get("input_tokens"), (int, float)):
                     input_tokens = usage["input_tokens"]
+                    input_token_samples.append(usage["input_tokens"])
                 if isinstance(usage.get("output_tokens"), (int, float)):
                     output_tokens = usage["output_tokens"]
+                    output_token_samples.append(usage["output_tokens"])
             for key in ("command", "cmd", "shell_command"):
                 command = item.get(key)
                 if isinstance(command, str) and command.strip():
                     commands.append(command.strip())
     counts = Counter(commands)
     repeated = sum(count - 1 for count in counts.values() if count > 1)
-    return tool_calls, mcp_tool_calls, repeated, input_tokens, output_tokens
+    return (
+        tool_calls,
+        mcp_tool_calls,
+        repeated,
+        input_tokens,
+        output_tokens,
+        input_token_samples,
+        output_token_samples,
+    )
 
 
 def _peak_rss_bytes() -> int:
@@ -291,7 +303,15 @@ def _run_one(
         success = False
         failure_reason = "timeout"
     duration = time.monotonic() - started
-    tool_calls, mcp_tool_calls, repeated_commands, input_tokens, output_tokens = _event_metrics(output)
+    (
+        tool_calls,
+        mcp_tool_calls,
+        repeated_commands,
+        input_tokens,
+        output_tokens,
+        input_token_samples,
+        output_token_samples,
+    ) = _event_metrics(output)
     if require_mcp_calls and success and mcp_tool_calls == 0:
         success = False
         failure_reason = "mcp_not_used"
@@ -314,6 +334,8 @@ def _run_one(
         "mcp_tool_calls": mcp_tool_calls,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "input_token_samples": input_token_samples,
+        "output_token_samples": output_token_samples,
     }
 
 

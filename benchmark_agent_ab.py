@@ -10,7 +10,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
-RECORDS_SCHEMA_VERSION = 2
+RECORDS_SCHEMA_VERSION = 3
 TASK_FIXTURE_VERSION = 1
 MODES = ("control", "mcp")
 TASKS = (
@@ -39,6 +39,7 @@ RUN_KEYS_V2 = RUN_KEYS - {"context_bytes"} | {
     "input_tokens",
     "output_tokens",
 }
+RUN_KEYS_V3 = RUN_KEYS_V2 | {"input_token_samples", "output_token_samples"}
 METRICS = (
     "completed",
     "signal_retrieved",
@@ -123,9 +124,15 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
-    run_keys = RUN_KEYS if records_schema_version == 1 else RUN_KEYS_V2
+    run_keys = (
+        RUN_KEYS
+        if records_schema_version == 1
+        else RUN_KEYS_V2
+        if records_schema_version == 2
+        else RUN_KEYS_V3
+    )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
     if not isinstance(runs, list):
@@ -152,7 +159,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
             value = record[field]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise ValueError(f"{field} must be a non-negative number in run: {key}")
-        if records_schema_version == RECORDS_SCHEMA_VERSION:
+        if records_schema_version >= 2:
             if record["exit_code"] is not None and (isinstance(record["exit_code"], bool) or not isinstance(record["exit_code"], int)):
                 raise ValueError(f"exit_code must be an integer or null in run: {key}")
             if record["failure_reason"] is not None and not isinstance(record["failure_reason"], str):
@@ -161,6 +168,13 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
                 value = record[field]
                 if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
                     raise ValueError(f"{field} must be a non-negative number or null in run: {key}")
+        if records_schema_version >= 3:
+            for field in ("input_token_samples", "output_token_samples"):
+                samples = record[field]
+                if not isinstance(samples, list):
+                    raise ValueError(f"{field} must be a list in run: {key}")
+                if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in samples):
+                    raise ValueError(f"{field} must contain non-negative numbers in run: {key}")
         actual[key] = record
     missing = sorted(set(expected) - set(actual))
     if missing:
