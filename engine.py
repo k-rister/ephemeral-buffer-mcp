@@ -1092,6 +1092,17 @@ class EphemeralEngine:
         encoded = json.dumps(payload, ensure_ascii=False, indent=2)
         if len(encoded.encode("utf-8")) > output_limit:
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > output_limit:
+            # Source metadata can be arbitrarily large (for example, a user
+            # supplied label). Keep the consolidated capture valid and bounded
+            # rather than returning content that the caller cannot ingest.
+            payload = {
+                "schema_version": 1,
+                "records": [],
+                "omitted_record_count": len(records),
+                "metadata_omitted": True,
+            }
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         return {
             "content": encoded,
             "source_capture_ids": [item["capture_id"] for item in sources],
