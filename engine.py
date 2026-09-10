@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import threading
 import json
+import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import Counter, OrderedDict
 import numpy as np
@@ -50,6 +51,19 @@ def sqlite_fts5_available() -> bool:
     finally:
         if connection is not None:
             connection.close()
+
+
+def _fallback_tokens(text: str) -> List[str]:
+    """Tokenize like FTS5 unicode61 with case- and diacritic-insensitive terms."""
+    tokens = re.findall(r"[\w]+", text, flags=re.UNICODE)
+    return [
+        "".join(
+            char
+            for char in unicodedata.normalize("NFKD", token)
+            if not unicodedata.combining(char)
+        ).casefold()
+        for token in tokens
+    ]
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -739,12 +753,10 @@ class EphemeralEngine:
         capture: Capture, tokens: List[str], top_k: int
     ) -> List[Tuple[int, float]]:
         """Search chunks with complete token matching when SQLite lacks FTS5."""
-        query_terms = {token.casefold() for token in tokens}
+        query_terms = set(_fallback_tokens(" ".join(tokens)))
         ranked: List[Tuple[int, float]] = []
         for chunk in capture.chunks:
-            chunk_terms = Counter(
-                token.casefold() for token in re.findall(r"[\w]+", chunk.text, flags=re.UNICODE)
-            )
+            chunk_terms = Counter(_fallback_tokens(chunk.text))
             matched_terms = query_terms.intersection(chunk_terms)
             if not matched_terms:
                 continue

@@ -88,10 +88,10 @@ and whether it has been loaded yet.
 
 Lexical search uses SQLite FTS5 when the host SQLite library provides it. If
 FTS5 is unavailable, captures remain searchable through a complete token-based
-Python fallback; this preserves matching coverage but may be slower and does
-not provide FTS5 BM25 ranking. `get_buffer_stats` reports the active lexical
-backend. FTS5 is therefore an optional capability rather than a package-level
-platform prerequisite.
+Python fallback with case- and diacritic-insensitive terms; this preserves
+matching coverage but may be slower and does not provide FTS5 BM25 ranking.
+`get_buffer_stats` reports the active lexical backend. FTS5 is therefore an
+optional capability rather than a package-level platform prerequisite.
 
 Semantic indexing prefetch is disabled by default. To opt in, set
 `EPHEMERAL_SEMANTIC_PREFETCH=1`; optionally set

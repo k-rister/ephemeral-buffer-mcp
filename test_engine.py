@@ -712,6 +712,13 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(engine.search_bm25(capture, "missing-token"), [])
         self.assertEqual(engine.get_buffer_stats()["lexical_backend"], "python-fallback")
 
+    def test_python_lexical_fallback_ignores_diacritics(self):
+        with patch("engine.sqlite_fts5_available", return_value=False):
+            engine = EphemeralEngine(max_captures=1)
+            capture = engine.ingest("café connection failed", label="diacritics")
+
+        self.assertEqual(engine.search_bm25(capture, "cafe")[0][0], 0)
+
     def test_clear_single_and_missing_capture_paths(self):
         engine = EphemeralEngine(max_captures=2)
         capture = engine.ingest("cleanup payload", label="cleanup")
