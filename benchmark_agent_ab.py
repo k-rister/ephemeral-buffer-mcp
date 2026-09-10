@@ -10,7 +10,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
-RECORDS_SCHEMA_VERSION = 3
+RECORDS_SCHEMA_VERSION = 4
 TASK_FIXTURE_VERSION = 1
 MODES = ("control", "mcp")
 TASKS = (
@@ -40,6 +40,7 @@ RUN_KEYS_V2 = RUN_KEYS - {"context_bytes"} | {
     "output_tokens",
 }
 RUN_KEYS_V3 = RUN_KEYS_V2 | {"input_token_samples", "output_token_samples"}
+RUN_KEYS_V4 = RUN_KEYS_V3 | {"prompt_bytes_proxy", "output_bytes_proxy"}
 METRICS = (
     "completed",
     "signal_retrieved",
@@ -124,7 +125,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
     run_keys = (
         RUN_KEYS
@@ -132,6 +133,8 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         else RUN_KEYS_V2
         if records_schema_version == 2
         else RUN_KEYS_V3
+        if records_schema_version == 3
+        else RUN_KEYS_V4
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
@@ -154,7 +157,17 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
             if not isinstance(record[field], bool):
                 raise ValueError(f"{field} must be boolean in run: {key}")
         numeric_fields = ("duration_seconds", "tool_calls", "repeated_commands", "peak_rss_bytes")
-        numeric_fields += ("context_bytes",) if records_schema_version == 1 else ("context_bytes_proxy", "mcp_tool_calls")
+        if records_schema_version == 1:
+            numeric_fields += ("context_bytes",)
+        elif records_schema_version < 4:
+            numeric_fields += ("context_bytes_proxy", "mcp_tool_calls")
+        else:
+            numeric_fields += (
+                "context_bytes_proxy",
+                "prompt_bytes_proxy",
+                "output_bytes_proxy",
+                "mcp_tool_calls",
+            )
         for field in numeric_fields:
             value = record[field]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
@@ -175,6 +188,9 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
                     raise ValueError(f"{field} must be a list in run: {key}")
                 if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in samples):
                     raise ValueError(f"{field} must contain non-negative numbers in run: {key}")
+        if records_schema_version >= 4:
+            if record["prompt_bytes_proxy"] + record["output_bytes_proxy"] != record["context_bytes_proxy"]:
+                raise ValueError(f"context byte proxy components must sum to the total in run: {key}")
         actual[key] = record
     missing = sorted(set(expected) - set(actual))
     if missing:
@@ -263,6 +279,8 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             "mcp_tool_calls": _stats([_metric_value(record, "mcp_tool_calls") for record in selected]),
             "repeated_commands": _stats([_metric_value(record, "repeated_commands") for record in selected]),
             "context_bytes_proxy": _stats([_metric_value(record, "context_bytes_proxy") for record in selected]),
+            "prompt_bytes_proxy": _optional_stats(selected, "prompt_bytes_proxy"),
+            "output_bytes_proxy": _optional_stats(selected, "output_bytes_proxy"),
             "peak_rss_bytes": _stats([_metric_value(record, "peak_rss_bytes") for record in selected]),
             "input_tokens": _optional_stats(selected, "input_tokens"),
             "output_tokens": _optional_stats(selected, "output_tokens"),
@@ -287,6 +305,12 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             mcp = _metric_value(pair["mcp"], metric)
             deltas.append(mcp - control)
         paired[metric] = _stats(deltas)
+    for metric in ("prompt_bytes_proxy", "output_bytes_proxy"):
+        if all(metric in record for record in runs):
+            deltas = []
+            for pair in grouped.values():
+                deltas.append(_metric_value(pair["mcp"], metric) - _metric_value(pair["control"], metric))
+            paired[metric] = _stats(deltas)
 
     recommendations = [
         "Treat completion and signal retrieval as primary outcomes; interpret cost metrics as secondary.",

@@ -328,6 +328,8 @@ def _run_one(
         # Codex CLI does not expose context bytes; this is the observable
         # prompt/event envelope, kept as a comparable proxy between modes.
         "context_bytes_proxy": len(prompt.encode()) + len(output.encode()),
+        "prompt_bytes_proxy": len(prompt.encode()),
+        "output_bytes_proxy": len(output.encode()),
         "peak_rss_bytes": _peak_rss_bytes(),
         "exit_code": exit_code,
         "failure_reason": failure_reason,

@@ -63,7 +63,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
 
-    def test_validation_accepts_version_three_records_and_summary_labels_proxy(self):
+    def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):
         schedule, payload = _records_payload()
         payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
         payload["runs"] = [
@@ -85,11 +85,16 @@ class TestAgentAbBenchmark(unittest.TestCase):
                 "output_tokens": 20,
                 "input_token_samples": [100] if record["mode"] == "control" else [100, 120],
                 "output_token_samples": [20] if record["mode"] == "control" else [20, 24],
+                "prompt_bytes_proxy": 40,
+                "output_bytes_proxy": 60 if record["mode"] == "mcp" else 360,
             }
             for record in payload["runs"]
         ]
         summary = summarize_records(payload, schedule)
         self.assertIn("context_bytes_proxy", summary["mode_summaries"]["mcp"])
+        self.assertEqual(summary["mode_summaries"]["mcp"]["prompt_bytes_proxy"]["mean"], 40.0)
+        self.assertEqual(summary["mode_summaries"]["mcp"]["output_bytes_proxy"]["mean"], 60.0)
+        self.assertIn("prompt_bytes_proxy", summary["paired_deltas_mcp_minus_control"])
         usage = summary["mode_summaries"]["mcp"]["usage_accounting"]["input_tokens"]
         self.assertEqual(usage["runs_with_multiple_samples"], 8)
         self.assertEqual(usage["observation"], "monotonic_samples_inconclusive")
