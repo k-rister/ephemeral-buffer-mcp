@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
+import release_checks
 from release_checks import (
     ReleaseCheckError,
     changelog_version,
@@ -23,6 +24,13 @@ from release_checks import (
 
 
 class TestReleaseChecks(unittest.TestCase):
+    def test_wheel_runtime_modules_include_metrics(self):
+        project = Path(__file__).with_name("pyproject.toml")
+        with project.open("rb") as stream:
+            modules = release_checks.tomllib.load(stream)["tool"]["setuptools"]["py-modules"]
+
+        self.assertIn("metrics", modules)
+
     def test_changelog_parser_skips_non_heading_lines(self):
         changelog_version("# Changelog\n\n## 1.2.3 - 2026-09-06", "1.2.3")
 
