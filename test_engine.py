@@ -18,10 +18,27 @@ from engine import (
     detect_signals,
     parse_unified_diff,
     process_rss_bytes,
+    sqlite_fts5_available,
 )
 
 
 class TestEngineClassification(unittest.TestCase):
+    def test_sqlite_fts5_probe_reports_missing_capability(self):
+        class BrokenConnection:
+            def __init__(self):
+                self.closed = False
+
+            def execute(self, _statement):
+                raise sqlite3.OperationalError("fts5 unavailable")
+
+            def close(self):
+                self.closed = True
+
+        connection = BrokenConnection()
+        with patch("engine.sqlite3.connect", return_value=connection):
+            self.assertFalse(sqlite_fts5_available())
+        self.assertTrue(connection.closed)
+
     def test_empty_and_non_diff_input_has_no_diff_metadata(self):
         self.assertIsNone(parse_unified_diff([]))
         self.assertIsNone(parse_unified_diff(["ordinary text", "with no patch markers"]))
@@ -681,6 +698,19 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         capture.fts_conn = BrokenConnection()
         self.assertEqual(engine.search_bm25(capture, "searchable"), [])
+
+    def test_python_lexical_fallback_preserves_token_matches(self):
+        with patch("engine.sqlite_fts5_available", return_value=False):
+            engine = EphemeralEngine(max_captures=1)
+            capture = engine.ingest("noise line\nECONNREFUSED on port 5432\n", label="fallback")
+
+        self.assertEqual(engine.lexical_backend, "python-fallback")
+        self.assertIsNone(capture.fts_conn)
+        results = engine.search_bm25(capture, "ECONNREFUSED")
+        self.assertEqual(results[0][0], 0)
+        self.assertGreater(results[0][1], 0)
+        self.assertEqual(engine.search_bm25(capture, "missing-token"), [])
+        self.assertEqual(engine.get_buffer_stats()["lexical_backend"], "python-fallback")
 
     def test_clear_single_and_missing_capture_paths(self):
         engine = EphemeralEngine(max_captures=2)

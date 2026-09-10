@@ -19,7 +19,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 ## 💡 The Solution
 
 `ephemeral-buffer` provides a transient in-memory ring buffer with **Dual Hybrid Indexing** and **Content-Aware Structure Parsing**:
-- **BM25 Lexical Search (SQLite FTS5):** For exact matches on error codes (`NullPointerException`, `ECONNREFUSED`, `exit 137`, HTTP `502`).
+- **BM25 Lexical Search (SQLite FTS5):** For exact matches on error codes (`NullPointerException`, `ECONNREFUSED`, `exit 137`, HTTP `502`). Builds without SQLite FTS5 use a complete token-based Python fallback with lower ranking performance.
 - **Dense Semantic Vector Search (FastEmbed ONNX):** For fuzzy conceptual queries (*"Where did the DB connection pool fail?"* or *"Why did authentication fail?"*).
 - **Unified Diff Structural Mapping:** Automatically detects git diffs and PR diffs (`gh pr diff`, `git show`, `git diff`), parses modified files, additions/deletions, and generates a line-indexed file map in the summary.
 - **Smart Signal Filtering:** Scans command/build/test logs for diagnostic keywords, suppresses false positives in diffs and source code, and accurately captures test runner failures, unhandled exceptions, and merge conflicts. Use `content_type='log'` when a plain-text capture should be signal-scanned.
@@ -221,7 +221,7 @@ flowchart TD
     end
 
     subgraph Indexing["2. Dual Hybrid Indexing & Classification"]
-        E --> F["SQLite FTS5 (BM25 Lexical)"]
+        E --> F["SQLite FTS5 (BM25 Lexical) or Python lexical fallback"]
         E --> G["FastEmbed ONNX (Dense Vectors)"]
         E --> K["Diff & Signal Parser (File Maps & Conflict Detection)"]
     end
