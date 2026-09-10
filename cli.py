@@ -19,6 +19,7 @@ import os
 import socket
 import json
 import argparse
+import shlex
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
 from config import positive_int_env, socket_path
 
@@ -97,7 +98,7 @@ def main():
         if cmd_list and cmd_list[0] == "--":
             cmd_list = cmd_list[1:]
             
-        cmd_str = " ".join(cmd_list)
+        cmd_str = shlex.join(cmd_list)
         label = args.label or cmd_str
         print(f"[ephbuf] Executing: {cmd_str}")
         
