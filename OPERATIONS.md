@@ -49,6 +49,17 @@ The server advertises the policy in its MCP initialization instructions and
 also enforces it at startup; the CLI refuses to send when strict mode is
 enabled without an explicit session ID or socket path.
 
+CLI socket operations use a 10-second timeout by default. Override it with a
+positive value when needed:
+
+```bash
+export EPHEMERAL_SOCKET_TIMEOUT_SECONDS=30
+```
+
+The timeout applies to connecting, sending the capture, and receiving the
+server response. A timeout produces a nonzero CLI result rather than leaving
+a shell pipeline blocked indefinitely.
+
 ## Capture limits and eviction
 
 The buffer is intentionally transient. The defaults are:

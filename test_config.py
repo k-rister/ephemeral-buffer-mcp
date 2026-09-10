@@ -18,6 +18,7 @@ from config import (
     socket_isolation_configured,
     socket_isolation_required,
     socket_path,
+    socket_timeout_seconds,
 )
 
 
@@ -76,6 +77,16 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertTrue(socket_isolation_configured())
         with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/eph.sock"}, clear=True):
             self.assertTrue(socket_isolation_configured())
+
+    def test_socket_timeout_defaults_and_accepts_positive_float(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(socket_timeout_seconds(), 10.0)
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "2.5"}, clear=True):
+            self.assertEqual(socket_timeout_seconds(), 2.5)
+
+    def test_socket_timeout_rejects_invalid_values(self):
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "0"}, clear=True):
+            self.assertEqual(socket_timeout_seconds(), 10.0)
 
     def test_embedding_defaults(self):
         with patch.dict(os.environ, {}, clear=True):

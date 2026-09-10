@@ -4,6 +4,7 @@ import io
 import json
 import os
 import runpy
+import socket
 import shlex
 import subprocess
 import sys
@@ -56,6 +57,9 @@ class TestCliConfiguration(unittest.TestCase):
                 self.closed = False
                 self.responses = [b'{"status":"ok"}', b""]
 
+            def settimeout(self, value):
+                self.timeout = value
+
             def connect(self, path):
                 self.path = path
 
@@ -105,6 +109,38 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("connection refused", result["message"])
 
+    def test_send_to_mcp_applies_socket_timeout_and_closes_on_timeout(self):
+        class StalledSocket:
+            def settimeout(self, value):
+                self.timeout = value
+
+            def connect(self, _path):
+                pass
+
+            def sendall(self, _payload):
+                pass
+
+            def shutdown(self, _mode):
+                pass
+
+            def recv(self, _size):
+                raise socket.timeout()
+
+            def close(self):
+                self.closed = True
+
+        stalled = StalledSocket()
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "1.5"}, clear=True), \
+                patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
+                patch.object(cli.os.path, "exists", return_value=True), \
+                patch.object(cli.socket, "socket", return_value=stalled):
+            result = cli.send_to_mcp("output")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Timed out communicating", result["message"])
+        self.assertEqual(stalled.timeout, 1.5)
+        self.assertTrue(stalled.closed)
+
     def test_stdin_capture_forwards_truncation_metadata(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "Piped STDIN"}
         with patch.object(cli, "send_to_mcp", return_value=response) as send, \
@@ -147,8 +183,10 @@ class TestCliConfiguration(unittest.TestCase):
                 patch.object(sys, "argv", ["cli.py"]), \
                 patch.object(sys, "stdin", io.StringIO("input")), \
                 patch.object(sys, "stderr", io.StringIO()) as stderr:
-            cli.main()
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
 
+        self.assertEqual(exit_result.exception.code, 1)
         self.assertIn("socket unavailable", stderr.getvalue())
 
     def test_tty_without_command_prints_help(self):
@@ -220,7 +258,7 @@ class TestCliConfiguration(unittest.TestCase):
             with self.assertRaises(SystemExit) as exit_result:
                 cli.main()
 
-        self.assertEqual(exit_result.exception.code, 0)
+        self.assertEqual(exit_result.exception.code, 1)
         self.assertIn("socket unavailable", stderr.getvalue())
 
     def test_wrapped_command_reports_invalid_output_limit(self):

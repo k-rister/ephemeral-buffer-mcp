@@ -156,6 +156,11 @@ socket. `EPHEMERAL_SOCKET_PATH` may be used instead when the launcher assigns
 the socket path directly. The MCP initialization instructions describe this
 policy to the client, but the environment checks enforce it independently.
 
+The CLI bounds each socket connect, send, and receive operation to 10 seconds
+by default. Set `EPHEMERAL_SOCKET_TIMEOUT_SECONDS` to a positive number of
+seconds when a different limit is appropriate; timeout failures return a
+nonzero CLI result.
+
 ### First-use model initialization
 
 FastEmbed loads the embedding model lazily on the first semantic or hybrid
