@@ -264,6 +264,10 @@ tool-call counts, optional provider-reported input/output token counts, and
 the complete provider usage samples observed in the Codex JSONL stream.
 Version-1 and version-2 records remain readable by the analyzer; unavailable
 provider metrics are distinct from zero values.
+The aggregate summary reports usage sample counts, monotonicity observations,
+and first-to-last deltas. A monotonic sequence is not treated as proof of
+cumulative accounting; use a controlled calibration matrix to establish the
+provider semantics.
 
 Issue #92's deterministic fixture generator is
 `benchmark_agent_ab_fixtures.py`. Generate its synthetic fixture and private

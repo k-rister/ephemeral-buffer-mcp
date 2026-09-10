@@ -701,6 +701,9 @@ tool-call count, provider-reported input/output token counts, and every
 provider usage sample when Codex emits them. Version-1 and version-2 records
 remain readable; missing provider metrics are reported as unavailable rather
 than zero.
+Summaries also report usage sample counts, monotonicity observations, and
+first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
+be cumulative or per-turn values and require a controlled calibration matrix.
 
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
 

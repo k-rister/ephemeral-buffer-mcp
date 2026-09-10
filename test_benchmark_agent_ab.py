@@ -83,13 +83,16 @@ class TestAgentAbBenchmark(unittest.TestCase):
                 "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
                 "input_tokens": 100,
                 "output_tokens": 20,
-                "input_token_samples": [100],
-                "output_token_samples": [20],
+                "input_token_samples": [100] if record["mode"] == "control" else [100, 120],
+                "output_token_samples": [20] if record["mode"] == "control" else [20, 24],
             }
             for record in payload["runs"]
         ]
         summary = summarize_records(payload, schedule)
         self.assertIn("context_bytes_proxy", summary["mode_summaries"]["mcp"])
+        usage = summary["mode_summaries"]["mcp"]["usage_accounting"]["input_tokens"]
+        self.assertEqual(usage["runs_with_multiple_samples"], 8)
+        self.assertEqual(usage["observation"], "monotonic_samples_inconclusive")
         self.assertEqual(summary["records_schema_version"], RECORDS_SCHEMA_VERSION)
         _, payload = _records_payload()
         payload["runs"][0]["raw_output"] = "forbidden"

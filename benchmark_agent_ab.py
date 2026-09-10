@@ -210,6 +210,44 @@ def _stats(values: list[float]) -> dict[str, float | int]:
     }
 
 
+def _usage_accounting(records: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    """Describe observed usage sequences without asserting their semantics."""
+    sequences = [record.get(field, []) for record in records if record.get(field)]
+    sample_counts = [len(sequence) for sequence in sequences]
+    multi_sample_sequences = [sequence for sequence in sequences if len(sequence) > 1]
+    monotonic_count = sum(
+        all(current >= previous for previous, current in zip(sequence, sequence[1:]))
+        for sequence in multi_sample_sequences
+    )
+    non_monotonic_count = len(multi_sample_sequences) - monotonic_count
+    if not sequences:
+        observation = "unavailable"
+    elif not multi_sample_sequences:
+        observation = "insufficient_samples"
+    elif non_monotonic_count:
+        observation = "non_monotonic_samples"
+    else:
+        observation = "monotonic_samples_inconclusive"
+    empty_stats = {"count": 0, "mean": 0.0, "stdev": 0.0, "ci95_half_width": 0.0}
+    return {
+        "runs_with_samples": len(sequences),
+        "runs_with_multiple_samples": len(multi_sample_sequences),
+        "sample_count": _stats([float(value) for value in sample_counts]),
+        "monotonic_runs": monotonic_count,
+        "non_monotonic_runs": non_monotonic_count,
+        "first_to_last_delta": (
+            _stats([float(sequence[-1] - sequence[0]) for sequence in multi_sample_sequences])
+            if multi_sample_sequences else empty_stats
+        ),
+        "observation": observation,
+        "interpretation": (
+            "Monotonic samples may be cumulative or per-turn; use a controlled calibration matrix."
+            if observation == "monotonic_samples_inconclusive"
+            else "Inspect sample boundaries and event types before interpreting token totals."
+        ),
+    }
+
+
 def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict[str, Any]:
     """Return aggregate and paired outcome summaries without raw agent data."""
     runs = validate_records(payload, schedule)
@@ -228,6 +266,10 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             "peak_rss_bytes": _stats([_metric_value(record, "peak_rss_bytes") for record in selected]),
             "input_tokens": _optional_stats(selected, "input_tokens"),
             "output_tokens": _optional_stats(selected, "output_tokens"),
+            "usage_accounting": {
+                "input_tokens": _usage_accounting(selected, "input_token_samples"),
+                "output_tokens": _usage_accounting(selected, "output_token_samples"),
+            },
             "failure_reasons": {
                 reason: sum(record.get("failure_reason") == reason for record in selected)
                 for reason in sorted({record.get("failure_reason") for record in selected if record.get("failure_reason")})
