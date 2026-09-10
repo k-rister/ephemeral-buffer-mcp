@@ -40,6 +40,14 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("socket not found", result["message"])
 
+    def test_send_to_mcp_rejects_unisolated_strict_mode(self):
+        with patch.dict(os.environ, {"EPHEMERAL_REQUIRE_ISOLATION": "1"}, clear=True), \
+                patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"):
+            result = cli.send_to_mcp("output")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Socket isolation is required", result["message"])
+
     def test_send_to_mcp_serializes_payload_and_reads_response(self):
         class FakeSocket:
             def __init__(self):

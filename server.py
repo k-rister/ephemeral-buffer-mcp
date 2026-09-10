@@ -23,7 +23,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from config import positive_int_env, socket_path
+from config import positive_int_env, socket_isolation_configured, socket_isolation_required, socket_path
 from mcp.server.fastmcp import FastMCP
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
@@ -73,8 +73,23 @@ def _instrument_tool(name):
         return wrapper
     return decorator
 
+def _mcp_instructions() -> str:
+    """Return client-visible operating guidance for this server instance."""
+    if socket_isolation_required() and not socket_isolation_configured():
+        isolation = "Socket isolation is required but not configured; startup must fail."
+    elif socket_isolation_configured():
+        isolation = "Socket isolation is configured for this session."
+    else:
+        isolation = "This is legacy single-session mode; configure EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH for concurrency."
+    return (
+        "Use execute_and_capture for large, noisy, or uncertain command output and for workflows "
+        "that need later search or follow-up retrieval. Use direct command execution for small, "
+        "targeted inspections. " + isolation
+    )
+
+
 # Initialize FastMCP
-mcp = FastMCP("ephemeral-buffer")
+mcp = FastMCP("ephemeral-buffer", instructions=_mcp_instructions())
 
 
 def _runtime_package_version() -> str:
@@ -751,6 +766,10 @@ def run_socket_server():
     asyncio.set_event_loop(loop)
 
     try:
+        if socket_isolation_required() and not socket_isolation_configured():
+            raise RuntimeError(
+                "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
+            )
         if os.path.lexists(SOCKET_PATH):
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -798,4 +817,8 @@ if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
 
 
 if __name__ == "__main__":
+    if socket_isolation_required() and not socket_isolation_configured():
+        raise SystemExit(
+            "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
+        )
     mcp.run()

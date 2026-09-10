@@ -36,6 +36,19 @@ export EPHEMERAL_SOCKET_PATH="${XDG_RUNTIME_DIR}/ephbuf-${SESSION_ID}.sock"
 
 Keep the socket in a private directory when multiple users share a host.
 
+For coding-agent launchers, require isolation so an incomplete environment
+cannot accidentally attach to another session's shared socket:
+
+```bash
+export EPHEMERAL_REQUIRE_ISOLATION=1
+export EPHEMERAL_SESSION_ID="agent-session-1"
+```
+
+The same variables must be inherited by the MCP server and the `ephbuf` CLI.
+The server advertises the policy in its MCP initialization instructions and
+also enforces it at startup; the CLI refuses to send when strict mode is
+enabled without an explicit session ID or socket path.
+
 ## Capture limits and eviction
 
 The buffer is intentionally transient. The defaults are:
