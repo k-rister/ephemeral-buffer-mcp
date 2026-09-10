@@ -6,8 +6,10 @@ import os
 import runpy
 import socket
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,67 @@ CLI_PATH = Path(__file__).with_name("cli.py")
 
 
 class TestCliConfiguration(unittest.TestCase):
+    def _launcher_fixture(self, environment_name):
+        root = Path(tempfile.mkdtemp())
+        launcher = root / "run.sh"
+        shutil.copy(Path(__file__).with_name("run.sh"), launcher)
+        launcher.chmod(0o755)
+        interpreter = root / environment_name / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text('#!/bin/sh\nprintf \'%s\' "$MARKER"\n', encoding="utf-8")
+        interpreter.chmod(0o755)
+        return root, launcher
+
+    def test_launcher_prefers_documented_dot_venv(self):
+        root, launcher = self._launcher_fixture(".venv")
+        legacy = root / "venv" / "bin" / "python"
+        legacy.parent.mkdir(parents=True)
+        shutil.copy(root / ".venv/bin/python", legacy)
+        marker = root / "selected"
+        try:
+            result = subprocess.run(
+                [str(launcher)],
+                env={**os.environ, "MARKER": str(marker), "PYTHON": "/invalid/python"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, str(marker))
+        finally:
+            shutil.rmtree(root)
+
+    def test_launcher_retains_legacy_venv_compatibility(self):
+        root, launcher = self._launcher_fixture("venv")
+        marker = root / "selected"
+        try:
+            result = subprocess.run(
+                [str(launcher)],
+                env={**os.environ, "MARKER": str(marker), "PYTHON": "/invalid/python"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, str(marker))
+        finally:
+            shutil.rmtree(root)
+
+    def test_launcher_rejects_invalid_explicit_python(self):
+        root = Path(tempfile.mkdtemp())
+        launcher = root / "run.sh"
+        shutil.copy(Path(__file__).with_name("run.sh"), launcher)
+        launcher.chmod(0o755)
+        try:
+            result = subprocess.run(
+                [str(launcher)],
+                env={**os.environ, "PYTHON": "/invalid/python"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 127)
+            self.assertIn("Configured PYTHON interpreter was not found", result.stderr)
+        finally:
+            shutil.rmtree(root)
+
     def test_invalid_buffer_environment_does_not_break_cli(self):
         environment = os.environ.copy()
         environment["EPHEMERAL_MAX_BUFFER_BYTES"] = "not-an-integer"

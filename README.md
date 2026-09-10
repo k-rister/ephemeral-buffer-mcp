@@ -91,6 +91,11 @@ The editable install exposes the same `ephbuf` command and MCP server as the
 PyPI installation. The reproducible, locked contributor environment is
 documented in [Testing the Server](#-testing-the-server).
 
+When launching from a source checkout with `run.sh`, the launcher prefers
+`.venv/bin/python`, then supports the legacy `venv/bin/python` layout, before
+using an explicit `PYTHON` override or `python3`. An invalid `PYTHON` override
+fails with an actionable error.
+
 ### Start the MCP server manually
 
 The MCP server uses stdio for communication with the MCP host. Start it with
