@@ -7,6 +7,7 @@ MODEL="${AGENT_AB_MODEL:-gpt-5.6-luna}"
 REPETITIONS="${AGENT_AB_REPETITIONS:-5}"
 SEED="${AGENT_AB_SEED:-20260909}"
 TIMEOUT_SECONDS="${AGENT_AB_TIMEOUT_SECONDS:-900}"
+FIXTURE_PROFILE="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
 RUN_DIR="${AGENT_AB_RUN_DIR:-/tmp/agent-ab-run-$(date +%Y%m%d-%H%M%S)}"
 
 if [[ -z "${CODEX_HOME:-}" ]]; then
@@ -29,9 +30,15 @@ fi
 CODEX_HOME="$CODEX_HOME" codex login status >/dev/null
 mkdir -p "$RUN_DIR"
 
-"$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab_fixtures.py" \
-    --fixture-output "$RUN_DIR/fixture" \
-    --manifest-output "$RUN_DIR/tasks.json"
+if [[ "$FIXTURE_PROFILE" == "repository-shaped-v1" ]]; then
+    "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab_repository_fixture.py" \
+        --fixture-output "$RUN_DIR/fixture" \
+        --manifest-output "$RUN_DIR/tasks.json"
+else
+    "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab_fixtures.py" \
+        --fixture-output "$RUN_DIR/fixture" \
+        --manifest-output "$RUN_DIR/tasks.json"
+fi
 
 "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab.py" \
     --schedule-output "$RUN_DIR/schedule.json" \
@@ -43,7 +50,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 CODEX_HOME="$CODEX_HOME" \
     --schedule "$RUN_DIR/schedule.json" \
     --tasks "$RUN_DIR/tasks.json" \
     --repository "$RUN_DIR/fixture" \
-    --repository-fixture synthetic-eb-heavy-v1 \
+    --repository-fixture "$FIXTURE_PROFILE" \
     --model "$MODEL" \
     --mcp-server-script "$PROJECT_DIR/server.py" \
     --mcp-python "$PYTHON_BIN" \

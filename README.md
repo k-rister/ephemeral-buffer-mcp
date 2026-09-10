@@ -719,6 +719,19 @@ targeted-output task and a follow-up retrieval task. The manifest includes
 output-size bands, expected signals, and objective success criteria. It is
 synthetic and contains no user logs or captured output.
 
+For a repository-shaped evaluation, set `AGENT_AB_FIXTURE_PROFILE`:
+
+```bash
+AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1 \
+  CODEX_HOME=/path/to/writable/authenticated-codex-home \
+  ./run_agent_ab_experiment.sh
+```
+
+This profile contains source, tests, configuration, and repository workflow
+tooling. Its test and build commands inspect that layout while producing
+deterministic noisy signals. It is still synthetic and privacy-safe; it does
+not contain a production repository or user data.
+
 Repeat the complete five-repetition Codex A/B run with the repository script.
 Set `CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
 records, and lifecycle logs remain under `/tmp` by default:
