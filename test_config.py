@@ -15,6 +15,8 @@ from config import (
     positive_int_env,
     semantic_prefetch_enabled,
     semantic_prefetch_workers,
+    socket_isolation_configured,
+    socket_isolation_required,
     socket_path,
 )
 
@@ -59,6 +61,21 @@ class TestPositiveIntEnv(unittest.TestCase):
         ):
             self.assertEqual(socket_path(), "/tmp/explicit.sock")
         self.assertTrue(DEFAULT_SOCKET_PATH)
+
+    def test_socket_isolation_defaults_to_optional(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(socket_isolation_configured())
+            self.assertFalse(socket_isolation_required())
+
+    def test_socket_isolation_can_be_required(self):
+        with patch.dict(os.environ, {"EPHEMERAL_REQUIRE_ISOLATION": "true"}, clear=True):
+            self.assertTrue(socket_isolation_required())
+
+    def test_session_or_explicit_path_configures_isolation(self):
+        with patch.dict(os.environ, {"EPHEMERAL_SESSION_ID": "session-1"}, clear=True):
+            self.assertTrue(socket_isolation_configured())
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/eph.sock"}, clear=True):
+            self.assertTrue(socket_isolation_configured())
 
     def test_embedding_defaults(self):
         with patch.dict(os.environ, {}, clear=True):

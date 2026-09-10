@@ -15,6 +15,18 @@ DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
 
 
+def socket_isolation_configured() -> bool:
+    """Return whether this process has an explicit session/socket identity."""
+    return bool(os.environ.get("EPHEMERAL_SOCKET_PATH") or os.environ.get("EPHEMERAL_SESSION_ID"))
+
+
+def socket_isolation_required() -> bool:
+    """Return whether shared legacy socket fallback is forbidden."""
+    return os.environ.get("EPHEMERAL_REQUIRE_ISOLATION", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def socket_path() -> str:
     """Return the shared server/CLI socket path for the current session."""
     configured_path = os.environ.get("EPHEMERAL_SOCKET_PATH")

@@ -138,6 +138,24 @@ that the `ephemeral-buffer` tools appear. The server exposes capture, search,
 summary, slice, consolidation, diagnostics, and cleanup tools; the `ephbuf`
 CLI is a separate convenience client for shell output.
 
+### Isolate concurrent agent sessions
+
+For a coding agent that may run alongside another agent, configure the same
+session identity for the MCP server and the `ephbuf` CLI:
+
+```json
+"env": {
+  "EPHEMERAL_REQUIRE_ISOLATION": "1",
+  "EPHEMERAL_SESSION_ID": "agent-session-1"
+}
+```
+
+The server and CLI then derive the same session-specific socket, while a
+missing identity fails closed instead of falling back to the shared legacy
+socket. `EPHEMERAL_SOCKET_PATH` may be used instead when the launcher assigns
+the socket path directly. The MCP initialization instructions describe this
+policy to the client, but the environment checks enforce it independently.
+
 ### First-use model initialization
 
 FastEmbed loads the embedding model lazily on the first semantic or hybrid

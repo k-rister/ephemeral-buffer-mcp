@@ -343,6 +343,21 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Socket mode: explicit path", explicit)
         self.assertIn("Socket mode: shared default path", default)
 
+    def test_mcp_instructions_describe_routing_and_isolation(self):
+        with patch.object(server, "socket_isolation_required", return_value=True), \
+                patch.object(server, "socket_isolation_configured", return_value=True):
+            instructions = server._mcp_instructions()
+
+        self.assertIn("execute_and_capture", instructions)
+        self.assertIn("Socket isolation is configured", instructions)
+
+    def test_mcp_instructions_report_missing_required_isolation(self):
+        with patch.object(server, "socket_isolation_required", return_value=True), \
+                patch.object(server, "socket_isolation_configured", return_value=False):
+            instructions = server._mcp_instructions()
+
+        self.assertIn("startup must fail", instructions)
+
     def test_runtime_diagnostics_includes_enabled_local_metrics(self):
         original_metrics = server.METRICS
         original_engine_metrics = server.engine.metrics
@@ -663,6 +678,20 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_strict_isolation_rejects_unconfigured_startup(self):
+        class FailingLoop:
+            def close(self):
+                pass
+
+        with patch.object(server, "socket_isolation_required", return_value=True), \
+                patch.object(server, "socket_isolation_configured", return_value=False), \
+                patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                patch.object(server.asyncio, "set_event_loop"), \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            server.run_socket_server()
+
+        self.assertIn("Socket isolation is required", stderr.getvalue())
+
     def _run_with_existing_socket(self, probe_error, unlink=None):
         class FailingLoop:
             def close(self):

@@ -21,7 +21,7 @@ import json
 import argparse
 import shlex
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
-from config import positive_int_env, socket_path
+from config import positive_int_env, socket_isolation_configured, socket_isolation_required, socket_path
 
 SOCKET_PATH = socket_path()
 
@@ -35,6 +35,11 @@ def send_to_mcp(
     command_exit_code: int | None = None,
     timed_out: bool = False,
 ) -> dict:
+    if socket_isolation_required() and not socket_isolation_configured():
+        return {
+            "status": "error",
+            "message": "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH",
+        }
     if not os.path.exists(SOCKET_PATH):
         return {
             "status": "error",
