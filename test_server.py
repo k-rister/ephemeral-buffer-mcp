@@ -888,6 +888,14 @@ class TestSocketServerStartup(unittest.TestCase):
         self.assertTrue(fake_thread.started)
         mcp_run.assert_called_once_with()
 
+    def test_module_entrypoint_rejects_missing_required_isolation(self):
+        with patch.dict(
+            os.environ,
+            {"EPHEMERAL_REQUIRE_ISOLATION": "1"},
+            clear=True,
+        ), self.assertRaisesRegex(SystemExit, "Socket isolation is required"):
+            runpy.run_path(server.__file__, run_name="__main__")
+
 
 if __name__ == "__main__":
     unittest.main()
