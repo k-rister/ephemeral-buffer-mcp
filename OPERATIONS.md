@@ -319,6 +319,15 @@ observations. Missing provider telemetry is unavailable rather than zero.
 Do not make live Codex calls part of required pull-request CI; run this manual
 workflow or an explicitly scheduled experiment after privacy review.
 
+The accepted provisional routing guidance from the agent-level evaluation is to
+prefer MCP for large noisy output and follow-up retrieval, while preferring
+direct execution for small targeted inspections. This is guidance, not a
+universal default or a set of hard numeric thresholds. The repository-shaped
+evaluation profile is synthetic and should not be treated as representative of
+every production repository. Provider-reported token deltas remain diagnostic
+until a controlled calibration matrix distinguishes cumulative from per-turn
+usage samples.
+
 Example:
 
 ```bash
