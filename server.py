@@ -36,10 +36,34 @@ from metrics import LocalMetrics
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
+SOCKET_STARTUP_TIMEOUT_SECONDS = positive_int_env("EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS", 5)
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
 METRICS = LocalMetrics()
 _TOOL_CALL_IDS = itertools.count(1)
+_SOCKET_STATE_LOCK = threading.Lock()
+_SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "starting"
+_SOCKET_FAILURE = None
+_SOCKET_STARTUP_EVENT = threading.Event()
+if _SOCKET_STATE == "disabled":
+    _SOCKET_STARTUP_EVENT.set()
+
+
+def _set_socket_state(state, failure=None):
+    """Publish socket lifecycle state for diagnostics and the module entrypoint."""
+    global _SOCKET_STATE, _SOCKET_FAILURE
+    with _SOCKET_STATE_LOCK:
+        _SOCKET_STATE = state
+        _SOCKET_FAILURE = failure
+        if state == "starting":
+            _SOCKET_STARTUP_EVENT.clear()
+        if state in {"ready", "failed", "disabled"}:
+            _SOCKET_STARTUP_EVENT.set()
+
+
+def _socket_lifecycle():
+    with _SOCKET_STATE_LOCK:
+        return _SOCKET_STATE, _SOCKET_FAILURE
 
 
 def _instrument_tool(name):
@@ -81,10 +105,15 @@ def _mcp_instructions() -> str:
         isolation = "Socket isolation is configured for this session."
     else:
         isolation = "This is legacy single-session mode; configure EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH for concurrency."
+    socket_state, socket_failure = _socket_lifecycle()
+    if socket_state == "failed":
+        socket_status = f"Socket lifecycle is failed ({socket_failure})."
+    else:
+        socket_status = f"Socket lifecycle is {socket_state}."
     return (
         "Use execute_and_capture for large, noisy, or uncertain command output and for workflows "
         "that need later search or follow-up retrieval. Use direct command execution for small, "
-        "targeted inspections. " + isolation
+        "targeted inspections. " + isolation + " " + socket_status
     )
 
 
@@ -657,6 +686,7 @@ def get_runtime_diagnostics() -> str:
         socket_mode = "shared default path"
 
     uptime_seconds = max(0, int(time.time() - SERVER_STARTED_AT))
+    socket_state, socket_failure = _socket_lifecycle()
     rss = stats["process_rss_bytes"]
     unaccounted = stats["unaccounted_rss_bytes"]
     lines = [
@@ -667,6 +697,8 @@ def get_runtime_diagnostics() -> str:
         f"Uptime: {uptime_seconds:,} seconds",
         f"Socket mode: {socket_mode}",
         f"Socket path: {SOCKET_PATH}",
+        f"Socket lifecycle: {socket_state}",
+        *( [f"Socket failure: {socket_failure}"] if socket_failure else [] ),
         f"Session ID configured: {'yes' if os.environ.get('EPHEMERAL_SESSION_ID') else 'no'}",
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
@@ -771,6 +803,7 @@ def run_socket_server():
     """Runs a Unix domain socket server in a separate thread so CLI tools can pipe to it."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    _set_socket_state("starting")
 
     try:
         if socket_isolation_required() and not socket_isolation_configured():
@@ -801,11 +834,14 @@ def run_socket_server():
         async def _main():
             server = await asyncio.start_unix_server(handle_socket_client, path=SOCKET_PATH)
             os.chmod(SOCKET_PATH, 0o600)
+            _set_socket_state("ready")
             async with server:
                 await server.serve_forever()
 
         loop.run_until_complete(_main())
     except Exception as e:
+        failure = f"{type(e).__name__}: {e}"
+        _set_socket_state("failed", failure)
         log_event(LOGGER, logging.ERROR, "socket_server_failed", error_type=type(e).__name__)
         LOGGER.exception("socket_server_exception")
         # Preserve the established stderr diagnostic for callers and tests
@@ -828,4 +864,12 @@ if __name__ == "__main__":
         raise SystemExit(
             "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
         )
+    if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
+        if not _SOCKET_STARTUP_EVENT.wait(timeout=SOCKET_STARTUP_TIMEOUT_SECONDS):
+            raise SystemExit(
+                f"Socket server did not become ready within {SOCKET_STARTUP_TIMEOUT_SECONDS} seconds"
+            )
+        socket_state, socket_failure = _socket_lifecycle()
+        if socket_state == "failed":
+            raise SystemExit(f"Socket server failed to start: {socket_failure}")
     mcp.run()

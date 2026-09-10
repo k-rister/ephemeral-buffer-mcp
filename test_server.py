@@ -328,6 +328,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Package version: 0.2.0", result)
         self.assertIn("Python:", result)
         self.assertIn("Socket mode: session-derived path", result)
+        self.assertIn("Socket lifecycle:", result)
         self.assertIn("Session ID configured: yes", result)
         self.assertIn("Captures: 1/", result)
         self.assertIn("Embedding model:", result)
@@ -816,8 +817,12 @@ class TestSocketServerStartup(unittest.TestCase):
                 server.run_socket_server()
 
         self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
+        self.assertEqual(server._socket_lifecycle()[0], "failed")
+        self.assertIn("RuntimeError: socket unavailable", server._socket_lifecycle()[1])
 
     def test_successful_startup_runs_listener_until_shutdown(self):
+        test_case = self
+
         class Listener:
             async def __aenter__(self):
                 return self
@@ -826,6 +831,7 @@ class TestSocketServerStartup(unittest.TestCase):
                 return False
 
             async def serve_forever(self):
+                test_case.assertEqual(server._socket_lifecycle()[0], "ready")
                 raise RuntimeError("listener stopped")
 
         class RunningLoop:
@@ -874,6 +880,11 @@ class TestSocketServerStartup(unittest.TestCase):
         self.assertIn("Unable to verify existing socket", stderr.getvalue())
 
     def test_module_entrypoint_starts_listener_and_runs_mcp(self):
+        class ReadyEvent:
+            def wait(self, timeout):
+                self.timeout = timeout
+                return True
+
         class FakeThread:
             def start(self):
                 self.started = True
@@ -881,6 +892,7 @@ class TestSocketServerStartup(unittest.TestCase):
         fake_thread = FakeThread()
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
                 patch.object(server.threading, "Thread", return_value=fake_thread), \
+                patch.object(server.threading, "Event", return_value=ReadyEvent()), \
                 patch("mcp.server.fastmcp.FastMCP", return_value=server.mcp), \
                 patch.object(server.mcp, "run") as mcp_run:
             runpy.run_path(server.__file__, run_name="__main__")

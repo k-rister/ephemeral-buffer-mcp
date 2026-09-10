@@ -158,6 +158,23 @@ not be established; it is not a safety approval. Shell expansion, aliases,
 pipelines, redirections, environment changes, and arbitrary shell logic remain
 outside preflight’s scope.
 
+### Socket startup lifecycle
+
+The server treats the Unix socket as part of the normal server lifecycle. On
+startup, the socket moves from `starting` to `ready` only after the listener
+has bound successfully. If probing, cleanup, binding, or permission checks
+fail, the socket enters `failed` and the module entrypoint exits instead of
+starting an apparently healthy stdio MCP session. The failure includes only an
+error class and message; captured content and command arguments are never
+included.
+
+Set `EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS` to control how long the
+entrypoint waits for the background listener to report readiness. The default
+is five seconds. Tests and embedders that intentionally disable the listener
+with `EPHEMERAL_DISABLE_SOCKET_SERVER=1` report `disabled` and do not apply
+the startup gate. `get_runtime_diagnostics()` reports the current socket
+lifecycle and any startup failure.
+
 ## Field-observation checklist
 
 When investigating behavior from a real MCP session, collect operational
