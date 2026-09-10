@@ -268,9 +268,18 @@ def _run_one(
     started = time.monotonic()
     exit_code = None
     failure_reason = None
+    require_mcp_calls = item["mode"] == "mcp" and getattr(args, "require_mcp_calls", False)
+    prompt = task["prompt"]
+    if require_mcp_calls:
+        prompt = (
+            "This is the MCP treatment. You must use the configured ephemeral-buffer MCP tools "
+            "for the capture and search workflow when they are available. Do not substitute direct "
+            "shell filtering for those MCP operations.\n\n"
+            + prompt
+        )
     try:
         completed = _run_codex_process(
-            [*command, task["prompt"]], cwd=fixture, timeout=args.timeout
+            [*command, prompt], cwd=fixture, timeout=args.timeout
         )
         output = completed.stdout + completed.stderr
         success = completed.returncode == 0
@@ -283,6 +292,9 @@ def _run_one(
         failure_reason = "timeout"
     duration = time.monotonic() - started
     tool_calls, mcp_tool_calls, repeated_commands, input_tokens, output_tokens = _event_metrics(output)
+    if require_mcp_calls and success and mcp_tool_calls == 0:
+        success = False
+        failure_reason = "mcp_not_used"
     marker = task["signal_marker"]
     return {
         "task_id": item["task_id"],
@@ -295,7 +307,7 @@ def _run_one(
         "repeated_commands": repeated_commands,
         # Codex CLI does not expose context bytes; this is the observable
         # prompt/event envelope, kept as a comparable proxy between modes.
-        "context_bytes_proxy": len(task["prompt"].encode()) + len(output.encode()),
+        "context_bytes_proxy": len(prompt.encode()) + len(output.encode()),
         "peak_rss_bytes": _peak_rss_bytes(),
         "exit_code": exit_code,
         "failure_reason": failure_reason,
@@ -330,6 +342,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], 
         "reset_policy": "fresh-copy-per-run",
         "agent_adapter": "codex-cli",
         "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "read-only-sandbox",
+        "mcp_usage_policy": "required" if getattr(args, "require_mcp_calls", False) else "opportunistic",
     }
     payload = {
         "schema_version": schedule["schema_version"],
@@ -362,6 +375,11 @@ def main() -> None:
         "--allow-mcp-approvals",
         action="store_true",
         help="Use Codex automatic review and workspace-write isolation for MCP runs",
+    )
+    parser.add_argument(
+        "--require-mcp-calls",
+        action="store_true",
+        help="Require at least one MCP tool call in every MCP run",
     )
     parser.add_argument("--sandbox", choices=("read-only", "workspace-write"), default="read-only")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)

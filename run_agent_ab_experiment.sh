@@ -48,6 +48,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 CODEX_HOME="$CODEX_HOME" \
     --mcp-server-script "$PROJECT_DIR/server.py" \
     --mcp-python "$PYTHON_BIN" \
     --allow-mcp-approvals \
+    --require-mcp-calls \
     --sandbox read-only \
     --timeout "$TIMEOUT_SECONDS" \
     --diagnostic-log-dir "$RUN_DIR/lifecycle" \
