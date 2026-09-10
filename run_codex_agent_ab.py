@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -95,6 +96,29 @@ def _terminate_process_group(process: subprocess.Popen[str]) -> None:
         process.kill()
 
 
+def _status_peak_rss_bytes(status: str) -> int:
+    """Parse Linux /proc status peak RSS, returning zero when unavailable."""
+    for line in status.splitlines():
+        if line.startswith("VmHWM:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1]) * 1024
+                except ValueError:
+                    return 0
+    return 0
+
+
+def _process_peak_rss_bytes(pid: int) -> int:
+    """Read the current invocation's peak RSS from its process record."""
+    if sys.platform != "linux":
+        return 0
+    try:
+        return _status_peak_rss_bytes(Path(f"/proc/{pid}/status").read_text(encoding="ascii"))
+    except (OSError, UnicodeError):
+        return 0
+
+
 def _run_codex_process(
     command: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -109,13 +133,30 @@ def _run_codex_process(
         text=True,
         start_new_session=os.name == "posix",
     )
+    stop_monitor = threading.Event()
+    peak_rss = [0]
+
+    def monitor_rss() -> None:
+        while not stop_monitor.is_set():
+            peak_rss[0] = max(peak_rss[0], _process_peak_rss_bytes(process.pid))
+            if process.poll() is not None:
+                return
+            stop_monitor.wait(0.01)
+
+    monitor = threading.Thread(target=monitor_rss, daemon=True)
+    monitor.start()
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _terminate_process_group(process)
         stdout, stderr = process.communicate()
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        stop_monitor.set()
+        monitor.join(timeout=1)
+    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    completed.peak_rss_bytes = peak_rss[0]
+    return completed
 
 
 def _walk_dicts(value: Any):
@@ -171,17 +212,6 @@ def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, 
         input_token_samples,
         output_token_samples,
     )
-
-
-def _peak_rss_bytes() -> int:
-    try:
-        import resource
-
-        value = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    except (ImportError, AttributeError, OSError):
-        return 0
-    # Linux reports KiB; macOS reports bytes.
-    return int(value * 1024 if sys.platform != "darwin" else value)
 
 
 def _codex_command(
@@ -330,7 +360,7 @@ def _run_one(
         "context_bytes_proxy": len(prompt.encode()) + len(output.encode()),
         "prompt_bytes_proxy": len(prompt.encode()),
         "output_bytes_proxy": len(output.encode()),
-        "peak_rss_bytes": _peak_rss_bytes(),
+        "peak_rss_bytes": getattr(completed, "peak_rss_bytes", 0),
         "exit_code": exit_code,
         "failure_reason": failure_reason,
         "mcp_tool_calls": mcp_tool_calls,

@@ -8,10 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from benchmark_agent_ab import build_schedule
-from run_codex_agent_ab import _event_metrics, _load_manifest, _run_one, run_schedule
+from run_codex_agent_ab import _event_metrics, _load_manifest, _run_one, _status_peak_rss_bytes, run_schedule
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_status_peak_rss_parser_converts_linux_kib(self):
+        self.assertEqual(_status_peak_rss_bytes("Name:\tcodex\nVmHWM:\t1234 kB\n"), 1234 * 1024)
+        self.assertEqual(_status_peak_rss_bytes("Name:\tcodex\n"), 0)
+
     def test_event_metrics_counts_tools_and_duplicate_commands(self):
         output = "\n".join([
             json.dumps({"type": "response.output_item.done", "item": {"type": "function_call", "command": "pytest"}}),
@@ -43,7 +47,10 @@ class TestCodexAgentRunner(unittest.TestCase):
             mcp_server_script=None, sandbox="read-only", timeout=10,
             allow_mcp_approvals=False,
         )
-        result = subprocess_result(stdout=json.dumps({"type": "command_execution", "command": "find"}) + "\nSUCCESS\n")
+        result = subprocess_result(
+            stdout=json.dumps({"type": "command_execution", "command": "find"}) + "\nSUCCESS\n",
+            peak_rss_bytes=1234,
+        )
         with tempfile.TemporaryDirectory() as directory, patch("run_codex_agent_ab._run_codex_process", return_value=result) as run:
             repository = Path(directory) / "repo"
             repository.mkdir()
@@ -58,6 +65,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 10)
         self.assertEqual(output["mcp_tool_calls"], 0)
         self.assertIsNone(output["input_tokens"])
+        self.assertEqual(output["peak_rss_bytes"], 1234)
 
     def test_mcp_approval_mode_uses_automatic_review_and_isolated_write_sandbox(self):
         from run_codex_agent_ab import _codex_command
