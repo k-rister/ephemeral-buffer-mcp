@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import json
 from concurrent.futures import Future, ThreadPoolExecutor
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -36,6 +36,20 @@ from config import (
 LOGGER = get_logger("engine")
 SEARCH_MODES = ("hybrid", "bm25", "semantic")
 HYBRID_LEXICAL_WEIGHT = 2.0
+
+
+def sqlite_fts5_available() -> bool:
+    """Return whether this Python build's SQLite library supports FTS5."""
+    connection = None
+    try:
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE VIRTUAL TABLE fts5_capability_probe USING fts5(content)")
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -343,6 +357,7 @@ class EphemeralEngine:
         self._total_bytes = 0
         self._indexed_chunks = 0
         self._next_id = 1
+        self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
         
         self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
         self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
@@ -546,20 +561,24 @@ class EphemeralEngine:
                     self.metrics.record_event("evictions")
                     self.metrics.forget_capture(evicted_id)
 
-            # Captures may be ingested by the CLI socket listener thread and
-            # queried by the MCP thread, so allow this connection to cross
-            # threads. Build it after admission so rejected captures never
-            # allocate index storage and LRU eviction can make room first.
-            fts_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            cur = fts_conn.cursor()
-            cur.execute("CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61')")
-            for chunk in capture.chunks:
+            if self.lexical_backend == "fts5":
+                # Captures may be ingested by the CLI socket listener thread
+                # and queried by the MCP thread, so allow this connection to
+                # cross threads. Build it after admission so rejected captures
+                # never allocate index storage and LRU eviction can make room
+                # first.
+                fts_conn = sqlite3.connect(":memory:", check_same_thread=False)
+                cur = fts_conn.cursor()
                 cur.execute(
-                    "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
-                    (chunk.chunk_id, chunk.text),
+                    "CREATE VIRTUAL TABLE chunks_fts USING fts5(chunk_id UNINDEXED, content, tokenize='unicode61')"
                 )
-            fts_conn.commit()
-            capture.fts_conn = fts_conn
+                for chunk in capture.chunks:
+                    cur.execute(
+                        "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
+                        (chunk.chunk_id, chunk.text),
+                    )
+                fts_conn.commit()
+                capture.fts_conn = fts_conn
 
             self.captures[capture_id] = capture
             self.capture_order[capture_id] = None
@@ -686,7 +705,7 @@ class EphemeralEngine:
         Search using SQLite FTS5 BM25. Query punctuation is treated as a
         separator; terms are combined with OR. Returns (chunk_id, score).
         """
-        if not capture.chunks or not capture.fts_conn:
+        if not capture.chunks:
             return []
 
         # FTS5 syntax is intentionally not exposed: regex-like characters,
@@ -698,6 +717,9 @@ class EphemeralEngine:
 
         fts_query = " OR ".join(f'"{t}"' for t in tokens)
         
+        if not capture.fts_conn:
+            return self._search_lexical_fallback(capture, tokens, top_k)
+
         cur = capture.fts_conn.cursor()
         try:
             cur.execute("""
@@ -711,6 +733,25 @@ class EphemeralEngine:
             return [(int(row[0]), -float(row[1])) for row in results]
         except sqlite3.OperationalError:
             return []
+
+    @staticmethod
+    def _search_lexical_fallback(
+        capture: Capture, tokens: List[str], top_k: int
+    ) -> List[Tuple[int, float]]:
+        """Search chunks with complete token matching when SQLite lacks FTS5."""
+        query_terms = {token.casefold() for token in tokens}
+        ranked: List[Tuple[int, float]] = []
+        for chunk in capture.chunks:
+            chunk_terms = Counter(
+                token.casefold() for token in re.findall(r"[\w]+", chunk.text, flags=re.UNICODE)
+            )
+            matched_terms = query_terms.intersection(chunk_terms)
+            if not matched_terms:
+                continue
+            score = sum(chunk_terms[term] for term in matched_terms) / max(sum(chunk_terms.values()), 1)
+            ranked.append((chunk.chunk_id, score))
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        return ranked[:top_k]
 
     @synchronized
     def search_semantic(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
@@ -1072,6 +1113,7 @@ class EphemeralEngine:
             "embedding_bytes": embedding_bytes,
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
+            "lexical_backend": self.lexical_backend,
             "embedding_cache_dir": self.embedding_cache_path,
             "semantic_prefetch_enabled": self.semantic_prefetch_enabled,
             "semantic_prefetch_workers": self.semantic_prefetch_workers,
