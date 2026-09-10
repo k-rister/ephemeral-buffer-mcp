@@ -296,6 +296,17 @@ class TestServerTools(unittest.TestCase):
         self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
         self.assertNotIn("\n  ", result["content"])
 
+    def test_consolidate_falls_back_when_source_metadata_exceeds_limit(self):
+        server.capture_text("café detail", label="label-" + ("x" * 5000))
+        source_id = server.engine.list_captures()[0]["capture_id"]
+
+        result = server._consolidated_jsonl([source_id], max_captures=1, max_bytes=512)
+
+        self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
+        payload = json.loads(result["content"])
+        self.assertTrue(payload["metadata_omitted"])
+        self.assertEqual(payload["records"], [])
+
     def test_consolidate_reports_ingest_failure(self):
         with patch.object(server.engine, "ingest", side_effect=RuntimeError("storage unavailable")):
             result = server.consolidate_captures([])
