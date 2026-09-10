@@ -175,6 +175,12 @@ starting an apparently healthy stdio MCP session. The failure includes only an
 error class and message; captured content and command arguments are never
 included.
 
+Importing the `server` module does not start or probe the socket. The normal
+module entrypoint calls `start_socket_server()` explicitly before waiting for
+readiness. Embedders that need the CLI socket can call that function during
+their own initialization; imports and package smoke tests can safely use the
+MCP tools without creating a Unix-socket side effect.
+
 Set `EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS` to control how long the
 entrypoint waits for the background listener to report readiness. The default
 is five seconds. Tests and embedders that intentionally disable the listener
