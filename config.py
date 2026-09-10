@@ -9,6 +9,7 @@ import math
 
 DEFAULT_MAX_CAPTURES = 25
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_INDEXED_CHUNKS = 32768
 DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
@@ -82,6 +83,11 @@ def semantic_prefetch_enabled() -> bool:
 def semantic_prefetch_workers() -> int:
     """Return the bounded number of semantic prefetch workers."""
     return positive_int_env("EPHEMERAL_SEMANTIC_PREFETCH_WORKERS", DEFAULT_SEMANTIC_PREFETCH_WORKERS)
+
+
+def max_indexed_chunks() -> int:
+    """Return the maximum total number of indexed chunks retained in memory."""
+    return positive_int_env("EPHEMERAL_MAX_INDEXED_CHUNKS", DEFAULT_MAX_INDEXED_CHUNKS)
 
 
 def positive_int_env(name: str, default: int) -> int:

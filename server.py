@@ -616,11 +616,18 @@ def get_buffer_stats() -> str:
     model_state = "loaded" if stats["embedding_model_loaded"] else "not loaded"
     model_line = f"Embedding model: {stats['embedding_model']} ({model_state})"
     cache_line = f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}"
+    indexed_chunks = stats.get("indexed_chunks", stats["total_chunks"])
+    max_indexed_chunks = stats.get("max_indexed_chunks", indexed_chunks)
+    remaining_indexed_chunks = stats.get(
+        "remaining_indexed_chunks", max_indexed_chunks - indexed_chunks
+    )
     result = (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
         f"Lines: {stats['total_lines']:,}\n"
         f"Chunks: {stats['total_chunks']:,}\n"
+        f"Indexed chunks: {indexed_chunks:,}/{max_indexed_chunks:,} "
+        f"({remaining_indexed_chunks:,} remaining)\n"
         f"{model_line}\n"
         f"{cache_line}\n"
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"

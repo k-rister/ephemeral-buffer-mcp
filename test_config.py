@@ -19,6 +19,7 @@ from config import (
     socket_isolation_required,
     socket_path,
     socket_timeout_seconds,
+    max_indexed_chunks,
 )
 
 
@@ -87,6 +88,12 @@ class TestPositiveIntEnv(unittest.TestCase):
     def test_socket_timeout_rejects_invalid_values(self):
         with patch.dict(os.environ, {"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "0"}, clear=True):
             self.assertEqual(socket_timeout_seconds(), 10.0)
+
+    def test_max_indexed_chunks_defaults_and_reads_environment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(max_indexed_chunks(), 32768)
+        with patch.dict(os.environ, {"EPHEMERAL_MAX_INDEXED_CHUNKS": "12"}, clear=True):
+            self.assertEqual(max_indexed_chunks(), 12)
 
     def test_embedding_defaults(self):
         with patch.dict(os.environ, {}, clear=True):

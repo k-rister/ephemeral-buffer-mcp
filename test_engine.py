@@ -450,6 +450,22 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertGreater(stats["process_rss_bytes"], 0)
             self.assertGreaterEqual(stats["unaccounted_rss_bytes"], 0)
 
+    def test_index_chunk_budget_evicts_lru_and_rejects_oversized_capture(self):
+        engine = EphemeralEngine(max_captures=3, max_indexed_chunks=3)
+        first = engine.ingest("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="first")
+        second = engine.ingest("eight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen", label="second")
+
+        self.assertNotIn(first.capture_id, engine.captures)
+        self.assertIn(second.capture_id, engine.captures)
+        stats = engine.get_buffer_stats()
+        self.assertEqual(stats["indexed_chunks"], 3)
+        self.assertEqual(stats["remaining_indexed_chunks"], 0)
+
+        rejecting = EphemeralEngine(max_captures=1, max_indexed_chunks=2)
+        with self.assertRaisesRegex(ValueError, "indexed chunks"):
+            rejecting.ingest("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="too-large")
+        self.assertEqual(rejecting.captures, {})
+
     def test_12_reads_are_not_blocked_by_embedding(self):
         class BlockingEmbedding:
             def __init__(self):
@@ -481,6 +497,8 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             EphemeralEngine(max_captures=0)
         with self.assertRaisesRegex(ValueError, "max_buffer_bytes"):
             EphemeralEngine(max_buffer_bytes=0)
+        with self.assertRaisesRegex(ValueError, "max_indexed_chunks"):
+            EphemeralEngine(max_indexed_chunks=0)
 
     def test_14_empty_and_missing_capture_paths(self):
         empty = EphemeralEngine(max_captures=1)
