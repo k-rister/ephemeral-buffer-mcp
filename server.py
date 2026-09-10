@@ -66,6 +66,17 @@ def _socket_lifecycle():
         return _SOCKET_STATE, _SOCKET_FAILURE
 
 
+def _require_socket_ready():
+    """Raise a clear entrypoint error unless the socket reports readiness."""
+    if not _SOCKET_STARTUP_EVENT.wait(timeout=SOCKET_STARTUP_TIMEOUT_SECONDS):
+        raise SystemExit(
+            f"Socket server did not become ready within {SOCKET_STARTUP_TIMEOUT_SECONDS} seconds"
+        )
+    socket_state, socket_failure = _socket_lifecycle()
+    if socket_state == "failed":
+        raise SystemExit(f"Socket server failed to start: {socket_failure}")
+
+
 def _instrument_tool(name):
     """Decorate a tool with opt-in content-free call metrics and timing logs."""
     def decorator(function):
@@ -865,11 +876,5 @@ if __name__ == "__main__":
             "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
         )
     if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
-        if not _SOCKET_STARTUP_EVENT.wait(timeout=SOCKET_STARTUP_TIMEOUT_SECONDS):
-            raise SystemExit(
-                f"Socket server did not become ready within {SOCKET_STARTUP_TIMEOUT_SECONDS} seconds"
-            )
-        socket_state, socket_failure = _socket_lifecycle()
-        if socket_state == "failed":
-            raise SystemExit(f"Socket server failed to start: {socket_failure}")
+        _require_socket_ready()
     mcp.run()
