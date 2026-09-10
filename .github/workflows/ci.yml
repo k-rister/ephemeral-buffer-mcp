@@ -62,6 +62,7 @@ jobs:
           python -m venv /tmp/ephemeral-package-venv
           /tmp/ephemeral-package-venv/bin/python -m pip install --no-deps dist/*.whl
           /tmp/ephemeral-package-venv/bin/ephbuf --help
+          /tmp/ephemeral-package-venv/bin/python -c "from metrics import LocalMetrics; assert LocalMetrics"
 
       - name: Compile sources
         run: python -m py_compile cli.py config.py engine.py server.py capture_utils.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py benchmark_relevance.py benchmark_routing.py benchmark_prefetch.py benchmark_agent_ab.py benchmark_agent_ab_fixtures.py benchmark_agent_ab_baseline.py run_codex_agent_ab.py release_checks.py
