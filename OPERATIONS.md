@@ -259,10 +259,11 @@ does not write transcripts or raw command output to the records file. Its
 provider-reported model-context measurement.
 If the fixture does not contain an importable `server` module, provide the
 absolute server path with `--mcp-server-script`.
-Records schema version 2 also includes exit code, failure reason, MCP-specific
-tool-call counts, and optional provider-reported input/output token counts.
-Version-1 records remain readable by the analyzer; unavailable provider
-metrics are distinct from zero values.
+Records schema version 3 also includes exit code, failure reason, MCP-specific
+tool-call counts, optional provider-reported input/output token counts, and
+the complete provider usage samples observed in the Codex JSONL stream.
+Version-1 and version-2 records remain readable by the analyzer; unavailable
+provider metrics are distinct from zero values.
 
 Issue #92's deterministic fixture generator is
 `benchmark_agent_ab_fixtures.py`. Generate its synthetic fixture and private

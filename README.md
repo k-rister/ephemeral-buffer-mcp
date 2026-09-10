@@ -696,10 +696,11 @@ MCP tool; runs that bypass MCP are then marked incomplete with reason
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 2 and add exit code, failure reason, MCP-specific
-tool-call count, and provider-reported input/output token counts when Codex
-emits them. Older version-1 records remain readable; missing provider metrics
-are reported as unavailable rather than zero.
+Runner records use version 3 and add exit code, failure reason, MCP-specific
+tool-call count, provider-reported input/output token counts, and every
+provider usage sample when Codex emits them. Version-1 and version-2 records
+remain readable; missing provider metrics are reported as unavailable rather
+than zero.
 
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
 

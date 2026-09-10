@@ -63,7 +63,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
 
-    def test_validation_accepts_version_two_records_and_summary_labels_proxy(self):
+    def test_validation_accepts_version_three_records_and_summary_labels_proxy(self):
         schedule, payload = _records_payload()
         payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
         payload["runs"] = [
@@ -83,6 +83,8 @@ class TestAgentAbBenchmark(unittest.TestCase):
                 "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
                 "input_tokens": 100,
                 "output_tokens": 20,
+                "input_token_samples": [100],
+                "output_token_samples": [20],
             }
             for record in payload["runs"]
         ]
