@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,36 @@ from run_codex_agent_ab import _event_metrics, _load_manifest, _run_one, _status
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_timeout_emits_record_and_next_run_can_continue(self):
+        item = {"sequence": 1, "repetition": 1, "task_id": "timeout", "mode": "control"}
+        next_item = {"sequence": 2, "repetition": 1, "task_id": "after-timeout", "mode": "control"}
+        task = {"prompt": "inspect the fixture", "signal_marker": "SUCCESS"}
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=1,
+            allow_mcp_approvals=False,
+        )
+        timeout = subprocess.TimeoutExpired(["codex"], 1, output=b"partial", stderr=b"timed out")
+        successful = subprocess_result(stdout="SUCCESS\n", peak_rss_bytes=4321)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_codex_agent_ab._run_codex_process", side_effect=[timeout, successful]
+        ):
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            timed_out = _run_one(
+                item, task, args=args, repository=repository, scratch=Path(directory)
+            )
+            continued = _run_one(
+                next_item, task, args=args, repository=repository, scratch=Path(directory)
+            )
+
+        self.assertFalse(timed_out["completed"])
+        self.assertEqual(timed_out["failure_reason"], "timeout")
+        self.assertEqual(timed_out["exit_code"], None)
+        self.assertGreater(timed_out["output_bytes_proxy"], 0)
+        self.assertTrue(continued["completed"])
+        self.assertEqual(continued["peak_rss_bytes"], 4321)
+
     def test_status_peak_rss_parser_converts_linux_kib(self):
         self.assertEqual(_status_peak_rss_bytes("Name:\tcodex\nVmHWM:\t1234 kB\n"), 1234 * 1024)
         self.assertEqual(_status_peak_rss_bytes("Name:\tcodex\n"), 0)
