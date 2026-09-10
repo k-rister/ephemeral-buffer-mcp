@@ -4,6 +4,7 @@ import io
 import json
 import os
 import runpy
+import shlex
 import subprocess
 import sys
 import unittest
@@ -173,6 +174,33 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(exit_result.exception.code, 3)
         run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES, None)
         self.assertEqual(send.call_args.kwargs["label"], "build")
+
+    def test_wrapped_command_preserves_argument_boundaries(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
+        command = [sys.executable, "-c", "import sys; print(repr(sys.argv[1:]));", "two words", "$(printf unsafe)"]
+        with patch.object(cli, "run_command_bounded", return_value=("['two words', '$(printf unsafe)']\n", 0, False, 37, False)) as run, \
+                patch.object(cli, "send_to_mcp", return_value=response), \
+                patch.object(sys, "argv", ["cli.py", "--", *command]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        run.assert_called_once_with(shlex.join(command), None, cli.DEFAULT_MAX_OUTPUT_BYTES, None)
+
+    def test_wrapped_command_does_not_reinterpret_literal_command_substitution(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
+        command = [sys.executable, "-c", "import sys; print(sys.argv[1])", "$(printf unsafe)"]
+        with patch.object(cli, "send_to_mcp", return_value=response), \
+                patch.object(sys, "argv", ["cli.py", "--", *command]), \
+                patch.object(sys, "stdout", io.StringIO()) as stdout, \
+                patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertIn("$(printf unsafe)", stdout.getvalue())
 
     def test_wrapped_command_reports_capture_warning(self):
         response = {"status": "error", "message": "socket unavailable"}
