@@ -43,7 +43,8 @@ jobs:
           if [ "${{ matrix.python-version }}" = "3.12" ]; then
             python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
           else
-            python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit
+            # Python 3.10 uses release_checks.py's tomli fallback for TOML parsing.
+            python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1
           fi
 
       - name: Audit dependencies
