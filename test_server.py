@@ -585,6 +585,29 @@ class TestServerTools(unittest.TestCase):
         server.capture_text("one line", label="listed")
         self.assertIn("listed", server.list_captures())
 
+    def test_search_response_has_a_utf8_budget(self):
+        matches = [
+            {
+                "score": 1.0,
+                "matched_range": "1-1",
+                "context_range": "1-1",
+                "snippet": "x" * (server.SEARCH_RESPONSE_MAX_BYTES // 4),
+            }
+            for _ in range(8)
+        ]
+        with patch.object(
+            server.engine,
+            "search",
+            return_value={
+                "status": "ok", "mode": "bm25", "capture_id": "cap",
+                "label": "label", "total_lines": 1, "matches": matches,
+            },
+        ):
+            result = server.search_capture("query", mode="bm25")
+
+        self.assertLessEqual(len(result.encode("utf-8")), server.SEARCH_RESPONSE_MAX_BYTES)
+        self.assertIn("Additional matches omitted", result)
+
     def test_clear_capture_delegates_success_and_missing_results(self):
         with patch.object(server.engine, "clear", return_value="Cleared capture 'cap'.") as clear:
             self.assertEqual(server.clear_captures("cap"), "Cleared capture 'cap'.")

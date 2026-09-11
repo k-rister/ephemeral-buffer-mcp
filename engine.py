@@ -39,6 +39,8 @@ SEARCH_MODES = ("hybrid", "bm25", "semantic")
 HYBRID_LEXICAL_WEIGHT = 2.0
 PREVIEW_MAX_BYTES = 4 * 1024
 PREVIEW_TRUNCATION_MARKER = "\n... [preview truncated; use get_capture_slice for full content] ..."
+SEARCH_SNIPPET_MAX_BYTES = 8 * 1024
+SEARCH_SNIPPET_TRUNCATION_MARKER = "... [search line truncated; use get_capture_slice for full content] ..."
 
 
 def sqlite_fts5_available() -> bool:
@@ -73,18 +75,22 @@ def _fallback_tokens(text: str) -> List[str]:
     return _fts5_tokens(text)
 
 
-def _bounded_preview(content: str, max_bytes: int = PREVIEW_MAX_BYTES) -> str:
+def _bounded_preview(
+    content: str,
+    max_bytes: int = PREVIEW_MAX_BYTES,
+    marker: str = PREVIEW_TRUNCATION_MARKER,
+) -> str:
     """Return a UTF-8 bounded preview with an explicit truncation marker."""
     encoded = content.encode("utf-8")
     if len(encoded) <= max_bytes:
         return content
 
-    marker_bytes = PREVIEW_TRUNCATION_MARKER.encode("utf-8")
+    marker_bytes = marker.encode("utf-8")
     if len(marker_bytes) >= max_bytes:
         return marker_bytes[:max_bytes].decode("utf-8", errors="ignore")
 
     prefix = encoded[: max_bytes - len(marker_bytes)].decode("utf-8", errors="ignore")
-    return prefix + PREVIEW_TRUNCATION_MARKER
+    return prefix + marker
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -1034,7 +1040,11 @@ class EphemeralEngine:
                 raw = capture.raw_lines[line_no - 1]
                 is_match_core = chunk.start_line <= line_no <= chunk.end_line
                 prefix = ">" if is_match_core else " "
-                lines_with_numbers.append(f"{prefix} {line_no:5d} | {raw}")
+                lines_with_numbers.append(_bounded_preview(
+                    f"{prefix} {line_no:5d} | {raw}",
+                    max_bytes=SEARCH_SNIPPET_MAX_BYTES,
+                    marker=SEARCH_SNIPPET_TRUNCATION_MARKER,
+                ))
 
             snippet = "\n".join(lines_with_numbers)
             matches.append({

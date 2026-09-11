@@ -40,6 +40,7 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 # JSON string escaping can expand a UTF-8 capture by at most six bytes per
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
+SEARCH_RESPONSE_MAX_BYTES = 64 * 1024
 SOCKET_STARTUP_TIMEOUT_SECONDS = positive_int_env("EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS", 5)
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
@@ -582,10 +583,19 @@ def search_capture(
     ]
     
     for i, m in enumerate(matches, 1):
-        out.append(f"### Match #{i} (Score: {m['score']}, Range: {m['matched_range']}, Context: {m['context_range']})")
-        out.append("```text")
-        out.append(m["snippet"])
-        out.append("```\n")
+        match_output = [
+            f"### Match #{i} (Score: {m['score']}, Range: {m['matched_range']}, Context: {m['context_range']})",
+            "```text",
+            m["snippet"],
+            "```\n",
+        ]
+        if len("\n".join(out + match_output).encode("utf-8")) > SEARCH_RESPONSE_MAX_BYTES:
+            out.append(
+                "Additional matches omitted because the search response reached "
+                f"its {SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. Use get_capture_slice for full content."
+            )
+            break
+        out.extend(match_output)
         
     return "\n".join(out)
 
