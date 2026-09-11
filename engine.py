@@ -1192,14 +1192,15 @@ class EphemeralEngine:
             separators=(",", ":"),
         )[:-1] + ',"records":['
 
-        def compact_suffix(omitted_count: int) -> str:
+        def compact_suffix(omitted_count: int, record_count: int) -> str:
             metadata_after_records = {
                 "requested_capture_count": len(requested_ids),
                 "selected_capture_count": len(selected_ids),
                 "missing_capture_ids": missing_ids,
                 "omitted_record_count": omitted_count,
             }
-            return "]," + json.dumps(
+            closing = "\n]," if record_count else "],"
+            return closing + json.dumps(
                 metadata_after_records,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -1215,11 +1216,11 @@ class EphemeralEngine:
         for index, encoded_record in enumerate(encoded_records):
             candidate_record_bytes = record_bytes + len(encoded_record.encode("utf-8"))
             if index:
-                candidate_record_bytes += 1  # comma between records
+                candidate_record_bytes += 2  # comma and newline between records
             candidate_bytes = (
                 metadata_bytes
                 + candidate_record_bytes
-                + len(compact_suffix(len(records) - index - 1).encode("utf-8"))
+                + len(compact_suffix(len(records) - index - 1, index + 1).encode("utf-8"))
             )
             if candidate_bytes > output_limit:
                 break
@@ -1229,8 +1230,8 @@ class EphemeralEngine:
         omitted_count = len(records) - included_count
         encoded = (
             metadata_before_records
-            + ",".join(encoded_records[:included_count])
-            + compact_suffix(omitted_count)
+            + ",\n".join(encoded_records[:included_count])
+            + compact_suffix(omitted_count, included_count)
         )
         payload: Dict[str, Any] = {
             "schema_version": 1,
