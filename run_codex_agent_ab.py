@@ -78,20 +78,24 @@ def _as_text(value: str | bytes | None) -> str:
     return value
 
 
-def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+def _terminate_process_group(
+    process: subprocess.Popen[str], process_group_id: int | None = None
+) -> None:
     """Terminate Codex and any MCP children that inherited its output pipes."""
+    group_id = process_group_id if process_group_id is not None else process.pid
     if os.name == "posix":
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            os.killpg(group_id, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            pass
+        try:
+            os.killpg(group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     else:  # pragma: no cover - Windows process-group behavior is platform-specific.
         process.kill()
 
@@ -133,6 +137,12 @@ def _run_codex_process(
         text=True,
         start_new_session=os.name == "posix",
     )
+    process_group_id = process.pid
+    if os.name == "posix":
+        try:
+            process_group_id = os.getpgid(process.pid)
+        except OSError:
+            pass
     stop_monitor = threading.Event()
     peak_rss = [0]
 
@@ -148,8 +158,16 @@ def _run_codex_process(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _terminate_process_group(process)
-        stdout, stderr = process.communicate()
+        _terminate_process_group(process, process_group_id)
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired as drain_timeout:
+            _terminate_process_group(process, process_group_id)
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired as final_timeout:
+                stdout = _as_text(final_timeout.output or drain_timeout.output)
+                stderr = _as_text(final_timeout.stderr or drain_timeout.stderr)
         raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
     finally:
         stop_monitor.set()

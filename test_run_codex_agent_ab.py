@@ -9,10 +9,51 @@ from pathlib import Path
 from unittest.mock import patch
 
 from benchmark_agent_ab import build_schedule
-from run_codex_agent_ab import _event_metrics, _load_manifest, _run_one, _status_peak_rss_bytes, run_schedule
+from run_codex_agent_ab import (
+    _event_metrics,
+    _load_manifest,
+    _run_codex_process,
+    _run_one,
+    _status_peak_rss_bytes,
+    run_schedule,
+)
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_codex_timeout_uses_bounded_pipe_drains_after_leader_exit(self):
+        class Process:
+            pid = 42
+            returncode = -9
+            stdout = None
+            stderr = None
+
+            def __init__(self):
+                self.communicate_calls = 0
+
+            def communicate(self, timeout=None):
+                self.communicate_calls += 1
+                raise subprocess.TimeoutExpired(
+                    ["codex"], timeout, output=b"partial", stderr=b"timed out"
+                )
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        process = Process()
+        with patch("run_codex_agent_ab.subprocess.Popen", return_value=process), \
+                patch("run_codex_agent_ab.os.getpgid", return_value=4242), \
+                patch("run_codex_agent_ab.os.killpg") as killpg:
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                _run_codex_process(["codex"], cwd=Path("."), timeout=1)
+
+        self.assertEqual(process.communicate_calls, 3)
+        self.assertEqual(raised.exception.output, "partial")
+        self.assertEqual(killpg.call_args_list[0].args, (4242, 15))
+        self.assertEqual(killpg.call_args_list[1].args, (4242, 9))
+
     def test_timeout_emits_record_and_next_run_can_continue(self):
         item = {"sequence": 1, "repetition": 1, "task_id": "timeout", "mode": "control"}
         next_item = {"sequence": 2, "repetition": 1, "task_id": "after-timeout", "mode": "control"}

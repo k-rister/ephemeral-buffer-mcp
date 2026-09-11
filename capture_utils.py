@@ -96,6 +96,11 @@ def _run_command_bounded(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    process_group_id = getattr(proc, "pid", None)
+    try:
+        process_group_id = os.getpgid(proc.pid)
+    except (AttributeError, OSError):
+        pass
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
@@ -126,7 +131,10 @@ def _run_command_bounded(
                 timeout_seconds=timeout_seconds,
                 output_bytes=capture.total_bytes,
             )
-            _terminate_process_group(proc)
+            if process_group_id is None:
+                _terminate_process_group(proc)
+            else:
+                _terminate_process_group(proc, process_group_id)
         try:
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
@@ -140,11 +148,12 @@ def _run_command_bounded(
     return output, (124 if timed_out else proc.returncode), truncated, total_bytes, timed_out
 
 
-def _terminate_process_group(proc: subprocess.Popen) -> None:
+def _terminate_process_group(proc: subprocess.Popen, process_group_id: Optional[int] = None) -> None:
     """Terminate a shell command and all children started in its process group."""
     process_id = getattr(proc, "pid", None)
+    group_id = process_group_id if process_group_id is not None else process_id
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(group_id, signal.SIGTERM)
         log_event(LOGGER, logging.INFO, "process_group_terminate", pid=process_id, signal="SIGTERM")
     except (ProcessLookupError, OSError):
         log_event(LOGGER, logging.INFO, "process_terminate_fallback", pid=process_id)
@@ -152,12 +161,15 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
     try:
         proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-            log_event(LOGGER, logging.WARNING, "process_group_kill", pid=process_id, signal="SIGKILL")
-        except (ProcessLookupError, OSError):
-            log_event(LOGGER, logging.WARNING, "process_kill_fallback", pid=process_id)
-            proc.kill()
+        pass
+    try:
+        os.killpg(group_id, signal.SIGKILL)
+        log_event(LOGGER, logging.WARNING, "process_group_kill", pid=process_id, signal="SIGKILL")
+    except ProcessLookupError:
+        pass
+    except OSError:
+        log_event(LOGGER, logging.WARNING, "process_kill_fallback", pid=process_id)
+        proc.kill()
 
 
 def read_file_bounded(file_path: str, max_bytes: int) -> str:

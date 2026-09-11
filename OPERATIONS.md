@@ -120,8 +120,9 @@ content. The summary also reports the original size and truncation state.
 
 Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 `ephbuf` when a command might block or run indefinitely. A timed-out command is
-terminated as a process group, its output collected so far is retained, and it
-returns exit status 124.
+terminated as a process group, including descendants that outlive the shell
+leader; pipe draining and final reaping remain bounded. Its output collected so
+far is retained, and it returns exit status 124.
 
 Signal summaries recognize successful test-run markers and avoid treating
 example error text inside a passing test run as an active failure. The complete

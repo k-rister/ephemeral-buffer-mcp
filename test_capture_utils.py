@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -81,6 +82,20 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertGreater(original_size, 0)
         self.assertTrue(any("command_timeout" in event for event in events.output))
         self.assertTrue(all(command not in event for event in events.output))
+
+    def test_timeout_kills_descendant_after_group_leader_exits(self):
+        child_script = "import time; time.sleep(10)"
+        parent_script = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child_script!r}])"
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)}"
+        started = time.monotonic()
+        output, exit_code, _truncated, _original_size, timed_out = run_command_bounded(
+            command, None, 1024, timeout_seconds=0.1
+        )
+
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(output, "")
+        self.assertEqual(exit_code, 124)
+        self.assertTrue(timed_out)
 
     def test_timeout_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "timeout_seconds"):
@@ -203,8 +218,8 @@ class TestBoundedCommandCapture(unittest.TestCase):
         with patch("capture_utils.os.killpg") as killpg:
             _terminate_process_group(process)
 
-        killpg.assert_called_once()
-        self.assertEqual(killpg.call_args.args, (42, 15))
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual(killpg.call_args_list[0].args, (42, 15))
 
     def test_process_group_cleanup_escalates_to_group_kill_after_wait_timeout(self):
         class SlowProcess:
