@@ -68,6 +68,88 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertEqual(original_size, len(output.encode("utf-8")))
         self.assertEqual(output, "complete\n")
 
+    def test_early_eof_waits_for_process_within_deadline(self):
+        script = "import os, time; os.close(1); time.sleep(0.2)"
+        command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+        output, exit_code, truncated, original_size, timed_out = run_command_bounded(
+            command, None, 1024, timeout_seconds=5
+        )
+
+        self.assertEqual((output, exit_code, truncated, original_size, timed_out), ("", 0, False, 0, False))
+
+    def test_early_eof_without_deadline_does_not_invent_timeout(self):
+        script = "import os, time; os.close(1); time.sleep(0.2)"
+        command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+        output, exit_code, truncated, original_size, timed_out = run_command_bounded(
+            command, None, 1024
+        )
+
+        self.assertEqual((output, exit_code, truncated, original_size, timed_out), ("", 0, False, 0, False))
+
+    def test_early_eof_still_honors_expired_deadline(self):
+        script = "import os, time; os.close(1); time.sleep(2)"
+        command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+        output, exit_code, truncated, original_size, timed_out = run_command_bounded(
+            command, None, 1024, timeout_seconds=0.1
+        )
+
+        self.assertEqual((output, exit_code, truncated, original_size, timed_out), ("", 124, False, 0, True))
+
+    def test_post_eof_wait_timeout_uses_timeout_cleanup(self):
+        class FakeStream:
+            def read1(self, _size):
+                return b""
+
+            def close(self):
+                pass
+
+        stream = FakeStream()
+
+        class FakeSelector:
+            def __init__(self):
+                self.active = True
+
+            def register(self, _stream, _event):
+                pass
+
+            def get_map(self):
+                return {"stdout": object()} if self.active else {}
+
+            def select(self, _timeout):
+                return [(type("Key", (), {"fileobj": stream})(), None)]
+
+            def unregister(self, _stream):
+                self.active = False
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            stdout = stream
+            returncode = 0
+
+            def __init__(self):
+                self.wait_calls = 0
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    raise subprocess.TimeoutExpired("ignored", timeout)
+
+        process = FakeProcess()
+        with patch("capture_utils.selectors.DefaultSelector", return_value=FakeSelector()), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils.time.monotonic", side_effect=[0, 0, 0]), \
+                patch("capture_utils._terminate_process_group") as terminate:
+            result = _run_command_bounded("ignored", None, 1024, timeout_seconds=1)
+
+        self.assertEqual(result[1], 124)
+        self.assertTrue(result[4])
+        terminate.assert_called_once_with(process)
+
     def test_command_timeout_terminates_process_group(self):
         command = f"{shlex.quote(sys.executable)} -c \"import time; print('started', flush=True); time.sleep(10)\""
         with self.assertLogs("ephemeral_buffer.capture", level="WARNING") as events:
