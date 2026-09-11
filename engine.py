@@ -322,9 +322,13 @@ def detect_signals(
     for name, pat in LOG_SIGNAL_PATTERNS.items():
         hits = 0
         for line in lines:
-            if BENIGN_SIGNAL_RE.search(line):
+            # Remove only benign zero-valued phrases.  A summary line may
+            # contain both a zero-valued category and a real failure, such as
+            # ``FAILED: 1 failure, 0 errors``.
+            signal_line = BENIGN_SIGNAL_RE.sub("", line)
+            if not signal_line.strip():
                 continue
-            if pat.search(line):
+            if pat.search(signal_line):
                 hits += 1
         if hits > 0:
             detected[name] = hits

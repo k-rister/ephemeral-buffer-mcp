@@ -138,6 +138,12 @@ class TestEngineClassification(unittest.TestCase):
         self.assertEqual(signals, {"error": 1})
         self.assertEqual(summary, "error: 1")
 
+        mixed_signals, mixed_summary = detect_signals(
+            ["FAILED: 1 failure, 0 errors"], "log"
+        )
+        self.assertEqual(mixed_signals, {"failure": 1})
+        self.assertEqual(mixed_summary, "failure: 1")
+
     def test_storage_cleanup_ignores_captures_without_storage(self):
         engine = EphemeralEngine(max_captures=1)
         capture = engine.ingest("no storage payload", label="no-storage")
