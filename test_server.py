@@ -800,7 +800,13 @@ class TestSocketServerStartup(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "existing.sock")
-            Path(socket_path).write_text("occupied", encoding="utf-8")
+            stale_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                stale_listener.bind(socket_path)
+            except PermissionError as exc:
+                stale_listener.close()
+                self.skipTest(f"Unix socket bind unavailable: {exc}")
+            stale_listener.close()
             with patch.object(server, "SOCKET_PATH", socket_path), \
                     patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
@@ -830,6 +836,74 @@ class TestSocketServerStartup(unittest.TestCase):
 
         unlink.assert_not_called()
         self.assertIn("Socket already in use", stderr)
+
+    def test_non_socket_paths_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "regular", root / "directory"]
+            paths[0].write_text("preserve me", encoding="utf-8")
+            paths[1].mkdir()
+            symlink = root / "symlink"
+            try:
+                symlink.symlink_to(paths[0])
+                paths.append(symlink)
+            except OSError:
+                pass
+
+            class FailingLoop:
+                def close(self):
+                    pass
+
+            for path in paths:
+                with self.subTest(path=path), \
+                        patch.object(server, "SOCKET_PATH", str(path)), \
+                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(server.asyncio, "set_event_loop"), \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    server.run_socket_server()
+
+                self.assertTrue(os.path.lexists(path))
+                self.assertIn("not a Unix socket", stderr.getvalue())
+
+    def test_socket_replacement_during_probe_is_not_unlinked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "ephemeral.sock"
+            replacement = Path(directory) / "replacement"
+            replacement.write_text("preserve replacement", encoding="utf-8")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+            except PermissionError as exc:
+                listener.close()
+                self.skipTest(f"Unix socket bind unavailable: {exc}")
+            listener.close()
+
+            initial_stat = os.lstat(socket_path)
+            replacement_stat = os.lstat(replacement)
+
+            class FailingLoop:
+                def close(self):
+                    pass
+
+            class RefusingProbe:
+                def connect(self, _path):
+                    raise ConnectionRefusedError()
+
+                def close(self):
+                    pass
+
+            with patch.object(server, "SOCKET_PATH", str(socket_path)), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
+                    patch.object(server.socket, "socket", return_value=RefusingProbe()), \
+                    patch.object(server.os, "unlink") as unlink, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+            unlink.assert_not_called()
+            self.assertTrue(socket_path.exists())
+            self.assertIn("changed to a non-socket path", stderr.getvalue())
 
     def test_live_socket_is_not_removed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -965,7 +1039,7 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 server.run_socket_server()
 
-        self.assertIn("Unable to verify existing socket", stderr.getvalue())
+        self.assertIn("not a Unix socket", stderr.getvalue())
 
     def test_module_entrypoint_starts_listener_and_runs_mcp(self):
         class ReadyEvent:
