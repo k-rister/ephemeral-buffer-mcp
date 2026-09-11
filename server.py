@@ -503,7 +503,8 @@ def consolidate_captures(
 
     The consolidated capture keeps source capture IDs and source line numbers.
     If records do not fit, the complete source captures remain available through
-    their original IDs and the response reports how many records were omitted.
+    their original IDs until normal LRU eviction. The operation fails if the
+    consolidated capture cannot be admitted while retaining those sources.
     """
     try:
         result = engine.consolidate(capture_ids, max_captures, max_bytes)
@@ -511,6 +512,7 @@ def consolidate_captures(
             result["content"],
             label=label,
             content_type="text",
+            protected_capture_ids=result["source_capture_ids"],
         )
         return json.dumps({
             "status": "ok",

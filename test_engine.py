@@ -556,6 +556,56 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             rejecting.ingest("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="too-large")
         self.assertEqual(rejecting.captures, {})
 
+    def test_protected_ingest_evicts_only_unrelated_captures(self):
+        engine = EphemeralEngine(max_captures=2)
+        source = engine.ingest("source payload", label="source")
+        unrelated = engine.ingest("unrelated payload", label="unrelated")
+
+        admitted = engine.ingest(
+            "consolidated payload",
+            label="consolidated",
+            protected_capture_ids=[source.capture_id],
+        )
+
+        self.assertIn(source.capture_id, engine.captures)
+        self.assertNotIn(unrelated.capture_id, engine.captures)
+        self.assertIn(admitted.capture_id, engine.captures)
+
+    def test_protected_ingest_rejects_without_evicting_sources(self):
+        engine = EphemeralEngine(max_captures=1)
+        source = engine.ingest("source payload", label="source")
+
+        with self.assertRaisesRegex(ValueError, "protected source captures"):
+            engine.ingest(
+                "consolidated payload",
+                label="consolidated",
+                protected_capture_ids=[source.capture_id],
+            )
+
+        self.assertEqual(list(engine.captures), [source.capture_id])
+        self.assertEqual(engine.get_capture(source.capture_id).label, "source")
+
+    def test_protected_ingest_rejects_when_bytes_or_chunks_cannot_fit(self):
+        byte_limited = EphemeralEngine(max_captures=2, max_buffer_bytes=25)
+        byte_source = byte_limited.ingest("source payload", label="source")
+        with self.assertRaisesRegex(ValueError, "protected source captures"):
+            byte_limited.ingest(
+                "consolidated payload",
+                label="consolidated",
+                protected_capture_ids=[byte_source.capture_id],
+            )
+        self.assertIn(byte_source.capture_id, byte_limited.captures)
+
+        chunk_limited = EphemeralEngine(max_captures=2, max_indexed_chunks=1)
+        chunk_source = chunk_limited.ingest("source payload", label="source")
+        with self.assertRaisesRegex(ValueError, "protected source captures"):
+            chunk_limited.ingest(
+                "consolidated payload",
+                label="consolidated",
+                protected_capture_ids=[chunk_source.capture_id],
+            )
+        self.assertIn(chunk_source.capture_id, chunk_limited.captures)
+
     def test_12_reads_are_not_blocked_by_embedding(self):
         class BlockingEmbedding:
             def __init__(self):
