@@ -338,6 +338,24 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertLessEqual(len(output.encode("utf-8")), 1024)
         self.assertIn("output truncated", output)
 
+    def test_invalid_utf8_replacement_stays_within_output_budget(self):
+        output, truncated, original_size = bound_chunks([b"\xff" * 600], 512)
+
+        self.assertTrue(truncated)
+        self.assertEqual(original_size, 600)
+        self.assertLessEqual(len(output.encode("utf-8")), 512)
+        self.assertIn("output truncated", output)
+
+    def test_complete_invalid_utf8_that_expands_is_bounded(self):
+        capture = _BoundedCapture(512)
+        capture.add(b"\xff" * 200)
+
+        output, truncated, original_size = capture.finish()
+
+        self.assertTrue(truncated)
+        self.assertEqual(original_size, 200)
+        self.assertLessEqual(len(output.encode("utf-8")), 512)
+
     def test_file_read_rejects_oversized_content(self):
         with tempfile.NamedTemporaryFile() as file_handle:
             file_handle.write(b"x" * 1024)
