@@ -117,7 +117,8 @@ def synchronized(method):
             return method(self, *args, **kwargs)
     return wrapper
 
-DIFF_GIT_RE = re.compile(r"^diff --git a/(.*) b/(.*)$")
+DIFF_GIT_RE = re.compile(r"^diff --git (.+)$")
+DIFF_PATH_TOKEN_RE = re.compile(r'"(?:\\.|[^"])*"|[^\s]+')
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 BENIGN_SIGNAL_RE = re.compile(
     r"(\b0\s*(errors?|failures?|failed)\b|\b(errors?|failures?|failed)\s*[:=]\s*0\b|\bno\s+errors?\b)",
@@ -165,6 +166,45 @@ def _contains_conflict_marker(line: str) -> bool:
     )
 
 
+def _decode_git_path(token: str) -> str:
+    """Decode a Git-quoted path, including octal C-style escapes."""
+    if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+        token = token[1:-1]
+
+    decoded = bytearray()
+    index = 0
+    escape_bytes = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13}
+    while index < len(token):
+        if token[index] != "\\":
+            decoded.extend(token[index].encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(token):
+            decoded.extend(b"\\")
+            break
+        if token[index] in "01234567" and index + 2 < len(token):
+            octal = token[index:index + 3]
+            if all(char in "01234567" for char in octal):
+                decoded.append(int(octal, 8))
+                index += 3
+                continue
+        decoded.append(escape_bytes.get(token[index], ord(token[index])))
+        index += 1
+    return decoded.decode("utf-8", errors="replace")
+
+
+def _parse_git_diff_paths(line: str) -> Optional[Tuple[str, str]]:
+    """Return decoded old/new paths from a ``diff --git`` header."""
+    match = DIFF_GIT_RE.match(line)
+    if not match:
+        return None
+    tokens = DIFF_PATH_TOKEN_RE.findall(match.group(1))
+    if len(tokens) != 2:
+        return None
+    return _decode_git_path(tokens[0]), _decode_git_path(tokens[1])
+
+
 def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
     """
     Parses unified diff lines to extract structured file-level metadata and line boundaries.
@@ -188,12 +228,16 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
         if _contains_conflict_marker(line):
             has_conflicts = True
 
-        m = DIFF_GIT_RE.match(line)
-        if m:
+        git_paths = _parse_git_diff_paths(line)
+        if git_paths:
             if current_file:
                 current_file["end_line"] = idx - 1
                 files.append(current_file)
-            old_p, new_p = m.group(1), m.group(2)
+            old_p, new_p = git_paths
+            if old_p.startswith("a/"):
+                old_p = old_p[2:]
+            if new_p.startswith("b/"):
+                new_p = new_p[2:]
             path = new_p if new_p != "/dev/null" else old_p
             current_file = {
                 "path": path,
@@ -210,7 +254,7 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
             continue
 
         if current_file is None and (line.startswith("--- ") or line.startswith("+++ ")):
-            path = line[4:].strip()
+            path = _decode_git_path(line[4:].strip())
             if path.startswith("a/") or path.startswith("b/"):
                 path = path[2:]
             if path:

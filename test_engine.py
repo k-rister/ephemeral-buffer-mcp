@@ -110,6 +110,20 @@ class TestEngineClassification(unittest.TestCase):
         self.assertEqual(parsed["files"][0]["additions"], 1)
         self.assertEqual(parsed["files"][0]["deletions"], 1)
 
+    def test_parse_unified_diff_decodes_git_quoted_paths(self):
+        parsed = parse_unified_diff([
+            'diff --git "a/src/caf\\303\\251 notes.txt" "b/src/caf\\303\\251 notes.txt"',
+            '--- "a/src/caf\\303\\251 notes.txt"',
+            '+++ "b/src/caf\\303\\251 notes.txt"',
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+
+        self.assertEqual(parsed["files"][0]["path"], "src/café notes.txt")
+        self.assertEqual(parsed["files"][0]["old_path"], "src/café notes.txt")
+        self.assertEqual(parsed["files"][0]["new_path"], "src/café notes.txt")
+
     def test_content_type_hints_and_label_detection(self):
         self.assertEqual(detect_content_type(["error"], content_type_hint="log"), ("log", None))
         self.assertEqual(detect_content_type(["source"], content_type_hint="text"), ("text", None))
