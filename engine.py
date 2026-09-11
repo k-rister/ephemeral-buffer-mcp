@@ -1103,7 +1103,6 @@ class EphemeralEngine:
             })
         return result
 
-    @synchronized
     def consolidate(
         self,
         capture_ids: Optional[List[str]] = None,
@@ -1122,54 +1121,94 @@ class EphemeralEngine:
                 f"({self.max_buffer_bytes:,})"
             )
 
-        requested_ids = capture_ids or [item["capture_id"] for item in self.list_captures()]
-        selected_ids = list(dict.fromkeys(requested_ids))[:max_captures]
-        sources: List[Dict[str, Any]] = []
-        records: List[Dict[str, Any]] = []
-        missing_ids: List[str] = []
-        for capture_id in selected_ids:
-            capture = self.captures.get(capture_id)
-            if not capture:
-                missing_ids.append(capture_id)
-                continue
-            sources.append({
-                "capture_id": capture.capture_id,
-                "label": capture.label,
-                "content_type": capture.content_type,
-                "total_lines": capture.line_count,
-                "byte_size": capture.byte_size,
-                "truncated": capture.truncated,
-                "original_byte_size": capture.original_byte_size,
-                "command_exit_code": capture.command_exit_code,
-                "timed_out": capture.timed_out,
-            })
-            records.extend(
-                {"capture_id": capture.capture_id, "source_line": line_number, "text": line}
-                for line_number, line in enumerate(capture.raw_lines, start=1)
-            )
+        # Capture objects are immutable after ingestion. Snapshot their metadata
+        # and lines while holding the lock, then release it before doing the
+        # potentially expensive serialization work.
+        with self._lock:
+            requested_ids = list(capture_ids) if capture_ids else list(reversed(self.capture_order))
+            selected_ids = list(dict.fromkeys(requested_ids))[:max_captures]
+            sources: List[Dict[str, Any]] = []
+            records: List[Dict[str, Any]] = []
+            missing_ids: List[str] = []
+            for capture_id in selected_ids:
+                capture = self.captures.get(capture_id)
+                if not capture:
+                    missing_ids.append(capture_id)
+                    continue
+                sources.append({
+                    "capture_id": capture.capture_id,
+                    "label": capture.label,
+                    "content_type": capture.content_type,
+                    "total_lines": capture.line_count,
+                    "byte_size": capture.byte_size,
+                    "truncated": capture.truncated,
+                    "original_byte_size": capture.original_byte_size,
+                    "command_exit_code": capture.command_exit_code,
+                    "timed_out": capture.timed_out,
+                })
+                records.extend(
+                    {"capture_id": capture.capture_id, "source_line": line_number, "text": line}
+                    for line_number, line in enumerate(capture.raw_lines, start=1)
+                )
 
+        metadata_before_records = json.dumps(
+            {"schema_version": 1, "sources": sources},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )[:-1] + ',"records":['
+
+        def compact_suffix(omitted_count: int) -> str:
+            metadata_after_records = {
+                "requested_capture_count": len(requested_ids),
+                "selected_capture_count": len(selected_ids),
+                "missing_capture_ids": missing_ids,
+                "omitted_record_count": omitted_count,
+            }
+            return "]," + json.dumps(
+                metadata_after_records,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )[1:]
+
+        encoded_records = [
+            json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            for record in records
+        ]
+        metadata_bytes = len(metadata_before_records.encode("utf-8"))
+        record_bytes = 0
+        included_count = 0
+        for index, encoded_record in enumerate(encoded_records):
+            candidate_record_bytes = record_bytes + len(encoded_record.encode("utf-8"))
+            if index:
+                candidate_record_bytes += 1  # comma between records
+            candidate_bytes = (
+                metadata_bytes
+                + candidate_record_bytes
+                + len(compact_suffix(len(records) - index - 1).encode("utf-8"))
+            )
+            if candidate_bytes > output_limit:
+                break
+            record_bytes = candidate_record_bytes
+            included_count = index + 1
+
+        omitted_count = len(records) - included_count
+        encoded = (
+            metadata_before_records
+            + ",".join(encoded_records[:included_count])
+            + compact_suffix(omitted_count)
+        )
         payload: Dict[str, Any] = {
             "schema_version": 1,
             "sources": sources,
-            "records": [],
+            "records": records[:included_count],
             "requested_capture_count": len(requested_ids),
             "selected_capture_count": len(selected_ids),
             "missing_capture_ids": missing_ids,
-            "omitted_record_count": 0,
+            "omitted_record_count": omitted_count,
         }
-        for index, record in enumerate(records):
-            candidate = dict(payload)
-            candidate["records"] = payload["records"] + [record]
-            candidate["omitted_record_count"] = len(records) - index - 1
-            encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
-            if len(encoded.encode("utf-8")) > output_limit:
-                payload["omitted_record_count"] = len(records) - index
-                break
-            payload["records"].append(record)
-
-        encoded = json.dumps(payload, ensure_ascii=False, indent=2)
-        if len(encoded.encode("utf-8")) > output_limit:
-            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        pretty_encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(pretty_encoded.encode("utf-8")) <= output_limit:
+            encoded = pretty_encoded
         if len(encoded.encode("utf-8")) > output_limit:
             # Source metadata can be arbitrarily large (for example, a user
             # supplied label). Keep the consolidated capture valid and bounded
