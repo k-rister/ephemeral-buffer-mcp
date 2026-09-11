@@ -9,6 +9,7 @@ import sys
 import json
 import asyncio
 import socket
+import stat
 import threading
 import logging
 import itertools
@@ -849,15 +850,41 @@ def run_socket_server():
                 "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
             )
         if os.path.lexists(SOCKET_PATH):
+            initial_path_stat = os.lstat(SOCKET_PATH)
+            if not stat.S_ISSOCK(initial_path_stat.st_mode):
+                raise RuntimeError(
+                    f"Socket path exists but is not a Unix socket: {SOCKET_PATH}"
+                )
+            initial_socket_identity = (
+                initial_path_stat.st_dev,
+                initial_path_stat.st_ino,
+                initial_path_stat.st_mode,
+            )
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 probe.connect(SOCKET_PATH)
             except ConnectionRefusedError:
-                # No listener accepted the connection, so this is a stale socket.
                 try:
-                    os.unlink(SOCKET_PATH)
+                    current_path_stat = os.lstat(SOCKET_PATH)
                 except FileNotFoundError:
-                    pass
+                    current_path_stat = None
+                if current_path_stat is not None:
+                    current_socket_identity = (
+                        current_path_stat.st_dev,
+                        current_path_stat.st_ino,
+                        current_path_stat.st_mode,
+                    )
+                    if not stat.S_ISSOCK(current_path_stat.st_mode):
+                        raise RuntimeError(
+                            f"Socket path changed to a non-socket path: {SOCKET_PATH}"
+                        )
+                    if current_socket_identity != initial_socket_identity:
+                        raise RuntimeError(
+                            f"Socket path changed while probing: {SOCKET_PATH}"
+                        )
+                    # No listener accepted the connection, so this is a stale
+                    # socket. Unlink only the inode that was inspected.
+                    os.unlink(SOCKET_PATH)
             except FileNotFoundError:
                 pass
             except OSError as exc:

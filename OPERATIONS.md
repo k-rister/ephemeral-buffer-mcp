@@ -22,9 +22,11 @@ export EPHEMERAL_SOCKET_PATH=/run/user/1000/ephemeral-buffer.sock
 ```
 
 The server probes an existing socket before startup: a live socket is preserved
-and the new instance exits with an error, while a stale socket is removed. The
-new socket is created with owner-only permissions (`0600`). The parent
-directory must already exist and be writable by the account running the server.
+and the new instance exits with an error, while a verified stale socket is
+removed. Regular files, directories, and symlinks at the configured path are
+never removed; the server exits with an error instead. The new socket is
+created with owner-only permissions (`0600`). The parent directory must
+already exist and be writable by the account running the server.
 
 If neither variable is set, the legacy shared default is used. When running
 multiple sessions without a session-aware launcher, give each server/CLI pair
