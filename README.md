@@ -580,7 +580,9 @@ build/log-like (2048 lines) output. Use the medians and p95 values to keep the
 heuristic honest: direct execution generally has lower latency for small,
 bounded output, while capture adds searchable context and bounded response
 size for noisy or uncertain output. These synthetic measurements are guidance,
-not universal thresholds or a required CI gate.
+not universal thresholds or a required CI gate. Both benchmark summaries use
+the nearest-rank p95 convention: for `n` samples, p95 is the value at sorted
+rank `ceil(0.95 * n)`, with ranks starting at one.
 
 Measure command-output handling effectiveness with deterministic synthetic data:
 ```bash

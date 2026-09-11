@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import platform
 import statistics
 import time
@@ -61,8 +62,21 @@ def _measure_once(line_count: int, engine: EphemeralEngine) -> dict[str, float |
     }
 
 
+def _nearest_rank(values: list[float], percentile: float = 0.95) -> float:
+    """Return a percentile using the nearest-rank convention."""
+    if not values:
+        raise ValueError("values must not be empty")
+    if not 0 < percentile <= 1:
+        raise ValueError("percentile must be greater than 0 and at most 1")
+    ordered = sorted(values)
+    rank = max(1, math.ceil(percentile * len(ordered)))
+    return ordered[rank - 1]
+
+
 def _summary(samples: list[dict[str, float | int]]) -> dict[str, Any]:
     """Return median and p95 timings while retaining sample count and size."""
+    if not samples:
+        raise ValueError("samples must not be empty")
     phases = ("command_seconds", "ingest_seconds", "semantic_index_seconds", "summary_seconds", "total_seconds")
     first = samples[0]
     result: dict[str, Any] = {
@@ -73,7 +87,7 @@ def _summary(samples: list[dict[str, float | int]]) -> dict[str, Any]:
     for phase in phases:
         values = sorted(float(sample[phase]) for sample in samples)
         result[f"{phase}_median"] = statistics.median(values)
-        result[f"{phase}_p95"] = values[max(0, int(len(values) * 0.95) - 1)]
+        result[f"{phase}_p95"] = _nearest_rank(values)
     return result
 
 
