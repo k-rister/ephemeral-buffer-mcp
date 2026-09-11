@@ -131,6 +131,32 @@ NONZERO_TEST_FAILURE_RE = re.compile(
     r"(?:\b[1-9]\d*\s+(?:failed|failures?|errors?)\b|\b(?:failed|failures?|errors?)\s*[:=]\s*[1-9]\d*)",
     re.IGNORECASE,
 )
+CONFLICT_START_RE = re.compile(r"^<<<<<<<(?:\s.*)?$")
+CONFLICT_SEPARATOR_RE = re.compile(r"^=======$")
+CONFLICT_END_RE = re.compile(r"^>>>>>>>(?:\s.*)?$")
+
+
+def _diff_content_for_conflict_check(line: str) -> Optional[str]:
+    """Return diff content while excluding removed lines and file headers."""
+    if line.startswith(("diff --git", "@@ ", "--- ", "+++ ")):
+        return None
+    if line.startswith("-"):
+        return None
+    if line.startswith(("+", " ")):
+        return line[1:]
+    return line
+
+
+def _contains_conflict_marker(line: str) -> bool:
+    content = _diff_content_for_conflict_check(line)
+    if content is None:
+        return False
+    content = content.rstrip()
+    return bool(
+        CONFLICT_START_RE.match(content)
+        or CONFLICT_SEPARATOR_RE.match(content)
+        or CONFLICT_END_RE.match(content)
+    )
 
 
 def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
@@ -152,7 +178,7 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
     has_conflicts = False
 
     for idx, line in enumerate(lines, start=1):
-        if line.startswith("<<<<<<<") or line.startswith("=======") or line.startswith(">>>>>>>"):
+        if _contains_conflict_marker(line):
             has_conflicts = True
 
         m = DIFF_GIT_RE.match(line)
