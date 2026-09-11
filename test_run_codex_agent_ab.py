@@ -96,6 +96,45 @@ class TestCodexAgentRunner(unittest.TestCase):
         ])
         self.assertEqual(_event_metrics(output), (3, 0, 2, None, None, [], []))
 
+    def test_event_metrics_deduplicates_started_and_completed_snapshots(self):
+        output = "\n".join([
+            json.dumps({
+                "type": "item.started",
+                "item": {"id": "call-1", "type": "function_call", "command": "pytest"},
+            }),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"item_id": "call-1", "type": "function_call", "command": "pytest"},
+            }),
+        ])
+
+        self.assertEqual(_event_metrics(output), (1, 0, 0, None, None, [], []))
+
+    def test_event_metrics_keeps_distinct_ids_for_repeated_commands(self):
+        output = "\n".join([
+            json.dumps({"type": "command_execution", "id": "call-1", "command": "pytest"}),
+            json.dumps({"type": "command_execution", "id": "call-2", "command": "pytest"}),
+        ])
+
+        self.assertEqual(_event_metrics(output), (2, 0, 1, None, None, [], []))
+
+    def test_event_metrics_merges_command_from_partial_lifecycle_snapshot(self):
+        output = "\n".join([
+            json.dumps({"type": "item.started", "item": {"id": "call-1", "type": "function_call"}}),
+            json.dumps({"type": "item.completed", "item": {"id": "call-1", "type": "function_call", "command": "pytest"}}),
+            json.dumps({"type": "command_execution", "id": "call-2", "command": "pytest"}),
+        ])
+
+        self.assertEqual(_event_metrics(output), (2, 0, 1, None, None, [], []))
+
+    def test_event_metrics_deduplicates_mcp_snapshots_with_call_id(self):
+        output = "\n".join([
+            json.dumps({"type": "mcp_tool_call", "call_id": "mcp-1"}),
+            json.dumps({"type": "mcp_tool_call.completed", "call_id": "mcp-1"}),
+        ])
+
+        self.assertEqual(_event_metrics(output), (1, 1, 0, None, None, [], []))
+
     def test_event_metrics_extracts_mcp_calls_and_usage(self):
         output = "\n".join([
             json.dumps({"type": "mcp_tool_call", "usage": {"input_tokens": 120, "output_tokens": 9}}),
