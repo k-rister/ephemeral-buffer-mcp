@@ -91,7 +91,8 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
 
     engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1))
     # Keep the reported size measurements focused on capture work, not model setup.
-    engine.ingest("warmup", label="latency-warmup")
+    warmup = engine.ingest("warmup", label="latency-warmup")
+    engine._ensure_embeddings(warmup)
     by_size = []
     for line_count in line_counts:
         measurements = [_measure_once(line_count, engine) for _ in range(samples)]

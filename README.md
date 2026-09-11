@@ -552,9 +552,12 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
 The latency harness reports cold-start time plus warm median and p95 timings
 for command execution, BM25 capture/indexing, deferred semantic indexing,
 summary generation, and the combined pipeline. Semantic embeddings are now
-materialized when semantic or hybrid search first needs them, so use the
-separate semantic-index phase when evaluating end-to-end costs. The benchmark
-is diagnostic and optional, not a required pull-request check.
+materialized when semantic or hybrid search first needs them, so the warmup
+explicitly materializes the warm engine's embeddings before timed samples begin.
+Use the separate semantic-index phase when evaluating end-to-end costs; cold
+start includes the first engine's model and embedding setup, while warm samples
+reuse the configured model cache and engine. The benchmark is diagnostic and
+optional, not a required pull-request check.
 
 Compare lazy semantic indexing with opt-in asynchronous prefetch:
 ```bash
