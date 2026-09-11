@@ -48,17 +48,51 @@ class _BoundedCapture:
         if len(self.tail) > self.tail_limit:
             del self.tail[:-self.tail_limit]
 
-    def finish(self) -> Tuple[str, bool, int]:
-        if not self.truncated:
-            return self.captured.decode("utf-8", errors="replace"), False, self.total_bytes
+    @staticmethod
+    def _truncate_text_to_bytes(text: str, max_bytes: int) -> str:
+        """Return text whose UTF-8 representation fits without splitting characters."""
+        if max_bytes <= 0:
+            return ""
+        encoded_size = 0
+        retained = []
+        for character in text:
+            character_size = len(character.encode("utf-8"))
+            if encoded_size + character_size > max_bytes:
+                break
+            retained.append(character)
+            encoded_size += character_size
+        return "".join(retained)
+
+    def _finish_truncated(self) -> str:
+        head_text = bytes(self.head).decode("utf-8", errors="replace")
+        tail_text = bytes(self.tail).decode("utf-8", errors="replace")
         marker = (
             f"\n\n[output truncated: retained first {len(self.head):,} and last {len(self.tail):,} bytes "
             f"of {self.total_bytes:,}]\n\n"
-        ).encode("utf-8")
-        output = bytes(self.head) + marker + bytes(self.tail)
-        if len(output) > self.max_output_bytes:
-            output = output[:self.max_output_bytes]
-        return output.decode("utf-8", errors="replace"), True, self.total_bytes
+        )
+        marker_bytes = len(marker.encode("utf-8"))
+        if marker_bytes >= self.max_output_bytes:
+            return self._truncate_text_to_bytes(marker, self.max_output_bytes)
+
+        content_budget = self.max_output_bytes - marker_bytes
+        head_budget = min(
+            len(head_text.encode("utf-8")),
+            content_budget // 2,
+        )
+        head_text = self._truncate_text_to_bytes(head_text, head_budget)
+        tail_budget = content_budget - len(head_text.encode("utf-8"))
+        tail_text = self._truncate_text_to_bytes(tail_text, tail_budget)
+        return head_text + marker + tail_text
+
+    def finish(self) -> Tuple[str, bool, int]:
+        if not self.truncated:
+            output = self.captured.decode("utf-8", errors="replace")
+            if len(output.encode("utf-8")) <= self.max_output_bytes:
+                return output, False, self.total_bytes
+            self.head = self.captured
+            self.tail = bytearray()
+            self.truncated = True
+        return self._finish_truncated(), True, self.total_bytes
 
 
 def bound_chunks(chunks: Iterable[bytes], max_output_bytes: int) -> Tuple[str, bool, int]:

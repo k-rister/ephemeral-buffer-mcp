@@ -227,6 +227,19 @@ class TestCliConfiguration(unittest.TestCase):
 
         self.assertEqual(send.call_args.args[0], "binary input")
 
+    def test_invalid_binary_stdin_is_bounded_after_decoding(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_binary", "label": "Piped STDIN"}
+        stdin = SimpleNamespace(isatty=lambda: False, buffer=io.BytesIO(b"\xff" * 600))
+        with patch.object(cli, "send_to_mcp", return_value=response) as send, \
+                patch.object(sys, "argv", ["cli.py", "--max-output-bytes", "512"]), \
+                patch.object(sys, "stdin", stdin):
+            cli.main()
+
+        payload = send.call_args.args[0]
+        self.assertLessEqual(len(payload.encode("utf-8")), 512)
+        self.assertTrue(send.call_args.kwargs["truncated"])
+        self.assertEqual(send.call_args.kwargs["original_byte_size"], 600)
+
     def test_wrapped_command_reports_timeout(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_timeout", "label": "sleep"}
         with patch.object(cli, "run_command_bounded", return_value=("partial", 124, False, 7, True)), \
