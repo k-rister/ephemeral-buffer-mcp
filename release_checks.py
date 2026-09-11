@@ -2,6 +2,7 @@
 """Validate the source state and metadata used to build a tagged release."""
 
 import argparse
+import datetime
 import re
 import subprocess
 import sys
@@ -22,6 +23,7 @@ SEMVER_TAG = re.compile(
     r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$"
 )
 CHANGELOG_HEADING = re.compile(r"^##\s+(?:\[(?P<bracketed>[^\]]+)\]|(?P<plain>\S+))(?:\s+-\s+(?P<label>.*))?\s*$")
+CHANGELOG_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def tag_version(tag: str) -> str:
@@ -58,12 +60,18 @@ def extract_changelog_notes(changelog: str, version: str) -> str:
         heading_version = match.group("bracketed") or match.group("plain")
         if heading_version != version:
             continue
-        label = (match.group("label") or "").strip().lower()
-        if "unreleased" in label:
+        label = (match.group("label") or "").strip()
+        if not CHANGELOG_DATE.fullmatch(label):
             raise ReleaseCheckError(
-                f"CHANGELOG.md section for {version} is still marked Unreleased; "
-                "replace it with release notes or a release date"
+                f"CHANGELOG.md section for {version} must use a release date in "
+                "YYYY-MM-DD format"
             )
+        try:
+            datetime.date.fromisoformat(label)
+        except ValueError as exc:
+            raise ReleaseCheckError(
+                f"CHANGELOG.md section for {version} has invalid release date {label!r}"
+            ) from exc
         end = next(
             (candidate for candidate in range(index + 1, len(lines))
              if lines[candidate].startswith("## ")),
