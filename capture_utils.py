@@ -121,6 +121,12 @@ def _run_command_bounded(
                     capture.add(chunk)
                 else:
                     selector.unregister(key.fileobj)
+        if not timed_out:
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
     finally:
         if timed_out:
             log_event(

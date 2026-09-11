@@ -122,7 +122,9 @@ Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 `ephbuf` when a command might block or run indefinitely. A timed-out command is
 terminated as a process group, including descendants that outlive the shell
 leader; pipe draining and final reaping remain bounded. Its output collected so
-far is retained, and it returns exit status 124.
+far is retained, and it returns exit status 124. Closing stdout does not end
+the command deadline: the process is still awaited until it exits or the
+requested deadline expires. Without a timeout, completion is awaited normally.
 
 Signal summaries recognize successful test-run markers and avoid treating
 example error text inside a passing test run as an active failure. The complete
