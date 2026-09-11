@@ -15,6 +15,7 @@ from unittest.mock import patch
 from engine import (
     EphemeralEngine,
     PREVIEW_MAX_BYTES,
+    SEARCH_SNIPPET_MAX_BYTES,
     _bounded_preview,
     detect_content_type,
     detect_signals,
@@ -278,6 +279,17 @@ STEP 3: Summary
 
         self.assertEqual(engine.search("MATCH", context_lines=-1)["status"], "error")
         self.assertEqual(engine.search("MATCH", top_k=0)["status"], "error")
+
+    def test_search_snippet_bounds_long_utf8_lines(self):
+        engine = EphemeralEngine(max_captures=1)
+        long_line = "MATCH " + "é" * (SEARCH_SNIPPET_MAX_BYTES * 2)
+        capture = engine.ingest(long_line, label="long-search-line")
+
+        result = engine.search("MATCH", mode="bm25", capture_id=capture.capture_id, top_k=1)
+        snippet = result["matches"][0]["snippet"]
+
+        self.assertLessEqual(len(snippet.encode("utf-8")), SEARCH_SNIPPET_MAX_BYTES)
+        self.assertIn("search line truncated", snippet)
 
     def test_search_reader_defers_storage_close_during_eviction(self):
         engine = EphemeralEngine(max_captures=1)
