@@ -15,6 +15,7 @@ from unittest.mock import patch
 from engine import (
     EphemeralEngine,
     PREVIEW_MAX_BYTES,
+    _bounded_preview,
     detect_content_type,
     detect_signals,
     parse_unified_diff,
@@ -24,6 +25,10 @@ from engine import (
 
 
 class TestEngineClassification(unittest.TestCase):
+    def test_preview_budget_smaller_than_marker_remains_bounded(self):
+        preview = _bounded_preview("content", max_bytes=1)
+        self.assertLessEqual(len(preview.encode("utf-8")), 1)
+
     def test_sqlite_fts5_probe_reports_missing_capability(self):
         class BrokenConnection:
             def __init__(self):
