@@ -884,7 +884,10 @@ def run_socket_server():
                         )
                     # No listener accepted the connection, so this is a stale
                     # socket. Unlink only the inode that was inspected.
-                    os.unlink(SOCKET_PATH)
+                    try:
+                        os.unlink(SOCKET_PATH)
+                    except FileNotFoundError:
+                        pass
             except FileNotFoundError:
                 pass
             except OSError as exc:

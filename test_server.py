@@ -895,6 +895,7 @@ class TestSocketServerStartup(unittest.TestCase):
             with patch.object(server, "SOCKET_PATH", str(socket_path)), \
                     patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=True), \
                     patch.object(server.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
                     patch.object(server.socket, "socket", return_value=RefusingProbe()), \
                     patch.object(server.os, "unlink") as unlink, \
@@ -904,6 +905,92 @@ class TestSocketServerStartup(unittest.TestCase):
             unlink.assert_not_called()
             self.assertTrue(socket_path.exists())
             self.assertIn("changed to a non-socket path", stderr.getvalue())
+
+    def test_socket_disappearing_during_revalidation_is_tolerated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "ephemeral.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+            except PermissionError as exc:
+                listener.close()
+                self.skipTest(f"Unix socket bind unavailable: {exc}")
+            listener.close()
+            initial_stat = os.lstat(socket_path)
+
+            class FailingLoop:
+                def close(self):
+                    pass
+
+                def run_until_complete(self, coroutine):
+                    coroutine.close()
+                    raise RuntimeError("socket unavailable")
+
+            class RefusingProbe:
+                def connect(self, _path):
+                    raise ConnectionRefusedError()
+
+                def close(self):
+                    pass
+
+            with patch.object(server, "SOCKET_PATH", str(socket_path)), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=True), \
+                    patch.object(server.os, "lstat", side_effect=[initial_stat, FileNotFoundError()]), \
+                    patch.object(server.socket, "socket", return_value=RefusingProbe()), \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+            self.assertIn("socket unavailable", stderr.getvalue())
+
+    def test_socket_identity_change_during_probe_is_not_unlinked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "ephemeral.sock"
+            replacement_path = Path(directory) / "replacement.sock"
+            listeners = []
+            for path in (socket_path, replacement_path):
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    listener.bind(str(path))
+                except PermissionError as exc:
+                    for open_listener in listeners:
+                        open_listener.close()
+                    listener.close()
+                    self.skipTest(f"Unix socket bind unavailable: {exc}")
+                listener.close()
+            initial_stat = os.lstat(socket_path)
+            replacement_stat = os.lstat(replacement_path)
+
+            class FailingLoop:
+                def close(self):
+                    pass
+
+            class RefusingProbe:
+                def connect(self, _path):
+                    raise ConnectionRefusedError()
+
+                def close(self):
+                    pass
+
+            with patch.object(server, "SOCKET_PATH", str(socket_path)), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=True), \
+                    patch.object(server.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
+                    patch.object(server.socket, "socket", return_value=RefusingProbe()), \
+                    patch.object(server.os, "unlink") as unlink, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+            unlink.assert_not_called()
+            self.assertIn("changed while probing", stderr.getvalue())
+
+    def test_socket_probe_os_error_is_reported(self):
+        stderr, unlink = self._run_with_existing_socket(OSError("probe failed"))
+
+        unlink.assert_not_called()
+        self.assertIn("Unable to verify existing socket", stderr)
 
     def test_live_socket_is_not_removed(self):
         with tempfile.TemporaryDirectory() as directory:
