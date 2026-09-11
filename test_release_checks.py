@@ -65,8 +65,14 @@ class TestReleaseChecks(unittest.TestCase):
 
         with self.assertRaisesRegex(ReleaseCheckError, "pyproject.toml"):
             validate_metadata("v1.2.4", "1.2.3", "## 1.2.3 - 2026-09-06")
-        with self.assertRaisesRegex(ReleaseCheckError, "Unreleased"):
+        with self.assertRaisesRegex(ReleaseCheckError, "release date"):
             changelog_version("## 1.2.3 - Unreleased", "1.2.3")
+        with self.assertRaisesRegex(ReleaseCheckError, "release date"):
+            changelog_version("## 1.2.3", "1.2.3")
+        with self.assertRaisesRegex(ReleaseCheckError, "release date"):
+            changelog_version("## 1.2.3 - 2026-09-06 - TBD", "1.2.3")
+        with self.assertRaisesRegex(ReleaseCheckError, "invalid release date"):
+            changelog_version("## 1.2.3 - 2026-02-30", "1.2.3")
         with self.assertRaisesRegex(ReleaseCheckError, "no release section"):
             changelog_version("## 1.2.2 - 2026-09-06", "1.2.3")
 

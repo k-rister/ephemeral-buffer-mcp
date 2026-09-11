@@ -461,8 +461,9 @@ publisher is registered, PyPI distributions.
 1. Update the version in `pyproject.toml` and add release notes to
    `CHANGELOG.md`.
 2. Run the focused and end-to-end test suites locally.
-3. Replace the matching `Unreleased` changelog heading with dated release
-   notes, then create and push an annotated `vX.Y.Z` tag from `main`. The tag
+3. Replace the matching `Unreleased` changelog heading with release notes under
+   a heading in the exact form `## X.Y.Z - YYYY-MM-DD`; the date must be a real
+   calendar date. Then create and push an annotated `vX.Y.Z` tag from `main`. The tag
    must match the project version exactly and point to a commit contained in
    the default branch.
 4. Wait for the tagged release workflow to finish.
@@ -486,7 +487,8 @@ publisher is registered, PyPI distributions.
 8. Confirm the package is available from PyPI and that its published metadata
    and files match the verified workflow artifacts.
 
-The release workflow also checks tag format, package/changelog consistency,
+The release workflow also checks tag format, package/changelog consistency
+(including the exact dated heading format `## X.Y.Z - YYYY-MM-DD`),
 clean source state, and tag ancestry before building. GitHub Release creation
 must succeed before the PyPI publish job is allowed to run. Treat a failed
 check, checksum mismatch, missing release asset, or missing attestation as a
