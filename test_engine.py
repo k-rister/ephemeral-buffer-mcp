@@ -518,8 +518,14 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         try:
             worker.start()
             self.assertTrue(blocker.started.wait(timeout=1))
+            started_at = time.monotonic()
             stats = self.engine.get_buffer_stats()
+            self.assertLess(time.monotonic() - started_at, 0.5)
             self.assertIn("capture_count", stats)
+            started_at = time.monotonic()
+            concurrent_capture = self.engine.ingest("concurrent capture")
+            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertIn(concurrent_capture.capture_id, self.engine.captures)
         finally:
             blocker.release.set()
             worker.join(timeout=2)
@@ -577,6 +583,26 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         capture.embeddings = None
         original_lock = engine._embedding_lock
         engine._embedding_lock = EmbeddingPublishedWhileWaiting()
+        try:
+            engine._ensure_embeddings(capture)
+        finally:
+            engine._embedding_lock = original_lock
+
+    def test_embedding_snapshot_aborts_when_capture_is_not_current(self):
+        engine = EphemeralEngine(max_captures=1)
+        engine._ensure_embeddings(SimpleNamespace(capture_id="missing", embeddings=None, chunks=[]))
+        capture = engine.ingest("evicted before embedding", label="evicted")
+
+        class EvictOnEnter:
+            def __enter__(self):
+                engine.captures.pop(capture.capture_id)
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        original_lock = engine._embedding_lock
+        engine._embedding_lock = EvictOnEnter()
         try:
             engine._ensure_embeddings(capture)
         finally:

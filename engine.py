@@ -402,41 +402,41 @@ class EphemeralEngine:
 
     def _get_embedding_model(self):
         """Load FastEmbed once, on first operation that needs embeddings."""
-        if self.embedding_model is None:
-            with self._embedding_lock:
-                if self.embedding_model is None:
-                    if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1":
-                        self.embedding_model = _DeterministicTestEmbedding()
-                        log_event(LOGGER, logging.INFO, "embedding_model_ready", model="deterministic-test")
-                        return self.embedding_model
-                    log_event(
-                        LOGGER,
-                        logging.INFO,
-                        "embedding_model_load_started",
-                        model=self.embedding_model_name,
-                        cache_dir=self.embedding_cache_path or "default",
-                    )
-                    sys.stderr.write(f"Loading embedding model: {self.embedding_model_name}...\n")
-                    sys.stderr.flush()
-                    kwargs = {"model_name": self.embedding_model_name}
-                    if self.embedding_cache_path:
-                        kwargs["cache_dir"] = self.embedding_cache_path
-                    try:
-                        self.embedding_model = TextEmbedding(**kwargs)
-                    except Exception:
-                        log_event(
-                            LOGGER,
-                            logging.ERROR,
-                            "embedding_model_load_failed",
-                            model=self.embedding_model_name,
-                            cache_dir=self.embedding_cache_path or "default",
-                        )
-                        LOGGER.exception("embedding_model_load_exception")
-                        raise
-                    sys.stderr.write("Embedding model ready.\n")
-                    sys.stderr.flush()
-                    log_event(LOGGER, logging.INFO, "embedding_model_ready", model=self.embedding_model_name)
-        return self.embedding_model
+        with self._embedding_lock:
+            if self.embedding_model is not None:
+                return self.embedding_model
+            if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1":
+                self.embedding_model = _DeterministicTestEmbedding()
+                log_event(LOGGER, logging.INFO, "embedding_model_ready", model="deterministic-test")
+                return self.embedding_model
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "embedding_model_load_started",
+                model=self.embedding_model_name,
+                cache_dir=self.embedding_cache_path or "default",
+            )
+            sys.stderr.write(f"Loading embedding model: {self.embedding_model_name}...\n")
+            sys.stderr.flush()
+            kwargs = {"model_name": self.embedding_model_name}
+            if self.embedding_cache_path:
+                kwargs["cache_dir"] = self.embedding_cache_path
+            try:
+                self.embedding_model = TextEmbedding(**kwargs)
+            except Exception:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "embedding_model_load_failed",
+                    model=self.embedding_model_name,
+                    cache_dir=self.embedding_cache_path or "default",
+                )
+                LOGGER.exception("embedding_model_load_exception")
+                raise
+            sys.stderr.write("Embedding model ready.\n")
+            sys.stderr.flush()
+            log_event(LOGGER, logging.INFO, "embedding_model_ready", model=self.embedding_model_name)
+            return self.embedding_model
 
     def _chunk_lines(self, lines: List[str], window_size: int = 4, step_size: int = 2) -> List[Chunk]:
         """
@@ -767,7 +767,6 @@ class EphemeralEngine:
         ranked.sort(key=lambda item: (-item[1], item[0]))
         return ranked[:top_k]
 
-    @synchronized
     def search_semantic(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
         Dense vector cosine similarity search. Returns list of (chunk_id, score).
@@ -777,35 +776,46 @@ class EphemeralEngine:
 
         self._wait_for_prefetch(capture)
         self._ensure_embeddings(capture)
-        if capture.embeddings is None or len(capture.embeddings) == 0:
+        with self._lock:
+            embeddings = capture.embeddings
+        if embeddings is None or len(embeddings) == 0:
             return []
             
-        query_embed = list(self._get_embedding_model().embed([query]))[0]
+        with self._embedding_lock:
+            query_embed = list(self._get_embedding_model().embed([query]))[0]
         query_embed = np.array(query_embed, dtype=np.float32)
         norm = np.linalg.norm(query_embed)
         if norm > 0:
             query_embed = query_embed / norm
 
-        similarities = np.dot(capture.embeddings, query_embed)
+        similarities = np.dot(embeddings, query_embed)
         top_indices = np.argsort(similarities)[::-1][:top_k]
         return [(int(idx), float(similarities[idx])) for idx in top_indices if similarities[idx] > 0.0]
 
     def _ensure_embeddings(self, capture: Capture) -> None:
         """Materialize and cache dense embeddings for a captured chunk set."""
-        if capture.embeddings is not None:
-            return
-        with self._embedding_lock:
+        with self._lock:
             if capture.embeddings is not None:
                 return
+            if self.captures.get(capture.capture_id) is not capture:
+                return
             chunk_texts = [chunk.text for chunk in capture.chunks]
+        with self._embedding_lock:
+            with self._lock:
+                if capture.embeddings is not None:
+                    return
+                if self.captures.get(capture.capture_id) is not capture:
+                    return
             embed_list = list(self._get_embedding_model().embed(chunk_texts))
             embeddings = np.array(embed_list, dtype=np.float32)
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
-            capture.embeddings = embeddings / norms
-            capture.semantic_index_state = "ready"
+            normalized = embeddings / norms
+            with self._lock:
+                if self.captures.get(capture.capture_id) is capture and capture.embeddings is None:
+                    capture.embeddings = normalized
+                    capture.semantic_index_state = "ready"
 
-    @synchronized
     def search(
         self,
         query: str,
