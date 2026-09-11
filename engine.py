@@ -55,17 +55,22 @@ def sqlite_fts5_available() -> bool:
             connection.close()
 
 
-def _fallback_tokens(text: str) -> List[str]:
+def _fts5_tokens(text: str) -> List[str]:
     """Tokenize like FTS5 unicode61 with case- and diacritic-insensitive terms."""
-    tokens = re.findall(r"[\w]+", text, flags=re.UNICODE)
-    return [
-        "".join(
-            char
-            for char in unicodedata.normalize("NFKD", token)
-            if not unicodedata.combining(char)
-        ).casefold()
-        for token in tokens
-    ]
+    normalized = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
+    # unicode61 treats underscores and punctuation as token separators while
+    # retaining Unicode letters and numbers.
+    tokens = re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+    return [token.casefold() for token in tokens]
+
+
+def _fallback_tokens(text: str) -> List[str]:
+    """Tokenize fallback documents with the same rules as FTS5 unicode61."""
+    return _fts5_tokens(text)
 
 
 def _bounded_preview(content: str, max_bytes: int = PREVIEW_MAX_BYTES) -> str:
@@ -808,7 +813,7 @@ class EphemeralEngine:
         # FTS5 syntax is intentionally not exposed: regex-like characters,
         # quotes, and operators are treated as punctuation rather than query
         # language. This keeps keyword search predictable and injection-safe.
-        tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
+        tokens = _fts5_tokens(query)
         if not tokens:
             return []
 
@@ -836,7 +841,7 @@ class EphemeralEngine:
         capture: Capture, tokens: List[str], top_k: int
     ) -> List[Tuple[int, float]]:
         """Search chunks with complete token matching when SQLite lacks FTS5."""
-        query_terms = set(_fallback_tokens(" ".join(tokens)))
+        query_terms = set(tokens)
         ranked: List[Tuple[int, float]] = []
         for chunk in capture.chunks:
             chunk_terms = Counter(_fallback_tokens(chunk.text))

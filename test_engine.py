@@ -915,6 +915,33 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         self.assertEqual(engine.search_bm25(capture, "cafe")[0][0], 0)
 
+    def test_lexical_backends_share_fts5_token_boundaries(self):
+        backend_modes = [False]
+        if sqlite_fts5_available():
+            backend_modes.append(True)
+
+        for fts5_available in backend_modes:
+            with self.subTest(fts5_available=fts5_available):
+                with patch("engine.sqlite_fts5_available", return_value=fts5_available):
+                    engine = EphemeralEngine(max_captures=1)
+                    capture = engine.ingest(
+                        "database_connection café naïve v2.4 error-code",
+                        label="token-boundaries",
+                    )
+
+                for query in ("connection", "cafe", "naive", "v2", "code"):
+                    self.assertTrue(
+                        engine.search_bm25(capture, query),
+                        f"{query!r} should match with fts5_available={fts5_available}",
+                    )
+
+    def test_fallback_query_syntax_remains_tokenized_as_text(self):
+        with patch("engine.sqlite_fts5_available", return_value=False):
+            engine = EphemeralEngine(max_captures=1)
+            capture = engine.ingest("database_connection", label="query-syntax")
+
+        self.assertTrue(engine.search_bm25(capture, '"connection" OR missing'))
+
     def test_clear_single_and_missing_capture_paths(self):
         engine = EphemeralEngine(max_captures=2)
         capture = engine.ingest("cleanup payload", label="cleanup")
