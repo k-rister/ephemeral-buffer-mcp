@@ -431,6 +431,35 @@ new file mode 100644
         self.assertIn("Conflict markers detected", summary["signals_summary"])
         print("\n[Diff Conflict Detection Passed] Correctly flagged merge conflict markers.")
 
+    def test_diff_conflict_detection_interprets_hunk_prefixes(self):
+        added_marker_diff = """diff --git a/config.py b/config.py
+--- a/config.py
++++ b/config.py
+@@ -1,3 +1,7 @@
++<<<<<<< HEAD
+ PORT = 8080
++=======
+ PORT = 9090
++>>>>>>> main
+"""
+        removed_marker_diff = """diff --git a/config.py b/config.py
+--- a/config.py
++++ b/config.py
+@@ -1,7 +1,3 @@
+-<<<<<<< HEAD
+-PORT = 8080
+-=======
+-PORT = 9090
+->>>>>>> main
+ PORT = 8080
+"""
+
+        added = self.engine.ingest(added_marker_diff.strip(), label="added-conflicts")
+        removed = self.engine.ingest(removed_marker_diff.strip(), label="removed-conflicts")
+
+        self.assertTrue(added.diff_meta["has_conflicts"])
+        self.assertFalse(removed.diff_meta["has_conflicts"])
+
     def test_08_log_signal_filtering_and_benign_suppression(self):
         # 1. Clean run with benign zeros
         clean_log = """
