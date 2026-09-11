@@ -845,6 +845,7 @@ def run_socket_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     _set_socket_state("starting")
+    bound_socket_identity = None
 
     try:
         if socket_isolation_required() and not socket_isolation_configured():
@@ -902,7 +903,15 @@ def run_socket_server():
                 probe.close()
 
         async def _main():
+            nonlocal bound_socket_identity
             server = await asyncio.start_unix_server(handle_socket_client, path=SOCKET_PATH)
+            bound_path_stat = os.lstat(SOCKET_PATH)
+            if stat.S_ISSOCK(bound_path_stat.st_mode):
+                bound_socket_identity = (
+                    bound_path_stat.st_dev,
+                    bound_path_stat.st_ino,
+                    bound_path_stat.st_mode,
+                )
             os.chmod(SOCKET_PATH, 0o600)
             _set_socket_state("ready")
             async with server:
@@ -918,6 +927,25 @@ def run_socket_server():
         # that capture the server's direct error stream.
         print(f"Socket server error: {e}", file=sys.stderr)
     finally:
+        if bound_socket_identity is not None:
+            try:
+                current_path_stat = os.lstat(SOCKET_PATH)
+            except FileNotFoundError:
+                pass
+            else:
+                current_socket_identity = (
+                    current_path_stat.st_dev,
+                    current_path_stat.st_ino,
+                    current_path_stat.st_mode,
+                )
+                if (
+                    stat.S_ISSOCK(current_path_stat.st_mode)
+                    and current_socket_identity == bound_socket_identity
+                ):
+                    try:
+                        os.unlink(SOCKET_PATH)
+                    except FileNotFoundError:
+                        pass
         loop.close()
 
 
