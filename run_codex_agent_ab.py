@@ -70,6 +70,60 @@ def _event_objects(output: str) -> list[dict[str, Any]]:
     return events
 
 
+def _signal_evidence_text(item: dict[str, Any]) -> list[str]:
+    """Return validated result or answer text from one protocol item."""
+    event_type = item.get("type")
+    if not isinstance(event_type, str):
+        return []
+    normalized_type = event_type.lower()
+    if "error" in normalized_type or "failure" in normalized_type:
+        return []
+
+    if "command_execution" in normalized_type:
+        status = item.get("status")
+        exit_code = item.get("exit_code")
+        if status in {"failed", "error", "cancelled", "canceled"}:
+            return []
+        if isinstance(exit_code, int) and exit_code != 0:
+            return []
+        keys = ("aggregated_output", "stdout", "stderr", "output", "result")
+    elif "mcp" in normalized_type and ("call" in normalized_type or "tool" in normalized_type):
+        if item.get("status") in {"failed", "error", "cancelled", "canceled"}:
+            return []
+        keys = ("result", "output", "content", "text", "data")
+    elif "agent_message" in normalized_type or "assistant" in normalized_type or normalized_type in {"message", "final"}:
+        keys = ("text", "content", "message")
+    else:
+        return []
+
+    evidence = []
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str):
+            evidence.append(value)
+    return evidence
+
+
+def _signal_retrieved(output: str, marker: str) -> bool:
+    """Check only returned results or answers, never serialized requests."""
+    if not marker:
+        return False
+
+    for line in output.splitlines():
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            if marker in line:
+                return True
+            continue
+
+    for event in _event_objects(output):
+        for item in _walk_dicts(event):
+            if any(marker in evidence for evidence in _signal_evidence_text(item)):
+                return True
+    return False
+
+
 def _as_text(value: str | bytes | None) -> str:
     if value is None:
         return ""
@@ -402,7 +456,7 @@ def _run_one(
         "repetition": item["repetition"],
         "mode": item["mode"],
         "completed": success,
-        "signal_retrieved": bool(marker and marker in output),
+        "signal_retrieved": _signal_retrieved(output, marker),
         "duration_seconds": duration,
         "tool_calls": tool_calls,
         "repeated_commands": repeated_commands,
