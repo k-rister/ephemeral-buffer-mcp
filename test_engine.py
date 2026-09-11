@@ -88,6 +88,27 @@ class TestEngineClassification(unittest.TestCase):
         self.assertEqual(statuses["files"][0]["path"], "added.py")
         self.assertEqual(statuses["files"][1]["path"], "deleted.py")
 
+    def test_parse_unified_diff_counts_header_like_hunk_content(self):
+        parsed = parse_unified_diff([
+            "diff --git a/loop.c b/loop.c",
+            "--- a/loop.c",
+            "+++ b/loop.c",
+            "@@ -1 +1 @@",
+            "---i;",
+            "+++i;",
+            "diff --git a/other.c b/other.c",
+            "--- a/other.c",
+            "+++ b/other.c",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+
+        self.assertEqual(parsed["total_additions"], 2)
+        self.assertEqual(parsed["total_deletions"], 2)
+        self.assertEqual(parsed["files"][0]["additions"], 1)
+        self.assertEqual(parsed["files"][0]["deletions"], 1)
+
     def test_content_type_hints_and_label_detection(self):
         self.assertEqual(detect_content_type(["error"], content_type_hint="log"), ("log", None))
         self.assertEqual(detect_content_type(["source"], content_type_hint="text"), ("text", None))

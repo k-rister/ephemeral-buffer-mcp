@@ -175,6 +175,7 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
 
     files: List[Dict[str, Any]] = []
     current_file: Optional[Dict[str, Any]] = None
+    in_hunk = False
     has_conflicts = False
 
     for idx, line in enumerate(lines, start=1):
@@ -199,6 +200,7 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
                 "deletions": 0,
                 "hunks": 0
             }
+            in_hunk = False
             continue
 
         if current_file is None and (line.startswith("--- ") or line.startswith("+++ ")):
@@ -217,6 +219,7 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
                     "deletions": 0,
                     "hunks": 0
                 }
+                in_hunk = False
 
         if current_file:
             if line.startswith("new file mode"):
@@ -227,9 +230,10 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
                 current_file["status"] = "renamed"
             elif HUNK_RE.match(line):
                 current_file["hunks"] += 1
-            elif line.startswith("+") and not line.startswith("+++"):
+                in_hunk = True
+            elif in_hunk and line.startswith("+"):
                 current_file["additions"] += 1
-            elif line.startswith("-") and not line.startswith("---"):
+            elif in_hunk and line.startswith("-"):
                 current_file["deletions"] += 1
 
     if current_file:
