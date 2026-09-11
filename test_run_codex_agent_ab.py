@@ -13,6 +13,7 @@ from run_codex_agent_ab import (
     _event_metrics,
     _load_manifest,
     _run_codex_process,
+    _signal_retrieved,
     _run_one,
     _status_peak_rss_bytes,
     run_schedule,
@@ -141,6 +142,54 @@ class TestCodexAgentRunner(unittest.TestCase):
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 140, "output_tokens": 12}}),
         ])
         self.assertEqual(_event_metrics(output), (1, 1, 0, 140, 12, [120, 140], [9, 12]))
+
+    def test_signal_retrieval_ignores_request_only_marker(self):
+        output = json.dumps({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "command": "grep TARGETED_SIGNAL missing-file",
+                "status": "failed",
+                "exit_code": 2,
+            },
+        })
+
+        self.assertFalse(_signal_retrieved(output, "TARGETED_SIGNAL"))
+
+    def test_signal_retrieval_accepts_successful_command_result(self):
+        output = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "grep TARGETED_SIGNAL fixture.txt",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "inspection result: TARGETED_SIGNAL found",
+            },
+        })
+
+        self.assertTrue(_signal_retrieved(output, "TARGETED_SIGNAL"))
+
+    def test_signal_retrieval_ignores_marker_in_failed_result(self):
+        output = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "status": "failed",
+                "exit_code": 1,
+                "aggregated_output": "TARGETED_SIGNAL was not found",
+            },
+        })
+
+        self.assertFalse(_signal_retrieved(output, "TARGETED_SIGNAL"))
+
+    def test_signal_retrieval_accepts_agent_answer_and_plain_answer_lines(self):
+        agent_answer = json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "The result is TARGETED_SIGNAL."},
+        })
+        self.assertTrue(_signal_retrieved(agent_answer, "TARGETED_SIGNAL"))
+        self.assertTrue(_signal_retrieved("TARGETED_SIGNAL\n", "TARGETED_SIGNAL"))
 
     def test_manifest_requires_all_schedule_tasks(self):
         with tempfile.TemporaryDirectory() as directory:
