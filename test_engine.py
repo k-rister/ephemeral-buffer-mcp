@@ -327,6 +327,40 @@ STEP 3: Summary
         self.assertEqual(result_holder["result"]["matches"][0]["context"], "target value\nsecond line")
         self.assertIsNone(capture.fts_conn)
 
+    def test_lazy_semantic_search_survives_capture_eviction(self):
+        class BlockingEmbedding:
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def embed(self, texts):
+                self.started.set()
+                self.release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=1)
+        embedding = BlockingEmbedding()
+        engine.embedding_model = embedding
+        capture = engine.ingest("semantic payload", label="lazy-eviction")
+        result_holder = {}
+        search_thread = threading.Thread(
+            target=lambda: result_holder.setdefault(
+                "result",
+                engine.search("payload", mode="semantic", capture_id=capture.capture_id),
+            )
+        )
+        search_thread.start()
+        self.assertTrue(embedding.started.wait(timeout=2))
+
+        engine.ingest("replacement", label="evicts-lazy-search")
+        self.assertNotIn(capture.capture_id, engine.captures)
+
+        embedding.release.set()
+        search_thread.join(timeout=2)
+        self.assertFalse(search_thread.is_alive())
+        self.assertEqual(result_holder["result"]["status"], "ok")
+        self.assertEqual(result_holder["result"]["match_count"], 1)
+
     def test_04_slice_and_summary(self):
         lines = [f"Log line number {i}" for i in range(1, 101)]
         lines[49] = "FATAL: System ran out of file descriptors"
