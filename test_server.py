@@ -622,8 +622,32 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "chunked")
 
+    async def test_escape_heavy_payload_within_capture_limit_is_accepted(self):
+        server.engine.max_buffer_bytes = 100_000
+        text = "\x00" * server.engine.max_buffer_bytes
+        payload = json.dumps({"label": "escaped", "text": text}).encode()
+        self.assertGreater(
+            len(payload),
+            server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD,
+        )
+        capture = SimpleNamespace(
+            capture_id="cap_escaped",
+            label="escaped",
+            line_count=1,
+            byte_size=server.engine.max_buffer_bytes,
+        )
+        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+            writer = await self.run_handler(payload)
+
+        response = json.loads(writer.writes[0])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["label"], "escaped")
+
     async def test_oversized_payload_is_rejected_across_socket_reads(self):
-        payload = b"x" * (server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD)
+        payload = b"x" * (
+            server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
+            + server.SOCKET_PAYLOAD_OVERHEAD
+        )
         writer = FakeWriter()
 
         await server.handle_socket_client(
@@ -653,7 +677,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         offload.assert_awaited_once()
 
     async def test_oversized_payload_returns_error_response(self):
-        payload = b"x" * (server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD)
+        payload = b"x" * (
+            server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
+            + server.SOCKET_PAYLOAD_OVERHEAD
+        )
 
         writer = await self.run_handler(payload)
 

@@ -36,6 +36,9 @@ from metrics import LocalMetrics
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
+# JSON string escaping can expand a UTF-8 capture by at most six bytes per
+# source byte (for example, a control character encoded as ``\u0000``).
+SOCKET_JSON_MAX_EXPANSION = 6
 SOCKET_STARTUP_TIMEOUT_SECONDS = positive_int_env("EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS", 5)
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
@@ -756,7 +759,10 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
     async def _handle():
         try:
             # Read the EOF-delimited payload completely before decoding it.
-            read_limit = engine.max_buffer_bytes + SOCKET_PAYLOAD_OVERHEAD
+            read_limit = (
+                engine.max_buffer_bytes * SOCKET_JSON_MAX_EXPANSION
+                + SOCKET_PAYLOAD_OVERHEAD
+            )
             data = await _read_socket_payload(reader, read_limit)
             if not data:
                 return
