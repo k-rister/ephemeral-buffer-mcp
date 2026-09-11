@@ -187,11 +187,27 @@ def _walk_dicts(value: Any):
             yield from _walk_dicts(child)
 
 
+def _stable_tool_id(item: dict[str, Any]) -> str | None:
+    """Return a lifecycle-stable identifier when the event provides one."""
+    for key in ("id", "item_id", "itemId", "call_id", "callId"):
+        value = item.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value)
+    return None
+
+
 def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, list[int | float], list[int | float]]:
-    """Return tool, MCP, duplicate-command, and usage metrics from JSONL."""
+    """Return tool, MCP, duplicate-command, and usage metrics from JSONL.
+
+    Lifecycle snapshots with a stable item identifier count once. Events without
+    an identifier remain independent because identical commands can represent
+    distinct invocations when the producer supplies no correlation key.
+    """
     tool_calls = 0
     mcp_tool_calls = 0
     commands: list[str] = []
+    identified_tools: dict[str, dict[str, Any]] = {}
+    anonymous_tools: list[dict[str, Any]] = []
     input_tokens = None
     output_tokens = None
     input_token_samples = []
@@ -199,14 +215,22 @@ def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, 
     for event in _event_objects(output):
         for item in _walk_dicts(event):
             event_type = item.get("type")
-            if isinstance(event_type, str) and (
+            is_tool = isinstance(event_type, str) and (
                 "tool_call" in event_type or event_type in {"command_execution", "function_call"}
-            ):
-                tool_calls += 1
-            if isinstance(event_type, str) and "mcp" in event_type.lower() and (
+            )
+            stable_id = _stable_tool_id(item) if is_tool else None
+            is_mcp_tool = isinstance(event_type, str) and "mcp" in event_type.lower() and (
                 "call" in event_type.lower() or "tool" in event_type.lower()
-            ):
-                mcp_tool_calls += 1
+            )
+            if is_tool:
+                if stable_id is None:
+                    anonymous_tools.append({"item": item, "is_mcp": is_mcp_tool})
+                else:
+                    logical = identified_tools.setdefault(
+                        stable_id, {"item": {}, "is_mcp": False}
+                    )
+                    logical["item"].update(item)
+                    logical["is_mcp"] = logical["is_mcp"] or is_mcp_tool
             usage = item.get("usage")
             if isinstance(usage, dict):
                 if isinstance(usage.get("input_tokens"), (int, float)):
@@ -215,10 +239,15 @@ def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, 
                 if isinstance(usage.get("output_tokens"), (int, float)):
                     output_tokens = usage["output_tokens"]
                     output_token_samples.append(usage["output_tokens"])
-            for key in ("command", "cmd", "shell_command"):
-                command = item.get(key)
-                if isinstance(command, str) and command.strip():
-                    commands.append(command.strip())
+    for logical in [*identified_tools.values(), *anonymous_tools]:
+        tool_calls += 1
+        if logical["is_mcp"]:
+            mcp_tool_calls += 1
+        item = logical["item"]
+        for key in ("command", "cmd", "shell_command"):
+            command = item.get(key)
+            if isinstance(command, str) and command.strip():
+                commands.append(command.strip())
     counts = Counter(commands)
     repeated = sum(count - 1 for count in counts.values() if count > 1)
     return (
