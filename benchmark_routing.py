@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from benchmark_latency import _nearest_rank
 from capture_utils import run_command_bounded
 from engine import EphemeralEngine
 
@@ -69,6 +70,8 @@ def _measure_captured(command: str, engine: EphemeralEngine, label: str) -> dict
 
 def _summary(samples: list[dict[str, float | int]], line_count: int) -> dict[str, Any]:
     """Return stable median and p95 timings for one output profile."""
+    if not samples:
+        raise ValueError("samples must not be empty")
     direct = sorted(float(sample["direct_seconds"]) for sample in samples)
     captured = sorted(float(sample["captured_seconds"]) for sample in samples)
     direct_median = statistics.median(direct)
@@ -79,9 +82,9 @@ def _summary(samples: list[dict[str, float | int]], line_count: int) -> dict[str
         "output_bytes": samples[0]["output_bytes"],
         "samples": len(samples),
         "direct_seconds_median": direct_median,
-        "direct_seconds_p95": direct[max(0, int(len(direct) * 0.95) - 1)],
+        "direct_seconds_p95": _nearest_rank(direct),
         "captured_seconds_median": captured_median,
-        "captured_seconds_p95": captured[max(0, int(len(captured) * 0.95) - 1)],
+        "captured_seconds_p95": _nearest_rank(captured),
         "capture_overhead_seconds_median": captured_median - direct_median,
         "capture_overhead_ratio_median": captured_median / direct_median if direct_median else None,
     }

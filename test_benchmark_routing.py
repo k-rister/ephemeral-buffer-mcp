@@ -2,10 +2,49 @@
 
 import unittest
 
-from benchmark_routing import run_benchmark
+from benchmark_latency import _nearest_rank, _summary as latency_summary
+from benchmark_routing import _summary as routing_summary, run_benchmark
 
 
 class TestRoutingBenchmark(unittest.TestCase):
+    def test_nearest_rank_p95_preserves_small_sample_tail(self):
+        self.assertEqual(_nearest_rank([1, 2, 100]), 100)
+        self.assertEqual(_nearest_rank([100, 1, 2]), 100)
+        self.assertEqual(_nearest_rank([1]), 1)
+        self.assertEqual(_nearest_rank([1, 1, 2, 2]), 2)
+
+        latency_samples = [
+            {
+                "line_count": 16,
+                "output_bytes": 100,
+                "command_seconds": value,
+                "ingest_seconds": value,
+                "semantic_index_seconds": value,
+                "summary_seconds": value,
+                "total_seconds": value,
+            }
+            for value in (1, 2, 100)
+        ]
+        self.assertEqual(latency_summary(latency_samples)["total_seconds_p95"], 100)
+
+        routing_samples = [
+            {
+                "direct_seconds": value,
+                "captured_seconds": value,
+                "output_bytes": 100,
+            }
+            for value in (1, 2, 100)
+        ]
+        routing_result = routing_summary(routing_samples, 16)
+        self.assertEqual(routing_result["direct_seconds_p95"], 100)
+        self.assertEqual(routing_result["captured_seconds_p95"], 100)
+
+    def test_summaries_reject_empty_samples(self):
+        with self.assertRaises(ValueError):
+            latency_summary([])
+        with self.assertRaises(ValueError):
+            routing_summary([], 16)
+
     def test_benchmark_reports_profiles_and_comparable_timings(self):
         result = run_benchmark((2, 4), samples=2)
         self.assertEqual(result["schema_version"], 1)
