@@ -11,6 +11,7 @@ import unittest
 import json
 from pathlib import Path
 from config import socket_path
+from server import SOCKET_JSON_MAX_EXPANSION, SOCKET_PAYLOAD_OVERHEAD
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SERVER_PATH = PROJECT_ROOT / "server.py"
@@ -86,7 +87,14 @@ class TestEndToEndPipe(unittest.TestCase):
             oversized_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             oversized_socket.connect(SOCKET_PATH)
             try:
-                oversized_socket.sendall(b"x" * (1024 + 64 * 1024 + 1))
+                oversized_socket.sendall(
+                    b"x" * (
+                        1024 * SOCKET_JSON_MAX_EXPANSION
+                        + SOCKET_PAYLOAD_OVERHEAD
+                        + 1
+                    )
+                )
+                oversized_socket.shutdown(socket.SHUT_WR)
             except BrokenPipeError:
                 # The server may close as soon as it observes the bounded read.
                 pass
