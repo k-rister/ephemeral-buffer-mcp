@@ -423,6 +423,12 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Socket lifecycle is failed (RuntimeError: unavailable)", instructions)
 
+    def test_mcp_instructions_refresh_before_serving(self):
+        with patch.object(server, "_mcp_instructions", return_value="ready-state guidance"):
+            server._refresh_mcp_instructions()
+
+        self.assertEqual(server.mcp.instructions, "ready-state guidance")
+
     def test_runtime_diagnostics_includes_enabled_local_metrics(self):
         original_metrics = server.METRICS
         original_engine_metrics = server.engine.metrics

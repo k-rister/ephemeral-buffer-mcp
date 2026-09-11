@@ -157,6 +157,11 @@ def _mcp_instructions() -> str:
 mcp = FastMCP("ephemeral-buffer", instructions=_mcp_instructions())
 
 
+def _refresh_mcp_instructions() -> None:
+    """Refresh client guidance immediately before MCP request serving."""
+    mcp._mcp_server.instructions = _mcp_instructions()
+
+
 def _runtime_package_version() -> str:
     """Return the version for the source or installed server being run."""
     pyproject = Path(__file__).with_name("pyproject.toml")
@@ -978,4 +983,5 @@ if __name__ == "__main__":
     if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
         start_socket_server()
         _require_socket_ready()
+    _refresh_mcp_instructions()
     mcp.run()
