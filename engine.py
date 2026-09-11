@@ -37,6 +37,8 @@ from config import (
 LOGGER = get_logger("engine")
 SEARCH_MODES = ("hybrid", "bm25", "semantic")
 HYBRID_LEXICAL_WEIGHT = 2.0
+PREVIEW_MAX_BYTES = 4 * 1024
+PREVIEW_TRUNCATION_MARKER = "\n... [preview truncated; use get_capture_slice for full content] ..."
 
 
 def sqlite_fts5_available() -> bool:
@@ -64,6 +66,20 @@ def _fallback_tokens(text: str) -> List[str]:
         ).casefold()
         for token in tokens
     ]
+
+
+def _bounded_preview(content: str, max_bytes: int = PREVIEW_MAX_BYTES) -> str:
+    """Return a UTF-8 bounded preview with an explicit truncation marker."""
+    encoded = content.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return content
+
+    marker_bytes = PREVIEW_TRUNCATION_MARKER.encode("utf-8")
+    if len(marker_bytes) >= max_bytes:
+        return marker_bytes[:max_bytes].decode("utf-8", errors="ignore")
+
+    prefix = encoded[: max_bytes - len(marker_bytes)].decode("utf-8", errors="ignore")
+    return prefix + PREVIEW_TRUNCATION_MARKER
 
 
 def process_rss_bytes() -> Optional[int]:
@@ -981,8 +997,15 @@ class EphemeralEngine:
             capture.timed_out,
         )
 
-        head_preview = [f"  {i+1:5d} | {line}" for i, line in enumerate(capture.raw_lines[:5])]
-        tail_preview = [f"  {capture.line_count - len(capture.raw_lines[-5:]) + i + 1:5d} | {line}" for i, line in enumerate(capture.raw_lines[-5:])]
+        head_preview = _bounded_preview(
+            "\n".join(f"  {i+1:5d} | {line}" for i, line in enumerate(capture.raw_lines[:5]))
+        )
+        tail_preview = _bounded_preview(
+            "\n".join(
+                f"  {capture.line_count - len(capture.raw_lines[-5:]) + i + 1:5d} | {line}"
+                for i, line in enumerate(capture.raw_lines[-5:])
+            )
+        )
 
         file_map_str = ""
         diff_stats_str = ""
@@ -1014,8 +1037,8 @@ class EphemeralEngine:
             "timed_out": capture.timed_out,
             "keyword_signals": signals,
             "signals_summary": signals_str,
-            "head_preview": "\n".join(head_preview),
-            "tail_preview": "\n".join(tail_preview)
+            "head_preview": head_preview,
+            "tail_preview": tail_preview
         }
 
     @synchronized
