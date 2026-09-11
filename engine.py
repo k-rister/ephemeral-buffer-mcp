@@ -919,14 +919,23 @@ class EphemeralEngine:
         with self._lock:
             if capture.embeddings is not None:
                 return
-            if self.captures.get(capture.capture_id) is not capture:
+            # A search reader may outlive LRU admission.  Its lease keeps the
+            # capture's chunks and storage alive long enough to finish lazy
+            # indexing even after the capture is removed from ``self.captures``.
+            if (
+                self.captures.get(capture.capture_id) is not capture
+                and not getattr(capture, "active_readers", 0)
+            ):
                 return
             chunk_texts = [chunk.text for chunk in capture.chunks]
         with self._embedding_lock:
             with self._lock:
                 if capture.embeddings is not None:
                     return
-                if self.captures.get(capture.capture_id) is not capture:
+                if (
+                    self.captures.get(capture.capture_id) is not capture
+                    and not getattr(capture, "active_readers", 0)
+                ):
                     return
             embed_list = list(self._get_embedding_model().embed(chunk_texts))
             embeddings = np.array(embed_list, dtype=np.float32)
@@ -934,7 +943,13 @@ class EphemeralEngine:
             norms[norms == 0] = 1.0
             normalized = embeddings / norms
             with self._lock:
-                if self.captures.get(capture.capture_id) is capture and capture.embeddings is None:
+                if (
+                    (
+                        self.captures.get(capture.capture_id) is capture
+                        or getattr(capture, "active_readers", 0)
+                    )
+                    and capture.embeddings is None
+                ):
                     capture.embeddings = normalized
                     capture.semantic_index_state = "ready"
 
