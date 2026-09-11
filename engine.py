@@ -321,6 +321,8 @@ class Capture:
     command_exit_code: Optional[int] = None
     timed_out: bool = False
     semantic_index_state: str = "not-requested"
+    active_readers: int = 0
+    storage_close_pending: bool = False
 
     @property
     def line_count(self) -> int:
@@ -683,10 +685,14 @@ class EphemeralEngine:
 
     def _close_capture_storage(self, capture: Capture) -> None:
         """Close per-capture search storage and report cleanup failures."""
+        if capture.active_readers:
+            capture.storage_close_pending = True
+            return
         if not capture.fts_conn:
             return
         try:
             capture.fts_conn.close()
+            capture.fts_conn = None
         except Exception:
             log_event(
                 LOGGER,
@@ -695,6 +701,28 @@ class EphemeralEngine:
                 capture_id=capture.capture_id,
             )
             LOGGER.exception("capture_storage_cleanup_exception")
+
+    def _acquire_capture_reader(self, capture_id: str) -> Optional[Capture]:
+        """Return a capture while retaining its storage for one search reader."""
+        with self._lock:
+            if not self.captures:
+                return None
+            if capture_id == "latest" or not capture_id:
+                capture = self.captures[next(reversed(self.capture_order))]
+            else:
+                capture = self.captures.get(capture_id)
+            if capture:
+                self._touch_capture(capture.capture_id)
+                capture.active_readers += 1
+            return capture
+
+    def _release_capture_reader(self, capture: Capture) -> None:
+        """Release a search reader and finish deferred storage cleanup."""
+        with self._lock:
+            capture.active_readers = max(0, capture.active_readers - 1)
+            if capture.active_readers == 0 and capture.storage_close_pending:
+                capture.storage_close_pending = False
+                self._close_capture_storage(capture)
 
     def _cancel_prefetch(self, capture_id: str) -> None:
         """Cancel queued work for a capture; running work is allowed to finish."""
@@ -853,12 +881,27 @@ class EphemeralEngine:
         if context_lines < 0:
             return {"status": "error", "message": "context_lines must be non-negative."}
 
-        capture = self.get_capture(capture_id)
+        capture = self._acquire_capture_reader(capture_id)
         if not capture:
             return {
                 "status": "error",
                 "message": f"No capture found for ID '{capture_id}'. Buffer is currently empty."
             }
+
+        try:
+            return self._search_capture(capture, query, mode, top_k, context_lines)
+        finally:
+            self._release_capture_reader(capture)
+
+    def _search_capture(
+        self,
+        capture: Capture,
+        query: str,
+        mode: str,
+        top_k: int,
+        context_lines: int,
+    ) -> Dict[str, Any]:
+        """Run search while the caller retains the capture storage lease."""
 
         if capture.line_count == 0:
             self.metrics.record_search(capture.capture_id, 0)

@@ -258,6 +258,41 @@ STEP 3: Summary
         self.assertEqual(engine.search("MATCH", context_lines=-1)["status"], "error")
         self.assertEqual(engine.search("MATCH", top_k=0)["status"], "error")
 
+    def test_search_reader_defers_storage_close_during_eviction(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("target value\nsecond line", label="reader-lifetime")
+        entered = threading.Event()
+        proceed = threading.Event()
+        original_search = engine._search_capture
+
+        def blocked_search(*args, **kwargs):
+            entered.set()
+            self.assertTrue(proceed.wait(timeout=2))
+            return original_search(*args, **kwargs)
+
+        with patch.object(engine, "_search_capture", side_effect=blocked_search):
+            result_holder = {}
+            search_thread = threading.Thread(
+                target=lambda: result_holder.setdefault(
+                    "result", engine.search("target", mode="bm25", capture_id=capture.capture_id)
+                )
+            )
+            search_thread.start()
+            self.assertTrue(entered.wait(timeout=2))
+
+            engine.ingest("replacement capture", label="replacement")
+            self.assertNotIn(capture.capture_id, engine.captures)
+            self.assertTrue(capture.storage_close_pending)
+            self.assertIsNotNone(capture.fts_conn)
+
+            proceed.set()
+            search_thread.join(timeout=2)
+
+        self.assertFalse(search_thread.is_alive())
+        self.assertEqual(result_holder["result"]["status"], "ok")
+        self.assertEqual(result_holder["result"]["matches"][0]["context"], "target value\nsecond line")
+        self.assertIsNone(capture.fts_conn)
+
     def test_04_slice_and_summary(self):
         lines = [f"Log line number {i}" for i in range(1, 101)]
         lines[49] = "FATAL: System ran out of file descriptors"
