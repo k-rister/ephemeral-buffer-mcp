@@ -261,6 +261,7 @@ STEP 3: Summary
     def test_search_reader_defers_storage_close_during_eviction(self):
         engine = EphemeralEngine(max_captures=1)
         capture = engine.ingest("target value\nsecond line", label="reader-lifetime")
+        self.assertIs(engine.get_capture(), capture)
         entered = threading.Event()
         proceed = threading.Event()
         original_search = engine._search_capture
