@@ -378,7 +378,9 @@ room for a new capture when possible. A capture that exceeds the entire index
 budget is rejected rather than partially indexed, so accepted captures remain
 fully searchable and cannot produce silent semantic false negatives.
 `execute_and_capture` retains the beginning and end of oversized command
-output and marks the capture with its original byte count.
+output and marks the capture with its original byte count. Each returned head
+or tail preview is independently capped at 4 KiB of UTF-8 data; a truncation
+marker directs the agent to `get_capture_slice` for the complete content.
 
 Call `get_runtime_diagnostics()` when reporting a field observation. It is
 explicitly opt-in and returns operational metadata only; captured content,

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from engine import (
     EphemeralEngine,
+    PREVIEW_MAX_BYTES,
     detect_content_type,
     detect_signals,
     parse_unified_diff,
@@ -269,6 +270,21 @@ STEP 3: Summary
         self.assertIn("FATAL: System ran out of file descriptors", slice_res["content"])
         print("\n[Slice & Summary Test Passed]:")
         print(slice_res["content"])
+
+    def test_04a_previews_are_utf8_bounded_without_changing_retained_content(self):
+        long_line = "界" * 10_000
+        cap = self.engine.ingest(long_line, label="long-unicode-line")
+
+        summary = self.engine.get_summary(cap.capture_id)
+        self.assertLessEqual(len(summary["head_preview"].encode("utf-8")), PREVIEW_MAX_BYTES)
+        self.assertLessEqual(len(summary["tail_preview"].encode("utf-8")), PREVIEW_MAX_BYTES)
+        self.assertIn("preview truncated", summary["head_preview"])
+        self.assertIn("preview truncated", summary["tail_preview"])
+        self.assertEqual(cap.raw_lines, [long_line])
+        self.assertEqual(
+            self.engine.get_slice(1, 1, capture_id=cap.capture_id)["content"],
+            f"      1 | {long_line}",
+        )
 
     def test_05_lru_buffer_eviction(self):
         # max_captures is 3 for this focused eviction test

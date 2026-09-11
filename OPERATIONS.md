@@ -111,8 +111,10 @@ export EPHEMERAL_MAX_BUFFER_BYTES=$((100 * 1024 * 1024))
 
 `execute_and_capture` and `capture_file` reject per-request limits above the
 configured byte budget. Oversized command output is retained as a bounded
-head/tail sample and marked as truncated. Use `get_capture_summary` to inspect
-the original size and truncation state.
+head/tail sample and marked as truncated. Each head or tail preview returned
+to the agent is independently capped at 4 KiB of UTF-8 data; use
+`get_capture_summary` followed by `get_capture_slice` to inspect complete
+content. The summary also reports the original size and truncation state.
 
 Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 `ephbuf` when a command might block or run indefinitely. A timed-out command is
