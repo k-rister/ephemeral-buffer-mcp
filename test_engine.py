@@ -17,6 +17,8 @@ from engine import (
     PREVIEW_MAX_BYTES,
     SEARCH_SNIPPET_MAX_BYTES,
     _bounded_preview,
+    _decode_git_path,
+    _parse_git_diff_paths,
     detect_content_type,
     detect_signals,
     parse_unified_diff,
@@ -123,6 +125,11 @@ class TestEngineClassification(unittest.TestCase):
         self.assertEqual(parsed["files"][0]["path"], "src/café notes.txt")
         self.assertEqual(parsed["files"][0]["old_path"], "src/café notes.txt")
         self.assertEqual(parsed["files"][0]["new_path"], "src/café notes.txt")
+
+    def test_git_path_decoder_handles_malformed_and_unknown_escapes(self):
+        self.assertEqual(_decode_git_path("trailing\\"), "trailing\\")
+        self.assertEqual(_decode_git_path(r"unknown\q"), "unknownq")
+        self.assertIsNone(_parse_git_diff_paths("diff --git a/only-one-path"))
 
     def test_content_type_hints_and_label_detection(self):
         self.assertEqual(detect_content_type(["error"], content_type_hint="log"), ("log", None))
