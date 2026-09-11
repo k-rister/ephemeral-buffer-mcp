@@ -43,6 +43,19 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertLessEqual(len(output.encode("utf-8")), 512)
 
+    def test_truncation_marker_can_be_bounded_to_zero_bytes(self):
+        self.assertEqual(_BoundedCapture._truncate_text_to_bytes("text", 0), "")
+
+    def test_oversized_truncation_marker_is_bounded(self):
+        capture = _BoundedCapture(512)
+        capture.add(b"x" * 300)
+        capture.total_bytes = 10**1000
+
+        output, truncated, _ = capture.finish()
+
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(output.encode("utf-8")), 512)
+
     def test_large_output_keeps_head_and_tail(self):
         command = (
             f"{shlex.quote(sys.executable)} -c "
