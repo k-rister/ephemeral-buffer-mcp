@@ -781,6 +781,41 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         finally:
             callback_engine.shutdown()
 
+    def test_shutdown_snapshots_prefetch_futures_before_cancellation(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            first = engine.ingest("first shutdown payload", label="shutdown-first")
+            self.assertTrue(started.wait(timeout=2))
+            second = engine.ingest("queued shutdown payload", label="shutdown-second")
+            self.assertIn(second.capture_id, engine._prefetch_futures)
+
+            shutdown_thread = threading.Thread(target=engine.shutdown)
+            shutdown_thread.start()
+            deadline = time.time() + 2
+            while second.capture_id in engine._prefetch_futures and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertNotIn(second.capture_id, engine._prefetch_futures)
+
+            release.set()
+            shutdown_thread.join(timeout=2)
+            self.assertFalse(shutdown_thread.is_alive())
+            self.assertTrue(engine._shutdown)
+            self.assertEqual(engine._prefetch_futures, {})
+            self.assertEqual(first.semantic_index_state, "ready")
+        finally:
+            release.set()
+            engine.shutdown()
+
     def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
         engine = EphemeralEngine(max_captures=1)
         capture = engine.ingest("searchable payload", label="search-errors")

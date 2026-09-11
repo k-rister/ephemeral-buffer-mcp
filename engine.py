@@ -737,7 +737,9 @@ class EphemeralEngine:
                 return
             self._shutdown = True
             executor = self._prefetch_executor
-            for future in self._prefetch_futures.values():
+            # Future cancellation can synchronously run _prefetch_finished,
+            # which removes the future from this mapping.
+            for future in list(self._prefetch_futures.values()):
                 future.cancel()
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
