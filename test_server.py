@@ -1175,6 +1175,43 @@ class TestSocketServerStartup(unittest.TestCase):
 
         unlink.assert_called_once_with(socket_path)
 
+    def test_shutdown_tolerates_socket_already_removed(self):
+        class Listener:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise RuntimeError("listener stopped")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        source_stat = os.stat(__file__)
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "lstat", side_effect=[socket_stat, FileNotFoundError()]), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(server.os, "chmod"), \
+                    patch.object(server.os, "unlink") as unlink, \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                server.run_socket_server()
+
+        unlink.assert_not_called()
+
     def test_shutdown_does_not_remove_replacement_socket(self):
         class Listener:
             async def __aenter__(self):
