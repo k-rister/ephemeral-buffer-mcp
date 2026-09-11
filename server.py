@@ -111,6 +111,26 @@ def _instrument_tool(name):
         return wrapper
     return decorator
 
+
+def _mcp_tool(name):
+    """Register a synchronous tool implementation behind an async MCP adapter.
+
+    The synchronous function remains the public Python API, while FastMCP sees
+    an async callable and therefore does not execute blocking work on its event
+    loop.  The complete instrumented call runs in a worker thread so command
+    execution, model loading, and searches all share the same non-blocking
+    boundary.
+    """
+    def decorator(function):
+        @wraps(function)
+        async def adapter(*args, **kwargs):
+            return await to_thread(function, *args, **kwargs)
+
+        mcp.add_tool(adapter, name=name)
+        return function
+
+    return decorator
+
 def _mcp_instructions() -> str:
     """Return client-visible operating guidance for this server instance."""
     if socket_isolation_required() and not socket_isolation_configured():
@@ -211,7 +231,7 @@ def _resolve_preflight_executable(tokens: list[str], resolved_cwd: str) -> dict[
     return {"status": "unavailable", "requested": token, "reason": "executable was not found on PATH"}
 
 
-@mcp.tool()
+@_mcp_tool("preflight_command")
 @_instrument_tool("preflight_command")
 def preflight_command(command: str, cwd: Optional[str] = None) -> str:
     """Return content-free path and executable diagnostics without running ``command``.
@@ -302,7 +322,7 @@ def _capture_text(content: str, label: str = "", content_type: str = "auto") -> 
     )
 
 
-@mcp.tool()
+@_mcp_tool("capture_text")
 @_instrument_tool("capture_text")
 def capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
     """Ingest already-collected text and return capture metadata.
@@ -314,7 +334,7 @@ def capture_text(content: str, label: str = "", content_type: str = "auto") -> s
     return _capture_text(content, label=label, content_type=content_type)
 
 
-@mcp.tool()
+@_mcp_tool("capture_file")
 @_instrument_tool("capture_file")
 def capture_file(
     file_path: str,
@@ -356,7 +376,7 @@ def capture_file(
         return f"Error reading file '{file_path}': {str(e)}"
 
 
-@mcp.tool()
+@_mcp_tool("execute_and_capture")
 @_instrument_tool("execute_and_capture")
 def execute_and_capture(
     command: str,
@@ -470,7 +490,7 @@ def _consolidated_jsonl(
     return engine.consolidate(capture_ids, max_captures, max_bytes)
 
 
-@mcp.tool()
+@_mcp_tool("consolidate_captures")
 @_instrument_tool("consolidate_captures")
 def consolidate_captures(
     capture_ids: Optional[List[str]] = None,
@@ -514,7 +534,7 @@ def consolidate_captures(
         return f"Error consolidating captures: {exc}"
 
 
-@mcp.tool()
+@_mcp_tool("search_capture")
 @_instrument_tool("search_capture")
 def search_capture(
     query: str,
@@ -567,7 +587,7 @@ def search_capture(
     return "\n".join(out)
 
 
-@mcp.tool()
+@_mcp_tool("get_capture_slice")
 @_instrument_tool("get_capture_slice")
 def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest") -> str:
     """
@@ -583,7 +603,7 @@ def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest"
     )
 
 
-@mcp.tool()
+@_mcp_tool("get_capture_summary")
 @_instrument_tool("get_capture_summary")
 def get_capture_summary(capture_id: str = "latest") -> str:
     """
@@ -618,7 +638,7 @@ def get_capture_summary(capture_id: str = "latest") -> str:
     )
 
 
-@mcp.tool()
+@_mcp_tool("list_captures")
 @_instrument_tool("list_captures")
 def list_captures() -> str:
     """
@@ -634,7 +654,7 @@ def list_captures() -> str:
     return "\n".join(out)
 
 
-@mcp.tool()
+@_mcp_tool("clear_captures")
 @_instrument_tool("clear_captures")
 def clear_captures(capture_id: str = "all") -> str:
     """
@@ -643,7 +663,7 @@ def clear_captures(capture_id: str = "all") -> str:
     return engine.clear(capture_id)
 
 
-@mcp.tool()
+@_mcp_tool("get_buffer_stats")
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
     """Returns aggregate capture, accounting, prefetch, and process RSS metrics."""
@@ -685,7 +705,7 @@ def get_buffer_stats() -> str:
     return result
 
 
-@mcp.tool()
+@_mcp_tool("get_runtime_diagnostics")
 @_instrument_tool("get_runtime_diagnostics")
 def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""

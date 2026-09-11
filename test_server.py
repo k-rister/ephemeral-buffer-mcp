@@ -105,6 +105,23 @@ class TestServerTools(unittest.TestCase):
             self.assertEqual(failed["error_type"], "RuntimeError")
             self.assertNotIn("private failure", str(log.call_args_list))
 
+    def test_registered_mcp_tools_use_async_worker_adapter(self):
+        async def exercise():
+            @server._mcp_tool("blocking_probe")
+            @server._instrument_tool("blocking_probe")
+            def blocking_probe():
+                return "worker result"
+
+            tool = server.mcp._tool_manager._tools["blocking_probe"].fn
+            offload = AsyncMock(return_value="worker result")
+            with patch.object(server, "to_thread", offload):
+                result = await tool()
+
+            self.assertEqual(result, "worker result")
+            offload.assert_awaited_once_with(blocking_probe)
+
+        asyncio.run(exercise())
+
     def test_tool_descriptions_include_agent_routing_and_path_guidance(self):
         capture_text_doc = server.capture_text.__doc__
         capture_file_doc = server.capture_file.__doc__
