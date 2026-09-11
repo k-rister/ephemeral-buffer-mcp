@@ -327,6 +327,21 @@ class TestServerTools(unittest.TestCase):
         self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
         self.assertNotIn("\n  ", result["content"])
 
+    def test_compact_consolidation_preserves_record_line_boundaries(self):
+        source_text = "\n".join(f"record-{index}-" + ("x" * 150) for index in range(4))
+        server.capture_text(source_text, label="compact-boundaries")
+        source_id = server.engine.list_captures()[0]["capture_id"]
+
+        result = server._consolidated_jsonl([source_id], max_captures=1, max_bytes=1024)
+        content = result["content"]
+        payload = json.loads(content)
+        record_lines = [line for line in content.splitlines() if '"source_line":' in line]
+
+        self.assertLessEqual(len(content.encode("utf-8")), 1024)
+        self.assertGreater(result["record_count"], 1)
+        self.assertEqual(len(record_lines), result["record_count"])
+        self.assertEqual(payload["records"][0]["source_line"], 1)
+
     def test_consolidate_falls_back_when_source_metadata_exceeds_limit(self):
         server.capture_text("café detail", label="label-" + ("x" * 5000))
         source_id = server.engine.list_captures()[0]["capture_id"]
