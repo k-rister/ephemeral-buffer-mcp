@@ -585,6 +585,18 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(list(engine.captures), [source.capture_id])
         self.assertEqual(engine.get_capture(source.capture_id).label, "source")
 
+    def test_protected_ingest_rejects_missing_source_ids(self):
+        engine = EphemeralEngine(max_captures=1)
+
+        with self.assertRaisesRegex(ValueError, "unavailable source captures"):
+            engine.ingest(
+                "consolidated payload",
+                label="consolidated",
+                protected_capture_ids=["cap-missing"],
+            )
+
+        self.assertEqual(engine.captures, {})
+
     def test_protected_ingest_rejects_when_bytes_or_chunks_cannot_fit(self):
         byte_limited = EphemeralEngine(max_captures=2, max_buffer_bytes=25)
         byte_source = byte_limited.ingest("source payload", label="source")
