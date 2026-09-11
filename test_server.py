@@ -6,6 +6,7 @@ import json
 import os
 import runpy
 import socket
+import stat
 import sys
 import tempfile
 import unittest
@@ -1121,10 +1122,16 @@ class TestSocketServerStartup(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
+            source_stat = os.stat(__file__)
+            socket_stat = os.stat_result(
+                (stat.S_IFSOCK | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+            )
             with patch.object(server, "SOCKET_PATH", socket_path), \
                     patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())) as start, \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "lstat", return_value=socket_stat), \
                     patch.object(server.os, "chmod") as chmod, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 server.run_socket_server()
@@ -1132,6 +1139,77 @@ class TestSocketServerStartup(unittest.TestCase):
         start.assert_awaited_once_with(server.handle_socket_client, path=socket_path)
         chmod.assert_called_once_with(socket_path, 0o600)
         self.assertIn("listener stopped", stderr.getvalue())
+
+    def test_shutdown_removes_socket_owned_by_listener(self):
+        class Listener:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise RuntimeError("listener stopped")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        socket_stat = os.stat(__file__)
+        socket_stat = os.stat_result((stat.S_IFSOCK | 0o600, socket_stat.st_ino, socket_stat.st_dev, 1, 0, 0, 0, 0, 0, 0))
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "lstat", return_value=socket_stat), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(server.os, "chmod"), \
+                    patch.object(server.os, "unlink") as unlink, \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                server.run_socket_server()
+
+        unlink.assert_called_once_with(socket_path)
+
+    def test_shutdown_does_not_remove_replacement_socket(self):
+        class Listener:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise RuntimeError("listener stopped")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        bound_stat = os.stat(__file__)
+        bound_stat = os.stat_result((stat.S_IFSOCK | 0o600, bound_stat.st_ino, bound_stat.st_dev, 1, 0, 0, 0, 0, 0, 0))
+        replacement_stat = os.stat_result((stat.S_IFSOCK | 0o600, bound_stat.st_ino + 1, bound_stat.st_dev, 1, 0, 0, 0, 0, 0, 0))
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "lstat", side_effect=[bound_stat, replacement_stat]), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(server.os, "chmod"), \
+                    patch.object(server.os, "unlink") as unlink, \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                server.run_socket_server()
+
+        unlink.assert_not_called()
 
     def test_socket_probe_failure_is_reported(self):
         class FailingLoop:
