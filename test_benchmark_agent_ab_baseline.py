@@ -1,10 +1,14 @@
 """Tests for aggregate agent A/B baselines."""
 
 import copy
+import io
+import sys
 import unittest
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
 from benchmark_agent_ab import build_schedule, summarize_records
-from benchmark_agent_ab_baseline import build_baseline, compare_summary, load_baseline_dict
+from benchmark_agent_ab_baseline import build_baseline, compare_summary, load_baseline_dict, main
 
 
 def summary_fixture():
@@ -60,6 +64,22 @@ class TestAgentAbBaseline(unittest.TestCase):
         result = compare_summary(summary, baseline)
         self.assertTrue(result["passed"])
         self.assertFalse(result["comparisons"]["mcp"]["input_tokens"]["available"])
+
+    def test_create_baseline_rejects_fail_on_regression(self):
+        stderr = io.StringIO()
+        argv = [
+            "benchmark_agent_ab_baseline.py",
+            "--summary", "summary.json",
+            "--create-baseline",
+            "--output", "baseline.json",
+            "--fail-on-regression",
+        ]
+        with patch.object(sys, "argv", argv), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                main()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("requires --baseline comparison", stderr.getvalue())
 
 
 if __name__ == "__main__":

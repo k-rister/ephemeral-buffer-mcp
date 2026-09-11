@@ -192,6 +192,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fail-on-regression", action="store_true")
     args = parser.parse_args()
+    if args.create_baseline and args.fail_on_regression:
+        parser.error("--fail-on-regression requires --baseline comparison")
     summary = _read_json(args.summary)
     if args.create_baseline == bool(args.baseline):
         parser.error("provide exactly one of --create-baseline or --baseline")
