@@ -280,6 +280,25 @@ STEP 3: Summary
         self.assertEqual(engine.search("MATCH", context_lines=-1)["status"], "error")
         self.assertEqual(engine.search("MATCH", top_k=0)["status"], "error")
 
+    def test_search_deduplicates_overlapping_contexts_before_top_k(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("\n".join(f"line {i}" for i in range(1, 11)), label="overlap-ranking")
+
+        with patch.object(
+            engine,
+            "search_bm25",
+            return_value=[(0, 1.0), (1, 0.9), (3, 0.8)],
+        ):
+            result = engine.search(
+                "line",
+                mode="bm25",
+                capture_id=capture.capture_id,
+                top_k=2,
+                context_lines=0,
+            )
+
+        self.assertEqual([match["chunk_id"] for match in result["matches"]], [0, 3])
+
     def test_search_snippet_bounds_long_utf8_lines(self):
         engine = EphemeralEngine(max_captures=1)
         long_line = "MATCH " + "é" * (SEARCH_SNIPPET_MAX_BYTES * 2)

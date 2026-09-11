@@ -1030,7 +1030,10 @@ class EphemeralEngine:
             for rank, (cid, _) in enumerate(semantic_results):
                 rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k_const + rank + 1)
 
-        sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        # Deduplicate overlapping context windows before applying top_k.  The
+        # search backends intentionally over-fetch candidates so a sliding
+        # window cannot consume the result quota with duplicate context.
+        sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
 
         matches = []
         seen_line_ranges = []
@@ -1072,6 +1075,8 @@ class EphemeralEngine:
                 "context": "\n".join(capture.raw_lines[ctx_start - 1:ctx_end]),
                 "snippet": snippet
             })
+            if len(matches) >= top_k:
+                break
 
         self.metrics.record_search(capture.capture_id, len(matches))
         return {
