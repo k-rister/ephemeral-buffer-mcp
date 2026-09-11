@@ -298,6 +298,20 @@ class TestServerTools(unittest.TestCase):
         self.assertGreater(result["omitted_record_count"], 0)
         self.assertEqual(result["byte_size"] <= 512, True)
 
+    def test_consolidation_rejects_when_sources_cannot_be_retained(self):
+        original_max_captures = server.engine.max_captures
+        server.engine.max_captures = 1
+        try:
+            server.capture_text("important failure " * 20, label="source")
+            source_id = server.engine.list_captures()[0]["capture_id"]
+
+            result = server.consolidate_captures([source_id], max_bytes=512)
+
+            self.assertIn("protected source captures", result)
+            self.assertEqual(server.engine.list_captures()[0]["capture_id"], source_id)
+        finally:
+            server.engine.max_captures = original_max_captures
+
     def test_consolidate_captures_validates_limits(self):
         self.assertIn("max_captures must be at least 1", server.consolidate_captures(max_captures=0))
         self.assertIn("max_bytes must be at least 512", server.consolidate_captures(max_bytes=511))

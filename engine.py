@@ -507,6 +507,7 @@ class EphemeralEngine:
         original_byte_size: Optional[int] = None,
         command_exit_code: Optional[int] = None,
         timed_out: bool = False,
+        protected_capture_ids: Optional[List[str]] = None,
     ) -> Capture:
         """
         Ingests text, chunks it, and builds the SQLite FTS5 BM25 index.
@@ -571,13 +572,47 @@ class EphemeralEngine:
         )
 
         with self._lock:
-            # LRU eviction: capture_order is ordered from least to most recently used.
-            while self.capture_order and (
-                len(self.capture_order) >= self.max_captures
-                or self._total_bytes + capture.byte_size > self.max_buffer_bytes
-                or self._indexed_chunks + len(capture.chunks) > self.max_indexed_chunks
+            protected_ids = set(protected_capture_ids or [])
+            missing_protected_ids = sorted(protected_ids.difference(self.captures))
+            if missing_protected_ids:
+                raise ValueError(
+                    "Cannot admit capture while retaining unavailable source captures: "
+                    + ", ".join(missing_protected_ids)
+                )
+
+            # Plan LRU eviction before mutating state. Protected captures are
+            # skipped so a consolidation can never evict its own sources.
+            projected_count = len(self.capture_order) + 1
+            projected_bytes = self._total_bytes + capture.byte_size
+            projected_chunks = self._indexed_chunks + len(capture.chunks)
+            eviction_ids: List[str] = []
+            for candidate_id in self.capture_order:
+                if not (
+                    projected_count > self.max_captures
+                    or projected_bytes > self.max_buffer_bytes
+                    or projected_chunks > self.max_indexed_chunks
+                ):
+                    break
+                if candidate_id in protected_ids:
+                    continue
+                old_cap = self.captures[candidate_id]
+                eviction_ids.append(candidate_id)
+                projected_count -= 1
+                projected_bytes -= old_cap.byte_size
+                projected_chunks -= len(old_cap.chunks)
+
+            if (
+                projected_count > self.max_captures
+                or projected_bytes > self.max_buffer_bytes
+                or projected_chunks > self.max_indexed_chunks
             ):
-                evicted_id, _ = self.capture_order.popitem(last=False)
+                raise ValueError(
+                    "Cannot admit capture while retaining protected source captures "
+                    f"(count={len(protected_ids)})"
+                )
+
+            for evicted_id in eviction_ids:
+                self.capture_order.pop(evicted_id, None)
                 if evicted_id in self.captures:
                     old_cap = self.captures.pop(evicted_id)
                     self._total_bytes -= old_cap.byte_size
