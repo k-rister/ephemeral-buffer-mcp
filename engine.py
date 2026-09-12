@@ -421,6 +421,16 @@ class Capture:
     def byte_size(self) -> int:
         return self.input_byte_size
 
+    @property
+    def label_byte_size(self) -> int:
+        """Return the UTF-8 bytes retained for the capture label."""
+        return len(self.label.encode("utf-8"))
+
+    @property
+    def retained_byte_size(self) -> int:
+        """Return content plus label bytes counted against the buffer limit."""
+        return self.byte_size + self.label_byte_size
+
 
 class _DeterministicTestEmbedding:
     """Small deterministic substitute used only by the CI test environment."""
@@ -616,17 +626,22 @@ class EphemeralEngine:
         capture_bytes = len(text.encode("utf-8"))
         with self._lock:
             max_buffer_bytes = self.max_buffer_bytes
-        if capture_bytes > max_buffer_bytes:
+        label_bytes = len(label.encode("utf-8"))
+        retained_bytes = capture_bytes + label_bytes
+        if retained_bytes > max_buffer_bytes:
             log_event(
                 LOGGER,
                 logging.WARNING,
                 "capture_rejected_limit",
                 capture_id=capture_id,
                 capture_bytes=capture_bytes,
+                label_bytes=label_bytes,
+                retained_bytes=retained_bytes,
                 max_buffer_bytes=max_buffer_bytes,
             )
             raise ValueError(
-                f"Capture is {capture_bytes:,} bytes, exceeding the {max_buffer_bytes:,}-byte buffer limit"
+                f"Capture content and label use {retained_bytes:,} bytes, exceeding the "
+                f"{max_buffer_bytes:,}-byte buffer limit"
             )
 
         classified_type, diff_meta = detect_content_type(lines, label=label, content_type_hint=content_type)
@@ -672,7 +687,7 @@ class EphemeralEngine:
             # Plan LRU eviction before mutating state. Protected captures are
             # skipped so a consolidation can never evict its own sources.
             projected_count = len(self.capture_order) + 1
-            projected_bytes = self._total_bytes + capture.byte_size
+            projected_bytes = self._total_bytes + capture.retained_byte_size
             projected_chunks = self._indexed_chunks + len(capture.chunks)
             eviction_ids: List[str] = []
             for candidate_id in self.capture_order:
@@ -687,7 +702,7 @@ class EphemeralEngine:
                 old_cap = self.captures[candidate_id]
                 eviction_ids.append(candidate_id)
                 projected_count -= 1
-                projected_bytes -= old_cap.byte_size
+                projected_bytes -= old_cap.retained_byte_size
                 projected_chunks -= len(old_cap.chunks)
 
             if (
@@ -704,7 +719,7 @@ class EphemeralEngine:
                 self.capture_order.pop(evicted_id, None)
                 if evicted_id in self.captures:
                     old_cap = self.captures.pop(evicted_id)
-                    self._total_bytes -= old_cap.byte_size
+                    self._total_bytes -= old_cap.retained_byte_size
                     self._indexed_chunks -= len(old_cap.chunks)
                     log_event(
                         LOGGER,
@@ -712,6 +727,8 @@ class EphemeralEngine:
                         "capture_evicted",
                         capture_id=evicted_id,
                         capture_bytes=old_cap.byte_size,
+                        label_bytes=old_cap.label_byte_size,
+                        retained_bytes=old_cap.retained_byte_size,
                     )
                     old_cap.semantic_index_state = "evicted"
                     self._cancel_prefetch(evicted_id)
@@ -740,7 +757,7 @@ class EphemeralEngine:
 
             self.captures[capture_id] = capture
             self.capture_order[capture_id] = None
-            self._total_bytes += capture.byte_size
+            self._total_bytes += capture.retained_byte_size
             self._indexed_chunks += len(capture.chunks)
             self.metrics.record_capture(capture_id)
         self._schedule_semantic_prefetch(capture)
@@ -1444,7 +1461,7 @@ class EphemeralEngine:
             cap = self.captures.pop(capture_id)
             self._cancel_prefetch(capture_id)
             cap.semantic_index_state = "evicted"
-            self._total_bytes -= cap.byte_size
+            self._total_bytes -= cap.retained_byte_size
             self._indexed_chunks -= len(cap.chunks)
             self._close_capture_storage(cap)
             self.capture_order.pop(capture_id, None)
