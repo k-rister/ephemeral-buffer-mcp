@@ -634,13 +634,13 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         original_limit = self.engine.max_buffer_bytes
         self.engine.max_buffer_bytes = 50
         try:
-            first = self.engine.ingest("a" * 20, label="byte-budget-1")
-            second = self.engine.ingest("b" * 20, label="byte-budget-2")
-            third = self.engine.ingest("c" * 20, label="byte-budget-3")
+            first = self.engine.ingest("a" * 20, label="a")
+            second = self.engine.ingest("b" * 20, label="b")
+            third = self.engine.ingest("c" * 20, label="c")
 
             stats = self.engine.get_buffer_stats()
             self.assertEqual(stats["capture_count"], 2)
-            self.assertEqual(stats["total_bytes"], second.byte_size + third.byte_size)
+            self.assertEqual(stats["total_bytes"], second.retained_byte_size + third.retained_byte_size)
             self.assertEqual(stats["max_buffer_bytes"], 50)
             self.assertNotIn(first.capture_id, self.engine.captures)
 
@@ -652,20 +652,33 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
 
     def test_byte_budget_uses_actual_utf8_input_bytes(self):
-        engine = EphemeralEngine(max_captures=3, max_buffer_bytes=5)
+        engine = EphemeralEngine(max_captures=3, max_buffer_bytes=7)
         try:
-            no_trailing_newline = engine.ingest("abc", label="no-trailing-newline")
-            multibyte = engine.ingest("é", label="multibyte")
+            no_trailing_newline = engine.ingest("abc", label="a")
+            multibyte = engine.ingest("é", label="b")
 
             self.assertEqual(no_trailing_newline.byte_size, len("abc".encode("utf-8")))
             self.assertEqual(multibyte.byte_size, len("é".encode("utf-8")))
-            self.assertEqual(engine.get_buffer_stats()["total_bytes"], 5)
+            self.assertEqual(engine.get_buffer_stats()["total_bytes"], 7)
             self.assertEqual(len(engine.captures), 2)
 
             with self.assertRaises(ValueError):
-                engine.ingest("ééé", label="over-limit")
+                engine.ingest("ééé", label="over")
         finally:
             engine.shutdown()
+
+    def test_byte_budget_includes_utf8_label_bytes(self):
+        engine = EphemeralEngine(max_captures=2, max_buffer_bytes=10)
+        try:
+            capture = engine.ingest("1234", label="ééé")
+            self.assertEqual(capture.byte_size, 4)
+            self.assertEqual(capture.label_byte_size, 6)
+            self.assertEqual(capture.retained_byte_size, 10)
+            self.assertEqual(engine.get_buffer_stats()["total_bytes"], 10)
+            with self.assertRaisesRegex(ValueError, "content and label use 11 bytes"):
+                engine.ingest("1234", label="éééx")
+        finally:
+            engine.clear("all")
 
     def test_11_buffer_stats_separate_accounted_and_process_memory(self):
         self.engine.ingest("stats payload", label="stats")
@@ -745,7 +758,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with self.assertRaisesRegex(ValueError, "protected source captures"):
             byte_limited.ingest(
                 "consolidated payload",
-                label="consolidated",
+                label="c",
                 protected_capture_ids=[byte_source.capture_id],
             )
         self.assertIn(byte_source.capture_id, byte_limited.captures)

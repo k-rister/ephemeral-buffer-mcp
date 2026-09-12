@@ -368,9 +368,10 @@ The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
 `EPHEMERAL_MAX_BUFFER_BYTES`. Session-aware launchers can set
 `EPHEMERAL_SESSION_ID` so each server/CLI pair automatically derives a unique
 socket path; `EPHEMERAL_SOCKET_PATH` remains an explicit override. The byte
-limit accounts for
-captured UTF-8 content; `get_buffer_stats` also reports embedding model
-readiness, embedding/cache settings, and process memory separately.
+limit accounts for captured UTF-8 content plus its label; a capture is rejected
+when their combined size exceeds the limit. `get_buffer_stats` also reports
+embedding model readiness, embedding/cache settings, and process memory
+separately.
 
 Indexed chunks are bounded separately by `EPHEMERAL_MAX_INDEXED_CHUNKS`, which
 defaults to 32,768 total chunks across retained captures. LRU eviction makes
