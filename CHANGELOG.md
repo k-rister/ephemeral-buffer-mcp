@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 - 2026-09-11
+
+- Harden capture, search, consolidation, socket, timeout, shutdown, and
+  process-group handling with stricter bounds and cleanup guarantees.
+- Improve diff parsing, fallback tokenization, hybrid search context handling,
+  semantic prefetch behavior, and diagnostic signal accuracy.
+- Add repository-shaped agent A/B evaluation fixtures, repeatable Codex
+  experiment tooling, provider-usage diagnostics, and privacy-safe baselines.
+- Expand release, benchmark, lifecycle, and operational coverage and refresh
+  the documented effectiveness measurements.
+
 ## 0.2.0 - 2026-09-07
 
 - Add bounded `consolidate_captures` support for building one searchable JSON
