@@ -625,29 +625,31 @@ exact cross-run gates; retention follows the workflow artifact policy.
 
 #### Example benchmark results
 
-The reproducible paired evaluation was run on 2026-09-07 with five
+The reproducible paired evaluation was run on 2026-09-11 with five
 repetitions, seed `20260907`, and deterministic test embeddings. Across four
 synthetic scenarios, both the direct-output baseline and the MCP workflow
 completed all 20 tasks, and every MCP search was useful. The MCP workflow
-examined 68–90% fewer bytes than the baseline per scenario (81% on average):
+examined 30–85% fewer bytes than the baseline per scenario (68% on average):
 
 | Scenario | Bytes examined reduction | Completion |
 | :--- | ---: | ---: |
-| Large build output | 90% | 5/5 |
-| Failure log | 83% | 5/5 |
-| Review diff | 68% | 5/5 |
-| Timeout log | 85% | 5/5 |
+| Large build output | 85% | 5/5 |
+| Failure log | 77% | 5/5 |
+| Review diff | 30% | 5/5 |
+| Timeout log | 79% | 5/5 |
 
 The consolidation evaluation, using the same seed and five repetitions,
 reduced the initial multi-result overview from an average of 4,298 bytes to
 213 bytes (95% fewer overview bytes), while preserving a 100% targeted
-retrieval success rate. These measurements quantify the MCP data path: fewer
-bytes need to be returned to the agent before it asks for targeted detail.
+retrieval success rate. The consolidated workflow retrieved 3.6% fewer bytes
+overall and took 2.2 times as long locally as sequential processing in this
+run. These measurements quantify the MCP data path: fewer bytes need to be
+returned to the agent before it asks for targeted detail.
 
 They are not universal performance guarantees. The fixtures are synthetic,
 the harness does not invoke a model, and the byte reduction is not a direct
-token-savings measurement. In this run, consolidated processing also took
-about 10 times longer locally than sequential processing, while retrieving
+token-savings measurement. In this run, consolidated processing took about 2.2
+times longer locally than sequential processing, while retrieving
 similar detail. The benchmark therefore demonstrates context-size and
 workflow-shaping benefits, not that every workload will be faster or that
 search results will be relevant for arbitrary repositories. Re-run the
