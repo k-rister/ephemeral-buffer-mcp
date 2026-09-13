@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-09-13
 
 - Package Codex and generic agent session launchers alongside `ephbuf`.
 - Allow explicitly configured stdio-only operation when the host denies Unix
