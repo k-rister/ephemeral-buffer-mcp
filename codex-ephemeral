@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "$DIR/ephemeral-session-env"
+
+# Pass the identity explicitly through Codex's MCP configuration as well as
+# the parent environment. This matters when Codex sanitizes the environment
+# used to launch MCP child processes. JSON string escaping is compatible with
+# TOML basic-string escaping for quotes, backslashes, and newlines.
+SESSION_ID_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$EPHEMERAL_SESSION_ID")"
+MCP_ENV_CONFIG="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_SESSION_ID=${SESSION_ID_TOML}}"
+
+exec codex --config "$MCP_ENV_CONFIG" "$@"

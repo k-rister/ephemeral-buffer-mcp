@@ -51,6 +51,25 @@ The server advertises the policy in its MCP initialization instructions and
 also enforces it at startup; the CLI refuses to send when strict mode is
 enabled without an explicit session ID or socket path.
 
+This policy is client-neutral. For stdio MCP clients, configure the server's
+`env` map with `EPHEMERAL_REQUIRE_ISOLATION=1` and a unique
+`EPHEMERAL_SESSION_ID`, and arrange for shell commands in that agent session
+to inherit the same values. If the client supports per-session environment
+interpolation, use that facility; otherwise generate the ID in the launcher
+that starts both the agent and its shell environment.
+
+The package installs `ephemeral-agent`, `codex-ephemeral`, and
+`ephemeral-session-env` alongside `ephbuf` in the virtual environment's
+`bin` directory. Use the first launcher for generic CLI agents, the Codex
+launcher for Codex's explicit MCP configuration override, and source the
+environment helper when the agent is started separately:
+
+```bash
+ephemeral-agent claude
+ephemeral-agent gemini
+source ephemeral-session-env
+```
+
 CLI socket operations use a 10-second timeout by default. Override it with a
 positive value when needed:
 
