@@ -71,14 +71,33 @@ def _socket_lifecycle():
         return _SOCKET_STATE, _SOCKET_FAILURE
 
 
+def _allow_stdio_without_socket() -> bool:
+    """Return whether MCP stdio may continue when the socket cannot start."""
+    return os.environ.get("EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def _require_socket_ready():
-    """Raise a clear entrypoint error unless the socket reports readiness."""
+    """Require socket readiness unless explicit stdio-only fallback is enabled."""
     if not _SOCKET_STARTUP_EVENT.wait(timeout=SOCKET_STARTUP_TIMEOUT_SECONDS):
+        if _allow_stdio_without_socket():
+            log_event(
+                LOGGER, logging.WARNING, "socket_unavailable_stdio_continues",
+                reason="startup timeout",
+            )
+            return
         raise SystemExit(
             f"Socket server did not become ready within {SOCKET_STARTUP_TIMEOUT_SECONDS} seconds"
         )
     socket_state, socket_failure = _socket_lifecycle()
     if socket_state == "failed":
+        if _allow_stdio_without_socket():
+            log_event(
+                LOGGER, logging.WARNING, "socket_unavailable_stdio_continues",
+                reason=socket_failure,
+            )
+            return
         raise SystemExit(f"Socket server failed to start: {socket_failure}")
 
 

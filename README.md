@@ -109,6 +109,81 @@ Normally you should let your MCP client start this process automatically. Do
 not start a separate server for every shell command: the `ephbuf` CLI sends
 captures to the running server over its local Unix socket.
 
+### Start an isolated Codex session
+
+When using the global Codex MCP configuration, start Codex through the
+installed `codex-ephemeral` launcher. From a source checkout, use
+`./codex-ephemeral`. The launcher creates a unique
+`EPHEMERAL_SESSION_ID` and exports it to Codex, the MCP server, and `ephbuf`.
+It also passes the ID explicitly through Codex's MCP configuration so it is
+available even when Codex sanitizes the MCP child environment.
+The global configuration requires this identity, so starting Codex directly
+will fail closed instead of attaching to another session's socket.
+
+The launcher also enables `EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1` because some
+Codex execution environments deny Unix-socket creation. In that case MCP over
+stdio remains available and runtime diagnostics report the socket failure;
+`ephbuf` CLI support remains available when the environment permits socket
+creation.
+
+### Configure other coding agents
+
+The server is not Codex-specific. Any MCP client that launches a local stdio
+server can use the same command and environment settings:
+
+```json
+{
+  "mcpServers": {
+    "ephemeral-buffer": {
+      "command": "/absolute/path/to/ephemeral-buffer-mcp/run.sh",
+      "args": [],
+      "env": {
+        "EPHEMERAL_REQUIRE_ISOLATION": "1",
+        "EPHEMERAL_SESSION_ID": "agent-session-unique-value",
+        "EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "1"
+      }
+    }
+  }
+}
+```
+
+This shape applies to clients such as Claude-style `.mcp.json` and
+Gemini/Antigravity-style `mcp_config.json`. Use a different
+`EPHEMERAL_SESSION_ID` for every concurrent agent session. If the client
+supports environment interpolation, use its per-session identifier; otherwise
+generate an ID when starting the agent and place that same value in the
+agent's shell environment:
+
+```bash
+export EPHEMERAL_SESSION_ID="agent-$(date +%s)-$$"
+export EPHEMERAL_REQUIRE_ISOLATION=1
+export EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1
+```
+
+The MCP server and `ephbuf` CLI must inherit the same ID. An MCP client that
+does not pass environment variables to child processes can still use the MCP
+tools, but its separate `ephbuf` shell commands will need an equivalent
+session environment configured independently.
+
+For other shell-launched agents, use the installed generic launcher. From a
+source checkout, use `./ephemeral-agent`:
+
+```bash
+ephemeral-agent claude
+ephemeral-agent gemini
+```
+
+Or source the environment into an existing shell before launching the agent:
+
+```bash
+source ephemeral-session-env
+claude   # or another coding-agent command
+```
+
+GUI-launched agents still need their MCP configuration to provide a unique
+session ID per conversation; these scripts cannot modify an already-running
+GUI process.
+
 ### Configure an MCP client
 
 MCP clients generally need the command, arguments, and environment used to
@@ -202,8 +277,9 @@ MCP client.
 | Use case | Recommended installation |
 | :--- | :--- |
 | Normal user | PyPI install in a virtual environment |
-| MCP host | PyPI install, then configure `python -m server` |
+| MCP host | PyPI install, then configure the installed server command |
 | Shell/CLI use | PyPI install, then run `ephbuf` |
+| CLI coding agent | PyPI install, then run `ephemeral-agent` or `codex-ephemeral` |
 | Contributor | Source checkout with `pip install -e .` |
 | Release validation | Follow the procedures in [OPERATIONS.md](OPERATIONS.md) |
 

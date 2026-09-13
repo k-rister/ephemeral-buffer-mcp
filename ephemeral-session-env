@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+# Source this file before starting an agent and its shell tools. The same
+# environment is inherited by the MCP server and the ephbuf CLI.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "Usage: source ${BASH_SOURCE[0]}" >&2
+    exit 2
+fi
+
+if [[ -z "${EPHEMERAL_SESSION_ID:-}" ]]; then
+    EPHEMERAL_SESSION_ID="agent-$(date +%s)-${PPID}-$$"
+fi
+export EPHEMERAL_SESSION_ID
+export EPHEMERAL_REQUIRE_ISOLATION=1
+export EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1

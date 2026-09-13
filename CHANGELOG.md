@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Package Codex and generic agent session launchers alongside `ephbuf`.
+- Allow explicitly configured stdio-only operation when the host denies Unix
+  socket creation while preserving dual-mode startup by default.
+
 ## 0.3.0 - 2026-09-11
 
 - Harden capture, search, consolidation, socket, timeout, shutdown, and
