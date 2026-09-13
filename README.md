@@ -563,10 +563,10 @@ Measure focused-test coverage locally:
 .venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 .venv/bin/python -m coverage report
 ```
-The current focused-test baseline is 91%; CI enforces a 91% minimum after
-adding coverage for defensive command, limit, cleanup, embedding, and socket
-handling paths. Coverage reports are uploaded for inspection, and future
-threshold increases should follow similarly targeted test additions.
+CI requires 100% coverage for application runtime modules and excludes test,
+benchmark, release-check, and packaging-metadata files from that gate. Coverage
+reports are uploaded for inspection, and new runtime paths should include
+targeted tests.
 The release guardrail utility is measured separately because it is a workflow
 utility rather than application runtime code:
 ```bash
