@@ -73,6 +73,13 @@ def embedding_cache_dir() -> str | None:
     return os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR") or None
 
 
+def embedding_warmup_enabled() -> bool:
+    """Return whether the embedding model is warmed in the background at startup."""
+    return os.environ.get("EPHEMERAL_EMBEDDING_WARMUP", "1").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def semantic_prefetch_enabled() -> bool:
     """Return whether post-ingestion semantic indexing is enabled."""
     return os.environ.get("EPHEMERAL_SEMANTIC_PREFETCH", "0").strip().lower() in {

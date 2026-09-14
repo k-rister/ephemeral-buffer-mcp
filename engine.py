@@ -28,6 +28,7 @@ from config import (
     DEFAULT_MAX_CAPTURES,
     embedding_cache_dir,
     embedding_model_name as configured_embedding_model_name,
+    embedding_warmup_enabled as configured_embedding_warmup_enabled,
     max_indexed_chunks as configured_max_indexed_chunks,
     semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
     semantic_prefetch_workers as configured_semantic_prefetch_workers,
@@ -467,6 +468,7 @@ class EphemeralEngine:
         max_indexed_chunks: Optional[int] = None,
         embedding_model_name: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
+        embedding_warmup: Optional[bool] = None,
         metrics: Optional[LocalMetrics] = None,
         semantic_prefetch: Optional[bool] = None,
         semantic_prefetch_workers: Optional[int] = None,
@@ -494,6 +496,16 @@ class EphemeralEngine:
         self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
         self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
         self.embedding_model = None
+        self.embedding_warmup_enabled = (
+            configured_embedding_warmup_enabled()
+            if embedding_warmup is None
+            else embedding_warmup
+        )
+        self.embedding_warmup_state = (
+            "not-started" if self.embedding_warmup_enabled else "disabled"
+        )
+        self.embedding_warmup_failure = None
+        self._embedding_warmup_thread: Optional[threading.Thread] = None
         self.metrics = metrics or LocalMetrics(enabled=False)
         self.semantic_prefetch_enabled = (
             configured_semantic_prefetch_enabled() if semantic_prefetch is None else semantic_prefetch
@@ -516,6 +528,64 @@ class EphemeralEngine:
         self._prefetch_futures: Dict[str, Future[None]] = {}
         self._prefetch_slots = threading.BoundedSemaphore(self.semantic_prefetch_workers * 2)
         self._shutdown = False
+
+    def start_embedding_warmup(self) -> bool:
+        """Start one non-blocking model warm-up and return whether work was started."""
+        with self._lock:
+            if self._shutdown or self.embedding_warmup_state != "not-started":
+                return False
+            self.embedding_warmup_state = "loading"
+            try:
+                thread = threading.Thread(
+                    target=self._warm_embedding_model,
+                    name="embedding-warmup",
+                    daemon=True,
+                )
+                self._embedding_warmup_thread = thread
+                thread.start()
+            except Exception as exc:
+                self._embedding_warmup_thread = None
+                self.embedding_warmup_state = "failed"
+                self.embedding_warmup_failure = type(exc).__name__
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "embedding_warmup_start_failed",
+                    error_type=type(exc).__name__,
+                )
+                return False
+            return True
+
+    def _warm_embedding_model(self) -> None:
+        """Load the model and run one deterministic inference off the serving thread."""
+        try:
+            with self._embedding_lock:
+                model = self._get_embedding_model()
+                list(model.embed(["ephemeral buffer embedding warmup"]))
+        except Exception as exc:
+            with self._lock:
+                self.embedding_warmup_state = "failed"
+                self.embedding_warmup_failure = type(exc).__name__
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "embedding_warmup_failed",
+                error_type=type(exc).__name__,
+            )
+            return
+        with self._lock:
+            self.embedding_warmup_state = "ready"
+            self.embedding_warmup_failure = None
+        log_event(LOGGER, logging.INFO, "embedding_warmup_ready")
+
+    def wait_for_embedding_warmup(self, timeout: Optional[float] = None) -> str:
+        """Wait for an active warm-up, primarily for benchmarks and orderly tests."""
+        with self._lock:
+            thread = self._embedding_warmup_thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+        with self._lock:
+            return self.embedding_warmup_state
 
     def _get_embedding_model(self):
         """Load FastEmbed once, on first operation that needs embeddings."""
@@ -872,16 +942,19 @@ class EphemeralEngine:
             future.cancel()
 
     def shutdown(self) -> None:
-        """Stop background indexing without holding the engine lock while waiting."""
+        """Stop background embedding work without holding the engine lock while waiting."""
         with self._lock:
             if self._shutdown:
                 return
             self._shutdown = True
             executor = self._prefetch_executor
+            warmup_thread = self._embedding_warmup_thread
             # Future cancellation can synchronously run _prefetch_finished,
             # which removes the future from this mapping.
             for future in list(self._prefetch_futures.values()):
                 future.cancel()
+        if warmup_thread is not None and warmup_thread is not threading.current_thread():
+            warmup_thread.join()
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
 
@@ -1077,8 +1150,20 @@ class EphemeralEngine:
         if mode in ("bm25", "hybrid"):
             bm25_results = self.search_bm25(capture, query, top_k=top_k * 3)
             
+        semantic_fallback = None
         if mode in ("semantic", "hybrid"):
-            semantic_results = self.search_semantic(capture, query, top_k=top_k * 3)
+            try:
+                semantic_results = self.search_semantic(capture, query, top_k=top_k * 3)
+            except Exception as exc:
+                if mode == "semantic":
+                    raise
+                semantic_fallback = type(exc).__name__
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "hybrid_search_lexical_fallback",
+                    error_type=semantic_fallback,
+                )
 
         rrf_scores: Dict[int, float] = {}
         k_const = 60.0
@@ -1144,7 +1229,7 @@ class EphemeralEngine:
                 break
 
         self.metrics.record_search(capture.capture_id, len(matches))
-        return {
+        result = {
             "status": "ok",
             "capture_id": capture.capture_id,
             "label": capture.label,
@@ -1154,6 +1239,9 @@ class EphemeralEngine:
             "match_count": len(matches),
             "matches": matches
         }
+        if semantic_fallback:
+            result["semantic_fallback"] = semantic_fallback
+        return result
 
     @synchronized
     def get_slice(self, start_line: int, end_line: int, capture_id: str = "latest") -> Dict[str, Any]:
@@ -1421,6 +1509,9 @@ class EphemeralEngine:
             "embedding_bytes": embedding_bytes,
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
+            "embedding_warmup_enabled": self.embedding_warmup_enabled,
+            "embedding_warmup_state": self.embedding_warmup_state,
+            "embedding_warmup_failure": self.embedding_warmup_failure,
             "lexical_backend": self.lexical_backend,
             "embedding_cache_dir": self.embedding_cache_path,
             "semantic_prefetch_enabled": self.semantic_prefetch_enabled,

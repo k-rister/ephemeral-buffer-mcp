@@ -1033,6 +1033,43 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             release.set()
             engine.shutdown()
 
+    def test_shutdown_waits_for_embedding_warmup(self):
+        started = threading.Event()
+        release = threading.Event()
+        shutdown_entered = threading.Event()
+        shutdown_done = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            self.assertTrue(engine.start_embedding_warmup())
+            self.assertTrue(started.wait(timeout=2))
+
+            def shutdown():
+                shutdown_entered.set()
+                engine.shutdown()
+                shutdown_done.set()
+
+            shutdown_thread = threading.Thread(target=shutdown)
+            shutdown_thread.start()
+            self.assertTrue(shutdown_entered.wait(timeout=2))
+            self.assertFalse(shutdown_done.wait(timeout=0.05))
+
+            release.set()
+            shutdown_thread.join(timeout=2)
+            self.assertFalse(shutdown_thread.is_alive())
+            self.assertTrue(shutdown_done.is_set())
+            self.assertEqual(engine.embedding_warmup_state, "ready")
+        finally:
+            release.set()
+            engine.shutdown()
+
     def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
         engine = EphemeralEngine(max_captures=1)
         capture = engine.ingest("searchable payload", label="search-errors")
@@ -1129,6 +1166,60 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 failing._get_embedding_model()
         self.assertIsNone(failing.embedding_model)
 
+    def test_embedding_warmup_succeeds_once_and_reports_readiness(self):
+        class WarmEmbedding:
+            def __init__(self):
+                self.calls = []
+
+            def embed(self, texts):
+                self.calls.append(list(texts))
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        embedding = WarmEmbedding()
+        engine.embedding_model = embedding
+        try:
+            self.assertTrue(engine.start_embedding_warmup())
+            self.assertEqual(engine.wait_for_embedding_warmup(timeout=2), "ready")
+            self.assertFalse(engine.start_embedding_warmup())
+            self.assertEqual(len(embedding.calls), 1)
+            stats = engine.get_buffer_stats()
+            self.assertEqual(stats["embedding_warmup_state"], "ready")
+            self.assertIsNone(stats["embedding_warmup_failure"])
+        finally:
+            engine.shutdown()
+
+    def test_embedding_warmup_failure_is_degraded_and_hybrid_falls_back(self):
+        class FailingEmbedding:
+            def embed(self, _texts):
+                raise RuntimeError("model unavailable")
+
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        engine.embedding_model = FailingEmbedding()
+        try:
+            self.assertTrue(engine.start_embedding_warmup())
+            self.assertEqual(engine.wait_for_embedding_warmup(timeout=2), "failed")
+            stats = engine.get_buffer_stats()
+            self.assertEqual(stats["embedding_warmup_failure"], "RuntimeError")
+
+            capture = engine.ingest("lexical fallback marker", label="fallback")
+            result = engine.search("marker", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["semantic_fallback"], "RuntimeError")
+            self.assertEqual(result["match_count"], 1)
+            with self.assertRaisesRegex(RuntimeError, "model unavailable"):
+                engine.search("marker", mode="semantic", capture_id=capture.capture_id)
+        finally:
+            engine.shutdown()
+
+    def test_embedding_warmup_can_be_disabled(self):
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        try:
+            self.assertFalse(engine.start_embedding_warmup())
+            self.assertEqual(engine.wait_for_embedding_warmup(timeout=0), "disabled")
+        finally:
+            engine.shutdown()
+
     def test_process_rss_falls_back_to_resource_and_can_be_unavailable(self):
         resource_module = SimpleNamespace(
             RUSAGE_SELF=object(),
@@ -1150,6 +1241,16 @@ class TestEmbeddingStartup(unittest.TestCase):
 
         embedding.assert_not_called()
         self.assertIsNone(engine.embedding_model)
+
+    def test_embedding_warmup_thread_start_failure_is_degraded(self):
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        try:
+            with patch.object(threading.Thread, "start", side_effect=RuntimeError("thread limit")):
+                self.assertFalse(engine.start_embedding_warmup())
+            self.assertEqual(engine.embedding_warmup_state, "failed")
+            self.assertEqual(engine.embedding_warmup_failure, "RuntimeError")
+        finally:
+            engine.shutdown()
 
 
 if __name__ == "__main__":

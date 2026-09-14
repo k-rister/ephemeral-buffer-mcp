@@ -369,8 +369,22 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Captures:", result)
         self.assertIn("Embedding bytes:", result)
         self.assertIn("Embedding model:", result)
+        self.assertIn("Embedding warm-up:", result)
         self.assertIn("Process RSS:", result)
         self.assertIn("Unaccounted RSS bytes:", result)
+
+    def test_buffer_stats_reports_embedding_warmup_failure(self):
+        original_state = server.engine.embedding_warmup_state
+        original_failure = server.engine.embedding_warmup_failure
+        server.engine.embedding_warmup_state = "failed"
+        server.engine.embedding_warmup_failure = "RuntimeError"
+        try:
+            result = server.get_buffer_stats()
+        finally:
+            server.engine.embedding_warmup_state = original_state
+            server.engine.embedding_warmup_failure = original_failure
+
+        self.assertIn("Embedding warm-up: failed (RuntimeError)", result)
 
     def test_runtime_diagnostics_reports_content_free_metadata(self):
         server.capture_text("secret command output", label="private-label")
@@ -390,6 +404,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Session ID configured: yes", result)
         self.assertIn("Captures: 1/", result)
         self.assertIn("Embedding model:", result)
+        self.assertIn("Embedding warm-up:", result)
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
 
@@ -409,6 +424,13 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("execute_and_capture", instructions)
         self.assertIn("Socket isolation is configured", instructions)
+
+    def test_mcp_instructions_describe_legacy_socket_mode(self):
+        with patch.object(server, "socket_isolation_required", return_value=False), \
+                patch.object(server, "socket_isolation_configured", return_value=False):
+            instructions = server._mcp_instructions()
+
+        self.assertIn("legacy single-session mode", instructions)
 
     def test_mcp_instructions_report_missing_required_isolation(self):
         with patch.object(server, "socket_isolation_required", return_value=True), \
@@ -585,6 +607,28 @@ class TestServerTools(unittest.TestCase):
             regular = server.get_capture_summary("cap")
         self.assertIn("Head (First 5 lines)", regular)
         self.assertIn("tail", regular)
+
+    def test_search_capture_discloses_semantic_fallback(self):
+        response = {
+            "status": "ok",
+            "capture_id": "cap-fallback",
+            "label": "fallback",
+            "total_lines": 1,
+            "mode": "hybrid",
+            "match_count": 1,
+            "semantic_fallback": "RuntimeError",
+            "matches": [{
+                "score": 1.0,
+                "matched_range": "L1-L1",
+                "context_range": "L1-L1",
+                "snippet": ">     1 | lexical result",
+            }],
+        }
+        with patch.object(server.engine, "search", return_value=response):
+            result = server.search_capture("query", mode="hybrid")
+
+        self.assertIn("Mode: hybrid; lexical fallback (RuntimeError)", result)
+        self.assertIn("Semantic fallback active (RuntimeError)", result)
 
     def test_empty_and_populated_capture_listing(self):
         self.assertIn("buffer is empty", server.list_captures())
@@ -800,7 +844,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 class TestSocketServerStartup(unittest.TestCase):
     def test_import_does_not_start_socket_listener(self):
-        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
+        with patch.dict(os.environ, {
+                "EPHEMERAL_DISABLE_SOCKET_SERVER": "0",
+                "EPHEMERAL_EMBEDDING_WARMUP": "0",
+        }), \
                 patch.object(server.threading, "Thread") as thread:
             runpy.run_path(server.__file__, run_name="server_import")
 
@@ -814,7 +861,8 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_socket_startup_timeout_is_reported(self):
         event = SimpleNamespace(wait=lambda timeout: False)
-        with patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
+        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "0"}), \
+                patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
                 patch.object(server, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
             with self.assertRaisesRegex(SystemExit, "did not become ready within 3 seconds"):
                 server._require_socket_ready()
@@ -828,7 +876,8 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_socket_startup_failure_is_reported_to_entrypoint(self):
         event = SimpleNamespace(wait=lambda timeout: True)
-        with patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
+        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "0"}), \
+                patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
                 patch.object(server, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
             with self.assertRaisesRegex(SystemExit, "failed to start: RuntimeError: unavailable"):
                 server._require_socket_ready()
