@@ -537,6 +537,15 @@ are pinned to full commit SHAs; when updating an action, resolve the intended
 release tag to its commit, retain the version comment beside the pin, and let
 the required CI checks validate the change.
 
+Pull-request CI uses a concurrency group keyed by the workflow, event, and
+pull-request number. Pushing a newer commit to the same pull request cancels
+the older in-progress run, including both Python test-matrix jobs. Runs for
+different pull requests are independent; default-branch pushes, scheduled
+runs, and manual dispatches use separate groups and are not canceled by PR
+updates. When checking a pull request, use the completed or in-progress run
+whose head SHA matches the current PR head; canceled runs for earlier commits
+are no longer authoritative.
+
 Repository administrators retain an explicit emergency bypass: an admin may
 merge a pull request despite a failed required check when necessary. This is
 an exception path, not the normal release process; record the reason in the
