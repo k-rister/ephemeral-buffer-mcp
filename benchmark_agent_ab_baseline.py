@@ -78,11 +78,17 @@ def _validate_summary(summary: dict[str, Any]) -> None:
         raise ValueError("summary benchmark must be agent-ab")
     if not isinstance(summary.get("protocol"), dict):
         raise ValueError("summary protocol metadata is required")
-    for field in ("model_config", "repository_fixture", "environment", "reset_policy", "agent_adapter"):
+    for field in (
+        "model_config", "repository_fixture", "environment", "reset_policy", "agent_adapter",
+    ):
         if not isinstance(summary["protocol"].get(field), str) or not summary["protocol"][field].strip():
             raise ValueError(f"summary protocol field {field} is required")
     if not isinstance(summary.get("repetitions"), int) or summary["repetitions"] < 1:
         raise ValueError("summary repetitions must be positive")
+    for field in ("embedding_mode", "embedding_model", "embedding_cache"):
+        value = summary["protocol"].get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"summary protocol field {field} must be a non-empty identifier")
     _assert_private(summary)
 
 
@@ -136,7 +142,10 @@ def compare_summary(summary: dict[str, Any], baseline: dict[str, Any]) -> dict[s
     comparisons = {}
     if summary["task_fixture_version"] != baseline.get("task_fixture_version"):
         regressions.append("task_fixture_version changed")
-    for field in ("model_config", "repository_fixture", "agent_adapter"):
+    for field in (
+        "model_config", "repository_fixture", "agent_adapter",
+        "embedding_mode", "embedding_model", "embedding_cache",
+    ):
         current = summary["protocol"].get(field)
         expected = baseline.get("protocol", {}).get(field)
         if current != expected:

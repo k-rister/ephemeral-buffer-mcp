@@ -25,6 +25,7 @@ from benchmark_agent_ab import MODES, RECORDS_SCHEMA_VERSION, TASKS, _read_json,
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_TIMEOUT = 900
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 
 
@@ -388,10 +389,15 @@ def _run_one(
             "EPHEMERAL_LOG_FILE": str(diagnostic_log),
         }
     if item["mode"] == "mcp":
-        if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS"):
-            if mcp_env is None:
-                mcp_env = {}
-            mcp_env["EPHEMERAL_TEST_EMBEDDINGS"] = os.environ["EPHEMERAL_TEST_EMBEDDINGS"]
+        for variable in (
+            "EPHEMERAL_TEST_EMBEDDINGS",
+            "EPHEMERAL_EMBEDDING_MODEL",
+            "EPHEMERAL_FASTEMBED_CACHE_DIR",
+        ):
+            if os.environ.get(variable):
+                if mcp_env is None:
+                    mcp_env = {}
+                mcp_env[variable] = os.environ[variable]
         if mcp_env is None:
             mcp_env = {}
         mcp_env["EPHEMERAL_DISABLE_SOCKET_SERVER"] = "1"
@@ -494,6 +500,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], 
             runs.append(_run_one(item, manifest[item["task_id"]], args=args, repository=repository, scratch=scratch))
     if args.dry_run:
         return {}
+    test_embeddings = os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1"
     protocol = {
         "model_config": args.model,
         "repository_fixture": args.repository_fixture,
@@ -502,6 +509,9 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], 
         "agent_adapter": "codex-cli",
         "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "read-only-sandbox",
         "mcp_usage_policy": "required" if getattr(args, "require_mcp_calls", False) else "opportunistic",
+        "embedding_mode": "test" if test_embeddings else "fastembed",
+        "embedding_model": "deterministic-test" if test_embeddings else os.environ.get("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        "embedding_cache": "not-applicable" if test_embeddings else os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR") or "default",
     }
     payload = {
         "schema_version": schedule["schema_version"],

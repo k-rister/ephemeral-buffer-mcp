@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -243,6 +244,35 @@ class TestCodexAgentRunner(unittest.TestCase):
         env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
         self.assertIn('EPHEMERAL_TEST_EMBEDDINGS="1"', env_config)
 
+    def test_mcp_forwards_embedding_model_and_cache_configuration(self):
+        from run_codex_agent_ab import _codex_command
+
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_TEST_EMBEDDINGS": "0",
+                "EPHEMERAL_EMBEDDING_MODEL": "custom/model",
+                "EPHEMERAL_FASTEMBED_CACHE_DIR": "/tmp/embedding-cache",
+            },
+            clear=False,
+        ):
+            command = _codex_command(
+                codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+                mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
+                allow_mcp_approvals=False, sandbox="read-only", timeout=10,
+                mcp_env={
+                    name: os.environ[name]
+                    for name in (
+                        "EPHEMERAL_TEST_EMBEDDINGS",
+                        "EPHEMERAL_EMBEDDING_MODEL",
+                        "EPHEMERAL_FASTEMBED_CACHE_DIR",
+                    )
+                },
+            )
+        env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
+        self.assertIn('EPHEMERAL_EMBEDDING_MODEL="custom/model"', env_config)
+        self.assertIn('EPHEMERAL_FASTEMBED_CACHE_DIR="/tmp/embedding-cache"', env_config)
+
     def test_codex_command_uses_current_exec_subcommand_syntax(self):
         from run_codex_agent_ab import _codex_command
 
@@ -298,10 +328,17 @@ class TestCodexAgentRunner(unittest.TestCase):
             dry_run=False,
         )
         result = subprocess_result(stdout=json.dumps({"type": "completed"}) + "\nok\n")
-        with patch("run_codex_agent_ab._run_codex_process", return_value=result):
+        with patch("run_codex_agent_ab._run_codex_process", return_value=result), patch.dict(
+            os.environ,
+            {"EPHEMERAL_TEST_EMBEDDINGS": "", "EPHEMERAL_FASTEMBED_CACHE_DIR": ""},
+            clear=False,
+        ):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
+        self.assertEqual(payload["protocol"]["embedding_mode"], "fastembed")
+        self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5")
+        self.assertEqual(payload["protocol"]["embedding_cache"], "default")
 
 
 def subprocess_result(**kwargs):

@@ -888,8 +888,12 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 ```
 
 Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
-`AGENT_AB_SEED`, or `AGENT_AB_TIMEOUT_SECONDS` to repeat a different
-experiment. The script uses the synthetic fixture by default; set
+`AGENT_AB_SEED`, `AGENT_AB_TIMEOUT_SECONDS`, or `AGENT_AB_TEST_EMBEDDINGS` to
+repeat a different experiment. The test embedding setting defaults to `1` for
+deterministic, offline runs; set it to `0` to exercise the configured FastEmbed
+model and measure real model startup and first-query behavior. Keep the model,
+embedding cache, and other environment settings identical across paired runs.
+The script uses the synthetic fixture by default; set
 `AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1` for the repository-shaped
 synthetic profile. Use the lower-level runner commands above for a
 privacy-reviewed production-repository fixture and private task manifest.
@@ -908,8 +912,9 @@ Create and compare an aggregate agent A/B baseline after a privacy review:
   --output /tmp/agent-ab-comparison.json
 ```
 
-The baseline stores model, fixture, seed, repetition, aggregate metrics, and
-explicit tolerances only. It never stores prompts, transcripts, commands,
+The baseline stores agent and embedding model configuration, embedding mode and
+cache, fixture, seed, repetition, aggregate metrics, and explicit tolerances
+only. It never stores prompts, transcripts, commands,
 captures, or user content. This comparison is a documented manual workflow;
 live model calls are not part of required pull-request CI. Update a checked-in
 baseline only when fixture or model changes are explained in review.
