@@ -32,6 +32,9 @@ def _records_payload():
             "environment": "test-environment",
             "reset_policy": "fresh-worktree-per-run",
             "agent_adapter": "test-adapter",
+            "embedding_mode": "test",
+            "embedding_model": "deterministic-test",
+            "embedding_cache": "not-applicable",
         },
         "schedule": schedule,
         "runs": runs,
@@ -91,6 +94,12 @@ class TestAgentAbBenchmark(unittest.TestCase):
         payload["runs"] = payload["runs"][:-1]
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
+
+    def test_validation_accepts_legacy_protocol_without_embedding_metadata(self):
+        schedule, payload = _records_payload()
+        for field in ("embedding_mode", "embedding_model", "embedding_cache"):
+            del payload["protocol"][field]
+        self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
 
     def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):
         schedule, payload = _records_payload()

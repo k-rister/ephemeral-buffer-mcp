@@ -28,6 +28,8 @@ def summary_fixture():
         "task_fixture_version": schedule["task_fixture_version"], "protocol": {
             "model_config": "gpt-5.6-luna", "repository_fixture": "fixture-v1",
             "environment": "test", "reset_policy": "fresh-copy-per-run", "agent_adapter": "codex-cli",
+            "embedding_mode": "test", "embedding_model": "deterministic-test",
+            "embedding_cache": "not-applicable",
         }, "schedule": schedule, "runs": runs,
     }
     return summarize_records(payload, schedule)
@@ -55,6 +57,22 @@ class TestAgentAbBaseline(unittest.TestCase):
         result = compare_summary(changed, baseline)
         self.assertFalse(result["passed"])
         self.assertIn("mcp.duration_seconds exceeded its tolerated change", result["regressions"])
+
+    def test_compare_rejects_embedding_configuration_change(self):
+        summary = summary_fixture()
+        baseline = build_baseline(summary)
+        changed = copy.deepcopy(summary)
+        changed["protocol"]["embedding_mode"] = "fastembed"
+        result = compare_summary(changed, baseline)
+        self.assertFalse(result["passed"])
+        self.assertIn("protocol.embedding_mode changed", result["regressions"][0])
+
+    def test_build_baseline_accepts_legacy_summary_without_embedding_metadata(self):
+        summary = summary_fixture()
+        for field in ("embedding_mode", "embedding_model", "embedding_cache"):
+            del summary["protocol"][field]
+        baseline = build_baseline(summary)
+        self.assertNotIn("embedding_mode", baseline["protocol"])
 
     def test_unavailable_metrics_are_not_regressions(self):
         summary = summary_fixture()

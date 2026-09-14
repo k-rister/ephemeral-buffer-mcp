@@ -57,7 +57,11 @@ PROTOCOL_FIELDS = (
     "environment",
     "reset_policy",
     "agent_adapter",
+    "embedding_mode",
+    "embedding_model",
+    "embedding_cache",
 )
+LEGACY_PROTOCOL_FIELDS = PROTOCOL_FIELDS[:5]
 
 
 def build_schedule(repetitions: int = 5, seed: int = 20260909) -> dict[str, Any]:
@@ -107,10 +111,18 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _validate_protocol(protocol: Any) -> None:
     if not isinstance(protocol, dict):
         raise ValueError("records protocol metadata is required")
-    for field in PROTOCOL_FIELDS:
+    for field in LEGACY_PROTOCOL_FIELDS:
         value = protocol.get(field)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"records protocol field {field} must be a non-empty identifier")
+    # Embedding metadata was added after records schema versions 1-4. Preserve
+    # validation of those historical records while validating new metadata
+    # whenever it is present.
+    for field in PROTOCOL_FIELDS[len(LEGACY_PROTOCOL_FIELDS):]:
+        if field in protocol:
+            value = protocol[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"records protocol field {field} must be a non-empty identifier")
 
 
 def _run_key(record: dict[str, Any]) -> tuple[int, str, str]:

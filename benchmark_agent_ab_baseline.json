@@ -32,7 +32,10 @@
     "mcp_usage_policy": "required",
     "model_config": "gpt-5.6-luna",
     "repository_fixture": "repository-shaped-v1",
-    "reset_policy": "fresh-copy-per-run"
+    "reset_policy": "fresh-copy-per-run",
+    "embedding_mode": "test",
+    "embedding_model": "deterministic-test",
+    "embedding_cache": "not-applicable"
   },
   "records_schema_version": 4,
   "repetitions": 5,

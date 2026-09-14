@@ -8,6 +8,7 @@ REPETITIONS="${AGENT_AB_REPETITIONS:-5}"
 SEED="${AGENT_AB_SEED:-20260909}"
 TIMEOUT_SECONDS="${AGENT_AB_TIMEOUT_SECONDS:-900}"
 FIXTURE_PROFILE="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
+TEST_EMBEDDINGS="${AGENT_AB_TEST_EMBEDDINGS:-1}"
 RUN_DIR="${AGENT_AB_RUN_DIR:-/tmp/agent-ab-run-$(date +%Y%m%d-%H%M%S)}"
 
 if [[ -z "${CODEX_HOME:-}" ]]; then
@@ -24,6 +25,10 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI is not on PATH" >&2
+    exit 2
+fi
+if [[ "$TEST_EMBEDDINGS" != "0" && "$TEST_EMBEDDINGS" != "1" ]]; then
+    echo "AGENT_AB_TEST_EMBEDDINGS must be 0 or 1" >&2
     exit 2
 fi
 
@@ -45,7 +50,7 @@ fi
     --repetitions "$REPETITIONS" \
     --seed "$SEED"
 
-EPHEMERAL_TEST_EMBEDDINGS=1 CODEX_HOME="$CODEX_HOME" \
+EPHEMERAL_TEST_EMBEDDINGS="$TEST_EMBEDDINGS" CODEX_HOME="$CODEX_HOME" \
 "$PYTHON_BIN" "$PROJECT_DIR/run_codex_agent_ab.py" \
     --schedule "$RUN_DIR/schedule.json" \
     --tasks "$RUN_DIR/tasks.json" \
