@@ -597,14 +597,24 @@ def search_capture(
         
     matches = res.get("matches", [])
     METRICS.record_result_count("search_capture", len(matches))
+    fallback_note = (
+        f" Semantic fallback active ({res['semantic_fallback']})."
+        if res.get("semantic_fallback")
+        else ""
+    )
     if not matches:
-        return f"No matches found for '{query}' in capture '{res.get('capture_id')}' ({res.get('label')})."
+        return f"No matches found for '{query}' in capture '{res.get('capture_id')}' ({res.get('label')}).{fallback_note}"
         
+    mode_label = res["mode"]
+    if res.get("semantic_fallback"):
+        mode_label += f"; lexical fallback ({res['semantic_fallback']})"
     out = [
-        f"Search Results for: \"{query}\" [Mode: {res['mode']}]",
+        f"Search Results for: \"{query}\" [Mode: {mode_label}]",
         f"Capture: `{res['capture_id']}` ({res['label']}, {res['total_lines']} total lines)",
         f"Found {len(matches)} relevant section(s):\n"
     ]
+    if res.get("semantic_fallback"):
+        out.insert(1, fallback_note.strip())
     
     for i, m in enumerate(matches, 1):
         match_output = [
@@ -715,6 +725,11 @@ def get_buffer_stats() -> str:
     )
     model_state = "loaded" if stats["embedding_model_loaded"] else "not loaded"
     model_line = f"Embedding model: {stats['embedding_model']} ({model_state})"
+    warmup_state = stats.get("embedding_warmup_state", "not-started")
+    warmup_failure = stats.get("embedding_warmup_failure")
+    warmup_line = f"Embedding warm-up: {warmup_state}"
+    if warmup_failure:
+        warmup_line += f" ({warmup_failure})"
     cache_line = f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}"
     indexed_chunks = stats.get("indexed_chunks", stats["total_chunks"])
     max_indexed_chunks = stats.get("max_indexed_chunks", indexed_chunks)
@@ -729,6 +744,7 @@ def get_buffer_stats() -> str:
         f"Indexed chunks: {indexed_chunks:,}/{max_indexed_chunks:,} "
         f"({remaining_indexed_chunks:,} remaining)\n"
         f"{model_line}\n"
+        f"{warmup_line}\n"
         f"{cache_line}\n"
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"
         f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
@@ -774,6 +790,8 @@ def get_runtime_diagnostics() -> str:
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
         f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",
+        f"Embedding warm-up: {stats.get('embedding_warmup_state', 'not-started')}"
+        + (f" ({stats['embedding_warmup_failure']})" if stats.get("embedding_warmup_failure") else ""),
         f"Lexical search backend: {stats['lexical_backend']}",
         f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}",
         f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
@@ -1002,5 +1020,6 @@ if __name__ == "__main__":
     if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
         start_socket_server()
         _require_socket_ready()
+    engine.start_embedding_warmup()
     _refresh_mcp_instructions()
     mcp.run()

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Warm the embedding model asynchronously after server readiness by default,
+  expose warm-up readiness and failures, and preserve lexical hybrid results
+  when semantic initialization is unavailable.
+- Add a warm-up benchmark covering startup readiness, first-query latency, and
+  process RSS impact, with an opt-out for lexical-only deployments.
+
 ## 0.3.1 - 2026-09-13
 
 - Package Codex and generic agent session launchers alongside `ephbuf`.

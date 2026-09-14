@@ -101,11 +101,15 @@ index, Python objects, and process RSS are reported separately by
 `get_buffer_stats`; process RSS is an approximate operational metric rather
 than an allocation limit.
 
-FastEmbed is loaded lazily on the first capture or semantic search. Set
-`EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
-`EPHEMERAL_FASTEMBED_CACHE_DIR` to place its downloaded model files in a
-controlled cache directory. Use `get_buffer_stats` to see the configured model
-and whether it has been loaded yet.
+FastEmbed is warmed in a background thread after socket startup succeeds, so
+the MCP handshake and BM25 search remain available while model loading and one
+small deterministic embedding complete. Set `EPHEMERAL_EMBEDDING_WARMUP=0` for
+lexical-only or memory-constrained deployments. Set `EPHEMERAL_EMBEDDING_MODEL`
+to select a compatible model and `EPHEMERAL_FASTEMBED_CACHE_DIR` to place its
+downloaded model files in a controlled cache directory. Warm-up failure does
+not block startup: BM25 remains available and hybrid search degrades to lexical
+results. `get_buffer_stats` and `get_runtime_diagnostics` report warm-up state
+and a content-free exception class on failure.
 
 Lexical search uses SQLite FTS5 when the host SQLite library provides it. If
 FTS5 is unavailable, captures remain searchable through a complete token-based

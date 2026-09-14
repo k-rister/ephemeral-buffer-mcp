@@ -241,17 +241,26 @@ by default. Set `EPHEMERAL_SOCKET_TIMEOUT_SECONDS` to a positive number of
 seconds when a different limit is appropriate; timeout failures return a
 nonzero CLI result.
 
-### First-use model initialization
+### Background model warm-up
 
-FastEmbed loads the embedding model lazily on the first semantic or hybrid
-search, rather than during capture or when the server process imports. The
-first semantic operation may therefore take longer and may download model files. Subsequent operations use
-the local model cache. To select a compatible model or move the cache, set:
+After socket startup succeeds, the server loads FastEmbed and runs a small
+deterministic embedding in a background thread. MCP startup and BM25 search do
+not wait for this work. A semantic request arriving during warm-up waits on the
+same model lock instead of starting a duplicate load. Subsequent operations use
+the local model cache. To disable warm-up for lexical-only or memory-constrained
+deployments, or to select a compatible model and cache location, set:
 
 ```bash
+export EPHEMERAL_EMBEDDING_WARMUP=0
 export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5"
 export EPHEMERAL_FASTEMBED_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
 ```
+
+Warm-up failures do not stop the server. BM25 remains available, and hybrid
+search returns lexical results with a `semantic_fallback` error-class field
+when semantic initialization fails. `get_buffer_stats` and
+`get_runtime_diagnostics` report warm-up as `not-started`, `loading`, `ready`,
+`failed`, or `disabled`; failures expose only the exception class.
 
 Semantic indexing can optionally be prefetched after ingestion:
 
@@ -554,13 +563,13 @@ development locks.
 
 Run the test suite:
 ```bash
-.venv/bin/python -m unittest test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m unittest test_benchmark_warmup.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 .venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
 Measure focused-test coverage locally:
 ```bash
-.venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
 .venv/bin/python -m coverage report
 ```
 CI requires 100% coverage for application runtime modules and excludes test,
@@ -645,6 +654,20 @@ The prefetch harness reports ingestion, first semantic search, and subsequent
 semantic search medians for both modes. Prefetch should reduce first-query
 latency when work completes during ingestion, while adding bounded background
 resource use; treat the output as deployment-specific diagnostic evidence.
+
+Compare lazy model loading with background startup warm-up:
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_warmup.py \
+  --samples 5 --output benchmark-warmup.json
+```
+The warm-up harness reports engine initialization, time to embedding readiness,
+first semantic-search latency, and process RSS change for both policies. For the
+lazy policy, embedding readiness is measured through completion of the first
+semantic search rather than reported as instantaneous. Run it without
+deterministic test embeddings to measure the configured FastEmbed model and host
+cache; each policy is measured in a fresh worker process so model pages retained
+by the allocator do not contaminate the other policy. Results are deployment-
+specific and the benchmark is optional.
 
 Measure direct-versus-captured routing tradeoffs with synthetic output profiles:
 ```bash

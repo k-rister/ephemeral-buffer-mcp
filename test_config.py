@@ -12,6 +12,7 @@ from config import (
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     embedding_cache_dir,
     embedding_model_name,
+    embedding_warmup_enabled,
     positive_int_env,
     semantic_prefetch_enabled,
     semantic_prefetch_workers,
@@ -116,6 +117,12 @@ class TestPositiveIntEnv(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(semantic_prefetch_enabled())
             self.assertEqual(semantic_prefetch_workers(), DEFAULT_SEMANTIC_PREFETCH_WORKERS)
+
+    def test_embedding_warmup_defaults_enabled_and_can_be_disabled(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(embedding_warmup_enabled())
+        with patch.dict(os.environ, {"EPHEMERAL_EMBEDDING_WARMUP": "off"}, clear=True):
+            self.assertFalse(embedding_warmup_enabled())
 
     def test_semantic_prefetch_settings_can_be_overridden(self):
         with patch.dict(
