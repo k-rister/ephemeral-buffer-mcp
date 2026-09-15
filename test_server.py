@@ -506,6 +506,7 @@ class TestServerTools(unittest.TestCase):
             server.engine.metrics = original_engine_metrics
 
         self.assertIn("Local metrics: {", result)
+        self.assertIn("Data-path bytes: {", result)
         self.assertIn('"captures": 1', result)
         self.assertNotIn("secret metrics payload", result)
         self.assertNotIn("private metrics label", result)
@@ -749,6 +750,27 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["label"], "socket-test")
         self.assertTrue(writer.closed)
 
+    async def test_socket_byte_metrics_count_framed_request_and_response(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        try:
+            payload = encode_frame(json.dumps({"label": "socket-metrics", "text": "hello"}).encode())
+            capture = SimpleNamespace(
+                capture_id="cap_socket_metrics",
+                label="socket-metrics",
+                line_count=1,
+                byte_size=5,
+            )
+            with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+                writer = await self.run_handler(payload)
+        finally:
+            server.METRICS = original_metrics
+
+        counters = metrics.snapshot()["bytes"]
+        self.assertEqual(counters["socket_request_bytes"], len(payload))
+        self.assertEqual(counters["socket_response_bytes"], len(writer.writes[0]))
+
     async def test_json_payload_is_reassembled_across_socket_reads(self):
         payload = encode_frame(json.dumps({"label": "chunked", "text": "complete payload"}).encode())
         capture = SimpleNamespace(
@@ -805,6 +827,27 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("exceeds", response["message"])
+
+    async def test_socket_byte_metrics_count_consumed_rejected_request_bytes(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        try:
+            oversized = encode_frame(b"x" * (
+                server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
+                + server.SOCKET_PAYLOAD_OVERHEAD
+                + 1
+            ))
+            await self.run_handler(oversized)
+            truncated_header = FRAME_MAGIC + b"\x01\x00"
+            await self.run_handler(truncated_header)
+        finally:
+            server.METRICS = original_metrics
+
+        self.assertEqual(
+            metrics.snapshot()["bytes"]["socket_request_bytes"],
+            FRAME_HEADER_SIZE + len(truncated_header),
+        )
 
     async def test_ingest_is_offloaded_from_event_loop(self):
         payload = encode_frame(json.dumps({"label": "offload-test", "text": "hello"}).encode())
@@ -868,6 +911,29 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("invalid capture", response["message"])
+
+    async def test_invalid_original_size_returns_error_without_retaining_capture(self):
+        original_metrics = server.METRICS
+        original_engine_metrics = server.engine.metrics
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        server.engine.metrics = metrics
+        try:
+            payload = encode_frame(json.dumps({
+                "text": "payload",
+                "truncated": True,
+                "original_byte_size": "not-an-integer",
+            }).encode())
+            writer = await self.run_handler(payload)
+        finally:
+            server.METRICS = original_metrics
+            server.engine.metrics = original_engine_metrics
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertIn("original_byte_size", response["message"])
+        self.assertEqual(server.engine.captures, {})
+        self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
 
     async def test_truncated_frame_returns_error_response(self):
         writer = await self.run_handler(FRAME_MAGIC + b"\x01\x00")
