@@ -9,6 +9,8 @@
   process RSS impact, with an opt-out for lexical-only deployments.
 - Add opt-in, session-scoped data-path byte counters to local diagnostics for
   capture input/retention, tool responses, and framed socket traffic.
+- Extend the Codex A/B records to collect per-run data-path byte counters from
+  content-free MCP metrics snapshots.
 
 ## 0.3.1 - 2026-09-13
 

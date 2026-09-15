@@ -856,12 +856,17 @@ MCP tool; runs that bypass MCP are then marked incomplete with reason
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 4 and add exit code, failure reason, MCP-specific
+Runner records use version 5 and add exit code, failure reason, MCP-specific
 tool-call count, provider-reported input/output token counts, and every
 provider usage sample when Codex emits them. They also break the observable
 context proxy into prompt and output byte components. Version-1 through
-version-3 records remain readable; missing provider metrics are reported as
-unavailable rather than zero.
+version-4 records remain readable; missing provider metrics are reported as
+unavailable rather than zero. Version-5 MCP records additionally include
+content-free session data-path byte counters for capture input/retention,
+tool/search/retrieval responses, and framed socket traffic. The adapter enables
+local metrics for MCP runs and collects the server snapshot after each run;
+missing snapshots are represented as zero counters and should be treated as
+unavailable when diagnosing a failed run.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.

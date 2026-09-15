@@ -20,7 +20,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from benchmark_agent_ab import MODES, RECORDS_SCHEMA_VERSION, TASKS, _read_json, validate_records
+from benchmark_agent_ab import (
+    DATA_PATH_BYTE_FIELDS,
+    MODES,
+    RECORDS_SCHEMA_VERSION,
+    TASKS,
+    _read_json,
+    validate_records,
+)
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
@@ -316,6 +323,25 @@ def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, 
     )
 
 
+def _data_path_bytes(path: Path | None) -> dict[str, int]:
+    """Read content-free server byte counters, defaulting unavailable values to zero."""
+    result = {field: 0 for field in DATA_PATH_BYTE_FIELDS}
+    if path is None or not path.exists():
+        return result
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return result
+    counters = payload.get("bytes") if isinstance(payload, dict) else None
+    if not isinstance(counters, dict):
+        return result
+    for field in DATA_PATH_BYTE_FIELDS:
+        value = counters.get(field, 0)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            result[field] = int(value)
+    return result
+
+
 def _codex_command(
     *,
     codex: str,
@@ -378,6 +404,7 @@ def _run_one(
     fixture = scratch / f"{item['sequence']}-{item['mode']}"
     _copy_fixture(repository, fixture)
     diagnostic_log = None
+    metrics_file = None
     diagnostic_log_dir = getattr(args, "diagnostic_log_dir", None)
     if item["mode"] == "mcp" and diagnostic_log_dir:
         diagnostic_log = Path(diagnostic_log_dir) / f"{item['sequence']:03d}-{item['mode']}.jsonl"
@@ -389,6 +416,7 @@ def _run_one(
             "EPHEMERAL_LOG_FILE": str(diagnostic_log),
         }
     if item["mode"] == "mcp":
+        metrics_file = scratch / f"{item['sequence']:03d}-{item['mode']}.metrics.json"
         for variable in (
             "EPHEMERAL_TEST_EMBEDDINGS",
             "EPHEMERAL_EMBEDDING_MODEL",
@@ -401,6 +429,8 @@ def _run_one(
         if mcp_env is None:
             mcp_env = {}
         mcp_env["EPHEMERAL_DISABLE_SOCKET_SERVER"] = "1"
+        mcp_env["EPHEMERAL_METRICS"] = "1"
+        mcp_env["EPHEMERAL_METRICS_FILE"] = str(metrics_file)
     command = _codex_command(
         codex=args.codex,
         model=args.model,
@@ -444,6 +474,7 @@ def _run_one(
         success = False
         failure_reason = "timeout"
     duration = time.monotonic() - started
+    data_path_bytes = _data_path_bytes(metrics_file)
     (
         tool_calls,
         mcp_tool_calls,
@@ -479,6 +510,7 @@ def _run_one(
         "output_tokens": output_tokens,
         "input_token_samples": input_token_samples,
         "output_token_samples": output_token_samples,
+        **data_path_bytes,
     }
 
 
