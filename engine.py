@@ -490,6 +490,12 @@ class EphemeralEngine:
         self.capture_order: OrderedDict[str, None] = OrderedDict()
         self._total_bytes = 0
         self._indexed_chunks = 0
+        self._last_index_budget_adjustment = {
+            "status": "startup",
+            "previous": self.max_indexed_chunks,
+            "effective": self.max_indexed_chunks,
+            "evicted_captures": 0,
+        }
         self._next_id = 1
         self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
         
@@ -786,25 +792,7 @@ class EphemeralEngine:
                 )
 
             for evicted_id in eviction_ids:
-                self.capture_order.pop(evicted_id, None)
-                if evicted_id in self.captures:
-                    old_cap = self.captures.pop(evicted_id)
-                    self._total_bytes -= old_cap.retained_byte_size
-                    self._indexed_chunks -= len(old_cap.chunks)
-                    log_event(
-                        LOGGER,
-                        logging.INFO,
-                        "capture_evicted",
-                        capture_id=evicted_id,
-                        capture_bytes=old_cap.byte_size,
-                        label_bytes=old_cap.label_byte_size,
-                        retained_bytes=old_cap.retained_byte_size,
-                    )
-                    old_cap.semantic_index_state = "evicted"
-                    self._cancel_prefetch(evicted_id)
-                    self._close_capture_storage(old_cap)
-                    self.metrics.record_event("evictions")
-                    self.metrics.forget_capture(evicted_id)
+                self._evict_capture_locked(evicted_id)
 
             if self.lexical_backend == "fts5":
                 # Captures may be ingested by the CLI socket listener thread
@@ -832,6 +820,52 @@ class EphemeralEngine:
             self.metrics.record_capture(capture_id)
         self._schedule_semantic_prefetch(capture)
         return capture
+
+    def _evict_capture_locked(self, capture_id: str) -> bool:
+        """Evict one capture; the caller must hold ``self._lock``."""
+        self.capture_order.pop(capture_id, None)
+        old_cap = self.captures.pop(capture_id, None)
+        if old_cap is None:
+            return False
+        self._total_bytes -= old_cap.retained_byte_size
+        self._indexed_chunks -= len(old_cap.chunks)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "capture_evicted",
+            capture_id=capture_id,
+            capture_bytes=old_cap.byte_size,
+            label_bytes=old_cap.label_byte_size,
+            retained_bytes=old_cap.retained_byte_size,
+        )
+        old_cap.semantic_index_state = "evicted"
+        self._cancel_prefetch(capture_id)
+        self._close_capture_storage(old_cap)
+        self.metrics.record_event("evictions")
+        self.metrics.forget_capture(capture_id)
+        return True
+
+    @synchronized
+    def set_max_indexed_chunks(self, new_limit: int) -> Dict[str, Any]:
+        """Adjust the session index budget and evict oldest captures if needed."""
+        if isinstance(new_limit, bool) or not isinstance(new_limit, int) or new_limit < 1:
+            raise ValueError("max_indexed_chunks must be a positive integer")
+        previous = self.max_indexed_chunks
+        self.max_indexed_chunks = new_limit
+        evicted = 0
+        while self._indexed_chunks > new_limit and self.capture_order:
+            candidate_id = next(iter(self.capture_order))
+            evicted += int(self._evict_capture_locked(candidate_id))
+        result = {
+            "status": "unchanged" if previous == new_limit else "updated",
+            "previous": previous,
+            "effective": new_limit,
+            "indexed_chunks": self._indexed_chunks,
+            "remaining_indexed_chunks": new_limit - self._indexed_chunks,
+            "evicted_captures": evicted,
+        }
+        self._last_index_budget_adjustment = result
+        return dict(result)
 
     def _schedule_semantic_prefetch(self, capture: Capture) -> None:
         """Submit at most a bounded number of post-ingestion indexing jobs."""
@@ -1503,6 +1537,7 @@ class EphemeralEngine:
             "total_chunks": total_chunks,
             "indexed_chunks": self._indexed_chunks,
             "max_indexed_chunks": self.max_indexed_chunks,
+            "last_index_budget_adjustment": dict(self._last_index_budget_adjustment),
             "remaining_indexed_chunks": self.max_indexed_chunks - self._indexed_chunks,
             "total_bytes": self._total_bytes,
             "max_buffer_bytes": self.max_buffer_bytes,

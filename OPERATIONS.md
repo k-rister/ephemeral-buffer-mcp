@@ -95,6 +95,11 @@ makes room under this limit. If one capture requires more indexed chunks than
 the entire configured index budget, ingestion is rejected instead of creating
 a partial index; this preserves complete search coverage for retained
 captures.
+For an explicitly authorized session, set `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`
+to enable `set_semantic_index_budget(max_indexed_chunks)`. The adjustment is
+session-scoped and not persisted; decreases evict the least-recently-used
+captures until the effective budget is satisfied. The result and latest
+adjustment are included in `get_buffer_stats` and runtime diagnostics.
 
 The byte budget covers retained capture content. Embedding storage, the search
 index, Python objects, and process RSS are reported separately by

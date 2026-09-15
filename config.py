@@ -97,6 +97,13 @@ def max_indexed_chunks() -> int:
     return positive_int_env("EPHEMERAL_MAX_INDEXED_CHUNKS", DEFAULT_MAX_INDEXED_CHUNKS)
 
 
+def runtime_index_budget_adjustment_enabled() -> bool:
+    """Return whether MCP callers may adjust the index budget for this session."""
+    return os.environ.get("EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
 def positive_int_env(name: str, default: int) -> int:
     """Return a positive integer environment setting or its safe default."""
     value = os.environ.get(name)

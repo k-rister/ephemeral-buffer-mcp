@@ -372,6 +372,7 @@ The agent has access to the following tools:
 | `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
+| `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
@@ -462,7 +463,11 @@ Indexed chunks are bounded separately by `EPHEMERAL_MAX_INDEXED_CHUNKS`, which
 defaults to 32,768 total chunks across retained captures. LRU eviction makes
 room for a new capture when possible. A capture that exceeds the entire index
 budget is rejected rather than partially indexed, so accepted captures remain
-fully searchable and cannot produce silent semantic false negatives.
+fully searchable and cannot produce silent semantic false negatives. The
+optional `set_semantic_index_budget` tool changes this limit for the current
+session only and is disabled unless `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1` is
+set at startup. Decreases use the same deterministic LRU order and may evict
+multiple captures; deployment defaults are not changed or persisted.
 `execute_and_capture` retains the beginning and end of oversized command
 output and marks the capture with its original byte count. Each returned head
 or tail preview is independently capped at 4 KiB of UTF-8 data; a truncation
