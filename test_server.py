@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from metrics import LocalMetrics
+from socket_protocol import FRAME_HEADER_SIZE, FRAME_MAGIC, decode_header, encode_frame
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import server
@@ -21,22 +22,28 @@ import server
 
 class FakeReader:
     def __init__(self, payload):
-        self.payload = payload
-        self.consumed = False
+        self.payload = bytearray(payload)
 
-    async def read(self, _limit):
-        if self.consumed:
-            return b""
-        self.consumed = True
-        return self.payload
+    async def read(self, limit):
+        chunk = bytes(self.payload[:limit])
+        del self.payload[:limit]
+        return chunk
 
 
 class ChunkedReader:
     def __init__(self, *chunks):
         self.chunks = iter(chunks)
+        self.pending = bytearray()
 
-    async def read(self, _limit):
-        return next(self.chunks, b"")
+    async def read(self, limit):
+        while not self.pending:
+            try:
+                self.pending.extend(next(self.chunks))
+            except StopIteration:
+                return b""
+        chunk = bytes(self.pending[:limit])
+        del self.pending[:limit]
+        return chunk
 
 
 class FakeWriter:
@@ -55,6 +62,12 @@ class FakeWriter:
 
     async def wait_closed(self):
         return None
+
+
+def response_json(writer):
+    framed = writer.writes[0]
+    length = decode_header(framed[:FRAME_HEADER_SIZE])
+    return json.loads(framed[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + length])
 
 
 class TestServerTools(unittest.TestCase):
@@ -721,7 +734,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         return writer
 
     async def test_json_payload_returns_success_response(self):
-        payload = json.dumps({"label": "socket-test", "text": "hello"}).encode()
+        payload = encode_frame(json.dumps({"label": "socket-test", "text": "hello"}).encode())
         capture = SimpleNamespace(
             capture_id="cap_socket",
             label="socket-test",
@@ -731,13 +744,13 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
             writer = await self.run_handler(payload)
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "socket-test")
         self.assertTrue(writer.closed)
 
     async def test_json_payload_is_reassembled_across_socket_reads(self):
-        payload = json.dumps({"label": "chunked", "text": "complete payload"}).encode()
+        payload = encode_frame(json.dumps({"label": "chunked", "text": "complete payload"}).encode())
         capture = SimpleNamespace(
             capture_id="cap_chunked",
             label="chunked",
@@ -751,14 +764,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 writer,
             )
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "chunked")
 
     async def test_escape_heavy_payload_within_capture_limit_is_accepted(self):
         server.engine.max_buffer_bytes = 100_000
         text = "\x00" * server.engine.max_buffer_bytes
-        payload = json.dumps({"label": "escaped", "text": text}).encode()
+        payload = encode_frame(json.dumps({"label": "escaped", "text": text}).encode())
         self.assertGreater(
             len(payload),
             server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD,
@@ -772,15 +785,16 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
             writer = await self.run_handler(payload)
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "escaped")
 
     async def test_oversized_payload_is_rejected_across_socket_reads(self):
-        payload = b"x" * (
+        payload = encode_frame(b"x" * (
             server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
             + server.SOCKET_PAYLOAD_OVERHEAD
-        )
+            + 1
+        ))
         writer = FakeWriter()
 
         await server.handle_socket_client(
@@ -788,12 +802,12 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             writer,
         )
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("exceeds", response["message"])
 
     async def test_ingest_is_offloaded_from_event_loop(self):
-        payload = json.dumps({"label": "offload-test", "text": "hello"}).encode()
+        payload = encode_frame(json.dumps({"label": "offload-test", "text": "hello"}).encode())
         capture = SimpleNamespace(
             capture_id="cap_offload",
             label="offload-test",
@@ -810,20 +824,21 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         offload.assert_awaited_once()
 
     async def test_oversized_payload_returns_error_response(self):
-        payload = b"x" * (
+        payload = encode_frame(b"x" * (
             server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
             + server.SOCKET_PAYLOAD_OVERHEAD
-        )
+            + 1
+        ))
 
         writer = await self.run_handler(payload)
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("exceeds", response["message"])
         self.assertTrue(writer.closed)
 
     async def test_empty_payload_closes_without_response(self):
-        writer = await self.run_handler(b"")
+        writer = await self.run_handler(encode_frame(b""))
 
         self.assertEqual(writer.writes, [])
         self.assertTrue(writer.closed)
@@ -836,9 +851,9 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             byte_size=8,
         )
         with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
-            writer = await self.run_handler(b"not-json")
+            writer = await self.run_handler(encode_frame(b"not-json"))
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "CLI pipe")
 
@@ -848,11 +863,23 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             "to_thread",
             new=AsyncMock(side_effect=ValueError("invalid capture")),
         ):
-            writer = await self.run_handler(json.dumps({"text": "payload"}).encode())
+            writer = await self.run_handler(encode_frame(json.dumps({"text": "payload"}).encode()))
 
-        response = json.loads(writer.writes[0])
+        response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("invalid capture", response["message"])
+
+    async def test_truncated_frame_returns_error_response(self):
+        writer = await self.run_handler(FRAME_MAGIC + b"\x01\x00")
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertIn("truncated socket frame", response["message"])
+
+    async def test_unsupported_frame_version_returns_error_response(self):
+        writer = await self.run_handler(FRAME_MAGIC + b"\x02\x00\x00\x00\x00")
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertIn("unsupported frame version", response["message"])
 
 
 class TestSocketServerStartup(unittest.TestCase):
