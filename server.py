@@ -143,6 +143,11 @@ def _instrument_tool(name):
                     error_type=type(exc).__name__, tool=name,
                 )
                 raise
+            finally:
+                # MCP clients may terminate the server process without running
+                # Python's atexit handlers. Persist the current counters after
+                # each tool call so benchmark runners can still collect them.
+                _write_metrics_snapshot()
         return wrapper
     return decorator
 
