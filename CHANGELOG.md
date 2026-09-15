@@ -1,16 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-09-15
 
 - Warm the embedding model asynchronously after server readiness by default,
   expose warm-up readiness and failures, and preserve lexical hybrid results
   when semantic initialization is unavailable.
 - Add a warm-up benchmark covering startup readiness, first-query latency, and
   process RSS impact, with an opt-out for lexical-only deployments.
+- Add explicit versioned length-prefix framing for socket requests and
+  responses, including bounded and malformed-frame handling.
+- Add opt-in runtime semantic-index budget adjustment with deterministic LRU
+  eviction, diagnostics, concurrency coverage, and documentation.
 - Add opt-in, session-scoped data-path byte counters to local diagnostics for
   capture input/retention, tool responses, and framed socket traffic.
 - Extend the Codex A/B records to collect per-run data-path byte counters from
   content-free MCP metrics snapshots.
+- Persist benchmark metrics snapshots after each MCP tool call so subprocess
+  shutdown still leaves counters available for comparison runs.
 
 ## 0.3.1 - 2026-09-13
 
