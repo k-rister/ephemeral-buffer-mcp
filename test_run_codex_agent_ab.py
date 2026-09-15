@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from benchmark_agent_ab import build_schedule
 from run_codex_agent_ab import (
+    _data_path_bytes,
     _event_metrics,
     _load_manifest,
     _run_codex_process,
@@ -22,6 +23,22 @@ from run_codex_agent_ab import (
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_data_path_bytes_reads_content_free_snapshot(self):
+        from benchmark_agent_ab import DATA_PATH_BYTE_FIELDS
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metrics.json"
+            path.write_text(json.dumps({"bytes": {
+                "capture_input_bytes": 120,
+                "tool_response_bytes": 45,
+            }}), encoding="utf-8")
+            counters = _data_path_bytes(path)
+
+        self.assertEqual(counters["capture_input_bytes"], 120)
+        self.assertEqual(counters["tool_response_bytes"], 45)
+        self.assertEqual(counters["socket_response_bytes"], 0)
+        self.assertEqual(set(counters), set(DATA_PATH_BYTE_FIELDS))
+
     def test_codex_timeout_uses_bounded_pipe_drains_after_leader_exit(self):
         class Process:
             pid = 42

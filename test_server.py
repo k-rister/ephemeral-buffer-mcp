@@ -511,6 +511,55 @@ class TestServerTools(unittest.TestCase):
         self.assertNotIn("secret metrics payload", result)
         self.assertNotIn("private metrics label", result)
 
+    def test_metrics_snapshot_file_is_opt_in_and_content_free(self):
+        original_metrics = server.METRICS
+        original_engine_metrics = server.engine.metrics
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        server.engine.metrics = metrics
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
+                clear=False,
+            ):
+                server.capture_text("private snapshot content", label="private snapshot label")
+                server._write_metrics_snapshot()
+                snapshot = json.loads(Path(directory, "metrics.json").read_text(encoding="utf-8"))
+        finally:
+            server.METRICS = original_metrics
+            server.engine.metrics = original_engine_metrics
+
+        self.assertEqual(snapshot["bytes"]["capture_input_bytes"], len("private snapshot content"))
+        self.assertNotIn("private snapshot content", json.dumps(snapshot))
+        self.assertNotIn("private snapshot label", json.dumps(snapshot))
+
+    def test_metrics_snapshot_file_skips_disabled_metrics(self):
+        original_metrics = server.METRICS
+        server.METRICS = LocalMetrics(enabled=False)
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
+                clear=False,
+            ):
+                server._write_metrics_snapshot()
+                self.assertFalse(Path(directory, "metrics.json").exists())
+        finally:
+            server.METRICS = original_metrics
+
+    def test_metrics_snapshot_file_write_failure_is_logged(self):
+        original_metrics = server.METRICS
+        server.METRICS = LocalMetrics(enabled=True)
+        try:
+            with patch.dict(os.environ, {"EPHEMERAL_METRICS_FILE": "/tmp/metrics.json"}, clear=False), \
+                    patch.object(Path, "write_text", side_effect=OSError("read-only")), \
+                    self.assertLogs("ephemeral_buffer.server", level="WARNING") as logs:
+                server._write_metrics_snapshot()
+        finally:
+            server.METRICS = original_metrics
+        self.assertTrue(any("metrics_snapshot_write_failed" in entry for entry in logs.output))
+
     def test_runtime_package_version_falls_back_to_source_checkout(self):
         with patch.object(server.Path, "read_text", side_effect=OSError("missing metadata")), \
                 patch.object(server, "package_version", side_effect=server.PackageNotFoundError()):

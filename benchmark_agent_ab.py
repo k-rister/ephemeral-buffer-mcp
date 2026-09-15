@@ -10,7 +10,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
-RECORDS_SCHEMA_VERSION = 4
+RECORDS_SCHEMA_VERSION = 5
 TASK_FIXTURE_VERSION = 1
 MODES = ("control", "mcp")
 TASKS = (
@@ -41,6 +41,17 @@ RUN_KEYS_V2 = RUN_KEYS - {"context_bytes"} | {
 }
 RUN_KEYS_V3 = RUN_KEYS_V2 | {"input_token_samples", "output_token_samples"}
 RUN_KEYS_V4 = RUN_KEYS_V3 | {"prompt_bytes_proxy", "output_bytes_proxy"}
+DATA_PATH_BYTE_FIELDS = (
+    "capture_input_bytes",
+    "capture_retained_bytes",
+    "capture_original_bytes",
+    "tool_response_bytes",
+    "search_response_bytes",
+    "retrieval_response_bytes",
+    "socket_request_bytes",
+    "socket_response_bytes",
+)
+RUN_KEYS_V5 = RUN_KEYS_V4 | set(DATA_PATH_BYTE_FIELDS)
 METRICS = (
     "completed",
     "signal_retrieved",
@@ -137,7 +148,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, 4, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
     run_keys = (
         RUN_KEYS
@@ -147,6 +158,8 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         else RUN_KEYS_V3
         if records_schema_version == 3
         else RUN_KEYS_V4
+        if records_schema_version == 4
+        else RUN_KEYS_V5
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
@@ -203,6 +216,11 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         if records_schema_version >= 4:
             if record["prompt_bytes_proxy"] + record["output_bytes_proxy"] != record["context_bytes_proxy"]:
                 raise ValueError(f"context byte proxy components must sum to the total in run: {key}")
+        if records_schema_version >= 5:
+            for field in DATA_PATH_BYTE_FIELDS:
+                value = record[field]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise ValueError(f"{field} must be a non-negative number in run: {key}")
         actual[key] = record
     missing = sorted(set(expected) - set(actual))
     if missing:
@@ -304,6 +322,10 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             "prompt_bytes_proxy": _optional_stats(selected, "prompt_bytes_proxy"),
             "output_bytes_proxy": _optional_stats(selected, "output_bytes_proxy"),
             "peak_rss_bytes": _optional_positive_stats(selected, "peak_rss_bytes"),
+            "data_path_bytes": {
+                field: _optional_stats(selected, field)
+                for field in DATA_PATH_BYTE_FIELDS
+            },
             "input_tokens": _optional_stats(selected, "input_tokens"),
             "output_tokens": _optional_stats(selected, "output_tokens"),
             "usage_accounting": {
@@ -339,6 +361,12 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             for pair in grouped.values():
                 deltas.append(_metric_value(pair["mcp"], metric) - _metric_value(pair["control"], metric))
             paired[metric] = _stats(deltas)
+    for field in DATA_PATH_BYTE_FIELDS:
+        if all(field in record for record in runs):
+            paired[field] = _stats([
+                _metric_value(pair["mcp"], field) - _metric_value(pair["control"], field)
+                for pair in grouped.values()
+            ])
 
     recommendations = [
         "Treat completion and signal retrieval as primary outcomes; interpret cost metrics as secondary.",

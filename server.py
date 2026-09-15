@@ -220,6 +220,22 @@ engine = EphemeralEngine(
 atexit.register(engine.shutdown)
 
 
+def _write_metrics_snapshot() -> None:
+    """Persist an opt-in, content-free metrics snapshot for benchmark runners."""
+    path = os.environ.get("EPHEMERAL_METRICS_FILE")
+    if not path or not METRICS.enabled:
+        return
+    try:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(METRICS.snapshot(), sort_keys=True), encoding="utf-8")
+    except OSError as exc:
+        log_event(LOGGER, logging.WARNING, "metrics_snapshot_write_failed", error_type=type(exc).__name__)
+
+
+atexit.register(_write_metrics_snapshot)
+
+
 # --- MCP Tools ---
 
 

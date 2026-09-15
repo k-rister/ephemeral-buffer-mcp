@@ -2,7 +2,13 @@
 
 import unittest
 
-from benchmark_agent_ab import RECORDS_SCHEMA_VERSION, build_schedule, summarize_records, validate_records
+from benchmark_agent_ab import (
+    DATA_PATH_BYTE_FIELDS,
+    RECORDS_SCHEMA_VERSION,
+    build_schedule,
+    summarize_records,
+    validate_records,
+)
 
 
 def _records_payload():
@@ -103,7 +109,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):
         schedule, payload = _records_payload()
-        payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
+        payload["records_schema_version"] = 4
         payload["runs"] = [
             {
                 "task_id": record["task_id"],
@@ -136,11 +142,47 @@ class TestAgentAbBenchmark(unittest.TestCase):
         usage = summary["mode_summaries"]["mcp"]["usage_accounting"]["input_tokens"]
         self.assertEqual(usage["runs_with_multiple_samples"], 8)
         self.assertEqual(usage["observation"], "monotonic_samples_inconclusive")
-        self.assertEqual(summary["records_schema_version"], RECORDS_SCHEMA_VERSION)
+        self.assertEqual(summary["records_schema_version"], 4)
         _, payload = _records_payload()
         payload["runs"][0]["raw_output"] = "forbidden"
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
+
+    def test_summary_reports_session_data_path_bytes_for_version_five(self):
+        schedule, payload = _records_payload()
+        payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
+        for record in payload["runs"]:
+            record.pop("context_bytes", None)
+            record.update({
+                "context_bytes_proxy": 100 if record["mode"] == "mcp" else 400,
+                "exit_code": 0,
+                "failure_reason": None,
+                "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+                "input_tokens": None,
+                "output_tokens": None,
+                "input_token_samples": [],
+                "output_token_samples": [],
+                "prompt_bytes_proxy": 40,
+                "output_bytes_proxy": 60 if record["mode"] == "mcp" else 360,
+            })
+            for field in DATA_PATH_BYTE_FIELDS:
+                record[field] = 0
+            if record["mode"] == "mcp":
+                record["capture_input_bytes"] = 1000
+                record["capture_retained_bytes"] = 600
+                record["tool_response_bytes"] = 120
+                record["search_response_bytes"] = 80
+                record["retrieval_response_bytes"] = 40
+
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(
+            summary["mode_summaries"]["mcp"]["data_path_bytes"]["capture_input_bytes"]["mean"],
+            1000.0,
+        )
+        self.assertEqual(
+            summary["paired_deltas_mcp_minus_control"]["tool_response_bytes"]["mean"],
+            120.0,
+        )
 
     def test_build_schedule_rejects_invalid_repetitions(self):
         with self.assertRaises(ValueError):
