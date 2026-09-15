@@ -119,6 +119,13 @@ def _instrument_tool(name):
             try:
                 with METRICS.measure(name) as state:
                     result = function(*args, **kwargs)
+                    if isinstance(result, str):
+                        response_bytes = len(result.encode("utf-8"))
+                        METRICS.record_bytes("tool_response_bytes", response_bytes)
+                        if name == "search_capture":
+                            METRICS.record_bytes("search_response_bytes", response_bytes)
+                        elif name in {"get_capture_slice", "get_capture_summary"}:
+                            METRICS.record_bytes("retrieval_response_bytes", response_bytes)
                     if isinstance(result, str) and result.startswith(("Error", "Search Error")):
                         state["success"] = False
                 duration_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -762,7 +769,9 @@ def get_buffer_stats() -> str:
         f"{unaccounted_line}"
     )
     if METRICS.enabled:
-        result += f"\nLocal metrics: {json.dumps(METRICS.snapshot(), sort_keys=True)}"
+        snapshot = METRICS.snapshot()
+        result += f"\nData-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}"
+        result += f"\nLocal metrics: {json.dumps(snapshot, sort_keys=True)}"
     return result
 
 
@@ -811,7 +820,9 @@ def get_runtime_diagnostics() -> str:
         "Captured content, labels, and command arguments are not included.",
     ]
     if METRICS.enabled:
-        lines.append(f"Metrics summary: {json.dumps(METRICS.snapshot(), sort_keys=True)}")
+        snapshot = METRICS.snapshot()
+        lines.append(f"Data-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}")
+        lines.append(f"Metrics summary: {json.dumps(snapshot, sort_keys=True)}")
     return "\n".join(lines)
 
 
@@ -832,7 +843,11 @@ def set_semantic_index_budget(max_indexed_chunks: int) -> str:
 
 # --- Unix Domain Socket IPC for CLI piping (ephbuf) ---
 
-async def _read_exact(reader: asyncio.StreamReader, size: int) -> bytes:
+async def _read_exact(
+    reader: asyncio.StreamReader,
+    size: int,
+    byte_counter: Optional[str] = None,
+) -> bytes:
     """Read exactly ``size`` bytes, tolerating fragmented stream reads."""
     chunks = []
     remaining = size
@@ -840,6 +855,8 @@ async def _read_exact(reader: asyncio.StreamReader, size: int) -> bytes:
         chunk = await reader.read(remaining)
         if not chunk:
             raise ValueError("truncated socket frame")
+        if byte_counter is not None:
+            METRICS.record_bytes(byte_counter, len(chunk))
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -847,7 +864,7 @@ async def _read_exact(reader: asyncio.StreamReader, size: int) -> bytes:
 
 async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) -> bytes:
     """Read one versioned length-prefixed request within the payload limit."""
-    header = await _read_exact(reader, FRAME_HEADER_SIZE)
+    header = await _read_exact(reader, FRAME_HEADER_SIZE, "socket_request_bytes")
     payload_length = decode_header(header)
     if payload_length > read_limit:
         log_event(
@@ -858,7 +875,7 @@ async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) ->
             max_payload_bytes=read_limit,
         )
         raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
-    return await _read_exact(reader, payload_length)
+    return await _read_exact(reader, payload_length, "socket_request_bytes")
 
 
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -907,12 +924,16 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 "line_count": cap.line_count,
                 "byte_size": cap.byte_size
             }
-            writer.write(encode_frame(json.dumps(resp).encode("utf-8")))
+            response_frame = encode_frame(json.dumps(resp).encode("utf-8"))
+            METRICS.record_bytes("socket_response_bytes", len(response_frame))
+            writer.write(response_frame)
             await writer.drain()
         except Exception as e:
             log_event(LOGGER, logging.ERROR, "socket_client_failed", error_type=type(e).__name__)
             err_resp = {"status": "error", "message": str(e)}
-            writer.write(encode_frame(json.dumps(err_resp).encode("utf-8")))
+            response_frame = encode_frame(json.dumps(err_resp).encode("utf-8"))
+            METRICS.record_bytes("socket_response_bytes", len(response_frame))
+            writer.write(response_frame)
             await writer.drain()
         finally:
             writer.close()

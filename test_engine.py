@@ -860,6 +860,27 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with self.assertRaisesRegex(ValueError, "max_indexed_chunks"):
             EphemeralEngine(max_indexed_chunks=0)
 
+    def test_ingest_rejects_invalid_original_byte_sizes_before_admission(self):
+        engine = EphemeralEngine(max_captures=1)
+        try:
+            for invalid in (True, "12", -1):
+                with self.subTest(original_byte_size=invalid):
+                    with self.assertRaisesRegex(ValueError, "original_byte_size"):
+                        engine.ingest("payload", original_byte_size=invalid)
+            self.assertEqual(engine.captures, {})
+            self.assertEqual(engine._next_id, 1)
+
+            decoded = "\ufffd" * 171
+            capture = engine.ingest(
+                decoded,
+                truncated=True,
+                original_byte_size=300,
+            )
+            self.assertEqual(capture.original_byte_size, 300)
+            self.assertGreater(capture.byte_size, capture.original_byte_size)
+        finally:
+            engine.shutdown()
+
     def test_14_empty_and_missing_capture_paths(self):
         empty = EphemeralEngine(max_captures=1)
         capture = empty.ingest("", label="empty")

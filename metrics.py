@@ -21,6 +21,17 @@ EVENT_NAMES = (
     "cleanups",
 )
 
+BYTE_COUNTER_NAMES = (
+    "capture_input_bytes",
+    "capture_retained_bytes",
+    "capture_original_bytes",
+    "tool_response_bytes",
+    "search_response_bytes",
+    "retrieval_response_bytes",
+    "socket_request_bytes",
+    "socket_response_bytes",
+)
+
 
 def metrics_enabled() -> bool:
     """Return whether local metrics were explicitly enabled."""
@@ -37,6 +48,7 @@ class LocalMetrics:
         self._lock = threading.Lock()
         self._tools: dict[str, dict[str, Any]] = defaultdict(self._new_tool)
         self._events: dict[str, int] = defaultdict(int)
+        self._bytes: dict[str, int] = defaultdict(int)
         self._captured: set[str] = set()
         self._searched: set[str] = set()
 
@@ -77,6 +89,14 @@ class LocalMetrics:
         if self.enabled:
             with self._lock:
                 self._events[event] += 1
+
+    def record_bytes(self, counter: str, amount: int) -> None:
+        """Record a non-content byte count for the current server session."""
+        if self.enabled:
+            if counter not in BYTE_COUNTER_NAMES:
+                raise ValueError(f"unknown byte counter: {counter}")
+            with self._lock:
+                self._bytes[counter] += max(0, int(amount))
 
     def record_result_count(self, tool: str, count: int) -> None:
         if self.enabled:
@@ -127,4 +147,5 @@ class LocalMetrics:
                     for name, stats in self._tools.items()
                 },
                 "events": {name: self._events[name] for name in EVENT_NAMES},
+                "bytes": {name: self._bytes[name] for name in BYTE_COUNTER_NAMES},
             }

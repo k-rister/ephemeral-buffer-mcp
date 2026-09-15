@@ -495,14 +495,21 @@ repository. The files contain lifecycle metadata only.
 
 Set `EPHEMERAL_METRICS=1` to collect content-free, in-process usage metrics.
 The metrics include per-tool call counts, success/failure counts, duration
-totals, and aggregate capture/search/retrieval, empty-search, eviction, and
-cleanup events. They are disabled by default, are never sent anywhere, and do
+totals, aggregate capture/search/retrieval, empty-search, eviction, and
+cleanup events, plus session-scoped data-path byte counters. The byte counters
+cover input, retained, and original capture bytes; tool/search/retrieval
+response bytes; and framed socket request/response bytes. They are disabled by
+default, are never sent anywhere, and do
 not retain captured content, labels, commands, or query text. When enabled,
 both `get_runtime_diagnostics()` and `get_buffer_stats()` include the same
 aggregate metrics snapshot. The event keys are stable and zero-filled when no
-event has occurred. Metrics are process-lifetime state: restarting the server
-clears them, while capture-associated correlation state is released when a
-capture is evicted or explicitly cleared.
+event has occurred, as are the byte-counter keys. Wire counts include framing
+headers and payload bytes actually consumed, including partial malformed
+requests; payload bytes rejected from an oversized frame before reading are
+not counted. MCP tool-response counts measure UTF-8 response content and
+exclude transport-envelope overhead. Metrics are process-lifetime
+state: restarting the server clears them, while capture-associated correlation
+state is released when a capture is evicted or explicitly cleared.
 
 ### Effectiveness metrics and privacy
 

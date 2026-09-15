@@ -62,6 +62,44 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(snapshot["events"]["search_to_retrieval"], 1)
         self.assertEqual(snapshot["events"]["evictions"], 1)
         self.assertNotIn("private", repr(snapshot))
+        self.assertEqual(snapshot["bytes"]["capture_input_bytes"], len("one useful line".encode()) + len("second line".encode()))
+        self.assertEqual(snapshot["bytes"]["capture_original_bytes"], len("one useful line".encode()) + len("second line".encode()))
+
+    def test_byte_counters_are_content_free_and_zero_filled(self):
+        metrics = LocalMetrics(enabled=True)
+        with self.assertRaisesRegex(ValueError, "unknown byte counter"):
+            metrics.record_bytes("unknown", 1)
+        metrics.record_bytes("capture_input_bytes", 12)
+        metrics.record_bytes("socket_response_bytes", 34)
+
+        self.assertEqual(metrics.snapshot()["bytes"], {
+            "capture_input_bytes": 12,
+            "capture_retained_bytes": 0,
+            "capture_original_bytes": 0,
+            "tool_response_bytes": 0,
+            "search_response_bytes": 0,
+            "retrieval_response_bytes": 0,
+            "socket_request_bytes": 0,
+            "socket_response_bytes": 34,
+        })
+        self.assertNotIn("private", repr(metrics.snapshot()))
+
+    def test_invalid_original_size_does_not_partially_record_capture(self):
+        metrics = LocalMetrics(enabled=True)
+        engine = EphemeralEngine(max_captures=1, metrics=metrics)
+        try:
+            with self.assertRaisesRegex(ValueError, "original_byte_size"):
+                engine.ingest(
+                    "payload",
+                    truncated=True,
+                    original_byte_size="not-an-integer",
+                )
+
+            self.assertEqual(engine.captures, {})
+            self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
+            self.assertEqual(metrics.snapshot()["bytes"]["capture_original_bytes"], 0)
+        finally:
+            engine.shutdown()
 
     def test_snapshot_has_stable_zero_filled_event_schema(self):
         metrics = LocalMetrics(enabled=True)
@@ -77,6 +115,19 @@ class TestMetrics(unittest.TestCase):
                 "search_to_retrieval": 0,
                 "evictions": 0,
                 "cleanups": 0,
+            },
+        )
+        self.assertEqual(
+            metrics.snapshot()["bytes"],
+            {
+                "capture_input_bytes": 0,
+                "capture_retained_bytes": 0,
+                "capture_original_bytes": 0,
+                "tool_response_bytes": 0,
+                "search_response_bytes": 0,
+                "retrieval_response_bytes": 0,
+                "socket_request_bytes": 0,
+                "socket_response_bytes": 0,
             },
         )
 

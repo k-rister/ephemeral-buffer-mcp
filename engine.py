@@ -691,6 +691,12 @@ class EphemeralEngine:
         type (diff, log, text) and extracts structural metadata.
         """
         lines = text.splitlines()
+        capture_bytes = len(text.encode("utf-8"))
+        if original_byte_size is not None:
+            if isinstance(original_byte_size, bool) or not isinstance(original_byte_size, int):
+                raise ValueError("original_byte_size must be a non-negative integer or null")
+            if original_byte_size < 0:
+                raise ValueError("original_byte_size must be a non-negative integer or null")
         with self._lock:
             capture_number = self._next_id
             capture_id = f"cap_{capture_number}"
@@ -699,7 +705,6 @@ class EphemeralEngine:
         if not label:
             label = f"Capture #{capture_number}"
 
-        capture_bytes = len(text.encode("utf-8"))
         with self._lock:
             max_buffer_bytes = self.max_buffer_bytes
         label_bytes = len(label.encode("utf-8"))
@@ -818,6 +823,12 @@ class EphemeralEngine:
             self._total_bytes += capture.retained_byte_size
             self._indexed_chunks += len(capture.chunks)
             self.metrics.record_capture(capture_id)
+            self.metrics.record_bytes("capture_input_bytes", capture.byte_size)
+            self.metrics.record_bytes("capture_retained_bytes", capture.retained_byte_size)
+            self.metrics.record_bytes(
+                "capture_original_bytes",
+                capture.original_byte_size if capture.original_byte_size is not None else capture.byte_size,
+            )
         self._schedule_semantic_prefetch(capture)
         return capture
 

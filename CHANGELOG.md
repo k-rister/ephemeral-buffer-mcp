@@ -7,6 +7,8 @@
   when semantic initialization is unavailable.
 - Add a warm-up benchmark covering startup readiness, first-query latency, and
   process RSS impact, with an opt-out for lexical-only deployments.
+- Add opt-in, session-scoped data-path byte counters to local diagnostics for
+  capture input/retention, tool responses, and framed socket traffic.
 
 ## 0.3.1 - 2026-09-13
 
