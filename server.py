@@ -24,7 +24,13 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from config import positive_int_env, socket_isolation_configured, socket_isolation_required, socket_path
+from config import (
+    positive_int_env,
+    runtime_index_budget_adjustment_enabled,
+    socket_isolation_configured,
+    socket_isolation_required,
+    socket_path,
+)
 from mcp.server.fastmcp import FastMCP
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
@@ -743,6 +749,7 @@ def get_buffer_stats() -> str:
         f"Chunks: {stats['total_chunks']:,}\n"
         f"Indexed chunks: {indexed_chunks:,}/{max_indexed_chunks:,} "
         f"({remaining_indexed_chunks:,} remaining)\n"
+        f"Index budget adjustment: {json.dumps(stats.get('last_index_budget_adjustment', {}), sort_keys=True)}\n"
         f"{model_line}\n"
         f"{warmup_line}\n"
         f"{cache_line}\n"
@@ -794,6 +801,7 @@ def get_runtime_diagnostics() -> str:
         + (f" ({stats['embedding_warmup_failure']})" if stats.get("embedding_warmup_failure") else ""),
         f"Lexical search backend: {stats['lexical_backend']}",
         f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}",
+        f"Semantic index budget adjustment: {json.dumps(stats.get('last_index_budget_adjustment', {}), sort_keys=True)}",
         f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
         f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed)",
         f"Process RSS: {'unavailable' if rss is None else f'{rss:,} bytes'}",
@@ -804,6 +812,21 @@ def get_runtime_diagnostics() -> str:
     if METRICS.enabled:
         lines.append(f"Metrics summary: {json.dumps(METRICS.snapshot(), sort_keys=True)}")
     return "\n".join(lines)
+
+
+@_mcp_tool("set_semantic_index_budget")
+@_instrument_tool("set_semantic_index_budget")
+def set_semantic_index_budget(max_indexed_chunks: int) -> str:
+    """Adjust this session's semantic-index chunk budget when explicitly enabled."""
+    if not runtime_index_budget_adjustment_enabled():
+        return (
+            "Error: runtime semantic-index budget adjustment is disabled; set "
+            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it."
+        )
+    try:
+        return json.dumps(engine.set_max_indexed_chunks(max_indexed_chunks), sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        return f"Error adjusting semantic-index budget: {exc}"
 
 
 # --- Unix Domain Socket IPC for CLI piping (ephbuf) ---

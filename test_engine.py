@@ -711,6 +711,53 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             rejecting.ingest("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="too-large")
         self.assertEqual(rejecting.captures, {})
 
+    def test_runtime_index_budget_decrease_evicts_oldest_captures(self):
+        engine = EphemeralEngine(max_captures=3, max_indexed_chunks=6)
+        first = engine.ingest("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="first")
+        second = engine.ingest("eight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen", label="second")
+        third = engine.ingest("fifteen\nsixteen\nseventeen\neighteen\nnineteen\ntwenty\ntwenty-one", label="third")
+
+        result = engine.set_max_indexed_chunks(3)
+
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["effective"], 3)
+        self.assertEqual(result["evicted_captures"], 1)
+        self.assertNotIn(first.capture_id, engine.captures)
+        self.assertNotIn(second.capture_id, engine.captures)
+        self.assertIn(third.capture_id, engine.captures)
+        self.assertEqual(engine.get_buffer_stats()["indexed_chunks"], 3)
+
+    def test_runtime_index_budget_rejects_invalid_values(self):
+        engine = EphemeralEngine(max_indexed_chunks=3)
+        for value in (0, -1, True, "3"):
+            with self.assertRaises(ValueError):
+                engine.set_max_indexed_chunks(value)
+
+    def test_eviction_of_missing_capture_is_reported_without_mutation(self):
+        engine = EphemeralEngine(max_indexed_chunks=3, embedding_warmup=False)
+        with engine._lock:
+            self.assertFalse(engine._evict_capture_locked("missing"))
+
+    def test_runtime_index_budget_adjustment_serializes_with_ingest(self):
+        engine = EphemeralEngine(max_indexed_chunks=6, embedding_warmup=False)
+        barrier = threading.Barrier(2)
+
+        def ingest():
+            barrier.wait()
+            return engine.ingest("one\ntwo\nthree\nfour\nfive\nsix\nseven")
+
+        def adjust():
+            barrier.wait()
+            return engine.set_max_indexed_chunks(3)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ingest_future = pool.submit(ingest)
+            adjust_future = pool.submit(adjust)
+            ingest_future.result()
+            adjust_future.result()
+        engine.set_max_indexed_chunks(3)
+        self.assertLessEqual(engine.get_buffer_stats()["indexed_chunks"], 3)
+
     def test_protected_ingest_evicts_only_unrelated_captures(self):
         engine = EphemeralEngine(max_captures=2)
         source = engine.ingest("source payload", label="source")

@@ -61,6 +61,7 @@ class TestServerTools(unittest.TestCase):
     def setUp(self):
         server.engine.clear("all")
         self.original_limit = server.engine.max_buffer_bytes
+        self.original_index_limit = server.engine.max_indexed_chunks
         self.original_model = server.engine.embedding_model
         server.engine.embedding_model = type(
             "TestEmbedding",
@@ -70,6 +71,7 @@ class TestServerTools(unittest.TestCase):
 
     def tearDown(self):
         server.engine.max_buffer_bytes = self.original_limit
+        server.engine.max_indexed_chunks = self.original_index_limit
         server.engine.embedding_model = self.original_model
         server.engine.clear("all")
 
@@ -405,8 +407,19 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Captures: 1/", result)
         self.assertIn("Embedding model:", result)
         self.assertIn("Embedding warm-up:", result)
+        self.assertIn("Semantic index budget adjustment:", result)
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
+
+    def test_runtime_index_budget_adjustment_requires_opt_in_and_reports_result(self):
+        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "0"}, clear=False):
+            self.assertIn("disabled", server.set_semantic_index_budget(4))
+        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "1"}, clear=False):
+            result = json.loads(server.set_semantic_index_budget(4))
+        self.assertEqual(result["effective"], 4)
+        self.assertEqual(server.engine.get_buffer_stats()["max_indexed_chunks"], 4)
+        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "1"}, clear=False):
+            self.assertIn("Error adjusting semantic-index budget", server.set_semantic_index_budget("4"))
 
     def test_runtime_diagnostics_reports_explicit_and_default_socket_modes(self):
         with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/diagnostic.sock"}, clear=True):
