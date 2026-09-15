@@ -108,6 +108,8 @@ the Python interpreter from the environment where the package was installed:
 Normally you should let your MCP client start this process automatically. Do
 not start a separate server for every shell command: the `ephbuf` CLI sends
 captures to the running server over its local Unix socket.
+The private CLI socket uses versioned length-prefixed request and response
+frames, so fragmented reads do not depend on half-closing the connection.
 
 ### Start an isolated Codex session
 

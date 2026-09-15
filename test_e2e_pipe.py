@@ -12,11 +12,22 @@ import json
 from pathlib import Path
 from config import socket_path
 from server import SOCKET_JSON_MAX_EXPANSION, SOCKET_PAYLOAD_OVERHEAD
+from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SERVER_PATH = PROJECT_ROOT / "server.py"
 CLI_PATH = PROJECT_ROOT / "cli.py"
 SOCKET_PATH = socket_path()
+
+
+def recv_exact(sock, size):
+    chunks = []
+    while sum(len(chunk) for chunk in chunks) < size:
+        chunk = sock.recv(size - sum(len(part) for part in chunks))
+        if not chunk:
+            raise AssertionError("truncated framed response")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class TestEndToEndPipe(unittest.TestCase):
@@ -87,18 +98,20 @@ class TestEndToEndPipe(unittest.TestCase):
             oversized_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             oversized_socket.connect(SOCKET_PATH)
             try:
-                oversized_socket.sendall(
+                oversized_socket.sendall(encode_frame(
                     b"x" * (
                         1024 * SOCKET_JSON_MAX_EXPANSION
                         + SOCKET_PAYLOAD_OVERHEAD
                         + 1
                     )
-                )
-                oversized_socket.shutdown(socket.SHUT_WR)
+                ))
             except BrokenPipeError:
                 # The server may close as soon as it observes the bounded read.
                 pass
-            response = oversized_socket.recv(4096).decode("utf-8")
+            header = recv_exact(oversized_socket, FRAME_HEADER_SIZE)
+            response_length = decode_header(header)
+            response = recv_exact(oversized_socket, response_length)
+            response = response.decode("utf-8")
             oversized_socket.close()
             self.assertIn('"status": "error"', response)
             self.assertIn("exceed", response)

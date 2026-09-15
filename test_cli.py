@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
+import socket_protocol
 
 import cli
 
@@ -21,6 +23,32 @@ CLI_PATH = Path(__file__).with_name("cli.py")
 
 
 class TestCliConfiguration(unittest.TestCase):
+    def test_recv_exact_rejects_truncated_response(self):
+        class EmptySocket:
+            def recv(self, _size):
+                return b""
+
+        with self.assertRaisesRegex(ValueError, "truncated socket response"):
+            cli._recv_exact(EmptySocket(), 1)
+
+    def test_socket_frame_round_trip_and_validation(self):
+        payload = b"fragmented payload"
+        frame = encode_frame(payload)
+        self.assertEqual(decode_header(frame[:FRAME_HEADER_SIZE]), len(payload))
+        with self.assertRaisesRegex(ValueError, "truncated frame header"):
+            decode_header(frame[:2])
+        with self.assertRaisesRegex(ValueError, "invalid frame magic"):
+            decode_header(b"XXXX" + frame[4:FRAME_HEADER_SIZE])
+        with self.assertRaisesRegex(ValueError, "unsupported frame version"):
+            decode_header(frame[:4] + b"\x02" + frame[5:FRAME_HEADER_SIZE])
+
+    def test_socket_frame_rejects_invalid_payloads(self):
+        with self.assertRaises(TypeError):
+            encode_frame("text")
+        with patch.object(socket_protocol, "MAX_FRAME_LENGTH", 1):
+            with self.assertRaisesRegex(ValueError, "too large"):
+                encode_frame(b"12")
+
     def _launcher_fixture(self, environment_name):
         root = Path(tempfile.mkdtemp())
         launcher = root / "run.sh"
@@ -116,9 +144,8 @@ class TestCliConfiguration(unittest.TestCase):
         class FakeSocket:
             def __init__(self):
                 self.sent = None
-                self.shutdown_mode = None
                 self.closed = False
-                self.responses = [b'{"status":"ok"}', b""]
+                self.response = bytearray(encode_frame(b'{"status":"ok"}'))
 
             def settimeout(self, value):
                 self.timeout = value
@@ -129,11 +156,10 @@ class TestCliConfiguration(unittest.TestCase):
             def sendall(self, payload):
                 self.sent = payload
 
-            def shutdown(self, mode):
-                self.shutdown_mode = mode
-
-            def recv(self, _size):
-                return self.responses.pop(0)
+            def recv(self, size):
+                chunk = bytes(self.response[:size])
+                del self.response[:size]
+                return chunk
 
             def close(self):
                 self.closed = True
@@ -148,10 +174,10 @@ class TestCliConfiguration(unittest.TestCase):
 
         self.assertEqual(result, {"status": "ok"})
         self.assertEqual(fake_socket.path, "/tmp/ephemeral.sock")
-        self.assertEqual(fake_socket.shutdown_mode, cli.socket.SHUT_WR)
         self.assertTrue(fake_socket.closed)
+        sent_length = decode_header(fake_socket.sent[:FRAME_HEADER_SIZE])
         self.assertEqual(
-            json.loads(fake_socket.sent),
+            json.loads(fake_socket.sent[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + sent_length]),
             {
                 "label": "build",
                 "text": "output",

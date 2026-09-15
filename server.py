@@ -40,6 +40,7 @@ from engine import (
 from capture_utils import read_file_bounded, run_command_bounded
 from logging_utils import get_logger, log_event
 from metrics import LocalMetrics
+from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
@@ -831,32 +832,39 @@ def set_semantic_index_budget(max_indexed_chunks: int) -> str:
 
 # --- Unix Domain Socket IPC for CLI piping (ephbuf) ---
 
-async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) -> bytes:
-    """Read one EOF-delimited request while enforcing the payload limit."""
+async def _read_exact(reader: asyncio.StreamReader, size: int) -> bytes:
+    """Read exactly ``size`` bytes, tolerating fragmented stream reads."""
     chunks = []
-    payload_bytes = 0
-    while True:
-        chunk = await reader.read(min(65536, read_limit - payload_bytes + 1))
+    remaining = size
+    while remaining:
+        chunk = await reader.read(remaining)
         if not chunk:
-            break
+            raise ValueError("truncated socket frame")
         chunks.append(chunk)
-        payload_bytes += len(chunk)
-        if payload_bytes >= read_limit:
-            log_event(
-                LOGGER,
-                logging.WARNING,
-                "socket_payload_limit_rejected",
-                payload_bytes=payload_bytes,
-                max_payload_bytes=read_limit,
-            )
-            raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
+        remaining -= len(chunk)
     return b"".join(chunks)
+
+
+async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) -> bytes:
+    """Read one versioned length-prefixed request within the payload limit."""
+    header = await _read_exact(reader, FRAME_HEADER_SIZE)
+    payload_length = decode_header(header)
+    if payload_length > read_limit:
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "socket_payload_limit_rejected",
+            payload_bytes=payload_length,
+            max_payload_bytes=read_limit,
+        )
+        raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
+    return await _read_exact(reader, payload_length)
 
 
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     async def _handle():
         try:
-            # Read the EOF-delimited payload completely before decoding it.
+            # Read and validate one complete framed payload before decoding it.
             read_limit = (
                 engine.max_buffer_bytes * SOCKET_JSON_MAX_EXPANSION
                 + SOCKET_PAYLOAD_OVERHEAD
@@ -899,12 +907,12 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 "line_count": cap.line_count,
                 "byte_size": cap.byte_size
             }
-            writer.write(json.dumps(resp).encode("utf-8"))
+            writer.write(encode_frame(json.dumps(resp).encode("utf-8")))
             await writer.drain()
         except Exception as e:
             log_event(LOGGER, logging.ERROR, "socket_client_failed", error_type=type(e).__name__)
             err_resp = {"status": "error", "message": str(e)}
-            writer.write(json.dumps(err_resp).encode("utf-8"))
+            writer.write(encode_frame(json.dumps(err_resp).encode("utf-8")))
             await writer.drain()
         finally:
             writer.close()

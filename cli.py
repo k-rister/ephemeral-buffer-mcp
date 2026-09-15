@@ -28,6 +28,7 @@ from config import (
     socket_path,
     socket_timeout_seconds,
 )
+from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 
 SOCKET_PATH = socket_path()
 
@@ -67,15 +68,10 @@ def send_to_mcp(
             "command_exit_code": command_exit_code,
             "timed_out": timed_out,
         }).encode("utf-8")
-        sock.sendall(payload)
-        sock.shutdown(socket.SHUT_WR)
-        
-        resp_data = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            resp_data += chunk
+        sock.sendall(encode_frame(payload))
+        header = _recv_exact(sock, FRAME_HEADER_SIZE)
+        response_length = decode_header(header)
+        resp_data = _recv_exact(sock, response_length)
             
         return json.loads(resp_data.decode("utf-8"))
     except socket.timeout:
@@ -91,6 +87,19 @@ def send_to_mcp(
     finally:
         if sock is not None:
             sock.close()
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    """Read exactly ``size`` bytes or fail on a truncated response."""
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ValueError("truncated socket response")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def main():

@@ -215,6 +215,9 @@ module entrypoint calls `start_socket_server()` explicitly before waiting for
 readiness. Embedders that need the CLI socket can call that function during
 their own initialization; imports and package smoke tests can safely use the
 MCP tools without creating a Unix-socket side effect.
+CLI socket requests and responses use a versioned fixed-width length prefix;
+the server rejects unsupported versions, truncated frames, and payloads above
+the configured limit before decoding or ingesting them.
 
 Set `EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS` to control how long the
 entrypoint waits for the background listener to report readiness. The default
