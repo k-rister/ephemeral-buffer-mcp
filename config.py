@@ -16,6 +16,12 @@ DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 DEFAULT_SOCKET_TIMEOUT_SECONDS = 10.0
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
+DEFAULT_EXECUTION_STATE_DIR = tempfile.mkdtemp(
+    prefix="ephemeral_buffer_executions-",
+    dir=tempfile.gettempdir(),
+)
+EXECUTION_STATE_SESSION_PREFIX = "ephemeral_buffer_executions-"
+EXECUTION_STATE_SOCKET_PREFIX = "ephemeral_buffer_executions-socket-"
 
 
 def socket_isolation_configured() -> bool:
@@ -61,6 +67,22 @@ def socket_path() -> str:
         return os.path.join(tempfile.gettempdir(), f"{SESSION_SOCKET_PREFIX}{digest}.sock")
 
     return DEFAULT_SOCKET_PATH
+
+
+def execution_state_dir() -> str:
+    """Return the durable directory used for resumable execution metadata."""
+    configured = os.environ.get("EPHEMERAL_EXECUTION_STATE_DIR")
+    if configured:
+        return configured
+    session_id = os.environ.get("EPHEMERAL_SESSION_ID")
+    if session_id:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(tempfile.gettempdir(), f"{EXECUTION_STATE_SESSION_PREFIX}{digest}")
+    configured_socket = os.environ.get("EPHEMERAL_SOCKET_PATH")
+    if configured_socket:
+        digest = hashlib.sha256(configured_socket.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(tempfile.gettempdir(), f"{EXECUTION_STATE_SOCKET_PREFIX}{digest}")
+    return DEFAULT_EXECUTION_STATE_DIR
 
 
 def embedding_model_name() -> str:

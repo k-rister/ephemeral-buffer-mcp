@@ -366,6 +366,11 @@ The agent has access to the following tools:
 | :--- | :--- |
 | `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. |
 | `preflight_command(command, cwd=None)` | Performs content-free path, symlink, local Git-root, and executable-resolution diagnostics without executing the requested command. |
+| `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Runs a sequential, durably checkpointed set of command phases and returns phase statuses, metrics, and a partial/completed marker. |
+| `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase, skipping completed phases; retries and unsafe side effects require explicit controls. |
+| `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. |
+| `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves a bounded output chunk persisted for all phases or one phase, including after a server restart; use `offset` to continue a large phase. |
+| `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact IDs with pagination metadata. |
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded log/output file from disk and returns the same compact summary schema. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
@@ -427,6 +432,59 @@ unavailable states without running the requested command or exposing command
 output. It cannot predict shell expansion, aliases, pipelines, redirections,
 environment changes, or arbitrary shell logic, so normal command validation
 and user intent checks remain necessary.
+
+### Resumable phase execution
+
+Use `start_execution` when a long-running workflow has meaningful checkpoints:
+
+```text
+start_execution(
+  execution_id="release-checks",
+  phases=[
+    {"name": "tests", "command": "python -m unittest", "timeout_seconds": 900},
+    {"name": "publish", "command": "./publish.sh", "side_effects": "unsafe"},
+  ],
+)
+```
+
+Each phase is persisted as `pending`, `started`, `completed`, `failed`,
+`interrupted`, or `timed_out`. Output, exit status, duration, truncation, and
+caller metrics are written after every finished phase. If the server restarts
+while a phase is `started`, the next inspection records it as `interrupted`.
+`resume_execution` skips every completed phase and continues at the first
+incomplete phase. Failed and timed-out phases require `retry_failed=True`;
+safe phases recovered as `interrupted` resume automatically. An interrupted
+phase marked `side_effects: "unsafe"` additionally requires
+`confirm_unsafe=True` unless the execution was created with the explicit
+`resume_policy="allow-unsafe"`. The persisted `idempotency_key` is
+an audit boundary for an external operation; it does not replace confirmation
+or provide an external deduplication guarantee. The compatibility alias
+`unsafe_side_effects: true` is normalized to `side_effects: "unsafe"`; if both
+fields are supplied, they must agree.
+The command process group is checkpointed while a phase runs and terminated
+before restart recovery permits that phase to resume.
+
+Execution responses include a human-readable `summary`, machine-readable
+`execution_status` and `partial` fields, per-phase event history, and the
+next resumable phase. If detailed metadata would exceed the 64 KiB tool
+response budget, the server returns a compact response with the durable
+`execution_id` and `response_truncated: true`; call `get_execution` or the
+bounded output tool to retrieve details. Durable JSON state defaults to a temporary local
+process-local directory created securely with owner-only permissions; set
+`EPHEMERAL_SESSION_ID` or `EPHEMERAL_EXECUTION_STATE_DIR` to persist and share
+state across server restarts. State can otherwise be placed elsewhere with
+`EPHEMERAL_EXECUTION_STATE_DIR`. State contains the commands and bounded
+outputs, so keep any explicitly configured directory protected when commands
+or results are sensitive.
+
+Execution metadata is bounded to 64 MiB per record, 64 phases, 32 attempts per
+phase, 16 KiB of structured metrics, and 1,000 records per state directory;
+list results are paginated with a maximum page size of 100. There is no
+automatic expiry: when the record cap is reached, stop the server and archive
+or rotate the state directory, or remove completed records together with their
+matching summary files before restarting. State and execution leases are
+isolated by the explicit execution-state directory, session ID, or socket path;
+without one, each server process receives a fresh private state directory.
 
 Before any repository-sensitive command or file capture, verify the intended
 working directory and target path. Prefer an explicit `cwd`, confirm the
@@ -609,13 +667,13 @@ development locks.
 
 Run the test suite:
 ```bash
-.venv/bin/python -m unittest test_benchmark_warmup.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m unittest test_benchmark_warmup.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
 .venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
 Measure focused-test coverage locally:
 ```bash
-.venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py
+.venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
 .venv/bin/python -m coverage report
 ```
 CI requires 100% coverage for application runtime modules and excludes test,

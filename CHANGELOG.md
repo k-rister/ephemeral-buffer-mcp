@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add durable phase-level executions with persisted outputs, metrics, status
+  history, restart recovery, explicit retries, and unsafe-side-effect resume
+  confirmation for long-running agent workflows, including recoverable compact
+  responses when detailed execution metadata exceeds the tool response budget,
+  bounded list-page fallbacks, owner checks, and crash-durable directory sync.
+
 ## 0.4.0 - 2026-09-15
 
 - Warm the embedding model asynchronously after server readiness by default,

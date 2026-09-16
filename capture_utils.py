@@ -7,7 +7,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 from config import DEFAULT_MAX_OUTPUT_BYTES
 from logging_utils import get_logger, log_event
 
@@ -108,9 +108,12 @@ def run_command_bounded(
     cwd: Optional[str],
     max_output_bytes: int,
     timeout_seconds: Optional[float] = None,
+    process_started: Optional[Callable[[int, Optional[int]], None]] = None,
 ) -> Tuple[str, int, bool, int, bool]:
     """Run a command while retaining bounded output and enforcing an optional timeout."""
-    return _run_command_bounded(command, cwd, max_output_bytes, timeout_seconds)
+    return _run_command_bounded(
+        command, cwd, max_output_bytes, timeout_seconds, process_started
+    )
 
 
 def _run_command_bounded(
@@ -118,6 +121,7 @@ def _run_command_bounded(
     cwd: Optional[str],
     max_output_bytes: int,
     timeout_seconds: Optional[float],
+    process_started: Optional[Callable[[int, Optional[int]], None]] = None,
 ) -> Tuple[str, int, bool, int, bool]:
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than 0")
@@ -135,6 +139,12 @@ def _run_command_bounded(
         process_group_id = os.getpgid(proc.pid)
     except (AttributeError, OSError):
         pass
+    if process_started is not None:
+        try:
+            process_started(proc.pid, process_group_id)
+        except BaseException:
+            _terminate_process_group(proc, process_group_id)
+            raise
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
