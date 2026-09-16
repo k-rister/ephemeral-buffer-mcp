@@ -160,6 +160,46 @@ far is retained, and it returns exit status 124. Closing stdout does not end
 the command deadline: the process is still awaited until it exits or the
 requested deadline expires. Without a timeout, completion is awaited normally.
 
+### Durable resumable executions
+
+Long workflows can be represented as sequential phases with
+`start_execution`. The server persists each phase transition and its bounded
+output in `EPHEMERAL_EXECUTION_STATE_DIR` (by default, a local temporary
+process-local directory created securely with owner-only permissions; use
+`EPHEMERAL_SESSION_ID` or `EPHEMERAL_EXECUTION_STATE_DIR` when state must
+survive a server restart; state files are also
+owner-readable. `get_execution` exposes a human-readable summary plus structured
+status, event history, metrics, and the first incomplete phase;
+`get_execution_output` retrieves bounded chunks of persisted phase output after
+a restart; pass `phase_name`, `offset`, and `max_bytes` to page through a large
+phase without creating an oversized MCP response.
+If detailed execution metadata would exceed the 64 KiB tool-response budget,
+the server returns a compact response that preserves the durable execution ID
+and sets `response_truncated: true`.
+The state directory is checked for current-user ownership before use, and
+directory metadata is synchronized after atomic record replacement so a
+completed phase checkpoint survives normal host-crash recovery.
+
+On restart, a phase left in `started` is recovered as `interrupted`. Resume
+stops any persisted command process group before permitting that recovery, then
+skips `completed` phases. A `failed` or `timed_out` phase is only retried with
+`retry_failed=True`; a safe phase recovered as `interrupted` resumes on the
+normal resume call. Mark operations that can write, deploy, publish, or make
+external requests with `side_effects: "unsafe"`; retrying an interrupted
+unsafe phase also requires `confirm_unsafe=True`, or the explicit
+`resume_policy: "allow-unsafe"` chosen when the execution was created. The
+boolean compatibility alias `unsafe_side_effects: true` is normalized to
+`side_effects: "unsafe"`; if both fields are supplied, they must agree. The
+optional `idempotency_key` is persisted as an audit identifier, not as a
+claim that the external system deduplicates requests. Keep the state directory
+access-controlled because it contains the stored commands and bounded output.
+Execution records are capped at 64 MiB, 64 phases, 32 attempts per phase, and
+1,000 records per state directory; `list_executions` is paginated. There is no
+automatic expiry. If the record cap is reached, stop the server and archive or
+rotate the state directory, or remove completed records and their matching
+summary files before restarting. When no explicit state directory is set,
+state is isolated by `EPHEMERAL_SESSION_ID` or by the explicit socket path.
+
 Signal summaries recognize successful test-run markers and avoid treating
 example error text inside a passing test run as an active failure while still
 reporting explicit warnings. The complete captured output remains available

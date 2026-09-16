@@ -8,12 +8,15 @@ from unittest.mock import patch
 
 from config import (
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EXECUTION_STATE_DIR,
     DEFAULT_SOCKET_PATH,
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     embedding_cache_dir,
     embedding_model_name,
     embedding_warmup_enabled,
+    execution_state_dir,
     positive_int_env,
+    runtime_index_budget_adjustment_enabled,
     semantic_prefetch_enabled,
     semantic_prefetch_workers,
     socket_isolation_configured,
@@ -42,6 +45,23 @@ class TestPositiveIntEnv(unittest.TestCase):
     def test_socket_path_can_be_overridden(self):
         with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/test-ephemeral.sock"}):
             self.assertEqual(socket_path(), "/tmp/test-ephemeral.sock")
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(socket_path(), DEFAULT_SOCKET_PATH)
+
+    def test_execution_state_directory_defaults_and_can_be_overridden(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(execution_state_dir(), DEFAULT_EXECUTION_STATE_DIR)
+        with patch.dict(os.environ, {"EPHEMERAL_EXECUTION_STATE_DIR": "/tmp/executions"}, clear=True):
+            self.assertEqual(execution_state_dir(), "/tmp/executions")
+        with patch.dict(os.environ, {"EPHEMERAL_SESSION_ID": "session-1"}, clear=True):
+            self.assertIn("ephemeral_buffer_executions-", execution_state_dir())
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/session-a.sock"}, clear=True):
+            first = execution_state_dir()
+        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/session-b.sock"}, clear=True):
+            second = execution_state_dir()
+        self.assertIn("ephemeral_buffer_executions-socket-", first)
+        self.assertNotEqual(first, second)
 
     def test_session_id_derives_stable_socket_path(self):
         with patch.dict(os.environ, {"EPHEMERAL_SESSION_ID": "agent-session-1"}, clear=True):
@@ -95,6 +115,12 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertEqual(max_indexed_chunks(), 32768)
         with patch.dict(os.environ, {"EPHEMERAL_MAX_INDEXED_CHUNKS": "12"}, clear=True):
             self.assertEqual(max_indexed_chunks(), 12)
+
+    def test_runtime_index_budget_adjustment_flag(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(runtime_index_budget_adjustment_enabled())
+        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "yes"}, clear=True):
+            self.assertTrue(runtime_index_budget_adjustment_enabled())
 
     def test_embedding_defaults(self):
         with patch.dict(os.environ, {}, clear=True):

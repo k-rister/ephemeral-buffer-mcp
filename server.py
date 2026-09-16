@@ -24,8 +24,10 @@ from functools import wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from config import (
+    execution_state_dir,
     positive_int_env,
     runtime_index_budget_adjustment_enabled,
     socket_isolation_configured,
@@ -40,6 +42,14 @@ from engine import (
     normalize_structured_metrics,
 )
 from capture_utils import read_file_bounded, run_command_bounded
+from execution import (
+    MAX_EXECUTION_ID_BYTES,
+    MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
+    MAX_EXECUTION_PHASES,
+    MAX_STRUCTURED_METRICS_BYTES,
+    MAX_PHASE_NAME_BYTES,
+    PhaseExecutionManager,
+)
 from logging_utils import get_logger, log_event
 from metrics import LocalMetrics
 from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
@@ -49,6 +59,7 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 # JSON string escaping can expand a UTF-8 capture by at most six bytes per
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
+EXECUTION_OUTPUT_RESPONSE_MAX_BYTES = 64 * 1024
 SEARCH_RESPONSE_MAX_BYTES = 64 * 1024
 SUMMARY_DIFF_FILE_MAP_MAX_BYTES = 8 * 1024
 SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES = 100
@@ -235,6 +246,10 @@ engine = EphemeralEngine(
     metrics=METRICS,
 )
 atexit.register(engine.shutdown)
+execution_manager = PhaseExecutionManager(
+    execution_state_dir(),
+    max_output_bytes=max(512, engine.max_buffer_bytes),
+)
 _ENGINE_OVERRIDE: ContextVar[Optional[EphemeralEngine]] = ContextVar(
     "ephemeral_server_engine_override",
     default=None,
@@ -244,6 +259,130 @@ _ENGINE_OVERRIDE: ContextVar[Optional[EphemeralEngine]] = ContextVar(
 def _active_engine() -> EphemeralEngine:
     """Return the request-local engine override or the process engine."""
     return _ENGINE_OVERRIDE.get() or engine
+
+
+def _capture_execution_phase(
+    phase: Dict[str, Any],
+    output: str,
+    result: Dict[str, Any],
+) -> Optional[str]:
+    """Retain a phase result in the searchable ring as a convenience snapshot."""
+    capture = _active_engine().ingest(
+        output,
+        label=f"execution phase: {phase['name']}",
+        content_type="auto",
+        truncated=bool(result.get("truncated", False)),
+        original_byte_size=(
+            result.get("original_byte_size") if result.get("truncated", False) else None
+        ),
+        command_exit_code=result.get("exit_code"),
+        timed_out=bool(result.get("timed_out", False)),
+        source="execution",
+        duration_ms=result.get("duration_ms"),
+        structured_metrics=phase.get("structured_metrics", {}),
+    )
+    return capture.capture_id
+
+
+def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> str:
+    """Run an execution operation and return a compact machine-readable result."""
+    try:
+        payload = operation()
+        result = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if max_response_bytes is not None and len(result.encode("utf-8")) > max_response_bytes:
+            if isinstance(payload, dict) and isinstance(payload.get("executions"), list):
+                compact = {
+                    key: payload[key]
+                    for key in ("status", "limit", "offset")
+                    if key in payload
+                }
+                compact["response_truncated"] = True
+                compact["executions"] = []
+                for execution in payload["executions"]:
+                    if not isinstance(execution, dict):
+                        continue
+                    summary = {
+                        key: execution[key]
+                        for key in (
+                            "execution_id", "label", "execution_status", "partial",
+                            "updated_at", "completed_phase_count", "phase_count",
+                        )
+                        if key in execution
+                    }
+                    candidate = dict(compact)
+                    candidate["executions"] = [*compact["executions"], summary]
+                    candidate["returned_count"] = len(candidate["executions"])
+                    candidate["omitted_count"] = len(payload["executions"]) - candidate["returned_count"]
+                    encoded_candidate = json.dumps(
+                        candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    )
+                    if len(encoded_candidate.encode("utf-8")) > max_response_bytes:
+                        break
+                    compact["executions"].append(summary)
+                compact["returned_count"] = len(compact["executions"])
+                compact["omitted_count"] = len(payload["executions"]) - len(compact["executions"])
+                compact_result = json.dumps(
+                    compact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if len(compact_result.encode("utf-8")) <= max_response_bytes:
+                    return compact_result
+            if isinstance(payload, dict) and payload.get("execution_id"):
+                compact = {
+                    key: payload[key]
+                    for key in (
+                        "status", "schema_version", "execution_id", "label",
+                        "execution_status", "partial", "summary", "created_at",
+                        "updated_at", "resume", "completed_phase_count", "phase_count",
+                    )
+                    if key in payload
+                }
+                compact["response_truncated"] = True
+                compact["phases"] = [
+                    {
+                        key: phase.get(key)
+                        for key in ("name", "status", "attempts", "error")
+                    }
+                    for phase in payload.get("phases", [])
+                    if isinstance(phase, dict)
+                ]
+                compact_result = json.dumps(
+                    compact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if len(compact_result.encode("utf-8")) <= max_response_bytes:
+                    return compact_result
+            return (
+                "Error managing execution: response exceeds the "
+                f"{max_response_bytes:,}-byte limit; request a smaller output chunk"
+            )
+        return result
+    except (KeyError, ValueError, OSError, RuntimeError) as exc:
+        return f"Error managing execution: {exc}"
+
+
+def _execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Annotate session-local capture references before returning durable state."""
+    for phase in payload.get("phases", []):
+        result = phase.get("result")
+        if not isinstance(result, dict) or "capture_id" not in result:
+            continue
+        result["capture_available"] = _active_engine().get_capture(result["capture_id"]) is not None
+    return payload
+
+
+def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str, Any]:
+    """Avoid copying large durable output before the response budget is known."""
+    metadata = execution_manager.public(execution_id, include_output=False)
+    if not include_output:
+        return metadata
+    output_bytes = sum(
+        phase.get("output_bytes", 0)
+        for phase in metadata.get("phases", [])
+        if isinstance(phase, dict) and isinstance(phase.get("output_bytes", 0), int)
+    )
+    if output_bytes > EXECUTION_OUTPUT_RESPONSE_MAX_BYTES:
+        metadata["response_truncated"] = True
+        return metadata
+    return execution_manager.public(execution_id, include_output=True)
 
 
 def _write_metrics_snapshot() -> None:
@@ -263,6 +402,70 @@ atexit.register(_write_metrics_snapshot)
 
 
 # --- MCP Tools ---
+
+
+class ExecutionPhaseInput(BaseModel):
+    """Schema contract for one phase exposed through the MCP tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_PHASE_NAME_BYTES})
+    command: str = Field(min_length=1, json_schema_extra={"maxUtf8Bytes": 16 * 1024})
+    cwd: Optional[str] = Field(
+        default=None, min_length=1, json_schema_extra={"maxUtf8Bytes": 4096}
+    )
+    timeout_seconds: Optional[float] = Field(default=None, gt=0)
+    max_output_bytes: Optional[int] = Field(default=None, ge=512)
+    structured_metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        json_schema_extra={"maxJsonBytes": MAX_STRUCTURED_METRICS_BYTES},
+    )
+    side_effects: Literal["none", "unsafe"] = "none"
+    unsafe_side_effects: Optional[bool] = None
+    idempotency_key: Optional[str] = Field(
+        default=None, min_length=1,
+        json_schema_extra={"maxUtf8Bytes": MAX_PHASE_NAME_BYTES},
+    )
+
+    @field_validator("name", "command", "cwd", "idempotency_key")
+    @classmethod
+    def validate_utf8_byte_limit(cls, value, info):
+        """Apply the same UTF-8 byte bounds as durable execution records."""
+        limits = {
+            "name": MAX_PHASE_NAME_BYTES,
+            "command": 16 * 1024,
+            "cwd": 4096,
+            "idempotency_key": MAX_PHASE_NAME_BYTES,
+        }
+        if value is not None and len(value.encode("utf-8")) > limits[info.field_name]:
+            raise ValueError(
+                f"{info.field_name} exceeds the {limits[info.field_name]:,}-byte limit"
+            )
+        return value
+
+    @field_validator("structured_metrics")
+    @classmethod
+    def validate_structured_metrics_size(cls, value):
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("structured_metrics must contain JSON-compatible values") from exc
+        if len(encoded) > MAX_STRUCTURED_METRICS_BYTES:
+            raise ValueError(
+                f"structured_metrics exceeds the {MAX_STRUCTURED_METRICS_BYTES:,}-byte limit"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def normalize_side_effect_alias(self):
+        """Treat the boolean alias as an override only when the enum was omitted."""
+        if "unsafe_side_effects" not in self.model_fields_set:
+            return self
+        alias_side_effects = "unsafe" if self.unsafe_side_effects else "none"
+        if "side_effects" in self.model_fields_set and self.side_effects != alias_side_effects:
+            raise ValueError("side_effects and unsafe_side_effects must agree")
+        self.side_effects = alias_side_effects
+        return self
 
 
 def _resolve_preflight_cwd(cwd: Optional[str]) -> dict[str, Any]:
@@ -375,6 +578,142 @@ def preflight_command(command: str, cwd: Optional[str] = None) -> str:
         )
     except Exception as exc:
         return json.dumps({"status": "error", "reason": type(exc).__name__})
+
+
+@_mcp_tool("start_execution")
+@_instrument_tool("start_execution")
+def start_execution(
+    phases: Annotated[List[ExecutionPhaseInput], Field(min_length=1, max_length=MAX_EXECUTION_PHASES)],
+    execution_id: Optional[Annotated[str, Field(
+        min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_EXECUTION_ID_BYTES}
+    )]] = None,
+    label: Annotated[str, Field(json_schema_extra={"maxUtf8Bytes": 1024})] = "",
+    resume_policy: Literal["safe", "allow-unsafe"] = "safe",
+    cwd: Optional[Annotated[str, Field(json_schema_extra={"maxUtf8Bytes": 4096})]] = None,
+    timeout_seconds: Annotated[Optional[float], Field(gt=0)] = None,
+    max_output_bytes: Annotated[Optional[int], Field(ge=512)] = None,
+) -> str:
+    """Run a sequential, durably checkpointed set of command phases.
+
+    Each phase is an object with ``name`` and ``command`` plus optional
+    ``cwd``, ``timeout_seconds``, ``max_output_bytes``, ``structured_metrics``,
+    and ``side_effects`` (``none`` or ``unsafe``). A completed phase is never
+    rerun by ``resume_execution``. An unsafe phase that must be retried after
+    failure, timeout, or interruption requires ``confirm_unsafe=True`` or the
+    explicit ``resume_policy='allow-unsafe'``. Outputs and phase event history
+    are stored under ``EPHEMERAL_EXECUTION_STATE_DIR``.
+    """
+    phase_payloads = [
+        phase.model_dump(exclude_none=True) if isinstance(phase, ExecutionPhaseInput) else phase
+        for phase in phases
+    ]
+    return _execution_json(
+        lambda: _execution_public_payload(
+            execution_manager.start(
+                phase_payloads,
+                execution_id=execution_id,
+                label=label,
+                resume_policy=resume_policy,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+                output_handler=_capture_execution_phase,
+            )
+        ),
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("resume_execution")
+@_instrument_tool("resume_execution")
+def resume_execution(
+    execution_id: Annotated[str, Field(
+        min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_EXECUTION_ID_BYTES}
+    )],
+    retry_failed: bool = False,
+    confirm_unsafe: bool = False,
+) -> str:
+    """Resume an execution from its first incomplete phase.
+
+    Completed phases are skipped. Failed and timed-out phases require
+    ``retry_failed=True``; a safe phase recovered as interrupted resumes on
+    the normal call. Retries of unsafe phases additionally need
+    ``confirm_unsafe=True`` unless the execution was created with the explicit
+    ``allow-unsafe`` resume policy.
+    """
+    return _execution_json(
+        lambda: _execution_public_payload(
+            execution_manager.resume(
+                execution_id,
+                retry_failed=retry_failed,
+                confirm_unsafe=confirm_unsafe,
+                output_handler=_capture_execution_phase,
+            )
+        ),
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("get_execution")
+@_instrument_tool("get_execution")
+def get_execution(
+    execution_id: Annotated[str, Field(
+        min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_EXECUTION_ID_BYTES}
+    )],
+    include_output: bool = False,
+) -> str:
+    """Return durable phase metadata and event history for one execution."""
+    return _execution_json(
+        lambda: _execution_public_payload(
+            _execution_get_payload(execution_id, include_output)
+        ),
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("get_execution_output")
+@_instrument_tool("get_execution_output")
+def get_execution_output(
+    execution_id: Annotated[str, Field(
+        min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_EXECUTION_ID_BYTES}
+    )],
+    phase_name: Optional[Annotated[str, Field(
+        min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_PHASE_NAME_BYTES}
+    )]] = None,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    max_bytes: Annotated[int, Field(ge=512, le=MAX_EXECUTION_OUTPUT_CHUNK_BYTES)] = MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
+) -> str:
+    """Retrieve one bounded output chunk for all phases or one named phase."""
+    return _execution_json(
+        lambda: _execution_public_payload(
+            execution_manager.output(
+                execution_id,
+                phase_name,
+                offset=offset,
+                max_bytes=max_bytes,
+            )
+        ),
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("list_executions")
+@_instrument_tool("list_executions")
+def list_executions(
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    offset: Annotated[int, Field(ge=0)] = 0,
+) -> str:
+    """List durable executions with compact partial/completion summaries."""
+    return _execution_json(
+        lambda: {
+            "status": "ok",
+            "limit": limit,
+            "offset": offset,
+            "executions": execution_manager.list_public(limit=limit, offset=offset),
+        },
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
 
 def _bounded_diff_file_map(
     file_map: str,

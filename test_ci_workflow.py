@@ -29,6 +29,14 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("  workflow_dispatch:\n", source)
         self.assertIn("  schedule:\n", source)
 
+    def test_ci_compiles_and_executes_resumable_execution_paths(self):
+        workflow = Path(__file__).with_name(".github") / "workflows" / "ci.yml"
+        source = workflow.read_text()
+
+        self.assertIn("execution.py", source)
+        self.assertIn("test_execution.py", source)
+        self.assertIn("test_execution_server.py", source)
+
 
 if __name__ == "__main__":
     unittest.main()

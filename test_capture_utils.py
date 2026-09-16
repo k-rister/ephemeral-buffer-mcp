@@ -81,6 +81,33 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertEqual(original_size, len(output.encode("utf-8")))
         self.assertEqual(output, "complete\n")
 
+    def test_process_started_callback_receives_process_identity(self):
+        identities = []
+        result = run_command_bounded(
+            "true", None, 1024,
+            process_started=lambda process_id, process_group_id: identities.append(
+                (process_id, process_group_id)
+            ),
+        )
+        self.assertEqual(result[1], 0)
+        self.assertEqual(len(identities), 1)
+        self.assertGreater(identities[0][0], 0)
+        self.assertGreater(identities[0][1], 0)
+
+    def test_process_started_callback_failure_terminates_process(self):
+        def fail(*_identity):
+            raise RuntimeError("cannot persist process identity")
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "cannot persist"):
+            run_command_bounded(
+                f"{shlex.quote(sys.executable)} -c \"import time; time.sleep(5)\"",
+                None,
+                1024,
+                process_started=fail,
+            )
+        self.assertLess(time.monotonic() - started, 3)
+
     def test_early_eof_waits_for_process_within_deadline(self):
         script = "import os, time; os.close(1); time.sleep(0.2)"
         command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
