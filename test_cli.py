@@ -186,6 +186,7 @@ class TestCliConfiguration(unittest.TestCase):
                 "original_byte_size": 100,
                 "command_exit_code": None,
                 "timed_out": False,
+                "duration_ms": None,
             },
         )
 
@@ -310,18 +311,40 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertIn("Pipe output into Ephemeral Buffer", stdout.getvalue())
 
     def test_wrapped_command_forwards_exit_code_and_label(self):
-        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
+        response = {
+            "status": "ok",
+            "line_count": 1,
+            "capture_id": "cap_test",
+            "label": "build",
+            "summary": {"schema_version": 1, "execution_status": "captured"},
+        }
         with patch.object(cli, "run_command_bounded", return_value=("command output", 3, False, 14, False)) as run, \
                 patch.object(cli, "send_to_mcp", return_value=response) as send, \
                 patch.object(sys, "argv", ["cli.py", "--label", "build", "--", "echo", "ok"]), \
                 patch.object(sys, "stdout", io.StringIO()), \
-                patch.object(sys, "stderr", io.StringIO()):
+                patch.object(sys, "stderr", io.StringIO()) as stderr:
             with self.assertRaises(SystemExit) as exit_result:
                 cli.main()
 
         self.assertEqual(exit_result.exception.code, 3)
         run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES, None)
         self.assertEqual(send.call_args.kwargs["label"], "build")
+        self.assertIsInstance(send.call_args.kwargs["duration_ms"], float)
+        self.assertIn('"schema_version":1', stderr.getvalue())
+
+    def test_wrapped_command_forwards_execution_duration(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}
+        with patch.object(cli, "run_command_bounded", return_value=("output", 0, False, 6, False)), \
+                patch.object(cli.time, "perf_counter", side_effect=[10.0, 10.25]), \
+                patch.object(cli, "send_to_mcp", return_value=response) as send, \
+                patch.object(sys, "argv", ["cli.py", "--", "echo", "ok"]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertEqual(send.call_args.kwargs["duration_ms"], 250.0)
 
     def test_wrapped_command_preserves_argument_boundaries(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}

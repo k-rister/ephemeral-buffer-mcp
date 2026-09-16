@@ -2,19 +2,40 @@
 """Measure deterministic command-output workflows with and without the buffer."""
 
 import argparse
+from contextlib import ContextDecorator
 import json
+import math
 import platform
 import re
 import statistics
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+from unittest.mock import patch
 
 from engine import EphemeralEngine, process_rss_bytes
+import server
 
 
 SCHEMA_VERSION = 1
 CONTEXT_LINES = 2
+
+
+class _IsolatedSummaryEngine(ContextDecorator):
+    """Give the summary benchmark a private engine without mutating callers."""
+
+    def _recreate_cm(self):
+        return type(self)()
+
+    def __enter__(self):
+        self._benchmark_engine = EphemeralEngine(max_captures=len(summary_scenarios()))
+        self._engine_token = server._ENGINE_OVERRIDE.set(self._benchmark_engine)
+        return self._benchmark_engine
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        server._ENGINE_OVERRIDE.reset(self._engine_token)
+        self._benchmark_engine.shutdown()
+        return False
 
 
 def _noise(prefix: str, count: int) -> List[str]:
@@ -47,6 +68,247 @@ def scenarios() -> List[Dict[str, Any]]:
     ]
 
 
+def summary_scenarios() -> List[Dict[str, Any]]:
+    """Return representative coding-agent capture outcomes for summary measurement."""
+    return [
+        {
+            "id": "successful-test",
+            "task_prompt": "Decide whether the test suite is safe to continue.",
+            "command": "pytest tests/test_orders.py -q",
+            "content_type": "log",
+            "text": "\n".join(
+                [
+                    f"test case {index}: passed; " + ("assertion detail " * 8)
+                    for index in range(1, 81)
+                ]
+                + ["80 tests passed", "OK"]
+            ),
+            "command_exit_code": 0,
+            "truncated": False,
+            "original_byte_size": None,
+            "timed_out": False,
+        },
+        {
+            "id": "failed-test",
+            "task_prompt": "Identify the failing test signal and decide what to inspect next.",
+            "command": "pytest tests/test_payments.py -q",
+            "content_type": "log",
+            "text": "\n".join(
+                [
+                    f"test case {index}: passed; " + ("fixture detail " * 8)
+                    for index in range(1, 81)
+                ]
+                + ["FAILED: 2 tests failed", "ERROR: assertion mismatch"]
+            ),
+            "command_exit_code": 1,
+            "truncated": False,
+            "original_byte_size": None,
+            "timed_out": False,
+        },
+        {
+            "id": "noisy-build",
+            "task_prompt": "Decide whether the build completed successfully despite noisy output.",
+            "command": "make all",
+            "content_type": "log",
+            "text": "\n".join(
+                f"build step {index}: compiler output " + ("diagnostic context " * 20)
+                for index in range(1, 501)
+            ),
+            "command_exit_code": 0,
+            "truncated": False,
+            "original_byte_size": None,
+            "timed_out": False,
+        },
+        {
+            "id": "truncated-command",
+            "task_prompt": "Decide whether the retained command output is sufficient or needs retrieval.",
+            "command": "./scripts/run-integration-suite.sh",
+            "content_type": "log",
+            "text": ("retained command output; " + ("captured context " * 12) + "\n") * 60,
+            "command_exit_code": 1,
+            "truncated": True,
+            "original_byte_size": 80_000,
+            "timed_out": False,
+        },
+        {
+            "id": "timed-out-command",
+            "task_prompt": "Decide whether the timed-out command needs a retry or targeted inspection.",
+            "command": "python tools/long_running_worker.py",
+            "content_type": "log",
+            "text": ("partial command output; " + ("timeout context " * 12) + "\n") * 40,
+            "command_exit_code": 124,
+            "truncated": False,
+            "original_byte_size": None,
+            "timed_out": True,
+            "timeout_seconds": 0.5,
+        },
+    ]
+
+
+def _legacy_execute_response(
+    command: str,
+    summary: Dict[str, Any],
+    exit_code: int,
+    timed_out: bool,
+    timeout_seconds: float | None,
+) -> str:
+    """Reproduce the parent commit's formatted execute response contract."""
+    if timed_out:
+        status = f"TIMED OUT after {timeout_seconds:g}s"
+    else:
+        status = "SUCCESS" if exit_code == 0 else f"FAILED (Exit Code {exit_code})"
+    truncation = ""
+    if summary.get("truncated"):
+        truncation = f"\nOutput: truncated from {summary['original_byte_size']:,} bytes\n"
+    signals = summary.get("signals_summary", "None detected")
+    return (
+        f"Command: `{command}`\n"
+        f"Status: {status}\n"
+        f"Captured ID: `{summary['capture_id']}` ({summary['total_lines']:,} lines, {summary['byte_size']:,} bytes)\n"
+        f"{truncation}"
+        f"Detected Signals: {signals}\n\n"
+        f"--- Head (First 5 lines) ---\n{summary['head_preview']}\n\n"
+        f"--- Tail (Last 5 lines) ---\n{summary['tail_preview']}\n\n"
+        f"Query details using `search_capture(query='...', capture_id='{summary['capture_id']}')`."
+    )
+
+
+@_IsolatedSummaryEngine()
+def run_summary_benchmark() -> Dict[str, Any]:
+    """Measure public preview responses versus summary-first prompts.
+
+    This is a deterministic prompt-size proxy. It does not invoke a model or
+    claim provider-reported token usage. The baseline reconstructs the parent
+    commit's formatted-text response, while the comparison path exercises the
+    public compact response from ``execute_and_capture``. Full retained output
+    is verified through the public slice-retrieval API.
+    """
+    selected = summary_scenarios()
+    records = []
+    for scenario in selected:
+        with patch.object(
+            server,
+            "run_command_bounded",
+            return_value=(
+                scenario["text"],
+                scenario["command_exit_code"],
+                scenario["truncated"],
+                scenario["original_byte_size"],
+                scenario["timed_out"],
+            ),
+        ):
+            compact_summary = json.loads(server.execute_and_capture(
+                scenario["command"],
+                label=f"summary-benchmark-{scenario['id']}",
+                content_type=scenario["content_type"],
+                max_output_bytes=server._active_engine().max_buffer_bytes,
+            ))
+        capture_id = compact_summary["capture_id"]
+        detailed_summary = json.loads(
+            server.get_capture_summary(capture_id, include_previews=True)
+        )
+        raw_summary = server._active_engine().get_summary(capture_id, include_previews=True)
+        legacy_response = _legacy_execute_response(
+            scenario["command"],
+            raw_summary,
+            scenario["command_exit_code"],
+            scenario["timed_out"],
+            scenario.get("timeout_seconds"),
+        )
+        compact_core = {
+            key: value
+            for key, value in compact_summary.items()
+            if key not in {"command", "command_truncated"}
+        }
+        detailed_core = {
+            key: value for key, value in detailed_summary.items() if key != "previews"
+        }
+        payload_shapes_aligned = set(compact_core) == set(detailed_core)
+        if not payload_shapes_aligned:
+            raise RuntimeError("summary benchmark payload shapes are not aligned")
+        compact = json.dumps(
+            compact_summary,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        detailed = json.dumps(
+            detailed_summary,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        legacy_prompt = json.dumps(
+            {"task": scenario["task_prompt"], "tool_response": legacy_response},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        summary_prompt = json.dumps(
+            {"task": scenario["task_prompt"], "tool_response": compact_summary},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        retrieval = server.get_capture_slice(
+            1,
+            compact_summary["total_lines"],
+            capture_id=capture_id,
+        )
+        retrieval_body = retrieval.split("```text\n", 1)[1].rsplit("\n```", 1)[0]
+        retrieved_lines = [
+            line.split(" | ", 1)[1]
+            for line in retrieval_body.splitlines()
+            if " | " in line
+        ]
+        retrieval_verified = (
+            retrieved_lines == scenario["text"].splitlines()
+        )
+        compact_tokens = math.ceil(len(compact) / 4)
+        detailed_tokens = math.ceil(len(detailed) / 4)
+        legacy_prompt_tokens = math.ceil(len(legacy_prompt) / 4)
+        summary_prompt_tokens = math.ceil(len(summary_prompt) / 4)
+        records.append({
+            "task_id": scenario["id"],
+            "status": compact_summary["status"],
+            "compact_summary_bytes": len(compact),
+            "preview_summary_bytes": len(detailed),
+            "compact_token_proxy": compact_tokens,
+            "preview_token_proxy": detailed_tokens,
+            "byte_reduction": 1 - (len(compact) / len(detailed)),
+            "token_proxy_reduction": 1 - (compact_tokens / detailed_tokens),
+            "legacy_prompt_bytes": len(legacy_prompt),
+            "summary_prompt_bytes": len(summary_prompt),
+            "legacy_prompt_token_proxy": legacy_prompt_tokens,
+            "summary_prompt_token_proxy": summary_prompt_tokens,
+            "prompt_byte_reduction": 1 - (len(summary_prompt) / len(legacy_prompt)),
+            "prompt_token_proxy_reduction": 1 - (summary_prompt_tokens / legacy_prompt_tokens),
+            "retrieval_bytes": len(retrieval.encode("utf-8")),
+            "full_output_available_for_retrieval": retrieval_verified,
+            "retrieval_verified": retrieval_verified,
+            "payload_shapes_aligned": payload_shapes_aligned,
+        })
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "benchmark": "capture-summary",
+        "evaluation": "public-preview-vs-summary-first-agent-prompt",
+        "controls": {
+            "fixtures": "deterministic coding-agent capture outcomes",
+            "model": "none; the harness does not invoke a model",
+            "token_proxy": "ceil(initial agent-prompt UTF-8 bytes / 4)",
+            "baseline": "parent execute_and_capture formatted-text response reconstructed from the parent contract",
+            "summary_path": "public execute_and_capture compact response; full output remains retrievable",
+            "retrieval": "public get_capture_slice response is compared with retained fixture lines",
+            "provider_usage": "not measured",
+        },
+        "records": records,
+        "aggregate": {
+            "task_count": len(records),
+            "mean_byte_reduction": statistics.mean(record["byte_reduction"] for record in records),
+            "mean_token_proxy_reduction": statistics.mean(record["token_proxy_reduction"] for record in records),
+            "mean_prompt_byte_reduction": statistics.mean(record["prompt_byte_reduction"] for record in records),
+            "mean_prompt_token_proxy_reduction": statistics.mean(
+                record["prompt_token_proxy_reduction"] for record in records
+            ),
+        },
+    }
+    return result
 def _record_base(scenario: Dict[str, Any], mode: str, started: float) -> Dict[str, Any]:
     text = "\n".join(scenario["lines"])
     return {
@@ -450,6 +712,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("baseline", "mcp", "both"), default="both")
     parser.add_argument("--ab-runs", type=int, help="Run paired A/B evaluation this many times")
+    parser.add_argument("--summary", action="store_true", help="Measure compact capture summaries for representative agent outcomes")
     parser.add_argument(
         "--consolidation-runs", type=int,
         help="Run sequential-vs-consolidated evaluation this many times",
@@ -457,7 +720,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260907, help="Seed for paired A/B task and mode order")
     parser.add_argument("--output", type=Path, help="Write machine-readable results to this JSON file")
     args = parser.parse_args()
-    if args.consolidation_runs is not None:
+    if args.summary:
+        record = run_summary_benchmark()
+    elif args.consolidation_runs is not None:
         record = run_consolidation_benchmark(args.consolidation_runs, args.seed)
     elif args.ab_runs is not None:
         record = run_ab_evaluation(args.ab_runs, args.seed)

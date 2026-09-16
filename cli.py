@@ -20,6 +20,7 @@ import socket
 import json
 import argparse
 import shlex
+import time
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
 from config import (
     positive_int_env,
@@ -41,6 +42,7 @@ def send_to_mcp(
     original_byte_size: int = 0,
     command_exit_code: int | None = None,
     timed_out: bool = False,
+    duration_ms: float | None = None,
 ) -> dict:
     if socket_isolation_required() and not socket_isolation_configured():
         return {
@@ -67,6 +69,7 @@ def send_to_mcp(
             "original_byte_size": original_byte_size if truncated else None,
             "command_exit_code": command_exit_code,
             "timed_out": timed_out,
+            "duration_ms": duration_ms,
         }).encode("utf-8")
         sock.sendall(encode_frame(payload))
         header = _recv_exact(sock, FRAME_HEADER_SIZE)
@@ -100,6 +103,22 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _report_success(response: dict) -> None:
+    """Print the legacy confirmation and the compact capture summary."""
+    print(
+        f"\n[ephbuf] Successfully captured {response['line_count']:,} lines "
+        f"into buffer `{response['capture_id']}` ({response['label']})",
+        file=sys.stderr,
+    )
+    summary = response.get("summary")
+    if isinstance(summary, dict):
+        print(
+            "[ephbuf] Summary: "
+            + json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -136,12 +155,14 @@ def main():
         label = args.label or cmd_str
         print(f"[ephbuf] Executing: {cmd_str}")
         
+        command_started = time.perf_counter()
         try:
             output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
                 cmd_str, None, args.max_output_bytes, args.timeout_seconds
             )
         except ValueError as e:
             parser.error(str(e))
+        duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
         # Also print output locally so user can see it if desired
         sys.stdout.write(output)
         sys.stdout.flush()
@@ -154,9 +175,10 @@ def main():
             original_byte_size=original_byte_size,
             command_exit_code=exit_code,
             timed_out=timed_out,
+            duration_ms=duration_ms,
         )
         if res.get("status") == "ok":
-            print(f"\n[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
+            _report_success(res)
         else:
             print(f"\n[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
         if timed_out:
@@ -180,7 +202,7 @@ def main():
             original_byte_size=original_byte_size,
         )
         if res.get("status") == "ok":
-            print(f"[ephbuf] Successfully captured {res['line_count']:,} lines into buffer `{res['capture_id']}` ({res['label']})", file=sys.stderr)
+            _report_success(res)
         else:
             print(f"[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
             sys.exit(1)

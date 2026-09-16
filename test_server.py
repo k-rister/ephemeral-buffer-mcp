@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import math
 import os
 import runpy
 import socket
@@ -283,7 +284,10 @@ class TestServerTools(unittest.TestCase):
         ) as run:
             result = server.execute_and_capture("sleep 10", timeout_seconds=0.5)
 
-        self.assertIn("TIMED OUT after 0.5s", result)
+        summary = json.loads(result)
+        self.assertEqual(summary["status"], "timed_out")
+        self.assertTrue(summary["partial"])
+        self.assertTrue(summary["timed_out"])
         run.assert_called_once()
 
     def test_consolidate_captures_preserves_sources_and_is_searchable(self):
@@ -293,10 +297,13 @@ class TestServerTools(unittest.TestCase):
 
         result = json.loads(server.consolidate_captures(source_ids, max_bytes=2048))
 
-        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["status"], "captured")
         self.assertEqual(result["source_capture_ids"], source_ids)
+        self.assertEqual(result["schema_version"], 1)
         self.assertEqual(result["source_count"], 2)
         self.assertEqual(result["record_count"], 4)
+        self.assertIn("estimated_tokens", result)
+        self.assertIn("retrieval", result)
         self.assertIn(source_ids[0], server.search_capture("alpha", capture_id=result["capture_id"]))
         self.assertIn("source_line", server.get_capture_slice(1, 100, capture_id=result["capture_id"]))
 
@@ -330,7 +337,23 @@ class TestServerTools(unittest.TestCase):
 
     def test_consolidate_captures_validates_limits(self):
         self.assertIn("max_captures must be at least 1", server.consolidate_captures(max_captures=0))
+        self.assertIn(
+            "max_captures must be at most",
+            server.consolidate_captures(max_captures=26),
+        )
         self.assertIn("max_bytes must be at least 512", server.consolidate_captures(max_bytes=511))
+        self.assertIn(
+            "at most 25 capture IDs",
+            server.consolidate_captures(["missing"] * 26),
+        )
+        self.assertIn(
+            "capture_ids must be a list",
+            server.consolidate_captures("missing"),
+        )
+        self.assertIn(
+            "capture_ids must contain strings",
+            server.consolidate_captures([123]),
+        )
         server.engine.max_buffer_bytes = 512
         self.assertIn("exceeds the configured buffer limit", server.consolidate_captures(max_bytes=513))
 
@@ -572,8 +595,11 @@ class TestServerTools(unittest.TestCase):
 
             result = server.capture_file(str(file_path))
 
-        self.assertIn("Captured into ID", result)
-        self.assertIn("capture.log", result)
+        summary = json.loads(result)
+        self.assertEqual(summary["status"], "captured")
+        self.assertEqual(summary["source"], "file")
+        self.assertEqual(summary["label"], "capture.log")
+        self.assertNotIn("previews", summary)
 
     def test_capture_text_formats_diff_metadata(self):
         diff = """diff --git a/old.txt b/new.txt
@@ -585,8 +611,9 @@ class TestServerTools(unittest.TestCase):
 """
         result = server.capture_text(diff, label="patch", content_type="diff")
 
-        self.assertIn("Unified Diff", result)
-        self.assertIn("new.txt", result)
+        summary = json.loads(result)
+        self.assertEqual(summary["content_type"], "diff")
+        self.assertIn("new.txt", summary["diff"]["file_map"])
 
     def test_execute_reports_failed_and_truncated_command(self):
         output = "x" * 700
@@ -597,8 +624,59 @@ class TestServerTools(unittest.TestCase):
         ):
             result = server.execute_and_capture("failing-command", max_output_bytes=1024)
 
-        self.assertIn("FAILED (Exit Code 7)", result)
-        self.assertIn("truncated from 700 bytes", result)
+        summary = json.loads(result)
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["exit_code"], 7)
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(summary["original_byte_size"], 700)
+        self.assertEqual(summary["original_estimated_tokens"], 175)
+        self.assertEqual(summary["source"], "command")
+
+    def test_execute_bounds_long_command_metadata(self):
+        command = "echo " + ("x" * 10_000)
+        with patch.object(
+            server,
+            "run_command_bounded",
+            return_value=("output", 0, False, 6, False),
+        ):
+            result = json.loads(server.execute_and_capture(command))
+
+        self.assertLessEqual(
+            len(result["command"].encode("utf-8")),
+            server.SUMMARY_COMMAND_MAX_BYTES,
+        )
+        self.assertTrue(result["command_truncated"])
+        self.assertTrue(result["command"].endswith(server.SUMMARY_COMMAND_TRUNCATION_MARKER))
+
+    def test_invalid_command_metrics_are_rejected_before_execution(self):
+        with patch.object(server, "run_command_bounded") as run:
+            result = server.execute_and_capture(
+                "would-not-run",
+                structured_metrics={"value": float("nan")},
+            )
+
+        self.assertIn("Error: invalid structured_metrics", result)
+        run.assert_not_called()
+
+    def test_invalid_file_metrics_are_rejected_before_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file_path = Path(directory) / "capture.log"
+            file_path.write_text("file content", encoding="utf-8")
+            with patch.object(server, "read_file_bounded") as read:
+                result = server.capture_file(
+                    str(file_path),
+                    structured_metrics={"value": float("nan")},
+                )
+
+        self.assertIn("Error: invalid structured_metrics", result)
+        read.assert_not_called()
+
+    def test_invalid_text_metrics_are_rejected_at_capture_boundary(self):
+        result = server.capture_text(
+            "would-not-ingest",
+            structured_metrics={"value": float("nan")},
+        )
+        self.assertIn("Error: invalid structured_metrics", result)
 
     def test_execute_formats_diff_command_response(self):
         diff = "diff --git a/old.txt b/new.txt\n--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-old\n+new\n"
@@ -609,9 +687,9 @@ class TestServerTools(unittest.TestCase):
         ):
             result = server.execute_and_capture("git diff", max_output_bytes=1024)
 
-        self.assertIn("Type: Unified Diff", result)
-        self.assertIn("Modified Files Map", result)
-        self.assertIn("new.txt", result)
+        summary = json.loads(result)
+        self.assertEqual(summary["content_type"], "diff")
+        self.assertIn("new.txt", summary["diff"]["file_map"])
 
     def test_search_and_read_tools_report_missing_and_empty_results(self):
         self.assertIn("Search Error", server.search_capture("query", capture_id="missing"))
@@ -666,9 +744,11 @@ class TestServerTools(unittest.TestCase):
                 "signals_summary": "None (Clean patch)",
             },
         ):
-            summary = server.get_capture_summary("cap")
-        self.assertIn("Modified Files Map", summary)
-        self.assertIn("truncated from 20 bytes", summary)
+            summary = json.loads(server.get_capture_summary("cap"))
+        self.assertEqual(summary["schema_version"], 1)
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(summary["original_byte_size"], 20)
+        self.assertIn("new.txt", summary["diff"]["file_map"])
 
         with patch.object(
             server.engine,
@@ -680,9 +760,140 @@ class TestServerTools(unittest.TestCase):
                 "head_preview": "head", "tail_preview": "tail",
             },
         ):
-            regular = server.get_capture_summary("cap")
-        self.assertIn("Head (First 5 lines)", regular)
-        self.assertIn("tail", regular)
+            regular = json.loads(server.get_capture_summary("cap", include_previews=True))
+        self.assertEqual(regular["previews"], {"head": "head", "tail": "tail"})
+
+    def test_capture_summary_includes_warnings_metrics_and_token_estimate(self):
+        result = server.capture_text(
+            "2 tests passed\nWARNING: slow test\nOK",
+            label="test-log",
+            content_type="log",
+            structured_metrics={"tests": 2, "duration_ms": 12.5},
+        )
+
+        summary = json.loads(result)
+        self.assertEqual(summary["schema_version"], 1)
+        self.assertEqual(summary["status"], "captured")
+        self.assertEqual(summary["warnings"], [{"type": "warning", "count": 1}])
+        self.assertEqual(summary["structured_metrics"]["tests"], 2)
+        self.assertGreater(summary["estimated_tokens"], 0)
+        self.assertNotIn("previews", summary)
+
+        detailed = json.loads(
+            server.get_capture_summary(summary["capture_id"], include_previews=True)
+        )
+        self.assertIn("previews", detailed)
+        self.assertLess(len(result), len(json.dumps(detailed, separators=(",", ":"))))
+
+    def test_summary_response_reduces_prompt_proxy_for_representative_outcomes(self):
+        cases = {
+            "success": ("completed\n" * 3, 0, False, 27, False),
+            "failure": ("ERROR: command failed\n" * 3, 1, False, 66, False),
+            "noisy": ("log line with useful context\n" * 500, 0, False, 15_000, False),
+            "truncated": ("retained output\n" * 20, 1, True, 80_000, False),
+            "timed_out": ("partial output\n" * 3, 124, False, 45, True),
+        }
+        reductions = {}
+        for name, (output, exit_code, truncated, original_size, timed_out) in cases.items():
+            with patch.object(
+                server,
+                "run_command_bounded",
+                return_value=(output, exit_code, truncated, original_size, timed_out),
+            ):
+                compact = server.execute_and_capture(
+                    f"representative-{name}",
+                    content_type="log",
+                    max_output_bytes=1024,
+                )
+            compact_payload = json.loads(compact)
+            detailed = server.get_capture_summary(
+                compact_payload["capture_id"],
+                include_previews=True,
+            )
+            compact_proxy = math.ceil(len(compact.encode("utf-8")) / 4)
+            detailed_proxy = math.ceil(len(detailed.encode("utf-8")) / 4)
+            self.assertLess(compact_proxy, detailed_proxy, name)
+            reductions[name] = detailed_proxy - compact_proxy
+
+        self.assertEqual(set(reductions), set(cases))
+        self.assertGreater(reductions["noisy"], reductions["success"])
+
+    def test_summary_payload_preserves_engine_errors(self):
+        self.assertEqual(
+            server._summary_payload({"status": "error", "message": "missing"}),
+            {"status": "error", "message": "missing"},
+        )
+
+    def test_diff_summary_bounds_large_file_maps(self):
+        file_map = "\n".join(
+            f"  - file-{index:05d}.txt (+1, -0) | Buffer Lines: L1-L2"
+            for index in range(10_000)
+        )
+        payload = server._summary_payload({
+            "status": "ok",
+            "schema_version": 1,
+            "capture_id": "cap-diff",
+            "label": "large diff",
+            "source": "capture_text",
+            "execution_status": "captured",
+            "partial": False,
+            "content_type": "diff",
+            "timestamp": "now",
+            "duration_ms": 1.0,
+            "command_exit_code": None,
+            "timed_out": False,
+            "total_lines": 20_000,
+            "byte_size": 500_000,
+            "original_byte_size": None,
+            "estimated_tokens": 125_000,
+            "original_estimated_tokens": None,
+            "truncated": False,
+            "keyword_signals": {},
+            "errors": [],
+            "warnings": [],
+            "structured_metrics": {},
+            "diff_stats": "10,000 files",
+            "file_map": file_map,
+        })
+        self.assertLessEqual(
+            len(payload["diff"]["file_map"].encode("utf-8")),
+            server.SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
+        )
+        self.assertTrue(payload["diff"]["file_map_truncated"])
+        self.assertGreater(payload["diff"]["omitted_file_count"], 0)
+
+        structured_bounded, structured_omitted = server._bounded_diff_file_map(
+            "unused legacy map",
+            {
+                "files": [
+                    {
+                        "path": "added.py",
+                        "status": "added",
+                        "additions": 3,
+                        "deletions": 0,
+                        "start_line": 1,
+                        "end_line": 6,
+                    }
+                    for _ in range(server.SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES + 1)
+                ]
+            },
+        )
+        self.assertIn("added.py [ADDED]", structured_bounded)
+        self.assertEqual(structured_omitted, 1)
+
+        bounded, omitted = server._bounded_diff_file_map(
+            "x" * (server.SUMMARY_DIFF_FILE_MAP_MAX_BYTES - 1) + "\nsmall"
+        )
+        self.assertLessEqual(
+            len(bounded.encode("utf-8")), server.SUMMARY_DIFF_FILE_MAP_MAX_BYTES
+        )
+        self.assertEqual(omitted, 2)
+
+        with patch.object(server, "SUMMARY_DIFF_FILE_MAP_MAX_BYTES", 10):
+            bounded, omitted = server._bounded_diff_file_map("long line\nsmall")
+        self.assertLessEqual(len(bounded.encode("utf-8")), 10)
+        self.assertGreater(len(bounded.encode("utf-8")), 0)
+        self.assertEqual(omitted, 2)
 
     def test_search_capture_discloses_semantic_fallback(self):
         response = {
@@ -705,6 +916,49 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Mode: hybrid; lexical fallback (RuntimeError)", result)
         self.assertIn("Semantic fallback active (RuntimeError)", result)
+
+    def test_context_responses_bound_long_labels(self):
+        long_label = "label-" + ("x" * 10_000)
+        summary = json.loads(server.capture_text("needle content", label=long_label))
+        capture_id = summary["capture_id"]
+
+        responses = [
+            server.list_captures(),
+            server.search_capture("needle", mode="bm25", capture_id=capture_id),
+            server.search_capture("missing", mode="bm25", capture_id=capture_id),
+            server.get_capture_slice(1, 1, capture_id=capture_id),
+        ]
+        for response in responses:
+            self.assertLessEqual(
+                len(response.encode("utf-8")),
+                3 * server.SUMMARY_LABEL_MAX_BYTES,
+            )
+            self.assertNotIn(long_label, response)
+            self.assertIn(server.SUMMARY_LABEL_TRUNCATION_MARKER, response)
+
+        long_query = "q" * 100_000
+        for mode in ("bm25", "hybrid", "semantic"):
+            response = server.search_capture(long_query, mode=mode, capture_id=capture_id)
+            self.assertEqual(
+                response,
+                f"Search Error: query exceeds the {server.SEARCH_QUERY_MAX_BYTES:,}-byte limit",
+            )
+        self.assertEqual(
+            server.search_capture(None, mode="bm25", capture_id=capture_id),
+            "Search Error: query must be a string",
+        )
+
+    def test_context_errors_bound_long_capture_ids(self):
+        long_id = "z" * 100_000
+        summary_error = server.get_capture_summary(long_id)
+        consolidation_error = server.consolidate_captures([long_id], max_bytes=512)
+
+        for response in (summary_error, consolidation_error):
+            self.assertLessEqual(
+                len(response.encode("utf-8")),
+                3 * server.SUMMARY_LABEL_MAX_BYTES,
+            )
+            self.assertNotIn(long_id, response)
 
     def test_empty_and_populated_capture_listing(self):
         self.assertIn("buffer is empty", server.list_captures())
@@ -791,13 +1045,98 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             line_count=1,
             byte_size=5,
         )
-        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+        ):
             writer = await self.run_handler(payload)
 
         response = response_json(writer)
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "socket-test")
         self.assertTrue(writer.closed)
+
+    async def test_socket_response_includes_compact_summary(self):
+        payload = encode_frame(json.dumps({"label": "socket-summary", "text": "hello"}).encode())
+        capture = SimpleNamespace(
+            capture_id="cap_socket_summary",
+            label="socket-summary",
+            line_count=1,
+            byte_size=5,
+        )
+        summary = {
+            "status": "ok",
+            "schema_version": 1,
+            "capture_id": "cap_socket_summary",
+            "label": "socket-summary",
+            "source": "socket",
+            "execution_status": "captured",
+            "partial": False,
+            "content_type": "text",
+            "timestamp": "now",
+            "duration_ms": 1.0,
+            "command_exit_code": None,
+            "timed_out": False,
+            "total_lines": 1,
+            "byte_size": 5,
+            "original_byte_size": None,
+            "estimated_tokens": 2,
+            "original_estimated_tokens": None,
+            "truncated": False,
+            "keyword_signals": {},
+            "errors": [],
+            "warnings": [],
+            "structured_metrics": {},
+        }
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=[capture, summary]),
+        ):
+            writer = await self.run_handler(payload)
+
+        response = response_json(writer)
+        self.assertEqual(response["summary"]["schema_version"], 1)
+        self.assertEqual(response["summary"]["status"], "captured")
+        self.assertNotIn("previews", response["summary"])
+
+    async def test_socket_response_bounds_long_command_label(self):
+        long_label = "x" * 10_000
+        payload = encode_frame(json.dumps({"label": long_label, "text": "hello"}).encode())
+        capture = SimpleNamespace(
+            capture_id="cap_long_label",
+            label=long_label,
+            line_count=1,
+            byte_size=5,
+        )
+        summary = {
+            "status": "ok",
+            "schema_version": 1,
+            "capture_id": "cap_long_label",
+            "label": long_label,
+            "source": "socket",
+            "content_type": "text",
+            "total_lines": 1,
+            "byte_size": 5,
+        }
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=[capture, summary]),
+        ):
+            writer = await self.run_handler(payload)
+
+        response = response_json(writer)
+        self.assertLessEqual(
+            len(response["label"].encode("utf-8")),
+            server.SUMMARY_LABEL_MAX_BYTES,
+        )
+        self.assertTrue(response["summary"]["label_truncated"])
+        self.assertLessEqual(
+            len(json.dumps(response).encode("utf-8")),
+            3 * server.SUMMARY_LABEL_MAX_BYTES,
+        )
 
     async def test_socket_byte_metrics_count_framed_request_and_response(self):
         original_metrics = server.METRICS
@@ -811,7 +1150,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 line_count=1,
                 byte_size=5,
             )
-            with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+            with patch.object(
+                server,
+                "to_thread",
+                new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+            ):
                 writer = await self.run_handler(payload)
         finally:
             server.METRICS = original_metrics
@@ -829,7 +1172,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             byte_size=16,
         )
         writer = FakeWriter()
-        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+        ):
             await server.handle_socket_client(
                 ChunkedReader(payload[:7], payload[7:]),
                 writer,
@@ -853,7 +1200,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             line_count=1,
             byte_size=server.engine.max_buffer_bytes,
         )
-        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+        ):
             writer = await self.run_handler(payload)
 
         response = response_json(writer)
@@ -909,11 +1260,17 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=capture),
+            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
         ) as offload:
             await self.run_handler(payload)
 
-        offload.assert_awaited_once()
+        self.assertEqual(offload.await_count, 2)
+        summary_callable = offload.await_args_list[1].args[0]
+        self.assertIs(summary_callable.__self__, server.engine)
+        self.assertIs(summary_callable.__func__, server.engine.get_summary_for_capture.__func__)
+        self.assertEqual(offload.await_args_list[1].kwargs, {
+            "include_previews": False,
+        })
 
     async def test_oversized_payload_returns_error_response(self):
         payload = encode_frame(b"x" * (
@@ -942,7 +1299,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             line_count=1,
             byte_size=8,
         )
-        with patch.object(server, "to_thread", new=AsyncMock(return_value=capture)):
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+        ):
             writer = await self.run_handler(encode_frame(b"not-json"))
 
         response = response_json(writer)
@@ -984,6 +1345,28 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.engine.captures, {})
         self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
 
+    async def test_invalid_socket_metrics_return_error_without_capturing_envelope(self):
+        payload = encode_frame(json.dumps({
+            "label": "invalid-metrics",
+            "text": "payload",
+            "structured_metrics": ["not", "an", "object"],
+        }).encode())
+
+        writer = await self.run_handler(payload)
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertIn("JSON object", response["message"])
+        self.assertEqual(server.engine.captures, {})
+
+    async def test_non_object_json_payload_returns_error_without_capturing(self):
+        writer = await self.run_handler(encode_frame(b"[]"))
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertIn("JSON object", response["message"])
+        self.assertEqual(server.engine.captures, {})
+
     async def test_truncated_frame_returns_error_response(self):
         writer = await self.run_handler(FRAME_MAGIC + b"\x01\x00")
         response = response_json(writer)
@@ -998,6 +1381,12 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_disabled_socket_import_marks_startup_event_ready(self):
+        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}):
+            namespace = runpy.run_path(server.__file__, run_name="server_disabled_import")
+
+        self.assertTrue(namespace["_SOCKET_STARTUP_EVENT"].is_set())
+
     def test_import_does_not_start_socket_listener(self):
         with patch.dict(os.environ, {
                 "EPHEMERAL_DISABLE_SOCKET_SERVER": "0",
