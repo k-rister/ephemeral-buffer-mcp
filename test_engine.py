@@ -13,6 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 from engine import (
+    Capture,
     EphemeralEngine,
     PREVIEW_MAX_BYTES,
     SEARCH_SNIPPET_MAX_BYTES,
@@ -21,6 +22,8 @@ from engine import (
     _parse_git_diff_paths,
     detect_content_type,
     detect_signals,
+    estimate_tokens,
+    estimate_tokens_from_bytes,
     parse_unified_diff,
     process_rss_bytes,
     sqlite_fts5_available,
@@ -28,6 +31,33 @@ from engine import (
 
 
 class TestEngineClassification(unittest.TestCase):
+    def test_capture_preserves_legacy_positional_field_order(self):
+        capture = Capture(
+            "cap-legacy",
+            "legacy",
+            0.0,
+            [],
+            0,
+            [],
+            None,
+            None,
+            "text",
+            None,
+            False,
+            None,
+            None,
+            False,
+            "not-requested",
+            0,
+            False,
+        )
+        self.assertEqual(capture.semantic_index_state, "not-requested")
+        self.assertEqual(capture.active_readers, 0)
+        self.assertFalse(capture.storage_close_pending)
+        self.assertEqual(capture.source, "capture")
+        self.assertIsNone(capture.duration_ms)
+        self.assertEqual(capture.structured_metrics, {})
+
     def test_preview_budget_smaller_than_marker_remains_bounded(self):
         preview = _bounded_preview("content", max_bytes=1)
         self.assertLessEqual(len(preview.encode("utf-8")), 1)
@@ -143,6 +173,18 @@ class TestEngineClassification(unittest.TestCase):
             detect_signals(["2 tests passed", "OK"], "log"),
             ({}, "None (successful test run)"),
         )
+        self.assertEqual(
+            detect_signals(["2 tests passed", "WARNING: slow test", "OK"], "log"),
+            ({"warning": 1}, "warning: 1"),
+        )
+        self.assertEqual(
+            detect_signals(["2 tests passed", "2 warnings", "OK"], "log"),
+            ({"warning": 1}, "warning: 1"),
+        )
+        self.assertEqual(
+            detect_signals(["2 tests passed", "0 warnings", "OK"], "log"),
+            ({}, "None (successful test run)"),
+        )
         timeout_signals, timeout_summary = detect_signals(
             ["command stopped"], "log", command_exit_code=0, timed_out=True
         )
@@ -164,6 +206,14 @@ class TestEngineClassification(unittest.TestCase):
         )
         self.assertEqual(mixed_signals, {"failure": 1})
         self.assertEqual(mixed_summary, "failure: 1")
+
+    def test_token_estimates_are_deterministic_and_null_safe(self):
+        self.assertEqual(estimate_tokens(""), 0)
+        self.assertEqual(estimate_tokens("abcd"), 1)
+        self.assertEqual(estimate_tokens("abcde"), 2)
+        self.assertEqual(estimate_tokens_from_bytes(None), None)
+        self.assertEqual(estimate_tokens_from_bytes(0), 0)
+        self.assertEqual(estimate_tokens_from_bytes(9), 3)
 
     def test_storage_cleanup_ignores_captures_without_storage(self):
         engine = EphemeralEngine(max_captures=1)
@@ -407,6 +457,18 @@ STEP 3: Summary
         self.assertEqual(result_holder["result"]["status"], "ok")
         self.assertEqual(result_holder["result"]["match_count"], 1)
 
+    def test_summary_for_capture_survives_lru_eviction(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("first capture", label="first")
+
+        engine.ingest("replacement capture", label="replacement")
+
+        self.assertEqual(engine.get_summary(capture.capture_id)["status"], "error")
+        summary = engine.get_summary_for_capture(capture, include_previews=False)
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["capture_id"], capture.capture_id)
+        self.assertEqual(summary["label"], "first")
+
     def test_04_slice_and_summary(self):
         lines = [f"Log line number {i}" for i in range(1, 101)]
         lines[49] = "FATAL: System ran out of file descriptors"
@@ -417,6 +479,15 @@ STEP 3: Summary
         self.assertEqual(summary["total_lines"], 100)
         self.assertIn("error", summary["keyword_signals"])
         self.assertEqual(summary["keyword_signals"]["error"], 1)
+        self.assertEqual(summary["schema_version"], 1)
+        self.assertEqual(summary["execution_status"], "captured")
+        self.assertEqual(summary["partial"], False)
+        self.assertIsInstance(summary["duration_ms"], float)
+        self.assertGreater(summary["estimated_tokens"], 0)
+        self.assertEqual(summary["errors"], [{"type": "error", "count": 1}])
+        compact = self.engine.get_summary(cap.capture_id, include_previews=False)
+        self.assertNotIn("head_preview", compact)
+        self.assertNotIn("tail_preview", compact)
 
         # Test slice around line 50
         slice_res = self.engine.get_slice(48, 52, capture_id=cap.capture_id)
@@ -439,6 +510,42 @@ STEP 3: Summary
             self.engine.get_slice(1, 1, capture_id=cap.capture_id)["content"],
             f"      1 | {long_line}",
         )
+
+    def test_ingest_validates_and_preserves_structured_metrics(self):
+        engine = EphemeralEngine(max_captures=2)
+        capture = engine.ingest(
+            "metric output",
+            source="command",
+            duration_ms=12.5,
+            structured_metrics={"tests": {"passed": 2}},
+        )
+        summary = engine.get_summary(capture.capture_id)
+        self.assertEqual(summary["source"], "command")
+        self.assertEqual(summary["duration_ms"], 12.5)
+        self.assertEqual(summary["structured_metrics"], {"tests": {"passed": 2}})
+
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            engine.ingest("invalid", structured_metrics=[])
+        with self.assertRaisesRegex(ValueError, "JSON-compatible"):
+            engine.ingest("invalid", structured_metrics={"value": float("nan")})
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            engine.ingest("invalid", structured_metrics={"value": "x" * 17_000})
+        with self.assertRaisesRegex(ValueError, "duration_ms"):
+            engine.ingest("invalid", duration_ms="12")
+        with self.assertRaisesRegex(ValueError, "duration_ms"):
+            engine.ingest("invalid", duration_ms=-1)
+        with self.assertRaisesRegex(ValueError, "source"):
+            engine.ingest("invalid", source="")
+
+    def test_ingest_preserves_positional_protected_capture_compatibility(self):
+        engine = EphemeralEngine(max_captures=2)
+        source = engine.ingest("source capture")
+        combined = engine.ingest(
+            "combined capture", "combined", "text", False, None, None, False,
+            [source.capture_id],
+        )
+        self.assertEqual(combined.label, "combined")
+        self.assertIn(source.capture_id, engine.captures)
 
     def test_05_lru_buffer_eviction(self):
         # max_captures is 3 for this focused eviction test

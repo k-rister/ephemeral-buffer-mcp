@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmark_effectiveness import (
     run_ab_evaluation,
@@ -9,10 +10,12 @@ from benchmark_effectiveness import (
     run_benchmark,
     run_consolidation_benchmark,
     run_mcp,
+    run_summary_benchmark,
     scenarios,
     write_results,
 )
 from engine import EphemeralEngine
+import server
 
 
 class TestEffectivenessBenchmark(unittest.TestCase):
@@ -83,6 +86,47 @@ class TestEffectivenessBenchmark(unittest.TestCase):
     def test_consolidation_benchmark_rejects_non_positive_repetitions(self):
         with self.assertRaises(ValueError):
             run_consolidation_benchmark(repetitions=0)
+
+    def test_summary_benchmark_measures_representative_capture_outcomes(self):
+        record = run_summary_benchmark()
+        self.assertEqual(record["benchmark"], "capture-summary")
+        self.assertEqual(record["aggregate"]["task_count"], 5)
+        self.assertGreater(record["aggregate"]["mean_byte_reduction"], 0)
+        self.assertGreater(record["aggregate"]["mean_token_proxy_reduction"], 0)
+        self.assertGreater(record["aggregate"]["mean_prompt_byte_reduction"], 0)
+        self.assertGreater(record["aggregate"]["mean_prompt_token_proxy_reduction"], 0)
+        self.assertTrue(all(item["full_output_available_for_retrieval"] for item in record["records"]))
+        self.assertTrue(all(item["retrieval_verified"] for item in record["records"]))
+        self.assertTrue(all(item["payload_shapes_aligned"] for item in record["records"]))
+        self.assertEqual(
+            {item["task_id"] for item in record["records"]},
+            {"successful-test", "failed-test", "noisy-build", "truncated-command", "timed-out-command"},
+        )
+
+    def test_summary_benchmark_preserves_caller_engine_on_success_and_failure(self):
+        original_engine = EphemeralEngine(
+            max_captures=2,
+            embedding_warmup=False,
+            semantic_prefetch=False,
+        )
+        previous_engine = server.engine
+        server.engine = original_engine
+        try:
+            capture = original_engine.ingest("caller capture", label="caller")
+            run_summary_benchmark()
+            self.assertIs(server.engine, original_engine)
+            self.assertIsNotNone(original_engine.get_capture(capture.capture_id))
+            with patch(
+                "benchmark_effectiveness.server.execute_and_capture",
+                side_effect=RuntimeError("benchmark failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "benchmark failure"):
+                    run_summary_benchmark()
+            self.assertIs(server.engine, original_engine)
+            self.assertIsNotNone(original_engine.get_capture(capture.capture_id))
+        finally:
+            server.engine = previous_engine
+            original_engine.shutdown()
 
 
 if __name__ == "__main__":

@@ -141,10 +141,16 @@ export EPHEMERAL_MAX_BUFFER_BYTES=$((100 * 1024 * 1024))
 
 `execute_and_capture` and `capture_file` reject per-request limits above the
 configured byte budget. Oversized command output is retained as a bounded
-head/tail sample and marked as truncated. Each head or tail preview returned
-to the agent is independently capped at 4 KiB of UTF-8 data; use
-`get_capture_summary` followed by `get_capture_slice` to inspect complete
-content. The summary also reports the original size and truncation state.
+head/tail sample and marked as truncated. Capture tools return a compact
+versioned JSON summary with status, duration, retained and original sizes,
+deterministic approximate token counts, truncation and partial-execution
+flags, typed warning/error signals, and optional structured metrics. The
+default summary omits previews; set `include_previews=True` on
+`get_capture_summary` when a bounded sample is needed. Each head or tail
+preview is capped at 4 KiB of UTF-8 data. Use `search_capture` or
+`get_capture_slice` for complete content. Diff file maps are bounded in the
+summary and report omitted entries; retrieve the underlying diff slices for a
+complete file map.
 
 Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 `ephbuf` when a command might block or run indefinitely. A timed-out command is
@@ -155,8 +161,10 @@ the command deadline: the process is still awaited until it exits or the
 requested deadline expires. Without a timeout, completion is awaited normally.
 
 Signal summaries recognize successful test-run markers and avoid treating
-example error text inside a passing test run as an active failure. The complete
-captured output remains available through search and slices.
+example error text inside a passing test run as an active failure while still
+reporting explicit warnings. The complete captured output remains available
+through search and slices. Approximate token counts are planning metrics based
+on four UTF-8 bytes per token, not provider-reported usage.
 
 Use `clear_captures("all")` between unrelated investigations when the active
 buffer should be released immediately instead of waiting for LRU eviction.

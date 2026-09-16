@@ -364,19 +364,51 @@ The agent has access to the following tools:
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None)` | Executes a shell command with bounded head/tail capture, optional timeout, and a compact diagnostic summary (exit code, diff file map, error signals, and truncation status) to the agent context. |
+| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. |
 | `preflight_command(command, cwd=None)` | Performs content-free path, symlink, local Git-root, and executable-resolution diagnostics without executing the requested command. |
-| `capture_text(content, label, content_type='auto')` | Ingests text directly into the buffer. |
-| `capture_file(file_path, label, content_type='auto', max_bytes=None)` | Ingests a bounded log/output file from disk; defaults to the configured buffer byte limit. |
+| `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
+| `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded log/output file from disk and returns the same compact summary schema. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, and line numbers. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
-| `get_capture_summary(capture_id)` | Diagnostic overview (line counts, diff file maps, error signals, preview). |
+| `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
+
+Capture tools return a compact JSON summary so an agent can decide whether it
+needs the full output before spending context on retrieval. The summary uses
+`schema_version: 1` and includes `status` (`captured`, `success`, `failed`, or
+`timed_out`), `duration_ms`, retained and original byte sizes, approximate
+token counts, truncation and partial-execution flags, typed warning/error
+signals, and bounded caller-provided `structured_metrics`. The token values
+are deterministic planning estimates based on four UTF-8 bytes per token;
+they are not provider billing counts. Use `get_capture_summary` for the
+compact form, set `include_previews=True` only when a head/tail sample is
+useful, and use `get_capture_slice` or `search_capture` for complete or
+targeted content. Diff file maps are also bounded and report omitted entries;
+use `get_capture_slice` for the complete diff. Raw retained captures are
+unchanged by summary generation.
+
+The deterministic summary benchmark measures the initial agent-prompt
+reduction for representative successful, failed, noisy, truncated, and
+timed-out captures. It exercises the public capture API, compares a
+parent-contract formatted-text response with the current compact
+summary-first decision prompt, and verifies through the public slice API that
+retained output can still be retrieved unchanged. The parent response is
+reconstructed from the prior `execute_and_capture` contract; the current path
+uses the public compact response. The proxy divides UTF-8 prompt bytes by four
+and is intended for regression comparison, not provider billing or exact
+token accounting. Execution summaries also bound command and label metadata
+so unusually long shell commands cannot re-expand the initial response.
+
+To generate the machine-readable benchmark record:
+
+```bash
+.venv/bin/python benchmark_effectiveness.py --summary --output /tmp/capture-summary.json
+```
 
 Choose the execution path based on the output and inspection goal:
 

@@ -8,6 +8,7 @@ import sys
 import time
 import logging
 import re
+import math
 import hashlib
 import sqlite3
 import threading
@@ -42,6 +43,9 @@ PREVIEW_MAX_BYTES = 4 * 1024
 PREVIEW_TRUNCATION_MARKER = "\n... [preview truncated; use get_capture_slice for full content] ..."
 SEARCH_SNIPPET_MAX_BYTES = 8 * 1024
 SEARCH_SNIPPET_TRUNCATION_MARKER = "... [search line truncated; use get_capture_slice for full content] ..."
+SUMMARY_SCHEMA_VERSION = 1
+TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
+MAX_STRUCTURED_METRICS_BYTES = 16 * 1024
 
 
 def sqlite_fts5_available() -> bool:
@@ -94,6 +98,66 @@ def _bounded_preview(
     return prefix + marker
 
 
+def estimate_tokens(text: str) -> int:
+    """Return a deterministic approximate token count for retained text.
+
+    This intentionally avoids a provider-specific tokenizer. Four UTF-8 bytes
+    per token is a conservative planning estimate, not a billable token count.
+    """
+    if not text:
+        return 0
+    return estimate_tokens_from_bytes(len(text.encode("utf-8")))
+
+
+def estimate_tokens_from_bytes(byte_count: Optional[int]) -> Optional[int]:
+    """Return the approximate token count for a byte count, preserving null."""
+    if byte_count is None:
+        return None
+    if byte_count <= 0:
+        return 0
+    return math.ceil(byte_count / TOKEN_ESTIMATE_BYTES_PER_TOKEN)
+
+
+def normalize_structured_metrics(metrics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate and detach bounded JSON-compatible tool metrics."""
+    if metrics is None:
+        return {}
+    if not isinstance(metrics, dict):
+        raise ValueError("structured_metrics must be a JSON object or null")
+    try:
+        encoded = json.dumps(
+            metrics,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("structured_metrics must contain JSON-compatible values") from exc
+    if len(encoded) > MAX_STRUCTURED_METRICS_BYTES:
+        raise ValueError(
+            f"structured_metrics exceeds the {MAX_STRUCTURED_METRICS_BYTES:,}-byte limit"
+        )
+    return json.loads(encoded.decode("utf-8"))
+
+
+def _capture_execution_status(capture: "Capture") -> str:
+    """Return the stable execution status exposed by the summary schema."""
+    if capture.timed_out:
+        return "timed_out"
+    if capture.command_exit_code is None:
+        return "captured"
+    return "success" if capture.command_exit_code == 0 else "failed"
+
+
+def _signal_details(signals: Dict[str, int], names: set[str]) -> List[Dict[str, int | str]]:
+    """Return stable typed signal details for the public summary."""
+    return [
+        {"type": name, "count": signals[name]}
+        for name in sorted(names)
+        if name in signals
+    ]
+
+
 def process_rss_bytes() -> Optional[int]:
     """Return current process RSS, when the host exposes it."""
     try:
@@ -122,7 +186,9 @@ DIFF_GIT_RE = re.compile(r"^diff --git (.+)$")
 DIFF_PATH_TOKEN_RE = re.compile(r'"(?:\\.|[^"])*"|[^\s]+')
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 BENIGN_SIGNAL_RE = re.compile(
-    r"(\b0\s*(errors?|failures?|failed)\b|\b(errors?|failures?|failed)\s*[:=]\s*0\b|\bno\s+errors?\b)",
+    r"(\b0\s*(errors?|failures?|failed|warnings?)\b|"
+    r"\b(errors?|failures?|failed|warnings?)\s*[:=]\s*0\b|"
+    r"\bno\s+(?:errors?|warnings?)\b)",
     re.IGNORECASE
 )
 LOG_SIGNAL_PATTERNS = {
@@ -130,6 +196,7 @@ LOG_SIGNAL_PATTERNS = {
     "exception": re.compile(r"\b(EXCEPTION|TRACEBACK)\b", re.IGNORECASE),
     "failure": re.compile(r"\b(FAILED|FAILURES?)\b", re.IGNORECASE),
     "timeout": re.compile(r"\b(TIMED\s*OUT|TIMEOUT)\b", re.IGNORECASE),
+    "warning": re.compile(r"\b(WARN(?:ING)?S?)\b", re.IGNORECASE),
 }
 SUCCESS_TEST_RE = re.compile(
     r"(?:^\s*OK\s*$|\b\d+\s+(?:tests?|cases?)\s+.*\bOK\b|\b\d+\s+(?:tests?|cases?)\s+passed\b|\b\d+\s+passed\b)",
@@ -361,6 +428,13 @@ def detect_signals(
         and any(SUCCESS_TEST_RE.search(line) for line in lines)
         and not any(NONZERO_TEST_FAILURE_RE.search(line) for line in lines)
     ):
+        warning_hits = 0
+        for line in lines:
+            signal_line = BENIGN_SIGNAL_RE.sub("", line)
+            if LOG_SIGNAL_PATTERNS["warning"].search(signal_line):
+                warning_hits += 1
+        if warning_hits:
+            return ({"warning": warning_hits}, f"warning: {warning_hits}")
         return ({}, "None (successful test run)")
 
     detected = {}
@@ -413,6 +487,11 @@ class Capture:
     semantic_index_state: str = "not-requested"
     active_readers: int = 0
     storage_close_pending: bool = False
+    # Append summary metadata after the legacy fields so positional Capture
+    # construction remains compatible with the pre-summary data model.
+    source: str = "capture"
+    duration_ms: Optional[float] = None
+    structured_metrics: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def line_count(self) -> int:
@@ -683,6 +762,10 @@ class EphemeralEngine:
         command_exit_code: Optional[int] = None,
         timed_out: bool = False,
         protected_capture_ids: Optional[List[str]] = None,
+        *,
+        source: str = "capture",
+        duration_ms: Optional[float] = None,
+        structured_metrics: Optional[Dict[str, Any]] = None,
     ) -> Capture:
         """
         Ingests text, chunks it, and builds the SQLite FTS5 BM25 index.
@@ -690,6 +773,7 @@ class EphemeralEngine:
         or hybrid search first needs them. Automatically classifies content
         type (diff, log, text) and extracts structural metadata.
         """
+        ingest_started = time.perf_counter()
         lines = text.splitlines()
         capture_bytes = len(text.encode("utf-8"))
         if original_byte_size is not None:
@@ -697,6 +781,14 @@ class EphemeralEngine:
                 raise ValueError("original_byte_size must be a non-negative integer or null")
             if original_byte_size < 0:
                 raise ValueError("original_byte_size must be a non-negative integer or null")
+        if duration_ms is not None:
+            if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)):
+                raise ValueError("duration_ms must be a non-negative finite number or null")
+            if not math.isfinite(duration_ms) or duration_ms < 0:
+                raise ValueError("duration_ms must be a non-negative finite number or null")
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        normalized_metrics = normalize_structured_metrics(structured_metrics)
         with self._lock:
             capture_number = self._next_id
             capture_id = f"cap_{capture_number}"
@@ -754,6 +846,9 @@ class EphemeralEngine:
             original_byte_size=original_byte_size,
             command_exit_code=command_exit_code,
             timed_out=timed_out,
+            source=source,
+            duration_ms=duration_ms,
+            structured_metrics=normalized_metrics,
         )
 
         with self._lock:
@@ -818,6 +913,8 @@ class EphemeralEngine:
                 fts_conn.commit()
                 capture.fts_conn = fts_conn
 
+            if capture.duration_ms is None:
+                capture.duration_ms = round((time.perf_counter() - ingest_started) * 1000, 3)
             self.captures[capture_id] = capture
             self.capture_order[capture_id] = None
             self._total_bytes += capture.retained_byte_size
@@ -1323,31 +1420,14 @@ class EphemeralEngine:
             "content": "\n".join(lines_with_numbers)
         }
 
-    @synchronized
-    def get_summary(self, capture_id: str = "latest") -> Dict[str, Any]:
-        """
-        Generates a quick diagnostic summary of the capture.
-        """
-        capture = self.get_capture(capture_id)
-        if not capture:
-            return {"status": "error", "message": f"Capture '{capture_id}' not found."}
-
+    def _build_summary(self, capture: Capture, include_previews: bool = True) -> Dict[str, Any]:
+        """Build a summary from a captured object without looking it up by ID."""
         signals, signals_str = detect_signals(
             capture.raw_lines,
             capture.content_type,
             capture.diff_meta,
             capture.command_exit_code,
             capture.timed_out,
-        )
-
-        head_preview = _bounded_preview(
-            "\n".join(f"  {i+1:5d} | {line}" for i, line in enumerate(capture.raw_lines[:5]))
-        )
-        tail_preview = _bounded_preview(
-            "\n".join(
-                f"  {capture.line_count - len(capture.raw_lines[-5:]) + i + 1:5d} | {line}"
-                for i, line in enumerate(capture.raw_lines[-5:])
-            )
         )
 
         file_map_str = ""
@@ -1363,10 +1443,12 @@ class EphemeralEngine:
                 )
             file_map_str = "\n".join(files_lines)
 
-        return {
+        summary = {
             "status": "ok",
+            "schema_version": SUMMARY_SCHEMA_VERSION,
             "capture_id": capture.capture_id,
             "label": capture.label,
+            "source": capture.source,
             "content_type": capture.content_type,
             "diff_stats": diff_stats_str,
             "file_map": file_map_str,
@@ -1378,11 +1460,52 @@ class EphemeralEngine:
             "original_byte_size": capture.original_byte_size,
             "command_exit_code": capture.command_exit_code,
             "timed_out": capture.timed_out,
+            "execution_status": _capture_execution_status(capture),
+            "partial": capture.timed_out,
+            "duration_ms": capture.duration_ms,
+            "estimated_tokens": estimate_tokens_from_bytes(capture.byte_size),
+            "original_estimated_tokens": (
+                estimate_tokens_from_bytes(capture.original_byte_size)
+                if capture.original_byte_size is not None else None
+            ),
             "keyword_signals": signals,
             "signals_summary": signals_str,
-            "head_preview": head_preview,
-            "tail_preview": tail_preview
+            "errors": _signal_details(signals, {"error", "exception", "failure", "timeout", "conflicts"}),
+            "warnings": _signal_details(signals, {"warning"}),
+            "structured_metrics": dict(capture.structured_metrics),
         }
+        if include_previews:
+            summary["head_preview"] = _bounded_preview(
+                "\n".join(f"  {i+1:5d} | {line}" for i, line in enumerate(capture.raw_lines[:5]))
+            )
+            summary["tail_preview"] = _bounded_preview(
+                "\n".join(
+                    f"  {capture.line_count - len(capture.raw_lines[-5:]) + i + 1:5d} | {line}"
+                    for i, line in enumerate(capture.raw_lines[-5:])
+                )
+            )
+        return summary
+
+    @synchronized
+    def get_summary(self, capture_id: str = "latest", include_previews: bool = True) -> Dict[str, Any]:
+        """Generate a quick diagnostic summary for an active capture."""
+        capture = self.get_capture(capture_id)
+        if not capture:
+            return {"status": "error", "message": f"Capture '{capture_id}' not found."}
+        return self._build_summary(capture, include_previews=include_previews)
+
+    def get_summary_for_capture(
+        self,
+        capture: Capture,
+        include_previews: bool = True,
+    ) -> Dict[str, Any]:
+        """Build a summary from an ingestion result even after LRU eviction.
+
+        Ingestion callers retain the returned capture object. Reading that
+        snapshot avoids a lookup race where another capture evicts it before
+        the response summary is assembled.
+        """
+        return self._build_summary(capture, include_previews=include_previews)
 
     @synchronized
     def list_captures(self) -> List[Dict[str, Any]]:

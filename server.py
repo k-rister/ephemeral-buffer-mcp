@@ -8,6 +8,7 @@ import atexit
 import sys
 import json
 import asyncio
+from contextvars import ContextVar
 import socket
 import stat
 import threading
@@ -36,6 +37,7 @@ from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
     EphemeralEngine,
+    normalize_structured_metrics,
 )
 from capture_utils import read_file_bounded, run_command_bounded
 from logging_utils import get_logger, log_event
@@ -48,6 +50,16 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
 SEARCH_RESPONSE_MAX_BYTES = 64 * 1024
+SUMMARY_DIFF_FILE_MAP_MAX_BYTES = 8 * 1024
+SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES = 100
+SUMMARY_COMMAND_MAX_BYTES = 1024
+SUMMARY_COMMAND_TRUNCATION_MARKER = "... [command truncated]"
+SUMMARY_LABEL_MAX_BYTES = 1024
+SUMMARY_LABEL_TRUNCATION_MARKER = "... [label truncated]"
+SEARCH_QUERY_MAX_BYTES = 1024
+SEARCH_QUERY_TRUNCATION_MARKER = "... [query truncated]"
+CONSOLIDATION_MAX_CAPTURES = 25
+CONSOLIDATION_CAPTURE_ID_MAX_BYTES = 256
 SOCKET_STARTUP_TIMEOUT_SECONDS = positive_int_env("EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS", 5)
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
@@ -223,6 +235,15 @@ engine = EphemeralEngine(
     metrics=METRICS,
 )
 atexit.register(engine.shutdown)
+_ENGINE_OVERRIDE: ContextVar[Optional[EphemeralEngine]] = ContextVar(
+    "ephemeral_server_engine_override",
+    default=None,
+)
+
+
+def _active_engine() -> EphemeralEngine:
+    """Return the request-local engine override or the process engine."""
+    return _ENGINE_OVERRIDE.get() or engine
 
 
 def _write_metrics_snapshot() -> None:
@@ -355,44 +376,217 @@ def preflight_command(command: str, cwd: Optional[str] = None) -> str:
     except Exception as exc:
         return json.dumps({"status": "error", "reason": type(exc).__name__})
 
-def _capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
+def _bounded_diff_file_map(
+    file_map: str,
+    diff_meta: Optional[Dict[str, Any]] = None,
+) -> tuple[str, int]:
+    """Bound diff file-map text and return it with the omitted-entry count."""
+    retained: List[str] = []
+    files = diff_meta.get("files") if isinstance(diff_meta, dict) else None
+    if isinstance(files, list):
+        total_entries = len(files)
+        # Format only the bounded prefix from structured metadata. The full
+        # raw diff remains available through get_capture_slice.
+        source_lines = []
+        for file_info in files:
+            status_tag = f" [{file_info['status'].upper()}]" if file_info["status"] != "modified" else ""
+            source_lines.append(
+                f"  - {file_info['path']}{status_tag} (+{file_info['additions']}, -{file_info['deletions']}) "
+                f"| Buffer Lines: L{file_info['start_line']}-L{file_info['end_line']}"
+            )
+            if len(source_lines) >= SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES:
+                break
+    else:
+        total_entries = file_map.count("\n") + (1 if file_map else 0)
+        source_lines = []
+        start = 0
+        for _ in range(SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES):
+            end = file_map.find("\n", start)
+            if end < 0:
+                if start < len(file_map):
+                    source_lines.append(file_map[start:])
+                break
+            source_lines.append(file_map[start:end])
+            start = end + 1
+
+    for line in source_lines:
+        candidate = "\n".join([*retained, line])
+        if len(candidate.encode("utf-8")) > SUMMARY_DIFF_FILE_MAP_MAX_BYTES:
+            break
+        retained.append(line)
+
+    omitted = total_entries - len(retained)
+    if omitted:
+        marker = (
+            f"... [{omitted:,} diff file-map entries omitted; "
+            "use get_capture_slice for complete diff details] ..."
+        )
+        while retained and len(("\n".join([*retained, marker])).encode("utf-8")) > SUMMARY_DIFF_FILE_MAP_MAX_BYTES:
+            retained.pop()
+            omitted += 1
+        bounded = "\n".join([*retained, marker])
+        if len(bounded.encode("utf-8")) > SUMMARY_DIFF_FILE_MAP_MAX_BYTES:
+            bounded = marker[:SUMMARY_DIFF_FILE_MAP_MAX_BYTES]
+        return bounded, omitted
+    return "\n".join(retained), 0
+
+
+def _bounded_summary_text(value: str, max_bytes: int, marker: str) -> tuple[str, bool]:
+    """Bound text metadata included alongside an execution summary."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value, False
+    marker_bytes = marker.encode("utf-8")
+    prefix = encoded[: max_bytes - len(marker_bytes)].decode("utf-8", errors="ignore")
+    return prefix + marker, True
+
+
+def _bounded_command(command: str) -> tuple[str, bool]:
+    """Bound command metadata included alongside an execution summary."""
+    return _bounded_summary_text(
+        command,
+        SUMMARY_COMMAND_MAX_BYTES,
+        SUMMARY_COMMAND_TRUNCATION_MARKER,
+    )
+
+
+def _summary_payload(summary: Dict[str, Any], include_previews: bool = False) -> Dict[str, Any]:
+    """Project an engine summary into the compact, versioned MCP schema."""
+    if summary.get("status") == "error":
+        return dict(summary)
+
+    execution_status = summary.get("execution_status")
+    if execution_status is None:
+        execution_status = "captured" if summary.get("command_exit_code") is None else (
+            "success" if summary.get("command_exit_code") == 0 else "failed"
+        )
+    bounded_label, label_truncated = _bounded_summary_text(
+        summary["label"],
+        SUMMARY_LABEL_MAX_BYTES,
+        SUMMARY_LABEL_TRUNCATION_MARKER,
+    )
+    payload: Dict[str, Any] = {
+        "schema_version": summary.get("schema_version", 1),
+        "capture_id": summary["capture_id"],
+        "label": bounded_label,
+        "label_truncated": label_truncated,
+        "source": summary.get("source", "capture"),
+        "status": execution_status,
+        "partial": summary.get("partial", summary.get("timed_out", False)),
+        "content_type": summary.get("content_type", "text"),
+        "timestamp": summary.get("timestamp"),
+        "duration_ms": summary.get("duration_ms"),
+        "exit_code": summary.get("command_exit_code"),
+        "timed_out": summary.get("timed_out", False),
+        "total_lines": summary.get("total_lines", 0),
+        "byte_size": summary.get("byte_size", 0),
+        "original_byte_size": summary.get("original_byte_size"),
+        "estimated_tokens": summary.get("estimated_tokens"),
+        "original_estimated_tokens": summary.get("original_estimated_tokens"),
+        "truncated": summary.get("truncated", False),
+        "signals": summary.get("keyword_signals", {}),
+        "errors": summary.get("errors", []),
+        "warnings": summary.get("warnings", []),
+        "structured_metrics": summary.get("structured_metrics", {}),
+        "retrieval": {
+            "search": f"search_capture(query='...', capture_id='{summary['capture_id']}')",
+            "slice": f"get_capture_slice(start_line=..., end_line=..., capture_id='{summary['capture_id']}')",
+        },
+    }
+    if summary.get("content_type") == "diff":
+        bounded_file_map, omitted_files = _bounded_diff_file_map(
+            summary.get("file_map", ""),
+            summary.get("diff_meta"),
+        )
+        payload["diff"] = {
+            "stats": summary.get("diff_stats", ""),
+            "file_map": bounded_file_map,
+            "file_map_truncated": omitted_files > 0,
+            "omitted_file_count": omitted_files,
+        }
+    if include_previews:
+        payload["previews"] = {
+            "head": summary.get("head_preview", ""),
+            "tail": summary.get("tail_preview", ""),
+        }
+    return payload
+
+
+def _summary_json(
+    capture_id: str,
+    include_previews: bool = False,
+    capture: Optional[Any] = None,
+) -> str:
+    """Return a compact JSON summary suitable for an agent response."""
+    if capture is None:
+        summary = _active_engine().get_summary(capture_id, include_previews=include_previews)
+    else:
+        summary = _active_engine().get_summary_for_capture(capture, include_previews=include_previews)
+    if summary.get("status") == "error":
+        message, _ = _bounded_summary_text(
+            str(summary.get("message", "capture summary unavailable")),
+            SUMMARY_LABEL_MAX_BYTES,
+            "... [error truncated]",
+        )
+        return f"Error: {message}"
+    return json.dumps(
+        _summary_payload(summary, include_previews=include_previews),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _capture_text(
+    content: str,
+    label: str = "",
+    content_type: str = "auto",
+    source: str = "capture_text",
+    duration_ms: Optional[float] = None,
+    structured_metrics: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Ingests raw text output directly into the ephemeral search index.
     Automatically detects diffs, logs, and text structures.
-    Returns capture metadata (ID, line count, byte size, diff summary if applicable).
+    Returns a compact JSON summary while preserving the complete capture for later retrieval.
     """
-    cap = engine.ingest(content, label=label, content_type=content_type)
-    summary = engine.get_summary(cap.capture_id)
-    
-    if summary.get("content_type") == "diff" and summary.get("file_map"):
-        return (
-            f"Captured into ID '{cap.capture_id}' ({cap.label})\n"
-            f"- Type: Unified Diff ({summary.get('diff_stats')})\n"
-            f"- Lines: {cap.line_count:,} | Bytes: {cap.byte_size:,} | Chunks: {len(cap.chunks)}\n"
-            f"- Detected Signals: {summary.get('signals_summary')}\n\n"
-            f"--- Modified Files Map ---\n{summary['file_map']}\n\n"
-            f"Use `search_capture` or `get_capture_slice` with capture_id='{cap.capture_id}' to query."
-        )
-
-    return (
-        f"Captured into ID '{cap.capture_id}' ({cap.label})\n"
-        f"- Lines: {cap.line_count:,}\n"
-        f"- Bytes: {cap.byte_size:,}\n"
-        f"- Chunks: {len(cap.chunks)}\n"
-        f"Use `search_capture` with capture_id='{cap.capture_id}' or 'latest' to query."
+    try:
+        structured_metrics = normalize_structured_metrics(structured_metrics)
+    except ValueError as exc:
+        return f"Error: invalid structured_metrics: {exc}"
+    cap = _active_engine().ingest(
+        content,
+        label=label,
+        content_type=content_type,
+        source=source,
+        duration_ms=duration_ms,
+        structured_metrics=structured_metrics,
     )
+    return _summary_json(cap.capture_id, capture=cap)
 
 
 @_mcp_tool("capture_text")
 @_instrument_tool("capture_text")
-def capture_text(content: str, label: str = "", content_type: str = "auto") -> str:
+def capture_text(
+    content: str,
+    label: str = "",
+    content_type: str = "auto",
+    structured_metrics: Optional[Dict[str, Any]] = None,
+) -> str:
     """Ingest already-collected text and return capture metadata.
 
     Use this when the caller already has output to index. For a noisy or
     potentially long command, use ``execute_and_capture`` so output remains
-    bounded before it reaches the agent context.
+    bounded before it reaches the agent context. The return value is a compact
+    versioned JSON summary; optional named metrics are retained in
+    ``structured_metrics``.
     """
-    return _capture_text(content, label=label, content_type=content_type)
+    return _capture_text(
+        content,
+        label=label,
+        content_type=content_type,
+        structured_metrics=structured_metrics,
+    )
 
 
 @_mcp_tool("capture_file")
@@ -401,38 +595,52 @@ def capture_file(
     file_path: str,
     label: str = "",
     content_type: str = "auto",
-    max_bytes: Optional[int] = None
+    max_bytes: Optional[int] = None,
+    structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Reads a file or log output from disk and ingests it into the ephemeral search index.
+    Reads a file or log output from disk and ingests it into the ephemeral
+    search index. Returns a compact versioned JSON summary and preserves
+    optional named metrics in ``structured_metrics``.
 
     Validate the intended file path before calling: resolve symlinks when path
     identity matters, confirm the file belongs to the expected workspace, and
     use an explicit bounded ``max_bytes`` for large or untrusted files. Capture
     limits control output handling; they do not validate filesystem intent.
     """
+    try:
+        structured_metrics = normalize_structured_metrics(structured_metrics)
+    except ValueError as exc:
+        return f"Error: invalid structured_metrics: {exc}"
     if not os.path.exists(file_path):
         return f"Error: File '{file_path}' does not exist."
     try:
-        if max_bytes is not None and max_bytes > engine.max_buffer_bytes:
+        active_engine = _active_engine()
+        if max_bytes is not None and max_bytes > active_engine.max_buffer_bytes:
             log_event(
                 LOGGER,
                 logging.WARNING,
                 "capture_file_limit_rejected",
                 requested_bytes=max_bytes,
-                max_buffer_bytes=engine.max_buffer_bytes,
+                max_buffer_bytes=active_engine.max_buffer_bytes,
             )
             return (
                 f"Error: max_bytes ({max_bytes:,}) exceeds the configured "
-                f"buffer limit ({engine.max_buffer_bytes:,})."
+                f"buffer limit ({active_engine.max_buffer_bytes:,})."
             )
-        read_limit = engine.max_buffer_bytes if max_bytes is None else max_bytes
+        read_limit = active_engine.max_buffer_bytes if max_bytes is None else max_bytes
         if read_limit < 1:
             return "Error: max_bytes must be at least 1."
         content = read_file_bounded(file_path, read_limit)
         if not label:
             label = os.path.basename(file_path)
-        return _capture_text(content, label=label, content_type=content_type)
+        return _capture_text(
+            content,
+            label=label,
+            content_type=content_type,
+            source="file",
+            structured_metrics=structured_metrics,
+        )
     except Exception as e:
         return f"Error reading file '{file_path}': {str(e)}"
 
@@ -445,12 +653,14 @@ def execute_and_capture(
     label: str = "",
     content_type: str = "auto",
     max_output_bytes: Optional[int] = None,
-    timeout_seconds: Optional[float] = None
+    timeout_seconds: Optional[float] = None,
+    structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Runs a shell command, captures stdout/stderr, indexes it, and returns a concise summary
-    (exit code, line count, diff map or error signals, head/tail preview) WITHOUT flooding
-    your prompt context with thousands of lines.
+    Runs a shell command, captures stdout/stderr, indexes it, and returns a
+    compact versioned JSON summary without flooding the prompt context with
+    thousands of lines. The summary includes status, duration, sizes,
+    approximate token counts, truncation, signals, and optional named metrics.
 
     Use this for noisy tests, builds, logs, and other output that benefits from
     bounded capture and later search. Direct command execution is usually
@@ -473,26 +683,34 @@ def execute_and_capture(
     """
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
-        
+
     try:
-        if max_output_bytes is not None and max_output_bytes > engine.max_buffer_bytes:
+        structured_metrics = normalize_structured_metrics(structured_metrics)
+    except ValueError as exc:
+        return f"Error: invalid structured_metrics: {exc}"
+
+    try:
+        active_engine = _active_engine()
+        if max_output_bytes is not None and max_output_bytes > active_engine.max_buffer_bytes:
             log_event(
                 LOGGER,
                 logging.WARNING,
                 "command_output_limit_rejected",
                 requested_bytes=max_output_bytes,
-                max_buffer_bytes=engine.max_buffer_bytes,
+                max_buffer_bytes=active_engine.max_buffer_bytes,
             )
             return (
                 f"Error: max_output_bytes ({max_output_bytes:,}) exceeds the configured "
-                f"buffer limit ({engine.max_buffer_bytes:,})."
+                f"buffer limit ({active_engine.max_buffer_bytes:,})."
             )
-        output_limit = engine.max_buffer_bytes if max_output_bytes is None else max_output_bytes
+        output_limit = active_engine.max_buffer_bytes if max_output_bytes is None else max_output_bytes
+        command_started = time.perf_counter()
         output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
             command, cwd, output_limit, timeout_seconds
         )
+        duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
         
-        cap = engine.ingest(
+        cap = active_engine.ingest(
             output,
             label=f"cmd: {label}",
             content_type=content_type,
@@ -500,43 +718,17 @@ def execute_and_capture(
             original_byte_size=original_byte_size if truncated else None,
             command_exit_code=exit_code,
             timed_out=timed_out,
+            source="command",
+            duration_ms=duration_ms,
+            structured_metrics=structured_metrics,
         )
-        summary = engine.get_summary(cap.capture_id)
-        
-        if timed_out:
-            status_str = f"TIMED OUT after {timeout_seconds:g}s"
-        else:
-            status_str = "SUCCESS" if exit_code == 0 else f"FAILED (Exit Code {exit_code})"
-        truncation_str = ""
-        if summary.get("truncated"):
-            truncation_str = f"\nOutput: truncated from {summary['original_byte_size']:,} bytes\n"
-        
-        if summary.get("content_type") == "diff" and summary.get("file_map"):
-            diff_stats = summary.get("diff_stats", "")
-            file_map = summary.get("file_map", "")
-            signals_str = summary.get("signals_summary", "None (Clean patch)")
-            return (
-                f"Command: `{command}`\n"
-                f"Status: {status_str} | Type: Unified Diff ({diff_stats})\n"
-                f"Captured ID: `{cap.capture_id}` ({cap.line_count:,} lines, {cap.byte_size:,} bytes)\n"
-                f"{truncation_str}"
-                f"Detected Signals: {signals_str}\n\n"
-                f"--- Modified Files Map ---\n"
-                f"{file_map}\n\n"
-                f"Query details using `search_capture(query='...', capture_id='{cap.capture_id}')` or slice lines with `get_capture_slice(start_line=..., end_line=...)`."
-            )
-            
-        signals_str = summary.get("signals_summary", "None detected")
-        return (
-            f"Command: `{command}`\n"
-            f"Status: {status_str}\n"
-            f"Captured ID: `{cap.capture_id}` ({cap.line_count:,} lines, {cap.byte_size:,} bytes)\n"
-            f"{truncation_str}"
-            f"Detected Signals: {signals_str}\n\n"
-            f"--- Head (First 5 lines) ---\n{summary['head_preview']}\n\n"
-            f"--- Tail (Last 5 lines) ---\n{summary['tail_preview']}\n\n"
-            f"Query details using `search_capture(query='...', capture_id='{cap.capture_id}')`."
+        payload = _summary_payload(
+            active_engine.get_summary_for_capture(cap, include_previews=False)
         )
+        bounded_command, command_truncated = _bounded_command(command)
+        payload["command"] = bounded_command
+        payload["command_truncated"] = command_truncated
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception as e:
         log_event(LOGGER, logging.ERROR, "command_execution_failed", error_type=type(e).__name__)
         return f"Error executing command: {str(e)}"
@@ -548,7 +740,7 @@ def _consolidated_jsonl(
     max_bytes: int,
 ) -> Dict[str, Any]:
     """Compatibility wrapper around the engine's consolidation implementation."""
-    return engine.consolidate(capture_ids, max_captures, max_bytes)
+    return _active_engine().consolidate(capture_ids, max_captures, max_bytes)
 
 
 @_mcp_tool("consolidate_captures")
@@ -567,17 +759,37 @@ def consolidate_captures(
     consolidated capture cannot be admitted while retaining those sources.
     """
     try:
-        result = engine.consolidate(capture_ids, max_captures, max_bytes)
-        capture = engine.ingest(
+        if max_captures > CONSOLIDATION_MAX_CAPTURES:
+            return (
+                f"Error consolidating captures: max_captures must be at most "
+                f"{CONSOLIDATION_MAX_CAPTURES}"
+            )
+        if capture_ids is not None:
+            if not isinstance(capture_ids, list):
+                return "Error consolidating captures: capture_ids must be a list or null"
+            if len(capture_ids) > CONSOLIDATION_MAX_CAPTURES:
+                return (
+                    f"Error consolidating captures: at most "
+                    f"{CONSOLIDATION_MAX_CAPTURES} capture IDs may be requested"
+                )
+            for capture_id in capture_ids:
+                if not isinstance(capture_id, str):
+                    return "Error consolidating captures: capture_ids must contain strings"
+                if len(capture_id.encode("utf-8")) > CONSOLIDATION_CAPTURE_ID_MAX_BYTES:
+                    return "Error consolidating captures: capture ID exceeds the 256-byte limit"
+        active_engine = _active_engine()
+        result = active_engine.consolidate(capture_ids, max_captures, max_bytes)
+        capture = active_engine.ingest(
             result["content"],
             label=label,
             content_type="text",
+            source="consolidated",
             protected_capture_ids=result["source_capture_ids"],
         )
-        return json.dumps({
-            "status": "ok",
-            "capture_id": capture.capture_id,
-            "label": capture.label,
+        payload = _summary_payload(
+            active_engine.get_summary_for_capture(capture, include_previews=False)
+        )
+        payload.update({
             "source_capture_ids": result["source_capture_ids"],
             "requested_capture_count": result["requested_capture_count"],
             "selected_capture_count": result["selected_capture_count"],
@@ -585,16 +797,21 @@ def consolidate_captures(
             "record_count": result["record_count"],
             "omitted_record_count": result["omitted_record_count"],
             "missing_capture_ids": result["missing_capture_ids"],
-            "byte_size": capture.byte_size,
             "next_steps": {
                 "search": f"search_capture(query='...', capture_id='{capture.capture_id}')",
                 "slice": f"get_capture_slice(start_line=..., end_line=..., capture_id='{capture.capture_id}')",
                 "source_detail": "Use the original source capture IDs for complete omitted records.",
             },
-        }, ensure_ascii=False)
+        })
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception as exc:
         log_event(LOGGER, logging.ERROR, "capture_consolidation_failed", error_type=type(exc).__name__)
-        return f"Error consolidating captures: {exc}"
+        message, _ = _bounded_summary_text(
+            str(exc),
+            SUMMARY_LABEL_MAX_BYTES,
+            "... [error truncated]",
+        )
+        return f"Error consolidating captures: {message}"
 
 
 @_mcp_tool("search_capture")
@@ -619,7 +836,11 @@ def search_capture(
         top_k: Number of matching snippets to return (default: 5).
         context_lines: Number of surrounding lines of context to include with each match (default: 3; must be non-negative).
     """
-    res = engine.search(
+    if not isinstance(query, str):
+        return "Search Error: query must be a string"
+    if len(query.encode("utf-8")) > SEARCH_QUERY_MAX_BYTES:
+        return f"Search Error: query exceeds the {SEARCH_QUERY_MAX_BYTES:,}-byte limit"
+    res = _active_engine().search(
         query=query,
         mode=mode,
         capture_id=capture_id,
@@ -628,7 +849,12 @@ def search_capture(
     )
     
     if res.get("status") == "error":
-        return f"Search Error: {res.get('message')}"
+        message, _ = _bounded_summary_text(
+            str(res.get("message", "search failed")),
+            SUMMARY_LABEL_MAX_BYTES,
+            "... [error truncated]",
+        )
+        return f"Search Error: {message}"
         
     matches = res.get("matches", [])
     METRICS.record_result_count("search_capture", len(matches))
@@ -637,15 +863,30 @@ def search_capture(
         if res.get("semantic_fallback")
         else ""
     )
+    display_query, _ = _bounded_summary_text(
+        query,
+        SEARCH_QUERY_MAX_BYTES,
+        SEARCH_QUERY_TRUNCATION_MARKER,
+    )
     if not matches:
-        return f"No matches found for '{query}' in capture '{res.get('capture_id')}' ({res.get('label')}).{fallback_note}"
+        label, _ = _bounded_summary_text(
+            res.get("label", ""),
+            SUMMARY_LABEL_MAX_BYTES,
+            SUMMARY_LABEL_TRUNCATION_MARKER,
+        )
+        return f"No matches found for '{display_query}' in capture '{res.get('capture_id')}' ({label}).{fallback_note}"
         
     mode_label = res["mode"]
     if res.get("semantic_fallback"):
         mode_label += f"; lexical fallback ({res['semantic_fallback']})"
+    label, _ = _bounded_summary_text(
+        res["label"],
+        SUMMARY_LABEL_MAX_BYTES,
+        SUMMARY_LABEL_TRUNCATION_MARKER,
+    )
     out = [
-        f"Search Results for: \"{query}\" [Mode: {mode_label}]",
-        f"Capture: `{res['capture_id']}` ({res['label']}, {res['total_lines']} total lines)",
+        f"Search Results for: \"{display_query}\" [Mode: {mode_label}]",
+        f"Capture: `{res['capture_id']}` ({label}, {res['total_lines']} total lines)",
         f"Found {len(matches)} relevant section(s):\n"
     ]
     if res.get("semantic_fallback"):
@@ -675,49 +916,35 @@ def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest"
     """
     Fetches an exact range of lines (1-indexed) from a capture to inspect full context around a match.
     """
-    res = engine.get_slice(start_line, end_line, capture_id=capture_id)
+    res = _active_engine().get_slice(start_line, end_line, capture_id=capture_id)
     if res.get("status") == "error":
-        return f"Error: {res.get('message')}"
+        message, _ = _bounded_summary_text(
+            str(res.get("message", "capture slice unavailable")),
+            SUMMARY_LABEL_MAX_BYTES,
+            "... [error truncated]",
+        )
+        return f"Error: {message}"
         
+    label, _ = _bounded_summary_text(
+        res["label"],
+        SUMMARY_LABEL_MAX_BYTES,
+        SUMMARY_LABEL_TRUNCATION_MARKER,
+    )
     return (
-        f"Capture: `{res['capture_id']}` ({res['label']}) | Lines {res['start_line']} to {res['end_line']} of {res['total_lines']}\n"
+        f"Capture: `{res['capture_id']}` ({label}) | Lines {res['start_line']} to {res['end_line']} of {res['total_lines']}\n"
         f"```text\n{res['content']}\n```"
     )
 
 
 @_mcp_tool("get_capture_summary")
 @_instrument_tool("get_capture_summary")
-def get_capture_summary(capture_id: str = "latest") -> str:
+def get_capture_summary(capture_id: str = "latest", include_previews: bool = False) -> str:
     """
-    Returns quick diagnostics for a capture: total lines, byte size, diff file map or error signals, and previews.
+    Returns a compact versioned JSON summary. Set ``include_previews`` when
+    head and tail samples are needed; full output remains available through
+    ``get_capture_slice``.
     """
-    res = engine.get_summary(capture_id)
-    if res.get("status") == "error":
-        return f"Error: {res.get('message')}"
-        
-    signals = res.get("signals_summary", "None detected")
-    
-    if res.get("content_type") == "diff" and res.get("file_map"):
-        return (
-            f"Capture: `{res['capture_id']}` ({res['label']})\n"
-            f"Type: Unified Diff ({res.get('diff_stats')})\n"
-            f"Timestamp: {res['timestamp']}\n"
-            f"Total Lines: {res['total_lines']:,} | Size: {res['byte_size']:,} bytes\n"
-            f"Output: {'truncated from ' + format(res['original_byte_size'], ',') + ' bytes' if res.get('truncated') else 'complete'}\n"
-            f"Detected Signals: {signals}\n\n"
-            f"--- Modified Files Map ---\n"
-            f"{res['file_map']}"
-        )
-
-    return (
-        f"Capture: `{res['capture_id']}` ({res['label']})\n"
-        f"Timestamp: {res['timestamp']}\n"
-        f"Total Lines: {res['total_lines']:,} | Size: {res['byte_size']:,} bytes\n"
-        f"Output: {'truncated from ' + format(res['original_byte_size'], ',') + ' bytes' if res.get('truncated') else 'complete'}\n"
-        f"Detected Keyword Signals: {signals}\n\n"
-        f"--- Head (First 5 lines) ---\n{res['head_preview']}\n\n"
-        f"--- Tail (Last 5 lines) ---\n{res['tail_preview']}"
-    )
+    return _summary_json(capture_id, include_previews=include_previews)
 
 
 @_mcp_tool("list_captures")
@@ -732,7 +959,12 @@ def list_captures() -> str:
         
     out = ["Active Captures in Ephemeral Buffer:"]
     for c in caps:
-        out.append(f"- `{c['capture_id']}`: \"{c['label']}\" | {c['total_lines']:,} lines | {c['byte_size']:,} bytes | {c['timestamp']}")
+        label, _ = _bounded_summary_text(
+            c["label"],
+            SUMMARY_LABEL_MAX_BYTES,
+            SUMMARY_LABEL_TRUNCATION_MARKER,
+        )
+        out.append(f"- `{c['capture_id']}`: \"{label}\" | {c['total_lines']:,} lines | {c['byte_size']:,} bytes | {c['timestamp']}")
     return "\n".join(out)
 
 
@@ -912,14 +1144,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 return
             try:
                 payload = json.loads(data.decode("utf-8"))
-                label = payload.get("label", "CLI pipe")
-                text = payload.get("text", "")
-                content_type = payload.get("content_type", "auto")
-                truncated = bool(payload.get("truncated", False))
-                original_byte_size = payload.get("original_byte_size")
-                command_exit_code = payload.get("command_exit_code")
-                timed_out = bool(payload.get("timed_out", False))
-            except Exception:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 label = "CLI pipe"
                 text = data.decode("utf-8", errors="replace")
                 content_type = "auto"
@@ -927,6 +1152,20 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 original_byte_size = None
                 command_exit_code = None
                 timed_out = False
+                duration_ms = None
+                structured_metrics = None
+            else:
+                if not isinstance(payload, dict):
+                    raise ValueError("socket payload must be a JSON object")
+                label = payload.get("label", "CLI pipe")
+                text = payload.get("text", "")
+                content_type = payload.get("content_type", "auto")
+                truncated = bool(payload.get("truncated", False))
+                original_byte_size = payload.get("original_byte_size")
+                command_exit_code = payload.get("command_exit_code")
+                timed_out = bool(payload.get("timed_out", False))
+                duration_ms = payload.get("duration_ms")
+                structured_metrics = normalize_structured_metrics(payload.get("structured_metrics"))
 
             cap = await to_thread(
                 engine.ingest,
@@ -937,14 +1176,28 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 original_byte_size=original_byte_size,
                 command_exit_code=command_exit_code,
                 timed_out=timed_out,
+                source="socket",
+                duration_ms=duration_ms,
+                structured_metrics=structured_metrics,
             )
             resp = {
                 "status": "ok",
                 "capture_id": cap.capture_id,
-                "label": cap.label,
+                "label": _bounded_summary_text(
+                    cap.label,
+                    SUMMARY_LABEL_MAX_BYTES,
+                    SUMMARY_LABEL_TRUNCATION_MARKER,
+                )[0],
                 "line_count": cap.line_count,
                 "byte_size": cap.byte_size
             }
+            summary = await to_thread(
+                engine.get_summary_for_capture,
+                cap,
+                include_previews=False,
+            )
+            if summary.get("status") == "ok":
+                resp["summary"] = _summary_payload(summary)
             response_frame = encode_frame(json.dumps(resp).encode("utf-8"))
             METRICS.record_bytes("socket_response_bytes", len(response_frame))
             writer.write(response_frame)
