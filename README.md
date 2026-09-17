@@ -435,6 +435,14 @@ and user intent checks remain necessary.
 
 ### Resumable phase execution
 
+Durable phase execution and its process-group recovery currently require Linux
+with file-locking support and `/proc` process identities. The package's
+Windows installations remain usable for MCP stdio and text/file capture.
+Bounded subprocess capture requires POSIX pipe and process-group support, and
+`start_execution` additionally requires Linux leases, `/proc` process
+identities, pidfd signaling, and selector support; startup rejects the request
+with a clear platform error when those recovery backends are unavailable.
+
 Use `start_execution` when a long-running workflow has meaningful checkpoints:
 
 ```text
@@ -453,7 +461,9 @@ caller metrics are written after every finished phase. If the server restarts
 while a phase is `started`, the next inspection records it as `interrupted`.
 `resume_execution` skips every completed phase and continues at the first
 incomplete phase. Failed and timed-out phases require `retry_failed=True`;
-safe phases recovered as `interrupted` resume automatically. An interrupted
+safe phases recovered as `interrupted` resume automatically. A timed-out phase
+whose process-group cleanup is not confirmed remains fence-pending and blocks
+retry. An interrupted
 phase marked `side_effects: "unsafe"` additionally requires
 `confirm_unsafe=True` unless the execution was created with the explicit
 `resume_policy="allow-unsafe"`. The persisted `idempotency_key` is
@@ -461,11 +471,14 @@ an audit boundary for an external operation; it does not replace confirmation
 or provide an external deduplication guarantee. The compatibility alias
 `unsafe_side_effects: true` is normalized to `side_effects: "unsafe"`; if both
 fields are supplied, they must agree.
-The command process group is checkpointed while a phase runs and terminated
+The command is run beneath a Linux subreaper supervisor that adopts and
+terminates descendants which escape the original process group. The supervisor
+identity is checkpointed while a phase runs and is signalled through a pidfd
 before restart recovery permits that phase to resume. Linux process start and
-boot identities protect recovery from signalling a reused process ID; resume
-stays blocked if group termination cannot be confirmed. A phase marks its
-launch fence before spawning the command, so a crash before process identity is
+boot identities are revalidated while the pidfd is pinned, protecting recovery
+from signalling a reused process ID; resume stays blocked if supervisor
+termination or group absence cannot be confirmed. A phase marks its launch
+fence before spawning the command, so a crash before process identity is
 persisted also fails closed. Older in-progress records without these identity
 fields are recovered as fence-pending and must be inspected or retired rather
 than being retried automatically.
@@ -492,7 +505,9 @@ or rotate the state directory, or remove completed records together with their
 matching summary files before restarting. State and execution leases are
 isolated by the explicit execution-state directory, session ID, or socket path;
 without one, each server process receives a fresh private state directory that
-is removed during normal shutdown.
+is removed during normal shutdown on POSIX platforms. Windows may retain that
+temporary directory because secure owner-identity cleanup is not available
+there.
 
 Before any repository-sensitive command or file capture, verify the intended
 working directory and target path. Prefer an explicit `cwd`, confirm the

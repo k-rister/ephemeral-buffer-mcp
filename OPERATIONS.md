@@ -159,8 +159,21 @@ leader; pipe draining and final reaping remain bounded. Its output collected so
 far is retained, and it returns exit status 124. Closing stdout does not end
 the command deadline: the process is still awaited until it exits or the
 requested deadline expires. Without a timeout, completion is awaited normally.
+If timeout cleanup cannot confirm that the process group is gone, the durable
+execution keeps its fence pending and blocks a retry until a later recovery
+proves cleanup.
 
 ### Durable resumable executions
+
+Durable phase execution is currently Linux-only: it relies on Linux file
+leases, `/proc` process identities, pidfds, a subreaper supervisor for bounded
+subprocess containment, and bounded pipe handling for restart fencing. Windows
+remains supported for MCP stdio and text/file capture; bounded subprocess
+capture requires POSIX pipe and process-group support. Startup validates the
+pidfd, `/proc`, and selector recovery backends before launching a built-in
+durable phase, and rejects unsupported hosts rather than leaving a phase
+fence-pending. The execution tools return a platform error where the required
+restart-safe backends are unavailable.
 
 Long workflows can be represented as sequential phases with
 `start_execution`. The server persists each phase transition and its bounded
@@ -181,14 +194,16 @@ directory metadata is synchronized after atomic record replacement so a
 completed phase checkpoint survives normal host-crash recovery.
 
 On restart, a phase left in `started` is recovered as `interrupted`. Resume
-stops any persisted command process group before permitting that recovery, then
-skips `completed` phases. Linux process start and boot identities are persisted
-with the group ID so a reused process ID is not signalled; if group termination
-cannot be confirmed, resume remains blocked until a later recovery attempt
-proves the fence complete. The launch fence is written before spawning, and
-older in-progress records without process identities are held fence-pending
-until they are inspected or retired. A `failed` or `timed_out` phase is only retried with
-`retry_failed=True`; a safe phase recovered as `interrupted` resumes on the
+signals the persisted supervisor through a pidfd; that supervisor adopts and
+terminates descendants that escaped the original process group before recovery
+is permitted, then skips `completed` phases. Linux process start and boot
+identities are revalidated while the pidfd is pinned so a reused process ID is
+not signalled; if identity lookup, supervisor termination, or group absence
+cannot be confirmed, resume remains blocked. The launch fence is written before
+spawning, and older in-progress records without process identities are held
+fence-pending until they are inspected or retired. A `failed` or `timed_out` phase is only retried with
+`retry_failed=True`; a timed-out phase whose process-group cleanup is not
+confirmed remains fence-pending and blocks retry. A safe phase recovered as `interrupted` resumes on the
 normal resume call. Mark operations that can write, deploy, publish, or make
 external requests with `side_effects: "unsafe"`; retrying an interrupted
 unsafe phase also requires `confirm_unsafe=True`, or the explicit
@@ -205,7 +220,9 @@ rotate the state directory, or remove completed records and their matching
 summary files before restarting. When no explicit state directory is set,
 state is isolated by `EPHEMERAL_SESSION_ID` or by the explicit socket path;
 otherwise each server process receives a fresh private directory that is
-removed during normal shutdown.
+removed during normal shutdown on POSIX platforms. Windows may retain that
+temporary directory because secure owner-identity cleanup is not available
+there.
 
 Signal summaries recognize successful test-run markers and avoid treating
 example error text inside a passing test run as an active failure while still
