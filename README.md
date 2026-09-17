@@ -462,7 +462,13 @@ or provide an external deduplication guarantee. The compatibility alias
 `unsafe_side_effects: true` is normalized to `side_effects: "unsafe"`; if both
 fields are supplied, they must agree.
 The command process group is checkpointed while a phase runs and terminated
-before restart recovery permits that phase to resume.
+before restart recovery permits that phase to resume. Linux process start and
+boot identities protect recovery from signalling a reused process ID; resume
+stays blocked if group termination cannot be confirmed. A phase marks its
+launch fence before spawning the command, so a crash before process identity is
+persisted also fails closed. Older in-progress records without these identity
+fields are recovered as fence-pending and must be inspected or retired rather
+than being retried automatically.
 
 Execution responses include a human-readable `summary`, machine-readable
 `execution_status` and `partial` fields, per-phase event history, and the
@@ -471,8 +477,9 @@ response budget, the server returns a compact response with the durable
 `execution_id` and `response_truncated: true`; call `get_execution` or the
 bounded output tool to retrieve details. Durable JSON state defaults to a temporary local
 process-local directory created securely with owner-only permissions; set
-`EPHEMERAL_SESSION_ID` or `EPHEMERAL_EXECUTION_STATE_DIR` to persist and share
-state across server restarts. State can otherwise be placed elsewhere with
+`EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
+`EPHEMERAL_EXECUTION_STATE_DIR` to persist and share state across server
+restarts. State can otherwise be placed elsewhere with
 `EPHEMERAL_EXECUTION_STATE_DIR`. State contains the commands and bounded
 outputs, so keep any explicitly configured directory protected when commands
 or results are sensitive.
@@ -484,7 +491,8 @@ automatic expiry: when the record cap is reached, stop the server and archive
 or rotate the state directory, or remove completed records together with their
 matching summary files before restarting. State and execution leases are
 isolated by the explicit execution-state directory, session ID, or socket path;
-without one, each server process receives a fresh private state directory.
+without one, each server process receives a fresh private state directory that
+is removed during normal shutdown.
 
 Before any repository-sensitive command or file capture, verify the intended
 working directory and target path. Prefer an explicit `cwd`, confirm the

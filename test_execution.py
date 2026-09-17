@@ -1,5 +1,6 @@
 """Tests for durable phase-level execution and resume behavior."""
 
+import errno
 import json
 import os
 import subprocess
@@ -252,16 +253,27 @@ class TestPhaseExecutionManager(unittest.TestCase):
         phase["attempts"] = 1
         phase["process_id"] = 123
         phase["process_group_id"] = 456
+        phase["process_start_time"] = "start"
+        phase["process_boot_id"] = "boot"
         manager.store.save(record)
-        with patch.object(execution.os, "getpgid", return_value=456), \
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution.os, "getpgid", return_value=456), \
                 patch.object(execution.os, "getpgrp", return_value=1), \
                 patch.object(execution.os, "killpg") as killpg:
             recovered = PhaseExecutionManager(
                 manager.store.state_dir, command_runner=Runner()
             ).public("stale-process")
         self.assertEqual(recovered["phases"][0]["status"], "interrupted")
-        self.assertEqual(killpg.call_count, 3)
-        stale = {"process_id": 123, "process_group_id": 456}
+        self.assertEqual(killpg.call_count, 4)
+        stale = {
+            "process_id": 123,
+            "process_group_id": 456,
+            "process_start_time": "start",
+            "process_boot_id": "boot",
+        }
+        identity_patcher = patch.object(execution, "_proc_identity", return_value=("start", "boot"))
+        identity_patcher.start()
+        self.addCleanup(identity_patcher.stop)
         with patch.object(execution.os, "killpg") as killpg:
             execution._terminate_stale_process({"process_id": 0, "process_group_id": 456})
         killpg.assert_not_called()
@@ -285,6 +297,122 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 patch.object(execution.os, "killpg", side_effect=[None, None, OSError("gone")]) as killpg:
             execution._terminate_stale_process(stale)
         self.assertEqual(killpg.call_count, 3)
+
+    def test_recovery_refuses_a_reused_process_id(self):
+        stale = {
+            "process_id": 123,
+            "process_group_id": 456,
+            "process_start_time": "old-start",
+            "process_boot_id": "boot",
+        }
+        with patch.object(execution, "_proc_identity", return_value=("new-start", "boot")), \
+                patch.object(execution.os, "killpg") as killpg:
+            self.assertFalse(execution._terminate_stale_process(stale))
+        killpg.assert_not_called()
+        with patch.object(execution, "_proc_identity", return_value=("old-start", "new-boot")), \
+                patch.object(execution.os, "killpg") as killpg:
+            self.assertFalse(execution._terminate_stale_process(stale))
+        killpg.assert_not_called()
+
+    def test_process_identity_handles_missing_proc_metadata(self):
+        with patch.object(execution.Path, "read_text", side_effect=OSError("missing")):
+            self.assertEqual(execution._proc_identity(123), (None, None))
+
+    def test_recovery_reports_unconfirmed_group_fence(self):
+        stale = {
+            "process_id": 123,
+            "process_group_id": 456,
+            "process_start_time": "start",
+            "process_boot_id": "boot",
+        }
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg", side_effect=[None, None, None, OSError("alive")]):
+            self.assertFalse(execution._terminate_stale_process(stale))
+
+    def test_recovery_requires_identity_and_distinguishes_permission_from_absence(self):
+        stale = {
+            "process_id": 123,
+            "process_group_id": 456,
+            "process_start_time": "start",
+            "process_boot_id": "boot",
+        }
+        for identity in ((None, None), ("start", None), (None, "boot")):
+            with self.subTest(identity=identity), \
+                    patch.object(execution, "_proc_identity", return_value=identity), \
+                    patch.object(execution.os, "kill", return_value=None), \
+                    patch.object(execution.os, "killpg") as killpg:
+                self.assertFalse(execution._terminate_stale_process(stale))
+            killpg.assert_not_called()
+        for missing in ({}, {"process_start_time": "start"}, {"process_boot_id": "boot"}):
+            incomplete = {key: stale[key] for key in ("process_id", "process_group_id")}
+            incomplete.update(missing)
+            with self.subTest(missing=missing), patch.object(execution.os, "killpg") as killpg:
+                self.assertFalse(execution._terminate_stale_process(incomplete))
+            killpg.assert_not_called()
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg", side_effect=OSError(errno.EPERM, "denied")):
+            self.assertFalse(execution._terminate_stale_process(stale))
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")):
+            self.assertTrue(execution._terminate_stale_process(stale))
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution.os, "getpgid", return_value=789), \
+                patch.object(execution.os, "killpg") as killpg:
+            self.assertFalse(execution._terminate_stale_process(stale))
+        killpg.assert_not_called()
+
+    def test_crash_before_process_checkpoint_blocks_recovery(self):
+        manager = self.manager()
+        manager.create([self.phase("launching", "launching")], execution_id="launch-window")
+        record = manager.get("launch-window")
+        phase = record["phases"][0]
+        phase["status"] = "started"
+        phase["attempts"] = 1
+        phase["process_fence_pending"] = True
+        manager.store.save(record)
+        recovered = manager.public("launch-window")
+        self.assertFalse(recovered["resume"]["available"])
+        self.assertTrue(manager.get("launch-window")["phases"][0]["process_fence_pending"])
+
+    def test_legacy_started_record_is_recovered_fail_closed(self):
+        manager = self.manager()
+        manager.create([self.phase("legacy", "legacy")], execution_id="legacy-started")
+        record = manager.get("legacy-started")
+        phase = record["phases"][0]
+        phase["status"] = "started"
+        phase["attempts"] = 1
+        phase.pop("process_fence_pending", None)
+        manager.store.save(record)
+        recovered = manager.public("legacy-started")
+        self.assertFalse(recovered["resume"]["available"])
+        self.assertTrue(manager.get("legacy-started")["phases"][0]["process_fence_pending"])
+
+    def test_pending_process_fence_blocks_resume(self):
+        manager = self.manager()
+        manager.create([self.phase("pending", "pending")], execution_id="pending-fence")
+        record = manager.get("pending-fence")
+        phase = record["phases"][0]
+        phase["status"] = "started"
+        phase["attempts"] = 1
+        phase["process_id"] = 123
+        phase["process_group_id"] = 456
+        phase["process_fence_pending"] = True
+        manager.store.save(record)
+        with patch.object(execution, "_terminate_stale_process", return_value=False):
+            recovered = manager.resume("pending-fence")
+        self.assertFalse(recovered["resume"]["available"])
+        self.assertTrue(manager.get("pending-fence")["phases"][0]["process_fence_pending"])
+        self.assertEqual(manager.command_runner.calls, [])
+        event_count = len(manager.get("pending-fence")["phases"][0]["events"])
+        with patch.object(execution, "_terminate_stale_process", return_value=False):
+            manager.resume("pending-fence")
+        self.assertEqual(
+            len(manager.get("pending-fence")["phases"][0]["events"]),
+            event_count,
+        )
 
     def test_default_runner_persists_and_clears_process_identity(self):
         base = self.manager()

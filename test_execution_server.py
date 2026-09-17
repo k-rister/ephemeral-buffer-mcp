@@ -1,8 +1,10 @@
 """Tests for resumable-execution MCP tool adapters."""
 
 import asyncio
+import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -174,6 +176,73 @@ class TestExecutionTools(unittest.TestCase):
         payload = {"phases": [{"result": None}, {"result": {"exit_code": 0}}]}
         self.assertIs(server._execution_public_payload(payload), payload)
         self.assertNotIn("capture_available", payload["phases"][1]["result"])
+        self.assertEqual(server._json_dumps_with_limit({"ok": True}, None), '{"ok":true}')
+
+    def test_socket_probe_paths_are_covered_without_host_socket_permissions(self):
+        class FailingLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                coroutine.close()
+                raise RuntimeError("socket unavailable")
+
+        class Probe:
+            def __init__(self, error=None):
+                self.error = error
+                self.path = None
+
+            def connect(self, path):
+                self.path = path
+                if self.error is not None:
+                    raise self.error
+
+            def close(self):
+                pass
+
+        source_stat = os.stat(__file__)
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+        )
+        replacement_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, source_stat.st_ino + 1, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+        )
+        mode_changed_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o666, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+        )
+        regular_stat = os.stat_result(
+            (stat.S_IFREG | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+        )
+        cases = (
+            (Probe(ConnectionRefusedError()), [socket_stat, socket_stat], None, True),
+            (Probe(ConnectionRefusedError()), [socket_stat, socket_stat], FileNotFoundError(), True),
+            (Probe(ConnectionRefusedError()), [socket_stat, FileNotFoundError()], None, False),
+            (Probe(FileNotFoundError()), [socket_stat], None, False),
+            (Probe(OSError("probe failed")), [socket_stat], None, False),
+            (Probe(), [socket_stat], None, False),
+            (Probe(ConnectionRefusedError()), [socket_stat, regular_stat], None, False),
+            (Probe(ConnectionRefusedError()), [socket_stat, replacement_stat], None, False),
+            (Probe(ConnectionRefusedError()), [socket_stat, mode_changed_stat], None, True),
+        )
+        for probe, lstat_results, unlink_error, expect_unlink in cases:
+            with self.subTest(probe=type(probe.error).__name__ if probe.error else "live"):
+                with patch.object(server, "SOCKET_PATH", "/tmp/ephemeral-buffer-test.sock"), \
+                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(server.asyncio, "set_event_loop"), \
+                        patch.object(server.os.path, "lexists", return_value=True), \
+                        patch.object(server.os, "lstat", side_effect=lstat_results), \
+                        patch.object(server.socket, "socket", return_value=probe), \
+                        patch.object(server.os, "unlink", side_effect=unlink_error) as unlink, \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    server.run_socket_server()
+                self.assertEqual(server._socket_lifecycle()[0], "failed")
+                if expect_unlink:
+                    unlink.assert_called_once_with("/tmp/ephemeral-buffer-test.sock")
+                else:
+                    unlink.assert_not_called()
+                self.assertEqual(probe.path, "/tmp/ephemeral-buffer-test.sock")
+                if probe.error is not None:
+                    self.assertTrue(stderr.getvalue())
 
     def test_tool_errors_are_bounded_and_returned_without_raising(self):
         self.assertTrue(server.start_execution([], execution_id="bad").startswith("Error managing execution:"))
@@ -287,6 +356,10 @@ class TestExecutionTools(unittest.TestCase):
             start_schema["properties"]["max_output_bytes"]["anyOf"][0]["minimum"],
             512,
         )
+        self.assertEqual(
+            start_schema["properties"]["max_output_bytes"]["anyOf"][0]["maximum"],
+            server.DEFAULT_MAX_BUFFER_BYTES,
+        )
         list_schema = names["list_executions"].parameters
         self.assertEqual(list_schema["properties"]["limit"]["minimum"], 1)
         self.assertEqual(list_schema["properties"]["limit"]["maximum"], 100)
@@ -305,6 +378,12 @@ class TestExecutionTools(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             server.ExecutionPhaseInput(name="é" * 256, command="echo")
+        with self.assertRaises(ValueError):
+            server.ExecutionPhaseInput(
+                name="output-limit",
+                command="echo",
+                max_output_bytes=server.DEFAULT_MAX_BUFFER_BYTES + 1,
+            )
         self.assertEqual(
             phase_schema["properties"]["structured_metrics"]["maxJsonBytes"],
             16 * 1024,

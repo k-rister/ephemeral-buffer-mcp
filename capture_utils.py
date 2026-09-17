@@ -149,38 +149,44 @@ def _run_command_bounded(
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
     timed_out = False
+    aborted = False
     try:
-        while selector.get_map():
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                timed_out = True
-                break
-            events = selector.select(remaining)
-            if not events:
-                timed_out = True
-                break
-            for key, _ in events:
-                chunk = key.fileobj.read1(65536)
-                if chunk:
-                    capture.add(chunk)
-                else:
-                    selector.unregister(key.fileobj)
-        if not timed_out:
-            remaining = None if deadline is None else max(0, deadline - time.monotonic())
-            try:
-                proc.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                timed_out = True
+        try:
+            while selector.get_map():
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    timed_out = True
+                    break
+                events = selector.select(remaining)
+                if not events:
+                    timed_out = True
+                    break
+                for key, _ in events:
+                    chunk = key.fileobj.read1(65536)
+                    if chunk:
+                        capture.add(chunk)
+                    else:
+                        selector.unregister(key.fileobj)
+            if not timed_out:
+                remaining = None if deadline is None else max(0, deadline - time.monotonic())
+                try:
+                    proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+        except BaseException:
+            aborted = True
+            raise
     finally:
-        if timed_out:
-            log_event(
-                LOGGER,
-                logging.WARNING,
-                "command_timeout",
-                pid=getattr(proc, "pid", None),
-                timeout_seconds=timeout_seconds,
-                output_bytes=capture.total_bytes,
-            )
+        if timed_out or aborted:
+            if timed_out:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "command_timeout",
+                    pid=getattr(proc, "pid", None),
+                    timeout_seconds=timeout_seconds,
+                    output_bytes=capture.total_bytes,
+                )
             if process_group_id is None:
                 _terminate_process_group(proc)
             else:

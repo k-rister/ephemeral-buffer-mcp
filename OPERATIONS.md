@@ -166,8 +166,8 @@ Long workflows can be represented as sequential phases with
 `start_execution`. The server persists each phase transition and its bounded
 output in `EPHEMERAL_EXECUTION_STATE_DIR` (by default, a local temporary
 process-local directory created securely with owner-only permissions; use
-`EPHEMERAL_SESSION_ID` or `EPHEMERAL_EXECUTION_STATE_DIR` when state must
-survive a server restart; state files are also
+`EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
+`EPHEMERAL_EXECUTION_STATE_DIR` when state must survive a server restart; state files are also
 owner-readable. `get_execution` exposes a human-readable summary plus structured
 status, event history, metrics, and the first incomplete phase;
 `get_execution_output` retrieves bounded chunks of persisted phase output after
@@ -182,7 +182,12 @@ completed phase checkpoint survives normal host-crash recovery.
 
 On restart, a phase left in `started` is recovered as `interrupted`. Resume
 stops any persisted command process group before permitting that recovery, then
-skips `completed` phases. A `failed` or `timed_out` phase is only retried with
+skips `completed` phases. Linux process start and boot identities are persisted
+with the group ID so a reused process ID is not signalled; if group termination
+cannot be confirmed, resume remains blocked until a later recovery attempt
+proves the fence complete. The launch fence is written before spawning, and
+older in-progress records without process identities are held fence-pending
+until they are inspected or retired. A `failed` or `timed_out` phase is only retried with
 `retry_failed=True`; a safe phase recovered as `interrupted` resumes on the
 normal resume call. Mark operations that can write, deploy, publish, or make
 external requests with `side_effects: "unsafe"`; retrying an interrupted
@@ -198,7 +203,9 @@ Execution records are capped at 64 MiB, 64 phases, 32 attempts per phase, and
 automatic expiry. If the record cap is reached, stop the server and archive or
 rotate the state directory, or remove completed records and their matching
 summary files before restarting. When no explicit state directory is set,
-state is isolated by `EPHEMERAL_SESSION_ID` or by the explicit socket path.
+state is isolated by `EPHEMERAL_SESSION_ID` or by the explicit socket path;
+otherwise each server process receives a fresh private directory that is
+removed during normal shutdown.
 
 Signal summaries recognize successful test-run markers and avoid treating
 example error text inside a passing test run as an active failure while still
