@@ -1381,6 +1381,67 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_socket_path_lock_closes_fd_when_lock_acquisition_fails(self):
+        with patch.object(server.os, "open", return_value=41), \
+                patch.object(server.fcntl, "flock", side_effect=OSError("lock failed")), \
+                patch.object(server.os, "close") as close:
+            with self.assertRaisesRegex(OSError, "lock failed"):
+                with server._socket_path_lock("/tmp/ephemeral-buffer-test.sock"):
+                    pass
+        close.assert_called_once_with(41)
+
+    def test_socket_startup_holds_path_lock_through_binding(self):
+        events = []
+
+        class Lock:
+            def __enter__(self):
+                events.append("enter")
+                return self
+
+            def __exit__(self, *_exc_info):
+                events.append("exit")
+                return False
+
+        class Listener:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise RuntimeError("listener stopped")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
+        )
+
+        async def start_server(*_args, **_kwargs):
+            events.append("bind")
+            return Listener()
+
+        with patch.object(server, "SOCKET_PATH", "/tmp/ephemeral-buffer-test.sock"), \
+                patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                patch.object(server.asyncio, "set_event_loop"), \
+                patch.object(server.os.path, "lexists", return_value=False), \
+                patch.object(server.os, "lstat", return_value=socket_stat), \
+                patch.object(server.asyncio, "start_unix_server", new=AsyncMock(side_effect=start_server)), \
+                patch.object(server.os, "chmod"), \
+                patch.object(server, "_socket_path_lock", return_value=Lock()), \
+                patch.object(server, "_unlink_socket_if_identity", return_value=True), \
+                patch("sys.stderr", new_callable=io.StringIO):
+            server.run_socket_server()
+
+        self.assertEqual(events[:2], ["enter", "bind"])
+        self.assertEqual(events[-1], "exit")
+
     def test_disabled_socket_import_marks_startup_event_ready(self):
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}):
             namespace = runpy.run_path(server.__file__, run_name="server_disabled_import")
@@ -1805,13 +1866,51 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.os, "lstat", return_value=socket_stat), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
                     patch.object(server.os, "chmod"), \
+                    patch.object(server, "_unlink_socket_if_identity", return_value=True) as cleanup, \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                server.run_socket_server()
+
+        cleanup.assert_called_once_with(socket_path, (socket_stat.st_dev, socket_stat.st_ino))
+
+    def test_shutdown_tolerates_socket_already_removed(self):
+        class Listener:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise RuntimeError("listener stopped")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        source_stat = os.stat(__file__)
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "lstat", side_effect=[socket_stat, socket_stat]), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(server.os, "chmod"), \
+                    patch.object(server, "_unlink_socket_if_identity", side_effect=FileNotFoundError()), \
                     patch.object(server.os, "unlink") as unlink, \
                     patch("sys.stderr", new_callable=io.StringIO):
                 server.run_socket_server()
 
-        unlink.assert_called_once_with(socket_path)
+        unlink.assert_not_called()
 
-    def test_shutdown_tolerates_socket_already_removed(self):
+    def test_shutdown_tolerates_socket_removed_before_final_revalidation(self):
         class Listener:
             async def __aenter__(self):
                 return self
@@ -1842,11 +1941,11 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.os, "lstat", side_effect=[socket_stat, FileNotFoundError()]), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
                     patch.object(server.os, "chmod"), \
-                    patch.object(server.os, "unlink") as unlink, \
+                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
                     patch("sys.stderr", new_callable=io.StringIO):
                 server.run_socket_server()
 
-        unlink.assert_not_called()
+        cleanup.assert_not_called()
 
     def test_shutdown_does_not_remove_replacement_socket(self):
         class Listener:

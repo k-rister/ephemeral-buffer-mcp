@@ -20,6 +20,8 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
+from contextlib import contextmanager
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
@@ -54,6 +56,11 @@ from logging_utils import get_logger, log_event
 from metrics import LocalMetrics
 from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no Unix socket backend.
+    fcntl = None
+
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 # JSON string escaping can expand a UTF-8 capture by at most six bytes per
@@ -80,6 +87,9 @@ _SOCKET_STATE_LOCK = threading.Lock()
 _SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "not-started"
 _SOCKET_FAILURE = None
 _SOCKET_STARTUP_EVENT = threading.Event()
+_SOCKET_PATH_LOCKS = {}
+_SOCKET_PATH_LOCKS_GUARD = threading.Lock()
+_SOCKET_PATH_LOCK_DEPTH = threading.local()
 if _SOCKET_STATE == "disabled":
     _SOCKET_STARTUP_EVENT.set()
 
@@ -99,6 +109,97 @@ def _set_socket_state(state, failure=None):
 def _socket_lifecycle():
     with _SOCKET_STATE_LOCK:
         return _SOCKET_STATE, _SOCKET_FAILURE
+
+
+def _socket_identity(path):
+    """Return a socket's filesystem identity without following symlinks."""
+    path_stat = os.lstat(path)
+    if not stat.S_ISSOCK(path_stat.st_mode):
+        return None
+    return path_stat.st_dev, path_stat.st_ino
+
+
+@contextmanager
+def _socket_path_lock(path):
+    """Serialize socket probing and cleanup for one pathname."""
+    key = os.path.abspath(path)
+    with _SOCKET_PATH_LOCKS_GUARD:
+        lock = _SOCKET_PATH_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        held_keys = getattr(_SOCKET_PATH_LOCK_DEPTH, "keys", set())
+        if key in held_keys:
+            yield
+            return
+        held_keys = set(held_keys)
+        held_keys.add(key)
+        _SOCKET_PATH_LOCK_DEPTH.keys = held_keys
+        lock_fd = None
+        try:
+            if fcntl is not None:
+                lock_path = f"{key}.lock"
+                lock_fd = os.open(
+                    lock_path,
+                    os.O_RDWR | os.O_CREAT,
+                    0o600,
+                )
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                except BaseException:
+                    os.close(lock_fd)
+                    lock_fd = None
+                    raise
+            yield
+        finally:
+            try:
+                if lock_fd is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
+            finally:
+                held_keys.remove(key)
+                _SOCKET_PATH_LOCK_DEPTH.keys = held_keys
+
+
+def _unlink_socket_if_identity(path, expected_identity):
+    with _socket_path_lock(path):
+        return _unlink_socket_if_identity_unlocked(path, expected_identity)
+
+
+def _unlink_socket_if_identity_unlocked(path, expected_identity):
+    """Remove only the socket inode that was atomically claimed.
+
+    Unlinking a pathname after an identity check has a replacement race.  Move
+    the name to a private quarantine name first; any replacement created at
+    the original path is then independent of the object being removed.
+    """
+    parent = os.path.dirname(path) or "."
+    quarantine = os.path.join(
+        parent,
+        f".{os.path.basename(path)}.cleanup-{os.getpid()}-"
+        f"{threading.get_ident()}-{uuid.uuid4().hex}",
+    )
+    try:
+        if _socket_identity(path) != expected_identity:
+            return False
+        os.rename(path, quarantine)
+    except FileNotFoundError:
+        return False
+    try:
+        if _socket_identity(quarantine) != expected_identity:
+            # Leave the claimed inode quarantined.  Restoring it with rename
+            # after checking the path would let a concurrent replacement be
+            # overwritten between the check and the restore.
+            return False
+        try:
+            os.unlink(quarantine)
+        except FileNotFoundError:
+            # Another cleanup actor removed the claimed inode.  The original
+            # pathname is still independent, so cleanup is complete.
+            return True
+        return True
+    except BaseException:
+        # Do not restore the quarantined inode: a replacement may have
+        # appeared at the original pathname since any earlier inspection.
+        raise
 
 
 def _allow_stdio_without_socket() -> bool:
@@ -424,9 +525,7 @@ class ExecutionPhaseInput(BaseModel):
         default=None, min_length=1, json_schema_extra={"maxUtf8Bytes": 4096}
     )
     timeout_seconds: Optional[float] = Field(default=None, gt=0)
-    max_output_bytes: Optional[int] = Field(
-        default=None, ge=512, le=DEFAULT_MAX_BUFFER_BYTES
-    )
+    max_output_bytes: Optional[int] = Field(default=None, ge=512)
     structured_metrics: Dict[str, Any] = Field(
         default_factory=dict,
         json_schema_extra={"maxJsonBytes": MAX_STRUCTURED_METRICS_BYTES},
@@ -464,6 +563,15 @@ class ExecutionPhaseInput(BaseModel):
         if len(encoded) > MAX_STRUCTURED_METRICS_BYTES:
             raise ValueError(
                 f"structured_metrics exceeds the {MAX_STRUCTURED_METRICS_BYTES:,}-byte limit"
+            )
+        return value
+
+    @field_validator("max_output_bytes")
+    @classmethod
+    def validate_output_limit(cls, value):
+        if value is not None and value > engine.max_buffer_bytes:
+            raise ValueError(
+                f"max_output_bytes cannot exceed the configured {engine.max_buffer_bytes:,}-byte limit"
             )
         return value
 
@@ -603,7 +711,7 @@ def start_execution(
     cwd: Optional[Annotated[str, Field(json_schema_extra={"maxUtf8Bytes": 4096})]] = None,
     timeout_seconds: Annotated[Optional[float], Field(gt=0)] = None,
     max_output_bytes: Annotated[
-        Optional[int], Field(ge=512, le=DEFAULT_MAX_BUFFER_BYTES)
+        Optional[int], Field(ge=512)
     ] = None,
 ) -> str:
     """Run a sequential, durably checkpointed set of command phases.
@@ -1576,8 +1684,12 @@ def run_socket_server():
     asyncio.set_event_loop(loop)
     _set_socket_state("starting")
     bound_socket_identity = None
+    socket_path_lock = _socket_path_lock(SOCKET_PATH)
+    lock_acquired = False
 
     try:
+        socket_path_lock.__enter__()
+        lock_acquired = True
         if socket_isolation_required() and not socket_isolation_configured():
             raise RuntimeError(
                 "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
@@ -1614,11 +1726,14 @@ def run_socket_server():
                             f"Socket path changed while probing: {SOCKET_PATH}"
                         )
                     # No listener accepted the connection, so this is a stale
-                    # socket. Unlink only the inode that was inspected.
-                    try:
-                        os.unlink(SOCKET_PATH)
-                    except FileNotFoundError:
-                        pass
+                    # socket. Claim it before removal so a replacement cannot
+                    # be deleted by a pathname-only unlink.
+                    if not _unlink_socket_if_identity(
+                        SOCKET_PATH, current_socket_identity
+                    ) and os.path.lexists(SOCKET_PATH):
+                        raise RuntimeError(
+                            f"Socket path changed while cleaning stale socket: {SOCKET_PATH}"
+                        )
             except FileNotFoundError:
                 pass
             except OSError as exc:
@@ -1654,25 +1769,31 @@ def run_socket_server():
         # that capture the server's direct error stream.
         print(f"Socket server error: {e}", file=sys.stderr)
     finally:
-        if bound_socket_identity is not None:
-            try:
-                current_path_stat = os.lstat(SOCKET_PATH)
-            except FileNotFoundError:
-                pass
-            else:
-                current_socket_identity = (
-                    current_path_stat.st_dev,
-                    current_path_stat.st_ino,
-                )
-                if (
-                    stat.S_ISSOCK(current_path_stat.st_mode)
-                    and current_socket_identity == bound_socket_identity
-                ):
-                    try:
-                        os.unlink(SOCKET_PATH)
-                    except FileNotFoundError:
-                        pass
-        loop.close()
+        try:
+            if bound_socket_identity is not None:
+                try:
+                    current_path_stat = os.lstat(SOCKET_PATH)
+                except FileNotFoundError:
+                    pass
+                else:
+                    current_socket_identity = (
+                        current_path_stat.st_dev,
+                        current_path_stat.st_ino,
+                    )
+                    if (
+                        stat.S_ISSOCK(current_path_stat.st_mode)
+                        and current_socket_identity == bound_socket_identity
+                    ):
+                        try:
+                            _unlink_socket_if_identity(
+                                SOCKET_PATH, bound_socket_identity
+                            )
+                        except FileNotFoundError:
+                            pass
+        finally:
+            if lock_acquired:
+                socket_path_lock.__exit__(None, None, None)
+            loop.close()
 
 
 def start_socket_server():

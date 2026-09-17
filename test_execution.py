@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import execution
+from capture_utils import BoundedCommandResult
 from execution import (
     ExecutionBusyError,
     ExecutionStore,
@@ -39,13 +40,14 @@ class Runner:
 
 
 class TestPhaseExecutionManager(unittest.TestCase):
-    def manager(self, runner=None, max_output_bytes=4096):
+    def manager(self, runner=None, max_output_bytes=4096, process_cleanup=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         return PhaseExecutionManager(
             directory.name,
             max_output_bytes=max_output_bytes,
             command_runner=runner or Runner(),
+            process_cleanup=process_cleanup,
         )
 
     @staticmethod
@@ -117,7 +119,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
             return ("partial deploy", 124 if attempts["deploy"] == 1 else 0, False, 13, attempts["deploy"] == 1)
 
         runner = Runner({"deploy": timeout_then_success})
-        manager = self.manager(runner)
+        manager = self.manager(runner, process_cleanup=lambda: None)
         initial = manager.start(
             [self.phase("deploy", "deploy", unsafe_side_effects=True, idempotency_key="deploy-v1")],
             execution_id="unsafe-timeout",
@@ -232,15 +234,24 @@ class TestPhaseExecutionManager(unittest.TestCase):
         record = manager.get("interrupted-execution")
         record["phases"][0]["status"] = "started"
         record["phases"][0]["attempts"] = 1
+        record["phases"][0]["process_id"] = 123
+        record["phases"][0]["process_group_id"] = 456
+        record["phases"][0]["process_start_time"] = "start"
+        record["phases"][0]["process_boot_id"] = "boot"
+        record["phases"][0]["process_containment"] = execution.PROCESS_CONTAINMENT_SUBREAPER
         manager.store.save(record)
 
         fresh_runner = Runner()
         fresh = PhaseExecutionManager(manager.store.state_dir, command_runner=fresh_runner)
-        recovered = fresh.public("interrupted-execution")
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=True):
+            recovered = fresh.public("interrupted-execution")
         self.assertEqual(recovered["execution_status"], "interrupted")
         self.assertEqual(recovered["phases"][0]["status"], "interrupted")
         self.assertIn("process restart recovery", recovered["phases"][0]["events"][-1]["reason"])
-        resumed = fresh.resume("interrupted-execution")
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=True):
+            resumed = fresh.resume("interrupted-execution")
         self.assertEqual(resumed["execution_status"], "completed")
         self.assertEqual([event["status"] for event in resumed["phases"][0]["events"]], ["interrupted", "started", "completed"])
 
@@ -255,48 +266,36 @@ class TestPhaseExecutionManager(unittest.TestCase):
         phase["process_group_id"] = 456
         phase["process_start_time"] = "start"
         phase["process_boot_id"] = "boot"
+        phase["process_containment"] = execution.PROCESS_CONTAINMENT_SUBREAPER
         manager.store.save(record)
         with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
-                patch.object(execution.os, "getpgid", return_value=456), \
-                patch.object(execution.os, "getpgrp", return_value=1), \
-                patch.object(execution.os, "killpg") as killpg:
+                patch.object(execution, "_terminate_pidfd", return_value=True) as terminate:
             recovered = PhaseExecutionManager(
                 manager.store.state_dir, command_runner=Runner()
             ).public("stale-process")
         self.assertEqual(recovered["phases"][0]["status"], "interrupted")
-        self.assertEqual(killpg.call_count, 4)
+        terminate.assert_called_once_with(
+            123, expected_identity=("start", "boot"), expected_group=456
+        )
         stale = {
             "process_id": 123,
             "process_group_id": 456,
             "process_start_time": "start",
             "process_boot_id": "boot",
+            "process_containment": execution.PROCESS_CONTAINMENT_SUBREAPER,
         }
-        identity_patcher = patch.object(execution, "_proc_identity", return_value=("start", "boot"))
-        identity_patcher.start()
-        self.addCleanup(identity_patcher.stop)
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=True) as terminate:
+            self.assertTrue(execution._terminate_stale_process(stale))
+        terminate.assert_called_once_with(
+            123, expected_identity=("start", "boot"), expected_group=456
+        )
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=False):
+            self.assertFalse(execution._terminate_stale_process(stale))
         with patch.object(execution.os, "killpg") as killpg:
-            execution._terminate_stale_process({"process_id": 0, "process_group_id": 456})
-        killpg.assert_not_called()
-        with patch.object(execution.os, "getpgrp", side_effect=OSError("gone")), \
-                patch.object(execution.os, "killpg") as killpg:
-            execution._terminate_stale_process(stale)
-        killpg.assert_not_called()
-        with patch.object(execution.os, "getpgrp", return_value=456), \
-                patch.object(execution.os, "killpg") as killpg:
-            execution._terminate_stale_process(stale)
-        killpg.assert_not_called()
-        with patch.object(execution.os, "getpgrp", return_value=1), \
-                patch.object(execution.os, "killpg", side_effect=OSError("gone")) as killpg:
-            execution._terminate_stale_process(stale)
-        self.assertEqual(killpg.call_count, 1)
-        with patch.object(execution.os, "getpgrp", return_value=1), \
-                patch.object(execution.os, "killpg", side_effect=[None, OSError("gone")]) as killpg:
-            execution._terminate_stale_process(stale)
-        self.assertEqual(killpg.call_count, 2)
-        with patch.object(execution.os, "getpgrp", return_value=1), \
-                patch.object(execution.os, "killpg", side_effect=[None, None, OSError("gone")]) as killpg:
-            execution._terminate_stale_process(stale)
-        self.assertEqual(killpg.call_count, 3)
+            self.assertFalse(execution._terminate_stale_process({"process_id": 0, "process_group_id": 456}))
+        killpg.assert_called_once_with(456, 0)
 
     def test_recovery_refuses_a_reused_process_id(self):
         stale = {
@@ -304,19 +303,341 @@ class TestPhaseExecutionManager(unittest.TestCase):
             "process_group_id": 456,
             "process_start_time": "old-start",
             "process_boot_id": "boot",
+            "process_containment": execution.PROCESS_CONTAINMENT_SUBREAPER,
         }
-        with patch.object(execution, "_proc_identity", return_value=("new-start", "boot")), \
-                patch.object(execution.os, "killpg") as killpg:
-            self.assertFalse(execution._terminate_stale_process(stale))
-        killpg.assert_not_called()
-        with patch.object(execution, "_proc_identity", return_value=("old-start", "new-boot")), \
-                patch.object(execution.os, "killpg") as killpg:
-            self.assertFalse(execution._terminate_stale_process(stale))
-        killpg.assert_not_called()
+        with patch.object(execution, "_proc_identity", return_value=("new-start", "boot")):
+            with patch.object(execution.os, "killpg", return_value=None):
+                self.assertFalse(execution._terminate_stale_process(stale))
+
+        with patch.object(execution, "_proc_identity", return_value=(None, None)), \
+                patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")):
+            self.assertTrue(execution._terminate_stale_process(stale))
+
+        self.assertTrue(
+            execution._terminate_stale_process(
+                {"process_id": 123, "process_group_id": 456, "process_fence_pending": False}
+            )
+        )
+        with patch.object(execution, "_proc_identity", return_value=("old-start", "new-boot")):
+            self.assertTrue(execution._terminate_stale_process(stale))
 
     def test_process_identity_handles_missing_proc_metadata(self):
         with patch.object(execution.Path, "read_text", side_effect=OSError("missing")):
             self.assertEqual(execution._proc_identity(123), (None, None))
+
+    def test_pidfd_termination_is_pinned_and_fails_closed(self):
+        with patch.object(execution.select, "select", side_effect=OSError("select failed")):
+            self.assertFalse(execution._pidfd_terminated(9))
+        with patch.object(execution.select, "select", return_value=([9], [], [])):
+            self.assertTrue(execution._pidfd_terminated(9))
+
+        with patch.object(execution.os, "pidfd_open", None):
+            self.assertFalse(execution._terminate_pidfd(123))
+        with patch.object(execution.os, "getpid", return_value=123):
+            self.assertFalse(execution._terminate_pidfd(123))
+        with patch.object(execution.os, "pidfd_open", side_effect=OSError(errno.EPERM, "denied")):
+            self.assertFalse(execution._terminate_pidfd(123))
+        with patch.object(execution.os, "pidfd_open", side_effect=OSError(errno.ESRCH, "gone")):
+            self.assertTrue(execution._terminate_pidfd(123))
+        with patch.object(execution.os, "pidfd_open", side_effect=OSError(errno.ESRCH, "gone")), \
+                patch.object(execution, "_process_group_is_absent", return_value=True):
+            self.assertTrue(execution._terminate_pidfd(123, expected_group=456))
+
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution, "_proc_identity", return_value=("new", "boot")), \
+                patch.object(execution.os, "close"):
+            self.assertFalse(
+                execution._terminate_pidfd(123, expected_identity=("old", "boot"))
+            )
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution, "_proc_identity", return_value=(None, None)), \
+                patch.object(execution, "_pidfd_terminated", return_value=True), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(
+                execution._terminate_pidfd(123, expected_identity=("old", "boot"))
+            )
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution, "_proc_identity", return_value=(None, None)), \
+                patch.object(execution, "_pidfd_terminated", return_value=True), \
+                patch.object(execution, "_process_group_is_absent", return_value=True), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(
+                execution._terminate_pidfd(
+                    123, expected_identity=("old", "boot"), expected_group=456
+                )
+            )
+
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution, "_proc_identity", return_value=("old", "boot")), \
+                patch.object(execution.os, "getpgid", return_value=789), \
+                patch.object(execution.os, "close"):
+            self.assertFalse(
+                execution._terminate_pidfd(
+                    123, expected_identity=("old", "boot"), expected_group=456
+                )
+            )
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution, "_proc_identity", return_value=("old", "boot")), \
+                patch.object(execution.os, "getpgid", side_effect=OSError(errno.EPERM, "denied")), \
+                patch.object(execution.os, "close"):
+            self.assertFalse(
+                execution._terminate_pidfd(
+                    123, expected_identity=("old", "boot"), expected_group=456
+                )
+            )
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution, "_proc_identity", return_value=("old", "boot")), \
+                patch.object(execution.os, "getpgid", side_effect=OSError(errno.ESRCH, "gone")), \
+                patch.object(execution, "_pidfd_terminated", return_value=True), \
+                patch.object(execution, "_process_group_is_absent", return_value=True), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(
+                execution._terminate_pidfd(
+                    123, expected_identity=("old", "boot"), expected_group=456
+                )
+            )
+
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution.signal, "pidfd_send_signal", side_effect=ProcessLookupError()), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(execution._terminate_pidfd(123))
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution.signal, "pidfd_send_signal", side_effect=ProcessLookupError()), \
+                patch.object(execution, "_pidfd_terminated", return_value=True), \
+                patch.object(execution, "_process_group_is_absent", return_value=True), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(execution._terminate_pidfd(123, expected_group=456))
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution.signal, "pidfd_send_signal"), \
+                patch.object(execution, "_pidfd_terminated", side_effect=[False, True]), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(execution._terminate_pidfd(123))
+        with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution.signal, "pidfd_send_signal", side_effect=[None, ProcessLookupError()]), \
+                patch.object(execution, "_pidfd_terminated", side_effect=[False, False]), \
+                patch.object(execution.os, "close"):
+            self.assertFalse(execution._terminate_pidfd(123))
+
+    def test_process_group_termination_proves_group_absence(self):
+        with patch.object(execution.os, "getpgrp", return_value=456), \
+                patch.object(execution.os, "killpg") as killpg:
+            self.assertFalse(execution._terminate_process_group(456))
+        killpg.assert_not_called()
+        with patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")) as killpg:
+            self.assertTrue(execution._terminate_process_group(456))
+        self.assertEqual(killpg.call_count, 1)
+        for side_effect, expected_calls in (
+            ([None, OSError(errno.ESRCH, "gone")], 2),
+            ([None, None, OSError(errno.ESRCH, "gone")], 3),
+        ):
+            with self.subTest(side_effect=side_effect), \
+                    patch.object(execution.os, "getpgrp", return_value=1), \
+                    patch.object(execution.os, "killpg", side_effect=side_effect) as killpg:
+                self.assertTrue(execution._terminate_process_group(456))
+            self.assertEqual(killpg.call_count, expected_calls)
+        for side_effect, expected in (
+            ([None, None, None, OSError(errno.ESRCH, "gone")], True),
+            ([None, None, None, OSError(errno.EPERM, "denied")], False),
+            ([None, None, None, None], False),
+        ):
+            with self.subTest(side_effect=side_effect), \
+                    patch.object(execution.os, "getpgrp", return_value=1), \
+                    patch.object(execution.os, "killpg", side_effect=side_effect):
+                self.assertEqual(execution._terminate_process_group(456), expected)
+
+    def test_process_recovery_capability_probe_and_startup_gate(self):
+        with patch.object(execution.sys, "platform", "win32"):
+            self.assertFalse(execution._process_recovery_supported())
+        with patch.object(execution, "fcntl", None):
+            self.assertFalse(execution._process_recovery_supported())
+        with patch.object(execution.os, "pidfd_open", None):
+            self.assertFalse(execution._process_recovery_supported())
+        with patch.object(execution.signal, "pidfd_send_signal", None):
+            self.assertFalse(execution._process_recovery_supported())
+        with patch.object(execution.Path, "is_dir", return_value=False):
+            self.assertFalse(execution._process_recovery_supported())
+        with patch.object(execution.Path, "is_dir", return_value=True), \
+                patch.object(execution.Path, "read_text", return_value="boot"), \
+                patch.object(execution, "_proc_identity", return_value=(None, None)):
+            self.assertFalse(execution._process_recovery_supported())
+        with patch.object(execution.Path, "is_dir", return_value=True), \
+                patch.object(execution.Path, "read_text", side_effect=OSError("boot id missing")):
+            self.assertFalse(execution._process_recovery_supported())
+
+        manager = self.manager(runner=execution.run_command_bounded)
+        with patch.object(execution, "_process_recovery_supported", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "pidfd"):
+                manager.start(
+                    [self.phase("blocked", "blocked")],
+                    execution_id="unsupported-recovery",
+                )
+
+        with patch.object(execution.Path, "is_dir", return_value=True), \
+                patch.object(execution.Path, "read_text", return_value="boot"), \
+                patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution.signal, "pidfd_send_signal"), \
+                patch.object(execution.select, "select", return_value=([], [], [])), \
+                patch.object(execution.os, "close"):
+            self.assertTrue(execution._process_recovery_supported())
+
+    def test_marker_recovery_fences_process_group_without_checkpointed_identity(self):
+        phase = {
+            "process_id": None,
+            "process_group_id": None,
+            "process_launch_token": "marker",
+        }
+        with patch.object(
+            execution,
+            "_marker_process_identities",
+            side_effect=[{123: ("start", "boot")}, {}],
+        ), \
+                patch.object(execution, "_terminate_pidfd", return_value=True) as terminate:
+            self.assertTrue(execution._terminate_stale_process(phase))
+        terminate.assert_called_once_with(123, expected_identity=("start", "boot"))
+        with patch.object(execution, "_marker_process_identities", return_value={}):
+            self.assertTrue(execution._terminate_stale_process(phase))
+        with patch.object(execution, "_marker_process_identities", return_value={123: ("start", "boot")}), \
+                patch.object(execution, "_terminate_pidfd", return_value=False):
+            self.assertFalse(execution._terminate_stale_process(phase))
+        phase["process_group_id"] = 456
+        with patch.object(
+            execution,
+            "_marker_process_identities",
+            side_effect=[{123: ("start", "boot")}, {}],
+        ), \
+                patch.object(execution, "_terminate_pidfd", return_value=True) as terminate, \
+                patch.object(execution, "_process_group_is_absent", return_value=True):
+            self.assertTrue(execution._terminate_stale_process(phase))
+        terminate.assert_called_once_with(123, expected_identity=("start", "boot"))
+        with patch.object(execution, "_marker_process_identities", return_value={123: ("start", "boot")}), \
+                patch.object(execution, "_terminate_pidfd", return_value=False), \
+                patch.object(execution, "_process_group_is_absent", return_value=True):
+            self.assertFalse(execution._terminate_stale_process(phase))
+        with patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")):
+            self.assertTrue(execution._terminate_stale_process({"process_id": 0, "process_group_id": 456}))
+
+    def test_marker_process_scan_fails_closed_for_unavailable_proc_metadata(self):
+        with patch.object(execution.sys, "platform", "win32"):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution.os, "listdir", side_effect=OSError("proc unavailable")):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution.os, "listdir", return_value=["not-a-pid", "123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", side_effect=FileNotFoundError()):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 11})()):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", side_effect=OSError("stat unavailable")):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.Path, "read_bytes", side_effect=FileNotFoundError()):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.Path, "read_bytes", side_effect=OSError("environ unavailable")):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.Path, "read_bytes", return_value=b"OTHER=value\0"):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
+                patch.object(execution.os, "getpgid", side_effect=OSError(errno.ESRCH, "gone")):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
+                patch.object(execution.os, "getpgid", side_effect=OSError(errno.EPERM, "denied")):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution, "_marker_process_identities", return_value=None):
+            self.assertFalse(
+                execution._terminate_stale_process(
+                    {"process_launch_token": "marker"}
+                )
+            )
+
+        with patch.object(execution, "_marker_process_identities", return_value=None):
+            self.assertFalse(
+                execution._terminate_stale_process(
+                    {"process_group_id": 456, "process_launch_token": "marker"}
+                )
+            )
+        with patch.object(execution, "_marker_process_identities", return_value={}), \
+                patch.object(execution, "_process_group_is_absent", return_value=True):
+            self.assertTrue(
+                execution._terminate_stale_process(
+                    {"process_group_id": 456, "process_launch_token": "marker"}
+                )
+            )
+        with patch.object(execution, "_marker_process_identities", return_value={}), \
+                patch.object(execution, "_process_group_is_absent", return_value=False):
+            self.assertFalse(
+                execution._terminate_stale_process(
+                    {
+                        "process_id": 123,
+                        "process_group_id": 456,
+                        "process_launch_token": "marker",
+                    }
+                )
+            )
+        with patch.object(execution, "_proc_identity", return_value=("other", "boot")), \
+                patch.object(execution, "_marker_process_identities", return_value={}), \
+                patch.object(execution, "_process_group_is_absent", return_value=True):
+            self.assertTrue(
+                execution._terminate_stale_process(
+                    {
+                        "process_id": 123,
+                        "process_group_id": 456,
+                        "process_start_time": "start",
+                        "process_boot_id": "boot",
+                        "process_launch_token": "marker",
+                    }
+                )
+            )
+
+    def test_marker_process_identities_pin_scan_results(self):
+        with patch.object(execution, "_marker_processes", return_value=None):
+            self.assertIsNone(execution._marker_process_identities("marker"))
+        with patch.object(execution, "_marker_processes", return_value=set()):
+            self.assertEqual(execution._marker_process_identities("marker"), {})
+        with patch.object(execution, "_marker_processes", return_value={123}), \
+                patch.object(execution, "_proc_identity", return_value=("start", "boot")):
+            self.assertEqual(
+                execution._marker_process_identities("marker"),
+                {123: ("start", "boot")},
+            )
+        with patch.object(execution, "_marker_processes", return_value={123}), \
+                patch.object(execution, "_proc_identity", return_value=(None, None)):
+            self.assertIsNone(execution._marker_process_identities("marker"))
+
+    def test_recovery_fences_when_durable_marker_is_not_observable(self):
+        manager = self.manager()
+        manager.create([self.phase("launching", "launching")], execution_id="marker-gone")
+        record = manager.get("marker-gone")
+        phase = record["phases"][0]
+        phase["status"] = "started"
+        phase["attempts"] = 1
+        phase["process_launch_token"] = "marker"
+        phase["process_fence_pending"] = True
+        manager.store.save(record)
+        with patch.object(execution, "_marker_process_identities", return_value=None):
+            recovered = manager.public("marker-gone")
+        self.assertEqual(recovered["phases"][0]["status"], "interrupted")
+        self.assertTrue(manager.get("marker-gone")["phases"][0]["process_fence_pending"])
+        self.assertFalse(recovered["resume"]["available"])
 
     def test_recovery_reports_unconfirmed_group_fence(self):
         stale = {
@@ -340,29 +661,16 @@ class TestPhaseExecutionManager(unittest.TestCase):
         for identity in ((None, None), ("start", None), (None, "boot")):
             with self.subTest(identity=identity), \
                     patch.object(execution, "_proc_identity", return_value=identity), \
-                    patch.object(execution.os, "kill", return_value=None), \
-                    patch.object(execution.os, "killpg") as killpg:
+                    patch.object(execution.os, "killpg", return_value=None):
                 self.assertFalse(execution._terminate_stale_process(stale))
-            killpg.assert_not_called()
         for missing in ({}, {"process_start_time": "start"}, {"process_boot_id": "boot"}):
             incomplete = {key: stale[key] for key in ("process_id", "process_group_id")}
             incomplete.update(missing)
-            with self.subTest(missing=missing), patch.object(execution.os, "killpg") as killpg:
+            with self.subTest(missing=missing), patch.object(execution.os, "killpg", return_value=None):
                 self.assertFalse(execution._terminate_stale_process(incomplete))
-            killpg.assert_not_called()
-        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
-                patch.object(execution.os, "getpgrp", return_value=1), \
-                patch.object(execution.os, "killpg", side_effect=OSError(errno.EPERM, "denied")):
-            self.assertFalse(execution._terminate_stale_process(stale))
-        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
-                patch.object(execution.os, "getpgrp", return_value=1), \
+        with patch.object(execution, "_proc_identity", return_value=(None, None)), \
                 patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")):
             self.assertTrue(execution._terminate_stale_process(stale))
-        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
-                patch.object(execution.os, "getpgid", return_value=789), \
-                patch.object(execution.os, "killpg") as killpg:
-            self.assertFalse(execution._terminate_stale_process(stale))
-        killpg.assert_not_called()
 
     def test_crash_before_process_checkpoint_blocks_recovery(self):
         manager = self.manager()
@@ -429,6 +737,95 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertIsNone(persisted["phases"][0]["process_id"])
         self.assertIsNone(persisted["phases"][0]["process_group_id"])
 
+    def test_default_runner_cleanup_failure_keeps_interruption_fenced(self):
+        base = self.manager()
+        interrupted = KeyboardInterrupt("interrupted")
+        interrupted.cleanup_confirmed = False
+        def interrupted_runner(*_args, **kwargs):
+            kwargs["process_started"](123, 456)
+            raise interrupted
+
+        with patch.object(
+            execution,
+            "run_command_bounded",
+            side_effect=interrupted_runner,
+        ), patch.object(execution, "_proc_identity", return_value=("start", "boot")):
+            manager = PhaseExecutionManager(
+                base.store.state_dir,
+                command_runner=execution.run_command_bounded,
+            )
+            with self.assertRaises(KeyboardInterrupt):
+                manager.start([self.phase("unsafe", "unsafe")], execution_id="default-fence")
+        record = manager.get("default-fence")
+        phase = record["phases"][0]
+        self.assertTrue(phase["process_fence_pending"])
+        self.assertEqual(
+            (phase["process_id"], phase["process_group_id"], phase["process_start_time"], phase["process_boot_id"]),
+            (123, 456, "start", "boot"),
+        )
+        self.assertFalse(manager.public("default-fence")["resume"]["available"])
+
+    def test_default_runner_exception_cleanup_failure_keeps_phase_fenced(self):
+        base = self.manager()
+        failure = RuntimeError("runner failed")
+        failure.cleanup_confirmed = False
+        def failed_runner(*_args, **kwargs):
+            kwargs["process_started"](123, 456)
+            raise failure
+
+        with patch.object(
+            execution,
+            "run_command_bounded",
+            side_effect=failed_runner,
+        ), patch.object(execution, "_proc_identity", return_value=("start", "boot")):
+            manager = PhaseExecutionManager(
+                base.store.state_dir,
+                command_runner=execution.run_command_bounded,
+            )
+            result = manager.start([self.phase("failed", "failed")], execution_id="default-error-fence")
+        self.assertEqual(result["phases"][0]["status"], "failed")
+        phase = manager.get("default-error-fence")["phases"][0]
+        self.assertTrue(phase["process_fence_pending"])
+        self.assertEqual(
+            (phase["process_id"], phase["process_group_id"], phase["process_start_time"], phase["process_boot_id"]),
+            (123, 456, "start", "boot"),
+        )
+
+    def test_default_runner_non_timeout_cleanup_failure_keeps_phase_fenced(self):
+        base = self.manager()
+        result = BoundedCommandResult(
+            "partial",
+            1,
+            False,
+            7,
+            False,
+            cleanup_confirmed=False,
+        )
+        def failed_runner(*_args, **kwargs):
+            kwargs["process_started"](123, 456)
+            return result
+
+        with patch.object(execution, "run_command_bounded", side_effect=failed_runner) as runner, \
+                patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=False):
+            manager = PhaseExecutionManager(base.store.state_dir)
+            first = manager.start(
+                [self.phase("failed", "failed")],
+                execution_id="default-non-timeout-fence",
+            )
+            self.assertEqual(first["phases"][0]["status"], "failed")
+            self.assertTrue(
+                manager.get("default-non-timeout-fence")["phases"][0]["process_fence_pending"]
+            )
+            blocked = manager.resume(
+                "default-non-timeout-fence",
+                retry_failed=True,
+            )
+        self.assertTrue(
+            manager.get("default-non-timeout-fence")["phases"][0]["process_fence_pending"]
+        )
+        self.assertEqual(runner.call_count, 1)
+
     def test_unsafe_started_phase_is_recovered_before_resume_confirmation(self):
         runner = Runner()
         manager = self.manager(runner)
@@ -439,18 +836,27 @@ class TestPhaseExecutionManager(unittest.TestCase):
         record = manager.get("unsafe-started")
         record["phases"][0]["status"] = "started"
         record["phases"][0]["attempts"] = 1
+        record["phases"][0]["process_id"] = 123
+        record["phases"][0]["process_group_id"] = 456
+        record["phases"][0]["process_start_time"] = "start"
+        record["phases"][0]["process_boot_id"] = "boot"
+        record["phases"][0]["process_containment"] = execution.PROCESS_CONTAINMENT_SUBREAPER
         manager.store.save(record)
         fresh = PhaseExecutionManager(manager.store.state_dir, command_runner=runner)
-        blocked = fresh.resume("unsafe-started")
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=True):
+            blocked = fresh.resume("unsafe-started")
         self.assertEqual(blocked["phases"][0]["status"], "interrupted")
         self.assertTrue(blocked["resume"]["unsafe_confirmation_required"])
         self.assertEqual(runner.calls, [])
-        completed = fresh.resume("unsafe-started", confirm_unsafe=True)
+        with patch.object(execution, "_proc_identity", return_value=("start", "boot")), \
+                patch.object(execution, "_terminate_pidfd", return_value=True):
+            completed = fresh.resume("unsafe-started", confirm_unsafe=True)
         self.assertEqual(completed["execution_status"], "completed")
 
     def test_runner_error_is_persisted_and_can_be_retried(self):
         runner = Runner({"broken": RuntimeError("runner unavailable"), "long-error": RuntimeError("x" * 5000)})
-        manager = self.manager(runner)
+        manager = self.manager(runner, process_cleanup=lambda: None)
         failed = manager.start([self.phase("broken", "broken")], execution_id="runner-error")
         self.assertEqual(failed["phases"][0]["status"], "failed")
         self.assertEqual(failed["phases"][0]["result"]["error_type"], "RuntimeError")
@@ -465,8 +871,102 @@ class TestPhaseExecutionManager(unittest.TestCase):
         manager = self.manager(runner)
         with self.assertRaises(KeyboardInterrupt):
             manager.start([self.phase("interrupt", "interrupt")], execution_id="keyboard-interrupt")
-        record = manager.public("keyboard-interrupt")
+        record = manager.get("keyboard-interrupt")
         self.assertEqual(record["phases"][0]["status"], "interrupted")
+        self.assertTrue(record["phases"][0]["process_fence_pending"])
+        self.assertFalse(manager.public("keyboard-interrupt")["resume"]["available"])
+
+    def test_runner_interrupt_uses_cleanup_hook_before_allowing_resume(self):
+        runner = Runner({"interrupt": KeyboardInterrupt()})
+        cleanup_calls = []
+        manager = self.manager(
+            runner,
+            process_cleanup=lambda: cleanup_calls.append("cleaned"),
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            manager.start([self.phase("interrupt", "interrupt")], execution_id="clean-interrupt")
+        self.assertEqual(cleanup_calls, ["cleaned"])
+        record = manager.get("clean-interrupt")
+        self.assertEqual(record["phases"][0]["status"], "interrupted")
+        self.assertFalse(record["phases"][0]["process_fence_pending"])
+        self.assertTrue(manager.public("clean-interrupt")["resume"]["available"])
+
+    def test_failed_opaque_cleanup_is_retried_before_runner_resume(self):
+        attempts = {"runner": 0, "cleanup": 0}
+
+        def runner(*_args):
+            attempts["runner"] += 1
+            if attempts["runner"] == 1:
+                raise KeyboardInterrupt()
+            return ("clean", 0, False, 5, False)
+
+        def cleanup():
+            attempts["cleanup"] += 1
+            if attempts["cleanup"] == 1:
+                raise RuntimeError("cleanup unavailable")
+
+        manager = self.manager(runner, process_cleanup=cleanup)
+        with self.assertRaises(KeyboardInterrupt):
+            manager.start([self.phase("opaque", "opaque")], execution_id="opaque-retry")
+        self.assertTrue(manager.get("opaque-retry")["phases"][0]["process_fence_pending"])
+        resumed = manager.resume("opaque-retry")
+        self.assertEqual(resumed["execution_status"], "completed")
+        self.assertEqual(attempts, {"runner": 2, "cleanup": 2})
+
+    def test_timeout_without_cleanup_confirmation_blocks_retry(self):
+        runner = Runner({"timeout": ("partial", 124, False, 7, True)})
+        manager = self.manager(runner)
+        result = manager.start([self.phase("timeout", "timeout")], execution_id="timeout-fence")
+        self.assertEqual(result["phases"][0]["status"], "timed_out")
+        self.assertTrue(manager.get("timeout-fence")["phases"][0]["process_fence_pending"])
+        blocked = manager.resume("timeout-fence", retry_failed=True)
+        self.assertEqual(blocked["phases"][0]["attempts"], 1)
+        self.assertEqual([call[0] for call in runner.calls], ["timeout"])
+        self.assertFalse(manager.list_public()[0]["resume"]["available"])
+
+    def test_recovery_preserves_failed_and_timed_out_status_for_retry_policy(self):
+        for status in ("failed", "timed_out"):
+            with self.subTest(status=status):
+                runner = Runner()
+                manager = self.manager(runner)
+                execution_id = f"pending-{status}"
+                manager.create([self.phase(status, status)], execution_id=execution_id)
+                record = manager.get(execution_id)
+                phase = record["phases"][0]
+                phase["status"] = status
+                phase["attempts"] = 1
+                phase["process_id"] = 123
+                phase["process_group_id"] = 456
+                phase["process_start_time"] = "start"
+                phase["process_boot_id"] = "boot"
+                phase["process_containment"] = execution.PROCESS_CONTAINMENT_SUBREAPER
+                phase["process_fence_pending"] = True
+                manager.store.save(record)
+
+                with patch.object(execution, "_terminate_stale_process", return_value=True):
+                    recovered = manager.resume(execution_id)
+
+                self.assertEqual(recovered["phases"][0]["status"], status)
+                self.assertEqual(runner.calls, [])
+
+    def test_interruption_fence_handles_default_and_failed_custom_cleanup(self):
+        base = self.manager()
+        default = PhaseExecutionManager(
+            base.store.state_dir,
+            command_runner=execution.run_command_bounded,
+        )
+        self.assertTrue(default._fence_interrupted_runner(True))
+        self.assertFalse(default._fence_interrupted_runner(False))
+
+        def failing_cleanup():
+            raise RuntimeError("cleanup unavailable")
+
+        custom = PhaseExecutionManager(
+            base.store.state_dir,
+            command_runner=Runner(),
+            process_cleanup=failing_cleanup,
+        )
+        self.assertFalse(custom._fence_interrupted_runner())
 
     def test_output_handler_and_structured_metrics_are_retained(self):
         runner = Runner()
@@ -561,8 +1061,12 @@ class TestPhaseExecutionManager(unittest.TestCase):
 
     def test_lease_and_store_defensive_limits(self):
         manager = self.manager()
+        with patch.object(execution.sys, "platform", "darwin"):
+            with self.assertRaisesRegex(RuntimeError, "Linux platform"):
+                with manager.store.lease("unsupported-platform"):
+                    pass
         with patch.object(execution, "fcntl", None):
-            with self.assertRaisesRegex(RuntimeError, "Unix file-locking"):
+            with self.assertRaisesRegex(RuntimeError, "Linux file-locking"):
                 with manager.store.lease("unsupported"):
                     pass
             self.assertFalse(manager.store.is_locked("unsupported"))
@@ -732,6 +1236,11 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertFalse(manager.store._lock_path("missing").exists())
         manager.create([self.phase("x", "x")], execution_id="lookup")
         self.assertEqual(manager.public("lookup", include_output=True)["phases"][0]["output"], "")
+        pending = manager.get("lookup")
+        pending["phases"][0]["output"] = "x" * 1024
+        manager.store.save(pending)
+        paged = manager.output("lookup", max_bytes=512)
+        self.assertEqual(len(paged["phases"][0]["output"]), 512)
         pending = manager.get("lookup")
         pending["phases"][0]["output"] = None
         manager.store.save(pending)

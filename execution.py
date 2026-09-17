@@ -11,8 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
 import signal
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -27,7 +29,7 @@ from config import DEFAULT_MAX_OUTPUT_BYTES
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - the server requires Unix sockets.
+except ImportError:  # pragma: no cover - durable execution requires Linux.
     fcntl = None
 
 
@@ -47,9 +49,12 @@ DEFAULT_EXECUTION_LIST_LIMIT = 20
 MAX_EXECUTION_LIST_LIMIT = 100
 MAX_EXECUTION_OUTPUT_CHUNK_BYTES = 8 * 1024
 JSON_OUTPUT_EXPANSION_BOUND = 6
+PROCESS_MARKER_ENV = "EPHEMERAL_EXECUTION_PROCESS_MARKER"
+PROCESS_CONTAINMENT_SUBREAPER = "linux-subreaper"
 
 
 CommandRunner = Callable[[str, Optional[str], int, Optional[float]], Tuple[str, int, bool, int, bool]]
+ProcessCleanup = Callable[[], None]
 OutputHandler = Callable[[Dict[str, Any], str, Dict[str, Any]], Optional[str]]
 
 
@@ -142,58 +147,104 @@ def _process_group_absent(error: OSError) -> bool:
     return getattr(error, "errno", None) == errno.ESRCH
 
 
-def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
-    """Stop a command left behind by a process that died during execution."""
-    process_id = phase.get("process_id")
-    process_group_id = phase.get("process_group_id")
-    if (
-        isinstance(process_id, bool)
-        or not isinstance(process_id, int)
-        or process_id <= 0
-        or isinstance(process_group_id, bool)
-        or not isinstance(process_group_id, int)
-        or process_group_id <= 0
-    ):
-        return phase.get("process_fence_pending") is False
-    expected_start = phase.get("process_start_time")
-    expected_boot = phase.get("process_boot_id")
-    if (
-        not isinstance(expected_start, str)
-        or not expected_start
-        or not isinstance(expected_boot, str)
-        or not expected_boot
-    ):
-        return False
-    current_start, current_boot = _proc_identity(process_id)
-    if current_start is not None or current_boot is not None:
-        if (
-            not isinstance(current_start, str)
-            or not current_start
-            or not isinstance(current_boot, str)
-            or not current_boot
-            or current_start != expected_start
-            or current_boot != expected_boot
-        ):
-            return False
-    else:
-        try:
-            os.kill(process_id, 0)
-        except OSError as exc:
-            if not _process_group_absent(exc):
-                return False
-        else:
-            return False
+def _process_group_is_absent(process_group_id: int) -> bool:
+    """Prove that a persisted process group no longer exists."""
     try:
-        current_process_group_id = os.getpgid(process_id)
+        os.killpg(process_group_id, 0)
+    except OSError as exc:
+        return _process_group_absent(exc)
+    return False
+
+
+def _pidfd_terminated(pidfd: int, timeout: float = 0.0) -> bool:
+    try:
+        ready, _write, _error = select.select([pidfd], [], [], timeout)
+    except (OSError, ValueError):
+        return False
+    return bool(ready)
+
+
+def _process_recovery_supported() -> bool:
+    """Probe every backend required to recover built-in command processes."""
+    if not sys.platform.startswith("linux") or fcntl is None:
+        return False
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    select_fn = getattr(select, "select", None)
+    if not all(callable(value) for value in (pidfd_open, pidfd_send_signal, select_fn)):
+        return False
+    try:
+        if not Path("/proc").is_dir():
+            return False
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        if not boot_id or _proc_identity(os.getpid()) == (None, None):
+            return False
+        pidfd = pidfd_open(os.getpid())
+        try:
+            pidfd_send_signal(pidfd, 0)
+            select_fn([pidfd], [], [], 0)
+        finally:
+            os.close(pidfd)
+    except (OSError, ValueError, UnicodeError, TypeError):
+        return False
+    return True
+
+
+def _terminate_pidfd(
+    process_id: int,
+    *,
+    expected_identity: Optional[Tuple[str, str]] = None,
+    expected_group: Optional[int] = None,
+) -> bool:
+    """Signal a pinned process without exposing a reusable numeric PID race."""
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or pidfd_send_signal is None or process_id == os.getpid():
+        return False
+    try:
+        pidfd = pidfd_open(process_id)
     except OSError as exc:
         if not _process_group_absent(exc):
             return False
-    else:
-        if current_process_group_id != process_group_id:
-            return False
+        return expected_group is None or _process_group_is_absent(expected_group)
+    try:
+        if expected_identity is not None:
+            current_identity = _proc_identity(process_id)
+            if current_identity != expected_identity:
+                if current_identity == (None, None) and _pidfd_terminated(pidfd):
+                    return expected_group is None or _process_group_is_absent(expected_group)
+                return False
+        if expected_group is not None:
+            try:
+                if os.getpgid(process_id) != expected_group:
+                    return False
+            except OSError as exc:
+                if not _process_group_absent(exc):
+                    return False
+                return _pidfd_terminated(pidfd) and _process_group_is_absent(expected_group)
+        try:
+            pidfd_send_signal(pidfd, signal.SIGTERM)
+        except ProcessLookupError:
+            return True if expected_group is None else (
+                _pidfd_terminated(pidfd) and _process_group_is_absent(expected_group)
+            )
+        if not _pidfd_terminated(pidfd, 1):
+            try:
+                pidfd_send_signal(pidfd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if not _pidfd_terminated(pidfd, 1):
+                return False
+        return expected_group is None or _process_group_is_absent(expected_group)
+    finally:
+        os.close(pidfd)
+
+
+def _terminate_process_group(process_group_id: int) -> bool:
+    """Terminate a verified process group and prove that it disappeared."""
     try:
         if os.getpgrp() == process_group_id:
-            return True
+            return False
         os.killpg(process_group_id, 0)
     except OSError as exc:
         return _process_group_absent(exc)
@@ -210,6 +261,172 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
     except OSError as exc:
         return _process_group_absent(exc)
     return False
+
+
+def _marker_processes(marker: str) -> Optional[set[int]]:
+    """Find Linux processes carrying a durable execution marker."""
+    if not sys.platform.startswith("linux"):
+        return None
+    marker_bytes = f"{PROCESS_MARKER_ENV}={marker}".encode("ascii")
+    try:
+        process_names = os.listdir("/proc")
+    except OSError:
+        return None
+    processes: set[int] = set()
+    current_uid = getattr(os, "getuid", lambda: None)()
+    for process_name in process_names:
+        if not process_name.isdigit():
+            continue
+        process_id = int(process_name)
+        try:
+            if current_uid is not None and os.stat(f"/proc/{process_id}").st_uid != current_uid:
+                continue
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        try:
+            environment = Path(f"/proc/{process_id}/environ").read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        if marker_bytes not in environment.split(b"\0"):
+            continue
+        processes.add(process_id)
+    return processes
+
+
+def _marker_process_groups(marker: str) -> Optional[set[int]]:
+    """Find Linux process groups carrying a durable execution marker."""
+    processes = _marker_processes(marker)
+    if processes is None:
+        return None
+    groups: set[int] = set()
+    for process_id in processes:
+        try:
+            groups.add(os.getpgid(process_id))
+        except OSError as exc:
+            if _process_group_absent(exc):
+                continue
+            return None
+    return groups
+
+
+def _marker_process_identities(marker: str) -> Optional[Dict[int, Tuple[str, str]]]:
+    """Pin marker-bearing processes to their current kernel identities."""
+    processes = _marker_processes(marker)
+    if processes is None:
+        return None
+    identities: Dict[int, Tuple[str, str]] = {}
+    for process_id in processes:
+        start_time, boot_id = _proc_identity(process_id)
+        if not start_time or not boot_id:
+            return None
+        identities[process_id] = (start_time, boot_id)
+    return identities
+
+
+def _terminate_marker_processes(
+    marker: str,
+    identities: Optional[Dict[int, Tuple[str, str]]] = None,
+) -> bool:
+    """Terminate marker-bearing processes through pinned process descriptors."""
+    identities = _marker_process_identities(marker) if identities is None else identities
+    if identities is None:
+        return False
+    if not identities:
+        return True
+    if not all(
+        _terminate_pidfd(process_id, expected_identity=identity)
+        for process_id, identity in identities.items()
+    ):
+        return False
+    return _marker_process_identities(marker) == {}
+
+
+def _terminate_marker_processes_or_confirm_group_absent(
+    marker: str,
+    process_group_id: int,
+) -> bool:
+    """Clean marked descendants before accepting an absent process group."""
+    identities = _marker_process_identities(marker)
+    if identities is None:
+        return False
+    if identities:
+        return _terminate_marker_processes(marker, identities)
+    return _process_group_is_absent(process_group_id)
+
+
+def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
+    """Stop a command left behind by a process that died during execution."""
+    process_id = phase.get("process_id")
+    process_group_id = phase.get("process_group_id")
+    valid_process_id = (
+        not isinstance(process_id, bool)
+        and isinstance(process_id, int)
+        and process_id > 0
+    )
+    valid_process_group_id = (
+        not isinstance(process_group_id, bool)
+        and isinstance(process_group_id, int)
+        and process_group_id > 0
+    )
+    marker = phase.get("process_launch_token")
+    if not valid_process_id or not valid_process_group_id:
+        if isinstance(marker, str) and marker:
+            # A process checkpoint can be interrupted before start-time
+            # metadata is written. Pin marker-bearing PIDs individually; a
+            # numeric process group is not safe to signal in that window.
+            if valid_process_group_id:
+                return _terminate_marker_processes_or_confirm_group_absent(
+                    marker, process_group_id
+                )
+            return _terminate_marker_processes(marker)
+        if valid_process_group_id and _process_group_is_absent(process_group_id):
+            return True
+        # Never treat incomplete identity metadata as proof that an unknown
+        # process group is gone. Legacy records without a launch marker remain
+        # fenced until an operator resolves them.
+        return False
+    expected_start = phase.get("process_start_time")
+    expected_boot = phase.get("process_boot_id")
+    if (
+        not isinstance(expected_start, str)
+        or not expected_start
+        or not isinstance(expected_boot, str)
+        or not expected_boot
+    ):
+        if isinstance(marker, str) and marker:
+            return _terminate_marker_processes_or_confirm_group_absent(
+                marker, process_group_id
+            )
+        return _process_group_is_absent(process_group_id)
+    current_start, current_boot = _proc_identity(process_id)
+    if (
+        not isinstance(current_start, str)
+        or not current_start
+        or not isinstance(current_boot, str)
+        or not current_boot
+        or current_start != expected_start
+        or current_boot != expected_boot
+    ):
+        # A missing /proc identity is not proof that the original leader is
+        # gone, unless the kernel also proves the whole persisted group gone.
+        if isinstance(marker, str) and marker:
+            return _terminate_marker_processes_or_confirm_group_absent(
+                marker, process_group_id
+            )
+        return _process_group_is_absent(process_group_id)
+    if phase.get("process_containment") != PROCESS_CONTAINMENT_SUBREAPER:
+        # Legacy records have no pinned supervisor.  Never signal a numeric
+        # group whose membership can have changed since the checkpoint.
+        return _process_group_is_absent(process_group_id)
+    return _terminate_pidfd(
+        process_id,
+        expected_identity=(expected_start, expected_boot),
+        expected_group=process_group_id,
+    )
 
 
 class ExecutionStore:
@@ -303,8 +520,10 @@ class ExecutionStore:
     @contextmanager
     def lease(self, execution_id: str):
         """Hold an inter-process lease while one execution runs a phase."""
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("durable execution leases require a Linux platform")
         if fcntl is None:
-            raise RuntimeError("durable execution leases require a Unix file-locking platform")
+            raise RuntimeError("durable execution leases require Linux file-locking support")
         self._ensure_state_dir()
         lock_path = self._lock_path(execution_id)
         self._reject_symlink(lock_path, "lock file")
@@ -379,7 +598,7 @@ class ExecutionStore:
                         key: phase.get(key)
                         for key in (
                             "name", "status", "side_effects", "unsafe_side_effects",
-                            "attempts", "error",
+                            "attempts", "error", "process_fence_pending",
                         )
                     }
                     for phase in summary_record.get("phases", [])
@@ -449,24 +668,28 @@ class ExecutionStore:
     def _recover_started(record: Dict[str, Any]) -> bool:
         changed = False
         for phase in record.get("phases", []):
-            if phase.get("status") != "started" and not phase.get("process_fence_pending"):
+            status = phase.get("status")
+            if status != "started" and not phase.get("process_fence_pending"):
                 continue
-            if phase.get("status") == "started" and "process_fence_pending" not in phase:
+            if status == "started" and "process_fence_pending" not in phase:
                 phase["process_fence_pending"] = True
             already_pending = (
-                phase.get("status") == "interrupted"
+                status == "interrupted"
                 and phase.get("process_fence_pending") is True
             )
             fenced = _terminate_stale_process(phase)
-            phase["status"] = "interrupted"
             phase["process_fence_pending"] = not fenced
-            phase["error"] = (
-                "process termination is pending before the phase can resume"
-                if not fenced
-                else "process terminated before the phase completed"
-            )
-            if not already_pending:
-                _phase_event(phase, "interrupted", reason="process restart recovery")
+            if status == "started" or status == "interrupted":
+                phase["status"] = "interrupted"
+                phase["error"] = (
+                    "process termination is pending before the phase can resume"
+                    if not fenced
+                    else "process terminated before the phase completed"
+                )
+                if not already_pending:
+                    _phase_event(phase, "interrupted", reason="process restart recovery")
+            elif not fenced:
+                phase["error"] = "process termination is pending before the phase can resume"
             changed = True
         if changed:
             PhaseExecutionManager._refresh_overall_status(record)
@@ -540,12 +763,14 @@ class PhaseExecutionManager:
         *,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         command_runner: Optional[CommandRunner] = None,
+        process_cleanup: Optional[ProcessCleanup] = None,
     ):
         if max_output_bytes < 512:
             raise ValueError("max_output_bytes must be at least 512")
         self.store = ExecutionStore(state_dir)
         self.max_output_bytes = max_output_bytes
         self.command_runner = command_runner or run_command_bounded
+        self.process_cleanup = process_cleanup
         self._lock = threading.RLock()
 
     @staticmethod
@@ -628,6 +853,8 @@ class PhaseExecutionManager:
             "process_group_id": None,
             "process_start_time": None,
             "process_boot_id": None,
+            "process_launch_token": None,
+            "process_containment": None,
             "process_fence_pending": False,
         }
 
@@ -810,6 +1037,7 @@ class PhaseExecutionManager:
         max_output_bytes: Optional[int],
     ):
         """Create a record and retain its lease through the caller's work."""
+        self._ensure_runner_capabilities()
         record = self._new_record(
             phases, execution_id, label, resume_policy, cwd,
             timeout_seconds, max_output_bytes,
@@ -822,6 +1050,12 @@ class PhaseExecutionManager:
                 yield record
                 return
             raise ValueError(f"Execution '{record['execution_id']}' already exists")
+
+    def _ensure_runner_capabilities(self) -> None:
+        if self.command_runner is run_command_bounded and not _process_recovery_supported():
+            raise RuntimeError(
+                "built-in durable execution requires Linux /proc, pidfd, and selector support"
+            )
 
     @staticmethod
     def _first_incomplete(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -844,6 +1078,9 @@ class PhaseExecutionManager:
         """Persist the child process identity before command output is consumed."""
         phase["process_id"] = process_id
         phase["process_group_id"] = process_group_id
+        phase["process_fence_pending"] = True
+        record["updated_at"] = _now()
+        self.store.save(record)
         phase["process_start_time"], phase["process_boot_id"] = _proc_identity(process_id)
         phase["process_fence_pending"] = False
         record["updated_at"] = _now()
@@ -855,7 +1092,30 @@ class PhaseExecutionManager:
         phase["process_group_id"] = None
         phase["process_start_time"] = None
         phase["process_boot_id"] = None
+        phase["process_launch_token"] = None
+        phase["process_containment"] = None
         phase["process_fence_pending"] = False
+
+    def _cleanup_injected_runner(self) -> bool:
+        """Fence an injected runner, whose child processes are opaque here."""
+        if self.process_cleanup is None:
+            # An injected runner may have spawned descendants that the manager
+            # cannot discover.  Block resume rather than repeating side
+            # effects until the runner supplies a successful cleanup hook.
+            return False
+        try:
+            self.process_cleanup()
+        except BaseException:
+            return False
+        return True
+
+    def _fence_interrupted_runner(self, cleanup_confirmed: Optional[bool] = None) -> bool:
+        """Fence an interrupted runner before allowing a retry."""
+        if self.command_runner is run_command_bounded:
+            # The built-in runner owns its process group and cleans it up
+            # before propagating an interruption.
+            return cleanup_confirmed is True
+        return self._cleanup_injected_runner()
 
     def _run(
         self,
@@ -872,11 +1132,19 @@ class PhaseExecutionManager:
                 record["updated_at"] = _now()
                 self.store.save(record)
                 return record
+            self._ensure_runner_capabilities()
             if phase.get("process_fence_pending"):
-                self._refresh_overall_status(record)
-                record["updated_at"] = _now()
-                self.store.save(record)
-                return record
+                if (
+                    self.command_runner is not run_command_bounded
+                    and self._cleanup_injected_runner()
+                ):
+                    self._clear_process_identity(phase)
+                    record["updated_at"] = _now()
+                else:
+                    self._refresh_overall_status(record)
+                    record["updated_at"] = _now()
+                    self.store.save(record)
+                    return record
             if phase["status"] in {"failed", "timed_out"}:
                 if not retry_failed:
                     self._refresh_overall_status(record)
@@ -914,15 +1182,22 @@ class PhaseExecutionManager:
             phase["process_group_id"] = None
             phase["process_start_time"] = None
             phase["process_boot_id"] = None
+            phase["process_launch_token"] = (
+                uuid.uuid4().hex if self.command_runner is run_command_bounded else None
+            )
+            phase["process_containment"] = (
+                PROCESS_CONTAINMENT_SUBREAPER if self.command_runner is run_command_bounded else None
+            )
             phase["process_fence_pending"] = True
             _phase_event(phase, "started")
             self._refresh_overall_status(record)
             record["updated_at"] = _now()
             self.store.save(record)
             started = time.perf_counter()
+            cleanup_confirmed = True
             try:
                 if self.command_runner is run_command_bounded:
-                    output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
+                    command_result = run_command_bounded(
                         phase["command"],
                         phase["cwd"],
                         phase["max_output_bytes"],
@@ -930,16 +1205,28 @@ class PhaseExecutionManager:
                         process_started=lambda process_id, process_group_id: self._record_process_identity(
                             record, phase, process_id, process_group_id
                         ),
+                        process_marker=phase["process_launch_token"],
                     )
                 else:
-                    output, exit_code, truncated, original_byte_size, timed_out = self.command_runner(
+                    command_result = self.command_runner(
                         phase["command"],
                         phase["cwd"],
                         phase["max_output_bytes"],
                         phase["timeout_seconds"],
                     )
-            except (KeyboardInterrupt, SystemExit):
-                self._clear_process_identity(phase)
+                output, exit_code, truncated, original_byte_size, timed_out = command_result
+                cleanup_confirmed = getattr(command_result, "cleanup_confirmed", True)
+                if timed_out and self.command_runner is not run_command_bounded:
+                    cleanup_confirmed = self._cleanup_injected_runner()
+            except (KeyboardInterrupt, SystemExit) as exc:
+                runner_cleanup_confirmed = getattr(exc, "cleanup_confirmed", None)
+                cleanup_confirmed = self._fence_interrupted_runner(
+                    runner_cleanup_confirmed
+                )
+                if cleanup_confirmed:
+                    self._clear_process_identity(phase)
+                else:
+                    phase["process_fence_pending"] = True
                 phase["status"] = "interrupted"
                 phase["error"] = "phase interrupted before a result was available"
                 _phase_event(phase, "interrupted", reason="runner interruption")
@@ -948,7 +1235,14 @@ class PhaseExecutionManager:
                 self.store.save(record)
                 raise
             except Exception as exc:
-                self._clear_process_identity(phase)
+                if self.command_runner is run_command_bounded:
+                    cleanup_confirmed = getattr(exc, "cleanup_confirmed", True)
+                else:
+                    cleanup_confirmed = self._cleanup_injected_runner()
+                if cleanup_confirmed:
+                    self._clear_process_identity(phase)
+                else:
+                    phase["process_fence_pending"] = True
                 phase["status"] = "failed"
                 phase["error"] = _bounded_error(exc)
                 phase["result"] = {
@@ -963,7 +1257,10 @@ class PhaseExecutionManager:
                 return record
 
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
-            self._clear_process_identity(phase)
+            if cleanup_confirmed:
+                self._clear_process_identity(phase)
+            else:
+                phase["process_fence_pending"] = True
             phase["output"] = output
             phase["result"] = {
                 "duration_ms": duration_ms,

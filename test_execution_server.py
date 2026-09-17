@@ -213,18 +213,25 @@ class TestExecutionTools(unittest.TestCase):
         regular_stat = os.stat_result(
             (stat.S_IFREG | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
         )
+        with patch.object(server.os, "lstat", return_value=socket_stat):
+            self.assertEqual(
+                server._socket_identity("/tmp/socket"),
+                (source_stat.st_dev, source_stat.st_ino),
+            )
+        with patch.object(server.os, "lstat", return_value=regular_stat):
+            self.assertIsNone(server._socket_identity("/tmp/regular"))
         cases = (
-            (Probe(ConnectionRefusedError()), [socket_stat, socket_stat], None, True),
-            (Probe(ConnectionRefusedError()), [socket_stat, socket_stat], FileNotFoundError(), True),
+            (Probe(ConnectionRefusedError()), [socket_stat, socket_stat], True, True),
+            (Probe(ConnectionRefusedError()), [socket_stat, socket_stat], False, True),
             (Probe(ConnectionRefusedError()), [socket_stat, FileNotFoundError()], None, False),
             (Probe(FileNotFoundError()), [socket_stat], None, False),
             (Probe(OSError("probe failed")), [socket_stat], None, False),
             (Probe(), [socket_stat], None, False),
             (Probe(ConnectionRefusedError()), [socket_stat, regular_stat], None, False),
             (Probe(ConnectionRefusedError()), [socket_stat, replacement_stat], None, False),
-            (Probe(ConnectionRefusedError()), [socket_stat, mode_changed_stat], None, True),
+            (Probe(ConnectionRefusedError()), [socket_stat, mode_changed_stat], True, True),
         )
-        for probe, lstat_results, unlink_error, expect_unlink in cases:
+        for probe, lstat_results, cleanup_result, expect_cleanup in cases:
             with self.subTest(probe=type(probe.error).__name__ if probe.error else "live"):
                 with patch.object(server, "SOCKET_PATH", "/tmp/ephemeral-buffer-test.sock"), \
                         patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
@@ -232,17 +239,97 @@ class TestExecutionTools(unittest.TestCase):
                         patch.object(server.os.path, "lexists", return_value=True), \
                         patch.object(server.os, "lstat", side_effect=lstat_results), \
                         patch.object(server.socket, "socket", return_value=probe), \
-                        patch.object(server.os, "unlink", side_effect=unlink_error) as unlink, \
+                        patch.object(server, "_unlink_socket_if_identity", return_value=cleanup_result) as cleanup, \
                         patch("sys.stderr", new_callable=io.StringIO) as stderr:
                     server.run_socket_server()
                 self.assertEqual(server._socket_lifecycle()[0], "failed")
-                if expect_unlink:
-                    unlink.assert_called_once_with("/tmp/ephemeral-buffer-test.sock")
+                if expect_cleanup:
+                    cleanup.assert_called_once_with(
+                        "/tmp/ephemeral-buffer-test.sock", (source_stat.st_dev, source_stat.st_ino)
+                    )
                 else:
-                    unlink.assert_not_called()
+                    cleanup.assert_not_called()
                 self.assertEqual(probe.path, "/tmp/ephemeral-buffer-test.sock")
                 if probe.error is not None:
                     self.assertTrue(stderr.getvalue())
+
+    def test_socket_cleanup_does_not_delete_replacement_after_claim(self):
+        expected = (1, 2)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "buffer.sock")
+            with open(path, "w", encoding="ascii") as stream:
+                stream.write("stale")
+
+            def inspect_claimed_inode(claimed_path):
+                if claimed_path == path:
+                    return expected
+                with open(path, "w", encoding="ascii") as stream:
+                    stream.write("replacement")
+                return expected
+
+            with patch.object(server, "_socket_identity", side_effect=inspect_claimed_inode):
+                self.assertTrue(server._unlink_socket_if_identity(path, expected))
+            with open(path, encoding="ascii") as stream:
+                self.assertEqual(stream.read(), "replacement")
+
+    def test_socket_cleanup_rejects_replacement_before_claim(self):
+        path = "/tmp/buffer.sock"
+        with patch.object(server.os, "rename") as rename, \
+                patch.object(server, "_socket_identity", return_value=(9, 9)):
+            self.assertFalse(server._unlink_socket_if_identity(path, (1, 2)))
+        rename.assert_not_called()
+
+    def test_socket_cleanup_leaves_unexpected_inode_quarantined(self):
+        path = "/tmp/buffer.sock"
+        with patch.object(server.os, "rename") as rename, \
+                patch.object(server, "_socket_identity", side_effect=[(1, 2), (9, 9)]), \
+                patch.object(server.os, "getpid", return_value=10), \
+                patch.object(server.threading, "get_ident", return_value=11):
+            self.assertFalse(server._unlink_socket_if_identity(path, (1, 2)))
+        quarantine = rename.call_args_list[0].args[1]
+        self.assertEqual(rename.call_args_list[0].args, (path, quarantine))
+        self.assertEqual(len(rename.call_args_list), 1)
+
+    def test_socket_cleanup_leaves_claimed_inode_quarantined_when_unlink_fails(self):
+        path = "/tmp/buffer.sock"
+        with patch.object(server.os, "rename") as rename, \
+                patch.object(server, "_socket_identity", side_effect=[(1, 2), (1, 2)]), \
+                patch.object(server.os, "unlink", side_effect=RuntimeError("unlink failed")), \
+                patch.object(server.os, "getpid", return_value=10), \
+                patch.object(server.threading, "get_ident", return_value=11):
+            with self.assertRaisesRegex(RuntimeError, "unlink failed"):
+                server._unlink_socket_if_identity(path, (1, 2))
+        quarantine = rename.call_args_list[0].args[1]
+        self.assertEqual(rename.call_args_list[0].args, (path, quarantine))
+        self.assertEqual(len(rename.call_args_list), 1)
+
+    def test_socket_cleanup_does_not_overwrite_replacement_during_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "buffer.sock")
+            with open(path, "w", encoding="ascii") as stream:
+                stream.write("stale")
+
+            def inspect_claimed_inode(claimed_path):
+                if claimed_path == path:
+                    return (1, 2)
+                with open(path, "w", encoding="ascii") as stream:
+                    stream.write("replacement")
+                return (9, 9)
+
+            with patch.object(server, "_socket_identity", side_effect=inspect_claimed_inode):
+                self.assertFalse(server._unlink_socket_if_identity(path, (1, 2)))
+            with open(path, encoding="ascii") as stream:
+                self.assertEqual(stream.read(), "replacement")
+
+    def test_socket_cleanup_tolerates_claimed_inode_already_removed(self):
+        path = "/tmp/buffer.sock"
+        with patch.object(server.os, "rename") as rename, \
+                patch.object(server, "_socket_identity", side_effect=[(1, 2), (1, 2)]), \
+                patch.object(server.os, "unlink", side_effect=FileNotFoundError()), \
+                patch.object(server.os, "getpid", return_value=10), \
+                patch.object(server.threading, "get_ident", return_value=11):
+            self.assertTrue(server._unlink_socket_if_identity(path, (1, 2)))
+        self.assertEqual(len(rename.call_args_list), 1)
 
     def test_tool_errors_are_bounded_and_returned_without_raising(self):
         self.assertTrue(server.start_execution([], execution_id="bad").startswith("Error managing execution:"))
@@ -356,10 +443,7 @@ class TestExecutionTools(unittest.TestCase):
             start_schema["properties"]["max_output_bytes"]["anyOf"][0]["minimum"],
             512,
         )
-        self.assertEqual(
-            start_schema["properties"]["max_output_bytes"]["anyOf"][0]["maximum"],
-            server.DEFAULT_MAX_BUFFER_BYTES,
-        )
+        self.assertNotIn("maximum", start_schema["properties"]["max_output_bytes"]["anyOf"][0])
         list_schema = names["list_executions"].parameters
         self.assertEqual(list_schema["properties"]["limit"]["minimum"], 1)
         self.assertEqual(list_schema["properties"]["limit"]["maximum"], 100)
@@ -384,6 +468,17 @@ class TestExecutionTools(unittest.TestCase):
                 command="echo",
                 max_output_bytes=server.DEFAULT_MAX_BUFFER_BYTES + 1,
             )
+        original_limit = server.engine.max_buffer_bytes
+        try:
+            server.engine.max_buffer_bytes = server.DEFAULT_MAX_BUFFER_BYTES + 1024
+            accepted = server.ExecutionPhaseInput(
+                name="configured-limit",
+                command="echo",
+                max_output_bytes=server.DEFAULT_MAX_BUFFER_BYTES + 512,
+            )
+            self.assertEqual(accepted.max_output_bytes, server.DEFAULT_MAX_BUFFER_BYTES + 512)
+        finally:
+            server.engine.max_buffer_bytes = original_limit
         self.assertEqual(
             phase_schema["properties"]["structured_metrics"]["maxJsonBytes"],
             16 * 1024,
