@@ -260,6 +260,40 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertTrue(result[4])
         terminate.assert_called_once()
 
+    def test_keyboard_interrupt_terminates_the_process_group(self):
+        class InterruptingSelector:
+            def register(self, _stream, _event):
+                pass
+
+            def get_map(self):
+                return {"stdout": object()}
+
+            def select(self, _timeout):
+                raise KeyboardInterrupt
+
+            def close(self):
+                pass
+
+        class FakeStream:
+            def close(self):
+                pass
+
+        class FakeProcess:
+            pid = 42
+            stdout = FakeStream()
+            returncode = 130
+
+            def wait(self, timeout=None):
+                return None
+
+        process = FakeProcess()
+        with patch("capture_utils.selectors.DefaultSelector", return_value=InterruptingSelector()), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils._terminate_process_group") as terminate:
+            with self.assertRaises(KeyboardInterrupt):
+                _run_command_bounded("ignored", None, 1024, timeout_seconds=None)
+        terminate.assert_called_once_with(process, 42)
+
     def test_expired_deadline_and_wait_timeout_force_cleanup(self):
         class FakeSelector:
             def register(self, _stream, _event):
@@ -402,6 +436,12 @@ class TestBoundedCommandCapture(unittest.TestCase):
             file_handle.flush()
             with self.assertRaisesRegex(ValueError, "exceeds"):
                 read_file_bounded(file_handle.name, 512)
+
+    def test_file_read_returns_utf8_content(self):
+        with tempfile.NamedTemporaryFile() as file_handle:
+            file_handle.write("héllo".encode("utf-8"))
+            file_handle.flush()
+            self.assertEqual(read_file_bounded(file_handle.name, 512), "héllo")
 
     def test_file_read_rejects_non_positive_limit(self):
         with tempfile.NamedTemporaryFile() as file_handle:

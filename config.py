@@ -1,10 +1,13 @@
 """Environment-backed server configuration helpers."""
 
-import os
-import sys
-import tempfile
+import atexit
 import hashlib
 import math
+import os
+import shutil
+import stat
+import sys
+import tempfile
 
 
 DEFAULT_MAX_CAPTURES = 25
@@ -22,6 +25,33 @@ DEFAULT_EXECUTION_STATE_DIR = tempfile.mkdtemp(
 )
 EXECUTION_STATE_SESSION_PREFIX = "ephemeral_buffer_executions-"
 EXECUTION_STATE_SOCKET_PREFIX = "ephemeral_buffer_executions-socket-"
+
+
+def cleanup_default_execution_state_dir() -> None:
+    """Remove only this process's private, non-persistent execution state."""
+    path = os.path.abspath(DEFAULT_EXECUTION_STATE_DIR)
+    temp_dir = os.path.abspath(tempfile.gettempdir())
+    if (
+        os.path.dirname(path) != temp_dir
+        or not os.path.basename(path).startswith(EXECUTION_STATE_SESSION_PREFIX)
+    ):
+        return
+    try:
+        info = os.stat(path, follow_symlinks=False)
+        get_uid = getattr(os, "getuid", None)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or get_uid is None
+            or info.st_uid != get_uid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            return
+        shutil.rmtree(path)
+    except (OSError, ValueError):
+        return
+
+
+atexit.register(cleanup_default_execution_state_dir)
 
 
 def socket_isolation_configured() -> bool:

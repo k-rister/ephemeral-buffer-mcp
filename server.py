@@ -288,8 +288,8 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
     """Run an execution operation and return a compact machine-readable result."""
     try:
         payload = operation()
-        result = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if max_response_bytes is not None and len(result.encode("utf-8")) > max_response_bytes:
+        result = _json_dumps_with_limit(payload, max_response_bytes)
+        if result is None:
             if isinstance(payload, dict) and isinstance(payload.get("executions"), list):
                 compact = {
                     key: payload[key]
@@ -313,18 +313,14 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
                     candidate["executions"] = [*compact["executions"], summary]
                     candidate["returned_count"] = len(candidate["executions"])
                     candidate["omitted_count"] = len(payload["executions"]) - candidate["returned_count"]
-                    encoded_candidate = json.dumps(
-                        candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                    )
-                    if len(encoded_candidate.encode("utf-8")) > max_response_bytes:
+                    encoded_candidate = _json_dumps_with_limit(candidate, max_response_bytes)
+                    if encoded_candidate is None:
                         break
                     compact["executions"].append(summary)
                 compact["returned_count"] = len(compact["executions"])
                 compact["omitted_count"] = len(payload["executions"]) - len(compact["executions"])
-                compact_result = json.dumps(
-                    compact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                )
-                if len(compact_result.encode("utf-8")) <= max_response_bytes:
+                compact_result = _json_dumps_with_limit(compact, max_response_bytes)
+                if compact_result is not None:
                     return compact_result
             if isinstance(payload, dict) and payload.get("execution_id"):
                 compact = {
@@ -345,10 +341,8 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
                     for phase in payload.get("phases", [])
                     if isinstance(phase, dict)
                 ]
-                compact_result = json.dumps(
-                    compact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                )
-                if len(compact_result.encode("utf-8")) <= max_response_bytes:
+                compact_result = _json_dumps_with_limit(compact, max_response_bytes)
+                if compact_result is not None:
                     return compact_result
             return (
                 "Error managing execution: response exceeds the "
@@ -357,6 +351,21 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
         return result
     except (KeyError, ValueError, OSError, RuntimeError) as exc:
         return f"Error managing execution: {exc}"
+
+
+def _json_dumps_with_limit(payload: Any, max_bytes: Optional[int]) -> Optional[str]:
+    """Encode incrementally so an oversized response never builds in full."""
+    if max_bytes is None:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    chunks = []
+    total_bytes = 0
+    for chunk in encoder.iterencode(payload):
+        total_bytes += len(chunk.encode("utf-8"))
+        if total_bytes > max_bytes:
+            return None
+        chunks.append(chunk)
+    return "".join(chunks)
 
 
 def _execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -415,7 +424,9 @@ class ExecutionPhaseInput(BaseModel):
         default=None, min_length=1, json_schema_extra={"maxUtf8Bytes": 4096}
     )
     timeout_seconds: Optional[float] = Field(default=None, gt=0)
-    max_output_bytes: Optional[int] = Field(default=None, ge=512)
+    max_output_bytes: Optional[int] = Field(
+        default=None, ge=512, le=DEFAULT_MAX_BUFFER_BYTES
+    )
     structured_metrics: Dict[str, Any] = Field(
         default_factory=dict,
         json_schema_extra={"maxJsonBytes": MAX_STRUCTURED_METRICS_BYTES},
@@ -591,7 +602,9 @@ def start_execution(
     resume_policy: Literal["safe", "allow-unsafe"] = "safe",
     cwd: Optional[Annotated[str, Field(json_schema_extra={"maxUtf8Bytes": 4096})]] = None,
     timeout_seconds: Annotated[Optional[float], Field(gt=0)] = None,
-    max_output_bytes: Annotated[Optional[int], Field(ge=512)] = None,
+    max_output_bytes: Annotated[
+        Optional[int], Field(ge=512, le=DEFAULT_MAX_BUFFER_BYTES)
+    ] = None,
 ) -> str:
     """Run a sequential, durably checkpointed set of command phases.
 
@@ -1578,7 +1591,6 @@ def run_socket_server():
             initial_socket_identity = (
                 initial_path_stat.st_dev,
                 initial_path_stat.st_ino,
-                initial_path_stat.st_mode,
             )
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -1592,7 +1604,6 @@ def run_socket_server():
                     current_socket_identity = (
                         current_path_stat.st_dev,
                         current_path_stat.st_ino,
-                        current_path_stat.st_mode,
                     )
                     if not stat.S_ISSOCK(current_path_stat.st_mode):
                         raise RuntimeError(
@@ -1627,7 +1638,6 @@ def run_socket_server():
                 bound_socket_identity = (
                     bound_path_stat.st_dev,
                     bound_path_stat.st_ino,
-                    bound_path_stat.st_mode,
                 )
             os.chmod(SOCKET_PATH, 0o600)
             _set_socket_state("ready")
@@ -1653,7 +1663,6 @@ def run_socket_server():
                 current_socket_identity = (
                     current_path_stat.st_dev,
                     current_path_stat.st_ino,
-                    current_path_stat.st_mode,
                 )
                 if (
                     stat.S_ISSOCK(current_path_stat.st_mode)

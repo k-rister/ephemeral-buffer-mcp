@@ -120,7 +120,29 @@ def _phase_event(phase: Dict[str, Any], status: str, **details: Any) -> None:
     phase["events"].append(event)
 
 
-def _terminate_stale_process(phase: Dict[str, Any]) -> None:
+def _proc_identity(process_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Return Linux process start and boot identities when available."""
+    boot_id = None
+    start_time = None
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="ascii"
+        ).strip()
+        stat_line = Path(f"/proc/{process_id}/stat").read_text(encoding="ascii")
+        remainder = stat_line[stat_line.rfind(") ") + 2 :].split()
+        if len(remainder) > 19:
+            start_time = remainder[19]
+    except (OSError, UnicodeError, ValueError):
+        return None, None
+    return start_time, boot_id
+
+
+def _process_group_absent(error: OSError) -> bool:
+    """Return true only when the kernel proved that a process group is gone."""
+    return getattr(error, "errno", None) == errno.ESRCH
+
+
+def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
     """Stop a command left behind by a process that died during execution."""
     process_id = phase.get("process_id")
     process_group_id = phase.get("process_group_id")
@@ -132,21 +154,62 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> None:
         or not isinstance(process_group_id, int)
         or process_group_id <= 0
     ):
-        return
+        return phase.get("process_fence_pending") is False
+    expected_start = phase.get("process_start_time")
+    expected_boot = phase.get("process_boot_id")
+    if (
+        not isinstance(expected_start, str)
+        or not expected_start
+        or not isinstance(expected_boot, str)
+        or not expected_boot
+    ):
+        return False
+    current_start, current_boot = _proc_identity(process_id)
+    if current_start is not None or current_boot is not None:
+        if (
+            not isinstance(current_start, str)
+            or not current_start
+            or not isinstance(current_boot, str)
+            or not current_boot
+            or current_start != expected_start
+            or current_boot != expected_boot
+        ):
+            return False
+    else:
+        try:
+            os.kill(process_id, 0)
+        except OSError as exc:
+            if not _process_group_absent(exc):
+                return False
+        else:
+            return False
+    try:
+        current_process_group_id = os.getpgid(process_id)
+    except OSError as exc:
+        if not _process_group_absent(exc):
+            return False
+    else:
+        if current_process_group_id != process_group_id:
+            return False
     try:
         if os.getpgrp() == process_group_id:
-            return
+            return True
         os.killpg(process_group_id, 0)
-    except OSError:
-        return
+    except OSError as exc:
+        return _process_group_absent(exc)
     try:
         os.killpg(process_group_id, signal.SIGTERM)
-    except OSError:
-        return
+    except OSError as exc:
+        return _process_group_absent(exc)
     try:
         os.killpg(process_group_id, signal.SIGKILL)
-    except OSError:
-        pass
+    except OSError as exc:
+        return _process_group_absent(exc)
+    try:
+        os.killpg(process_group_id, 0)
+    except OSError as exc:
+        return _process_group_absent(exc)
+    return False
 
 
 class ExecutionStore:
@@ -386,12 +449,24 @@ class ExecutionStore:
     def _recover_started(record: Dict[str, Any]) -> bool:
         changed = False
         for phase in record.get("phases", []):
-            if phase.get("status") != "started":
+            if phase.get("status") != "started" and not phase.get("process_fence_pending"):
                 continue
-            _terminate_stale_process(phase)
+            if phase.get("status") == "started" and "process_fence_pending" not in phase:
+                phase["process_fence_pending"] = True
+            already_pending = (
+                phase.get("status") == "interrupted"
+                and phase.get("process_fence_pending") is True
+            )
+            fenced = _terminate_stale_process(phase)
             phase["status"] = "interrupted"
-            phase["error"] = "process terminated before the phase completed"
-            _phase_event(phase, "interrupted", reason="process restart recovery")
+            phase["process_fence_pending"] = not fenced
+            phase["error"] = (
+                "process termination is pending before the phase can resume"
+                if not fenced
+                else "process terminated before the phase completed"
+            )
+            if not already_pending:
+                _phase_event(phase, "interrupted", reason="process restart recovery")
             changed = True
         if changed:
             PhaseExecutionManager._refresh_overall_status(record)
@@ -551,6 +626,9 @@ class PhaseExecutionManager:
             "error": None,
             "process_id": None,
             "process_group_id": None,
+            "process_start_time": None,
+            "process_boot_id": None,
+            "process_fence_pending": False,
         }
 
     def _new_record(
@@ -689,6 +767,7 @@ class PhaseExecutionManager:
                     next_phase is not None
                     and not attempt_limit_reached
                     and not execution_in_progress
+                    and not bool(next_record and next_record.get("process_fence_pending"))
                 ),
                 "retry_required": retry_required,
                 "unsafe_confirmation_required": confirmation_required,
@@ -765,6 +844,8 @@ class PhaseExecutionManager:
         """Persist the child process identity before command output is consumed."""
         phase["process_id"] = process_id
         phase["process_group_id"] = process_group_id
+        phase["process_start_time"], phase["process_boot_id"] = _proc_identity(process_id)
+        phase["process_fence_pending"] = False
         record["updated_at"] = _now()
         self.store.save(record)
 
@@ -772,6 +853,9 @@ class PhaseExecutionManager:
     def _clear_process_identity(phase: Dict[str, Any]) -> None:
         phase["process_id"] = None
         phase["process_group_id"] = None
+        phase["process_start_time"] = None
+        phase["process_boot_id"] = None
+        phase["process_fence_pending"] = False
 
     def _run(
         self,
@@ -784,6 +868,11 @@ class PhaseExecutionManager:
         while True:
             phase = self._first_incomplete(record)
             if phase is None:
+                self._refresh_overall_status(record)
+                record["updated_at"] = _now()
+                self.store.save(record)
+                return record
+            if phase.get("process_fence_pending"):
                 self._refresh_overall_status(record)
                 record["updated_at"] = _now()
                 self.store.save(record)
@@ -823,6 +912,9 @@ class PhaseExecutionManager:
             phase["result"] = None
             phase["process_id"] = None
             phase["process_group_id"] = None
+            phase["process_start_time"] = None
+            phase["process_boot_id"] = None
+            phase["process_fence_pending"] = True
             _phase_event(phase, "started")
             self._refresh_overall_status(record)
             record["updated_at"] = _now()

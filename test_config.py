@@ -2,15 +2,18 @@
 
 import io
 import os
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
 
+import config
 from config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EXECUTION_STATE_DIR,
     DEFAULT_SOCKET_PATH,
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
+    cleanup_default_execution_state_dir,
     embedding_cache_dir,
     embedding_model_name,
     embedding_warmup_enabled,
@@ -62,6 +65,46 @@ class TestPositiveIntEnv(unittest.TestCase):
             second = execution_state_dir()
         self.assertIn("ephemeral_buffer_executions-socket-", first)
         self.assertNotEqual(first, second)
+
+    def test_default_execution_state_cleanup_only_removes_private_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ephemeral_buffer_executions-test")
+            os.mkdir(path, 0o700)
+            with patch("config.DEFAULT_EXECUTION_STATE_DIR", path), \
+                    patch("config.tempfile.gettempdir", return_value=directory), \
+                    patch("config.os.getuid", return_value=os.stat(path).st_uid):
+                cleanup_default_execution_state_dir()
+            self.assertFalse(os.path.exists(path))
+
+    def test_default_execution_state_cleanup_rejects_nonprivate_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ephemeral_buffer_executions-test")
+            os.mkdir(path, 0o755)
+            with patch("config.DEFAULT_EXECUTION_STATE_DIR", path), \
+                    patch("config.tempfile.gettempdir", return_value=directory):
+                cleanup_default_execution_state_dir()
+            self.assertTrue(os.path.isdir(path))
+
+    def test_default_execution_state_cleanup_ignores_unexpected_path_and_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("config.DEFAULT_EXECUTION_STATE_DIR", os.path.join(directory, "other")), \
+                    patch("config.tempfile.gettempdir", return_value=directory):
+                cleanup_default_execution_state_dir()
+            path = os.path.join(directory, "ephemeral_buffer_executions-test")
+            with patch("config.DEFAULT_EXECUTION_STATE_DIR", path), \
+                    patch("config.tempfile.gettempdir", return_value=directory), \
+                    patch("config.os.stat", side_effect=OSError("gone")):
+                cleanup_default_execution_state_dir()
+
+    def test_default_execution_state_cleanup_handles_platform_without_getuid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ephemeral_buffer_executions-test")
+            os.mkdir(path, 0o700)
+            with patch("config.DEFAULT_EXECUTION_STATE_DIR", path), \
+                    patch("config.tempfile.gettempdir", return_value=directory), \
+                    patch.object(config.os, "getuid", None):
+                cleanup_default_execution_state_dir()
+            self.assertTrue(os.path.isdir(path))
 
     def test_session_id_derives_stable_socket_path(self):
         with patch.dict(os.environ, {"EPHEMERAL_SESSION_ID": "agent-session-1"}, clear=True):
