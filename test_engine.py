@@ -34,6 +34,11 @@ from engine import (
 )
 
 
+def _semantic_index_threads(engine):
+    """Return the live worker threads of one engine's on-demand semantic index pool."""
+    return [thread for thread in engine._on_demand_executor._threads if thread.is_alive()]
+
+
 class TestEngineClassification(unittest.TestCase):
     def test_capture_preserves_legacy_positional_field_order(self):
         capture = Capture(
@@ -1213,7 +1218,6 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertTrue(engine.search_semantic(queued, "payload"))
             self.assertEqual(queued.semantic_index_state, "ready")
             self.assertEqual(engine._on_demand_jobs, {})
-            self.assertEqual(engine._on_demand_threads, {})
         finally:
             release.set()
             engine.shutdown()
@@ -1328,9 +1332,15 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             result = unbounded.search("payload", mode="hybrid", capture_id=capture.capture_id)
             self.assertEqual(result["semantic_coverage"], "complete")
             self.assertEqual(capture.semantic_index_state, "ready")
-            # Empty captures have no semantic windows and report complete coverage.
+            # Empty captures have no semantic windows to index, so they report
+            # complete coverage for semantic and hybrid requests.
             empty = unbounded.ingest("", label="empty")
-            self.assertEqual(unbounded.search("x", mode="hybrid", capture_id=empty.capture_id)["matches"], [])
+            for mode, coverage in (("hybrid", "complete"), ("semantic", "complete"), ("bm25", "not-requested")):
+                result = unbounded.search("x", mode=mode, capture_id=empty.capture_id)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["matches"], [])
+                self.assertEqual(result["semantic_coverage"], coverage)
+                self.assertEqual(result["message"], "Capture is empty (0 lines).")
         finally:
             unbounded.shutdown()
 
@@ -1388,27 +1398,206 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0)
+        engine = EphemeralEngine(
+            max_captures=2, semantic_prefetch=False, semantic_prefetch_workers=1, semantic_wait_seconds=0
+        )
         engine.embedding_model = BlockingEmbedding()
         capture = engine.ingest("shutdown payload", label="on-demand-shutdown")
         self.assertEqual(engine.search("payload", mode="hybrid", capture_id=capture.capture_id)["semantic_coverage"], "pending")
         self.assertTrue(started.wait(timeout=2))
+        # A second search queues behind the single pool worker.
+        queued = engine.ingest("queued payload", label="queued-at-shutdown")
+        self.assertEqual(engine.search("payload", mode="hybrid", capture_id=queued.capture_id)["semantic_coverage"], "pending")
+        queued_job = engine._on_demand_jobs[queued.capture_id]
+        self.assertFalse(queued_job.future.running())
         shutdown_thread = threading.Thread(target=engine.shutdown)
         shutdown_thread.start()
         shutdown_thread.join(timeout=0.2)
         self.assertTrue(shutdown_thread.is_alive())
+        # Shutdown cancels the queued job at once and only waits for the running one.
+        self.assertTrue(queued_job.done.wait(timeout=2))
+        self.assertTrue(queued_job.future.cancelled())
+        self.assertEqual(queued.semantic_index_state, "not-requested")
+        self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
         release.set()
         shutdown_thread.join(timeout=2)
         self.assertFalse(shutdown_thread.is_alive())
-        self.assertEqual(engine._on_demand_threads, {})
+        self.assertEqual(_semantic_index_threads(engine), [])
+        self.assertEqual(engine._on_demand_jobs, {})
         self.assertEqual(capture.semantic_index_state, "ready")
+        self.assertIsNone(queued.embeddings)
+        # The cancelled capture is still buffered and indexes inline on demand.
+        self.assertEqual(engine.search("payload", mode="hybrid", capture_id=queued.capture_id)["semantic_coverage"], "complete")
+        self.assertEqual(queued.semantic_index_state, "ready")
         # After shutdown no thread may start, so an unindexed capture is indexed inline.
         late = engine.ingest("late payload", label="after-shutdown")
         self.assertEqual(late.semantic_index_state, "not-requested")
         result = engine.search("payload", mode="hybrid", capture_id=late.capture_id)
         self.assertEqual(result["semantic_coverage"], "complete")
         self.assertEqual(late.semantic_index_state, "ready")
-        self.assertEqual(engine._on_demand_threads, {})
+        self.assertEqual(_semantic_index_threads(engine), [])
+        self.assertEqual(engine._on_demand_jobs, {})
+
+    def test_on_demand_indexing_stays_bounded_under_capture_churn(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=5)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            semantic_prefetch_workers=1,
+            semantic_wait_seconds=0,
+        )
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            captures = []
+            for index in range(20):
+                capture = engine.ingest(f"churn payload {index}", label=f"churn-{index}")
+                result = engine.search("payload", mode="hybrid", capture_id=capture.capture_id)
+                self.assertEqual(result["semantic_coverage"], "pending")
+                captures.append(capture)
+            self.assertTrue(started.wait(timeout=2))
+
+            # The pool, not the number of timed-out searches, bounds live
+            # indexing threads; the buffer holds one capture, yet twenty
+            # searches started indexing work.
+            self.assertEqual(len(_semantic_index_threads(engine)), 1)
+            # Only the job that already holds the model (its capture was
+            # evicted mid-flight) and the live capture's job remain: every
+            # other evicted capture's job was cancelled while still queued.
+            self.assertEqual(
+                set(engine._on_demand_jobs),
+                {captures[0].capture_id, captures[-1].capture_id},
+            )
+            self.assertEqual(engine.get_buffer_stats()["semantic_index_on_demand_running"], 2)
+            for stale in captures[:-1]:
+                self.assertEqual(stale.semantic_index_state, "evicted")
+                self.assertIsNone(stale.embeddings)
+
+            release.set()
+            self.assertEqual(engine.wait_for_semantic_index(captures[-1], timeout=5), "ready")
+            self.assertEqual(engine._on_demand_jobs, {})
+            self.assertEqual(engine.get_buffer_stats()["semantic_index_on_demand_running"], 0)
+            self.assertEqual(len(_semantic_index_threads(engine)), 1)
+            # Cancelled work never materialized embeddings for evicted captures.
+            for stale in captures[:-1]:
+                self.assertIsNone(stale.embeddings)
+            complete = engine.search("payload", mode="hybrid", capture_id=captures[-1].capture_id)
+            self.assertEqual(complete["semantic_coverage"], "complete")
+        finally:
+            release.set()
+            engine.shutdown()
+        self.assertEqual(_semantic_index_threads(engine), [])
+
+    def test_cancelled_on_demand_job_releases_a_blocked_waiter(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=5)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(
+            max_captures=2, semantic_prefetch=False, semantic_prefetch_workers=1, semantic_wait_seconds=0
+        )
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            blocker = engine.ingest("blocker payload", label="blocker")
+            self.assertEqual(engine.search("payload", mode="hybrid", capture_id=blocker.capture_id)["semantic_coverage"], "pending")
+            self.assertTrue(started.wait(timeout=2))
+            queued = engine.ingest("queued payload", label="queued")
+            outcome = {}
+
+            def run_semantic():
+                outcome["result"] = engine.search("payload", mode="semantic", capture_id=queued.capture_id)
+
+            waiter = threading.Thread(target=run_semantic)
+            waiter.start()
+            deadline = time.time() + 2
+            while queued.capture_id not in engine._on_demand_jobs and time.time() < deadline:
+                time.sleep(0.01)
+            job = engine._on_demand_jobs[queued.capture_id]
+            self.assertFalse(job.future.running())
+
+            # Clearing the capture cancels its queued job and wakes the waiter,
+            # whose reader lease lets it finish through the lazy path.
+            engine.clear(queued.capture_id)
+            self.assertTrue(job.done.wait(timeout=2))
+            self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
+            self.assertTrue(job.future.cancelled())
+            release.set()
+            waiter.join(timeout=5)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(outcome["result"]["semantic_coverage"], "complete")
+            self.assertEqual(outcome["result"]["match_count"], 1)
+        finally:
+            release.set()
+            engine.shutdown()
+
+    def test_queued_capture_that_fails_inline_is_marked_failed_and_retries_lazily(self):
+        started = threading.Event()
+        release = threading.Event()
+        attempts = []
+
+        class FlakyEmbedding:
+            def embed(self, texts):
+                if texts[0] == "first payload":
+                    started.set()
+                    release.wait(timeout=2)
+                elif texts[0] == "queued payload":
+                    attempts.append(texts[0])
+                    if len(attempts) == 1:
+                        raise RuntimeError("embedding backend unavailable")
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(
+            max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1, semantic_wait_seconds=0
+        )
+        engine.embedding_model = FlakyEmbedding()
+        try:
+            engine.ingest("first payload", label="first")
+            self.assertTrue(started.wait(timeout=2))
+            queued = engine.ingest("queued payload", label="queued")
+            self.assertIn(queued.capture_id, engine._prefetch_queue)
+            self.assertEqual(queued.semantic_index_state, "pending")
+
+            # A search pulls the capture out of the prefetch queue; its job is
+            # blocked behind the running prefetch job's model lock.
+            result = engine.search("payload", mode="hybrid", capture_id=queued.capture_id)
+            self.assertEqual(result["semantic_coverage"], "pending")
+            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
+            job = engine._on_demand_jobs[queued.capture_id]
+
+            # When the dequeued job fails it is not left as a stale pending
+            # entry: the capture is marked failed and no job or queue slot remains.
+            release.set()
+            self.assertTrue(job.done.wait(timeout=2))
+            self.assertIsInstance(job.error, RuntimeError)
+            self.assertEqual(queued.semantic_index_state, "failed")
+            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
+            self.assertNotIn(queued.capture_id, engine._prefetch_running)
+            self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
+            stats = engine.get_buffer_stats()
+            self.assertEqual(stats["semantic_prefetch_failed"], 1)
+            self.assertEqual(stats["semantic_prefetch_pending"], 0)
+
+            # The failed capture retries through the normal lazy path.
+            self.assertEqual(engine.wait_for_semantic_index(queued, timeout=2), "ready")
+            self.assertEqual(attempts, ["queued payload", "queued payload"])
+            self.assertEqual(queued.semantic_index_state, "ready")
+            complete = engine.search("payload", mode="hybrid", capture_id=queued.capture_id)
+            self.assertEqual(complete["semantic_coverage"], "complete")
+        finally:
+            release.set()
+            engine.shutdown()
 
     def test_async_prefetch_lifecycle_error_and_shutdown_paths(self):
         with self.assertRaisesRegex(ValueError, "semantic_prefetch_workers"):
