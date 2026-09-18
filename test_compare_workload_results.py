@@ -2,6 +2,7 @@
 
 import io
 import json
+import math
 import runpy
 import tempfile
 import unittest
@@ -547,6 +548,9 @@ class TestCompare(ResultFiles):
             cw.compare([])
         with self.assertRaisesRegex(ComparisonError, "tolerance must not be negative"):
             cw.compare([path, path], tolerance_percent=-1)
+        for tolerance in (math.nan, math.inf, -math.inf):
+            with self.assertRaisesRegex(ComparisonError, "tolerance must be a finite percentage"):
+                cw.compare([path, path], tolerance_percent=tolerance)
         with self.assertRaisesRegex(ComparisonError, "unknown statistic average"):
             cw.compare([path, path], statistics=("median", "average"))
         with self.assertRaisesRegex(ComparisonError, "has no run 'lines-9' \\(available: lines-256\\)"):
@@ -685,6 +689,9 @@ class TestMain(ResultFiles):
             [baseline, baseline, "--select", "mode"],
             [baseline, baseline, "--direction", "x=up"],
             [baseline, baseline, "--statistic", "average"],
+            [baseline, baseline, "--tolerance", "nan"],
+            [baseline, baseline, "--tolerance", "inf"],
+            [baseline, baseline, "--tolerance", "-1"],
         ):
             code, stdout, stderr = self.run_main(*argv)
             self.assertEqual(code, cw.EXIT_INVALID, argv)
