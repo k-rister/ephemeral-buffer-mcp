@@ -29,6 +29,10 @@ from config import (
     socket_path,
     socket_timeout_seconds,
     max_indexed_chunks,
+    non_negative_int_env,
+    semantic_chunk_bytes,
+    semantic_chunk_lines,
+    semantic_chunk_overlap,
 )
 
 
@@ -207,6 +211,28 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertTrue(embedding_warmup_enabled())
         with patch.dict(os.environ, {"EPHEMERAL_EMBEDDING_WARMUP": "off"}, clear=True):
             self.assertFalse(embedding_warmup_enabled())
+
+    def test_semantic_chunk_settings_default_and_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(semantic_chunk_lines(), config.DEFAULT_SEMANTIC_CHUNK_LINES)
+            self.assertEqual(semantic_chunk_bytes(), config.DEFAULT_SEMANTIC_CHUNK_BYTES)
+            self.assertEqual(semantic_chunk_overlap(), config.DEFAULT_SEMANTIC_CHUNK_OVERLAP)
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_SEMANTIC_CHUNK_LINES": "12",
+                "EPHEMERAL_SEMANTIC_CHUNK_BYTES": "2048",
+                "EPHEMERAL_SEMANTIC_CHUNK_OVERLAP": "0",
+            },
+            clear=True,
+        ):
+            self.assertEqual((semantic_chunk_lines(), semantic_chunk_bytes(), semantic_chunk_overlap()), (12, 2048, 0))
+        for invalid in ("-1", "two"):
+            with patch.dict(os.environ, {"EPHEMERAL_SEMANTIC_CHUNK_OVERLAP": invalid}, clear=True):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(non_negative_int_env("EPHEMERAL_SEMANTIC_CHUNK_OVERLAP", 3), 3)
+                self.assertIn("Ignoring invalid EPHEMERAL_SEMANTIC_CHUNK_OVERLAP", stderr.getvalue())
 
     def test_semantic_prefetch_settings_can_be_overridden(self):
         with patch.dict(

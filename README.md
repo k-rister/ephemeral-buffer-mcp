@@ -280,6 +280,28 @@ when semantic initialization fails. `get_buffer_stats` and
 `get_runtime_diagnostics` report warm-up as `not-started`, `loading`, `ready`,
 `failed`, or `disabled`; failures expose only the exception class.
 
+Lexical and semantic search index different chunk grids. BM25 keeps four-line
+sliding windows with two-line overlap so exact line ranges stay tight. Semantic
+embeddings use separate windows packed from consecutive lines, closed at eight
+lines or 1,024 UTF-8 bytes, whichever comes first, with no overlap. That keeps
+every window inside the model's token limit and, because embedding cost tracks
+total tokens, roughly halves the work by not embedding the overlap twice. Hybrid ranking fuses the
+two grids in line space: a semantic window boosts the lexical hits it overlaps
+and appears on its own only when nothing lexical matched inside it. Each match
+reports `chunk_index` as `lexical` or `semantic` alongside its line range. Tune
+the windows when output has very long or very short lines:
+
+```bash
+export EPHEMERAL_SEMANTIC_CHUNK_LINES=8
+export EPHEMERAL_SEMANTIC_CHUNK_BYTES=1024
+export EPHEMERAL_SEMANTIC_CHUNK_OVERLAP=0
+```
+
+Larger windows embed fewer chunks but dilute single-line signals and cost more
+per token; overlap improves recall across window boundaries at proportional
+embedding cost. Compare strategies on the deployment host with
+`benchmark_semantic_index.py --semantic-chunk-lines ... --semantic-chunk-overlap ...`.
+
 Semantic indexing can optionally be prefetched after ingestion:
 
 ```bash
@@ -390,7 +412,7 @@ The agent has access to the following tools:
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded log/output file from disk and returns the same compact summary schema. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
-| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, and line numbers. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. |
+| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |

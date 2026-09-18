@@ -16,8 +16,8 @@ from typing import Any, Iterator
 from engine import EphemeralEngine
 
 
-SCHEMA_VERSION = 1
-FIXTURE_VERSION = 1
+SCHEMA_VERSION = 2
+FIXTURE_VERSION = 2
 DEFAULT_LINE_COUNTS = (16, 256, 2048, 8192)
 SEARCH_MODES = ("semantic", "hybrid")
 PHASES = (
@@ -27,10 +27,25 @@ PHASES = (
     "subsequent_search_seconds",
 )
 
-# The needle is phrased so lexical and semantic retrieval both have a fair
-# chance: the query shares vocabulary with it but is not a verbatim copy.
-NEEDLE_LINE = "ERROR worker-7 lost connection to postgres primary: connection reset by peer"
-NEEDLE_QUERY = "database connection dropped"
+# Needles are phrased so lexical and semantic retrieval both have a fair
+# chance: each query shares vocabulary with its needle without copying it.
+NEEDLES = (
+    {
+        "id": "database-disconnect",
+        "line": "ERROR worker-7 lost connection to postgres primary: connection reset by peer",
+        "query": "database connection dropped",
+    },
+    {
+        "id": "out-of-memory",
+        "line": "FATAL allocator: cannot allocate 2147483648 bytes for tensor buffer, out of memory",
+        "query": "allocation failed because RAM ran out",
+    },
+    {
+        "id": "certificate-expiry",
+        "line": "WARN  tls: certificate for api.internal expires in 3 days; renew before the rotation deadline",
+        "query": "TLS cert about to expire",
+    },
+)
 
 _LINE_TEMPLATES = (
     "INFO  {ts} build step {n}/{total} compiling module {mod} ({ms} ms)",
@@ -48,20 +63,37 @@ _MODULES = (
 )
 
 
+def needle_positions(line_count: int) -> list[tuple[int, int]]:
+    """Return (needle_index, 1-based line number) pairs that fit in the fixture.
+
+    Needles sit at one quarter, one half, and three quarters of the capture.
+    Small captures keep only the needles whose positions are distinct.
+    """
+    if line_count < 1:
+        raise ValueError("line_count must be positive")
+    placed: list[tuple[int, int]] = []
+    used: set[int] = set()
+    for index in range(len(NEEDLES)):
+        line_number = line_count * (index + 1) // 4 + 1
+        if line_number <= line_count and line_number not in used:
+            used.add(line_number)
+            placed.append((index, line_number))
+    return placed
+
+
 def build_fixture(line_count: int, seed: int = 1) -> str:
-    """Return deterministic log-like output with one needle line near the middle.
+    """Return deterministic log-like output with known needle lines.
 
     Lines are varied in vocabulary and length so embedding cost resembles real
     build or test output rather than a repeated short sentence.
     """
-    if line_count < 1:
-        raise ValueError("line_count must be positive")
+    positions = {line_number: index for index, line_number in needle_positions(line_count)}
     rng = random.Random(seed)
-    needle_at = line_count // 2
     lines = []
     for index in range(line_count):
-        if index == needle_at:
-            lines.append(NEEDLE_LINE)
+        needle = positions.get(index + 1)
+        if needle is not None:
+            lines.append(NEEDLES[needle]["line"])
             continue
         template = rng.choice(_LINE_TEMPLATES)
         lines.append(
@@ -79,17 +111,11 @@ def build_fixture(line_count: int, seed: int = 1) -> str:
     return "\n".join(lines)
 
 
-def needle_line_number(line_count: int) -> int:
-    """Return the 1-based line number where the fixture places the needle."""
-    return line_count // 2 + 1
-
-
-def _needle_rank(result: dict[str, Any], line_count: int) -> int | None:
-    """Return the 1-based rank of the first match whose core chunk holds the needle."""
-    needle = needle_line_number(line_count)
+def _needle_rank(result: dict[str, Any], line_number: int) -> int | None:
+    """Return the 1-based rank of the first match whose core range holds the line."""
     for rank, match in enumerate(result.get("matches", ()), start=1):
         start_text, _, end_text = match["matched_range"].partition("-")
-        if int(start_text[1:]) <= needle <= int(end_text[1:]):
+        if int(start_text[1:]) <= line_number <= int(end_text[1:]):
             return rank
     return None
 
@@ -120,34 +146,46 @@ def measure_once(
     top_k: int = 5,
     seed: int = 1,
 ) -> dict[str, Any]:
-    """Ingest one fresh capture and time the first and subsequent searches."""
+    """Ingest one fresh capture, time the first and subsequent searches, and rank needles."""
     if mode not in SEARCH_MODES:
         raise ValueError(f"mode must be one of {', '.join(SEARCH_MODES)}")
     text = build_fixture(line_count, seed=seed)
+    positions = needle_positions(line_count)
 
     started = time.perf_counter()
     capture = engine.ingest(text, label=f"semantic-index-{line_count}")
     ingest_seconds = time.perf_counter() - started
 
+    needle_ranks: dict[str, int | None] = {}
     timing = {"semantic_index_seconds": 0.0}
+    first_index, first_line = positions[0]
     with _timed_semantic_index(engine, timing):
         started = time.perf_counter()
-        first = engine.search(NEEDLE_QUERY, mode=mode, capture_id=capture.capture_id, top_k=top_k)
+        first = engine.search(
+            NEEDLES[first_index]["query"], mode=mode, capture_id=capture.capture_id, top_k=top_k
+        )
         first_search_seconds = time.perf_counter() - started
+    needle_ranks[NEEDLES[first_index]["id"]] = _needle_rank(first, first_line)
 
-    started = time.perf_counter()
-    engine.search(NEEDLE_QUERY, mode=mode, capture_id=capture.capture_id, top_k=top_k)
-    subsequent_search_seconds = time.perf_counter() - started
+    subsequent_times = []
+    for needle_index, line_number in positions[1:] or [(first_index, first_line)]:
+        started = time.perf_counter()
+        result = engine.search(
+            NEEDLES[needle_index]["query"], mode=mode, capture_id=capture.capture_id, top_k=top_k
+        )
+        subsequent_times.append(time.perf_counter() - started)
+        needle_ranks[NEEDLES[needle_index]["id"]] = _needle_rank(result, line_number)
 
     return {
         "line_count": line_count,
         "output_bytes": len(text.encode("utf-8")),
         "chunk_count": len(capture.chunks),
+        "semantic_chunk_count": len(capture.semantic_chunks),
         "ingest_seconds": ingest_seconds,
         "semantic_index_seconds": timing["semantic_index_seconds"],
         "first_search_seconds": first_search_seconds,
-        "subsequent_search_seconds": subsequent_search_seconds,
-        "needle_rank": _needle_rank(first, line_count),
+        "subsequent_search_seconds": statistics.median(subsequent_times),
+        "needle_ranks": needle_ranks,
     }
 
 
@@ -163,24 +201,28 @@ def _nearest_rank(values: list[float], percentile: float = 0.95) -> float:
 
 
 def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return median and p95 timings plus throughput for one capture size."""
+    """Return median and p95 timings, throughput, and needle retrieval quality."""
     if not samples:
         raise ValueError("samples must not be empty")
     first = samples[0]
+    ranks = [rank for sample in samples for rank in sample["needle_ranks"].values()]
     summary: dict[str, Any] = {
         "line_count": first["line_count"],
         "output_bytes": first["output_bytes"],
         "chunk_count": first["chunk_count"],
+        "semantic_chunk_count": first["semantic_chunk_count"],
         "samples": len(samples),
-        "needle_ranks": [sample["needle_rank"] for sample in samples],
+        "needle_ranks": [sample["needle_ranks"] for sample in samples],
+        "needle_hit_at_1": sum(1 for rank in ranks if rank == 1) / len(ranks),
+        "needle_mrr": sum(1.0 / rank for rank in ranks if rank is not None) / len(ranks),
     }
     for phase in PHASES:
         values = [float(sample[phase]) for sample in samples]
         summary[f"{phase}_median"] = statistics.median(values)
         summary[f"{phase}_p95"] = _nearest_rank(values)
     index_median = summary["semantic_index_seconds_median"]
-    summary["chunks_per_second_median"] = (
-        first["chunk_count"] / index_median if index_median > 0 else None
+    summary["semantic_chunks_per_second_median"] = (
+        first["semantic_chunk_count"] / index_median if index_median > 0 else None
     )
     return summary
 
@@ -229,6 +271,11 @@ def run_benchmark(
         "cpu_count": os.cpu_count(),
         "embedding_model": engine.embedding_model_name,
         "embedding_threads": engine.embedding_threads,
+        "semantic_chunking": {
+            "lines": engine.semantic_chunk_lines,
+            "bytes": engine.semantic_chunk_bytes,
+            "overlap": engine.semantic_chunk_overlap,
+        },
         "test_embeddings": os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1",
         "engine_options": {key: value for key, value in options.items() if key != "max_captures"},
         "mode": mode,
@@ -240,17 +287,19 @@ def run_benchmark(
 
 def format_measurement(measurement: dict[str, Any]) -> str:
     """Return one human-readable summary line for a capture size."""
-    throughput = measurement["chunks_per_second_median"]
+    throughput = measurement["semantic_chunks_per_second_median"]
     throughput_text = f"{throughput:.1f}" if throughput is not None else "n/a"
     return (
         f"lines={measurement['line_count']} chunks={measurement['chunk_count']} "
+        f"semantic_chunks={measurement['semantic_chunk_count']} "
         f"ingest_median={measurement['ingest_seconds_median']:.6f}s "
         f"semantic_index_median={measurement['semantic_index_seconds_median']:.6f}s "
         f"first_search_median={measurement['first_search_seconds_median']:.6f}s "
         f"first_search_p95={measurement['first_search_seconds_p95']:.6f}s "
         f"subsequent_search_median={measurement['subsequent_search_seconds_median']:.6f}s "
-        f"chunks_per_second={throughput_text} "
-        f"needle_ranks={measurement['needle_ranks']}"
+        f"semantic_chunks_per_second={throughput_text} "
+        f"needle_hit_at_1={measurement['needle_hit_at_1']:.2f} "
+        f"needle_mrr={measurement['needle_mrr']:.2f}"
     )
 
 
@@ -274,14 +323,19 @@ def main() -> None:
         type=int,
         help="ONNX Runtime thread count (default: EPHEMERAL_EMBEDDING_THREADS or the runtime default)",
     )
+    parser.add_argument("--semantic-chunk-lines", type=int, help="Maximum lines per semantic window")
+    parser.add_argument("--semantic-chunk-bytes", type=int, help="UTF-8 byte cap per semantic window")
+    parser.add_argument("--semantic-chunk-overlap", type=int, help="Lines shared by consecutive windows")
     parser.add_argument("--output", type=Path, help="Optional JSON output path")
     args = parser.parse_args()
 
     engine_options = {}
     if args.embedding_model:
         engine_options["embedding_model_name"] = args.embedding_model
-    if args.embedding_threads is not None:
-        engine_options["embedding_threads"] = args.embedding_threads
+    for option in ("embedding_threads", "semantic_chunk_lines", "semantic_chunk_bytes", "semantic_chunk_overlap"):
+        value = getattr(args, option)
+        if value is not None:
+            engine_options[option] = value
     try:
         result = run_benchmark(
             tuple(args.line_counts), args.samples, mode=args.mode, engine_options=engine_options
@@ -289,8 +343,10 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
+    chunking = result["semantic_chunking"]
     print(
         f"model={result['embedding_model']} threads={result['embedding_threads']} "
+        f"semantic_chunking=lines:{chunking['lines']}/bytes:{chunking['bytes']}/overlap:{chunking['overlap']} "
         f"test_embeddings={result['test_embeddings']} "
         f"mode={result['mode']} model_load={result['model_load_seconds']:.3f}s"
     )

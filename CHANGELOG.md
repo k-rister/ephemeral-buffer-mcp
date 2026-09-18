@@ -9,6 +9,13 @@
   inference, and register `BAAI/bge-small-en-v1.5-fp32` as a selectable fp32
   export of the default model that produces identical vectors but parallelizes
   on platforms where the reduced-precision catalogue file does not.
+- Index semantic embeddings over windows packed separately from the BM25
+  sliding grid, bounded by `EPHEMERAL_SEMANTIC_CHUNK_LINES` (default 8),
+  `EPHEMERAL_SEMANTIC_CHUNK_BYTES` (default 1024), and
+  `EPHEMERAL_SEMANTIC_CHUNK_OVERLAP` (default 0), fuse hybrid results in line
+  space so exact BM25 ranges are preserved, and report `chunk_index` per match.
+  This stops embedding the two-line overlap twice and roughly halves first
+  semantic or hybrid search latency on large captures.
 - Add durable phase-level executions with persisted outputs, metrics, status
   history, restart recovery, explicit retries, and unsafe-side-effect resume
   confirmation for long-running agent workflows, including recoverable compact

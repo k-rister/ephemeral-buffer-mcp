@@ -1429,6 +1429,85 @@ class TestEmbeddingStartup(unittest.TestCase):
         finally:
             engine.shutdown()
 
+    def test_semantic_chunks_pack_lines_by_line_and_byte_caps(self):
+        engine = EphemeralEngine(max_captures=1, semantic_chunk_lines=3, semantic_chunk_bytes=20)
+        self.assertEqual(engine._semantic_chunk_lines([]), [])
+
+        lines = ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff", "gggg"]
+        chunks = engine._semantic_chunk_lines(lines)
+        self.assertEqual([(c.chunk_id, c.start_line, c.end_line) for c in chunks], [(0, 1, 3), (1, 4, 6), (2, 7, 7)])
+        self.assertEqual(chunks[0].text, "aaaa\nbbbb\ncccc")
+
+        # The byte cap closes a window early, and an oversized line still gets its own chunk.
+        wide = ["x" * 15, "y" * 10, "z" * 40, "w"]
+        chunks = engine._semantic_chunk_lines(wide)
+        self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 1), (2, 2), (3, 3), (4, 4)])
+
+        overlapping = EphemeralEngine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=2)
+        chunks = overlapping._semantic_chunk_lines(lines)
+        self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 4), (3, 6), (5, 7)])
+
+        capture = engine.ingest("\n".join(lines), label="semantic-chunks")
+        self.assertEqual(len(capture.chunks), 3)
+        self.assertEqual(len(capture.semantic_chunks), 3)
+        stats = engine.get_buffer_stats()
+        self.assertEqual(stats["total_semantic_chunks"], 3)
+        self.assertEqual(stats["semantic_chunk_lines"], 3)
+        self.assertEqual(stats["semantic_chunk_bytes"], 20)
+        self.assertEqual(stats["semantic_chunk_overlap"], 0)
+
+    def test_semantic_chunk_settings_come_from_environment_and_are_validated(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "EPHEMERAL_SEMANTIC_CHUNK_LINES": "6",
+                "EPHEMERAL_SEMANTIC_CHUNK_BYTES": "512",
+                "EPHEMERAL_SEMANTIC_CHUNK_OVERLAP": "1",
+            },
+            clear=False,
+        ):
+            engine = EphemeralEngine(max_captures=1)
+        self.assertEqual(
+            (engine.semantic_chunk_lines, engine.semantic_chunk_bytes, engine.semantic_chunk_overlap),
+            (6, 512, 1),
+        )
+        with self.assertRaisesRegex(ValueError, "semantic_chunk_lines"):
+            EphemeralEngine(max_captures=1, semantic_chunk_lines=0)
+        with self.assertRaisesRegex(ValueError, "semantic_chunk_bytes"):
+            EphemeralEngine(max_captures=1, semantic_chunk_bytes=0)
+        with self.assertRaisesRegex(ValueError, "semantic_chunk_overlap"):
+            EphemeralEngine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=4)
+        with self.assertRaisesRegex(ValueError, "semantic_chunk_overlap"):
+            EphemeralEngine(max_captures=1, semantic_chunk_overlap=-1)
+
+    def test_hybrid_fuses_semantic_windows_with_lexical_ranges(self):
+        engine = EphemeralEngine(max_captures=1, semantic_chunk_lines=4)
+        capture = engine.ingest("\n".join(f"line {i}" for i in range(1, 13)), label="fusion")
+        # Lexical windows: 0=L1-4, 1=L3-6, 2=L5-8, 3=L7-10, 4=L9-12.
+        # Semantic windows: 0=L1-4, 1=L5-8, 2=L9-12.
+        with patch.object(engine, "search_bm25", return_value=[(4, 0.5), (0, 0.4)]), \
+                patch.object(engine, "search_semantic", return_value=[(0, 0.9), (1, 0.8)]):
+            result = engine.search("line", mode="hybrid", capture_id=capture.capture_id, top_k=3, context_lines=0)
+
+        matches = result["matches"]
+        # Semantic window 0 overlaps lexical window 0 and lifts it above the higher-ranked lexical hit.
+        self.assertEqual([(m["chunk_index"], m["chunk_id"]) for m in matches], [
+            ("lexical", 0), ("lexical", 4), ("semantic", 1),
+        ])
+        self.assertEqual(matches[0]["matched_range"], "L1-L4")
+        self.assertEqual(matches[2]["matched_range"], "L5-L8")
+
+        # A backend that reports the same chunk twice accumulates its score.
+        with patch.object(engine, "search_bm25", return_value=[(2, 0.5), (2, 0.25)]):
+            duplicated = engine.search("line", mode="bm25", capture_id=capture.capture_id, top_k=1)
+        self.assertEqual(duplicated["matches"][0]["score"], 0.75)
+
+        with patch.object(engine, "search_semantic", return_value=[(2, 0.9)]):
+            semantic_only = engine.search("line", mode="semantic", capture_id=capture.capture_id, top_k=1)
+        self.assertEqual(semantic_only["matches"][0]["chunk_index"], "semantic")
+        self.assertEqual(semantic_only["matches"][0]["chunk_id"], 2)
+        self.assertEqual(semantic_only["matches"][0]["matched_range"], "L9-L12")
+
     def test_embedding_threads_configuration_and_validation(self):
         with patch.dict("os.environ", {"EPHEMERAL_EMBEDDING_THREADS": "3"}, clear=False):
             configured = EphemeralEngine(max_captures=1)

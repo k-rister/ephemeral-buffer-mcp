@@ -36,6 +36,9 @@ from config import (
     max_indexed_chunks as configured_max_indexed_chunks,
     semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
     semantic_prefetch_workers as configured_semantic_prefetch_workers,
+    semantic_chunk_lines as configured_semantic_chunk_lines,
+    semantic_chunk_bytes as configured_semantic_chunk_bytes,
+    semantic_chunk_overlap as configured_semantic_chunk_overlap,
 )
 
 
@@ -495,6 +498,10 @@ class Capture:
     source: str = "capture"
     duration_ms: Optional[float] = None
     structured_metrics: Dict[str, Any] = field(default_factory=dict)
+    # Semantic windows are packed separately from the lexical sliding windows
+    # so embedding cost is bounded by line and byte caps rather than tied to
+    # the overlap BM25 uses for exact line ranges.
+    semantic_chunks: List[Chunk] = field(default_factory=list)
 
     @property
     def line_count(self) -> int:
@@ -587,6 +594,9 @@ class EphemeralEngine:
         metrics: Optional[LocalMetrics] = None,
         semantic_prefetch: Optional[bool] = None,
         semantic_prefetch_workers: Optional[int] = None,
+        semantic_chunk_lines: Optional[int] = None,
+        semantic_chunk_bytes: Optional[int] = None,
+        semantic_chunk_overlap: Optional[int] = None,
     ):
         self._lock = threading.RLock()
         if max_captures < 1:
@@ -620,6 +630,23 @@ class EphemeralEngine:
         )
         if self.embedding_threads is not None and self.embedding_threads < 1:
             raise ValueError("embedding_threads must be at least 1")
+        self.semantic_chunk_lines = (
+            configured_semantic_chunk_lines() if semantic_chunk_lines is None else semantic_chunk_lines
+        )
+        self.semantic_chunk_bytes = (
+            configured_semantic_chunk_bytes() if semantic_chunk_bytes is None else semantic_chunk_bytes
+        )
+        self.semantic_chunk_overlap = (
+            configured_semantic_chunk_overlap()
+            if semantic_chunk_overlap is None
+            else semantic_chunk_overlap
+        )
+        if self.semantic_chunk_lines < 1:
+            raise ValueError("semantic_chunk_lines must be at least 1")
+        if self.semantic_chunk_bytes < 1:
+            raise ValueError("semantic_chunk_bytes must be at least 1")
+        if not 0 <= self.semantic_chunk_overlap < self.semantic_chunk_lines:
+            raise ValueError("semantic_chunk_overlap must be non-negative and smaller than semantic_chunk_lines")
         self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
         self.embedding_model = None
         self.embedding_warmup_enabled = (
@@ -788,6 +815,40 @@ class EphemeralEngine:
             
         return chunks
 
+    def _semantic_chunk_lines(self, lines: List[str]) -> List[Chunk]:
+        """Pack consecutive lines into semantic windows bounded by line and byte caps.
+
+        Each window takes at least one line, so a single oversized line becomes
+        its own chunk and the tokenizer's truncation limit applies only to it.
+        """
+        if not lines:
+            return []
+        max_lines = self.semantic_chunk_lines
+        max_bytes = self.semantic_chunk_bytes
+        overlap = self.semantic_chunk_overlap
+        chunks: List[Chunk] = []
+        n = len(lines)
+        start = 0
+        while start < n:
+            end = start + 1
+            size = len(lines[start].encode("utf-8"))
+            while end < n and end - start < max_lines:
+                line_bytes = len(lines[end].encode("utf-8")) + 1
+                if size + line_bytes > max_bytes:
+                    break
+                size += line_bytes
+                end += 1
+            chunks.append(Chunk(
+                chunk_id=len(chunks),
+                start_line=start + 1,
+                end_line=end,
+                text="\n".join(lines[start:end]),
+            ))
+            if end >= n:
+                break
+            start = max(end - overlap, start + 1)
+        return chunks
+
     @staticmethod
     def _chunk_count(line_count: int, window_size: int = 4, step_size: int = 2) -> int:
         """Return the number of sliding chunks without materializing them."""
@@ -870,11 +931,12 @@ class EphemeralEngine:
                 f"{self.max_indexed_chunks:,}-chunk index budget"
             )
         chunks = self._chunk_lines(lines)
+        semantic_chunks = self._semantic_chunk_lines(lines)
 
         # Semantic embeddings are materialized lazily by the first semantic or
         # hybrid search. Ingestion remains useful for fast BM25 search without
         # paying the model/indexing cost when semantic ranking is unnecessary.
-        embeddings = np.empty((0, 384), dtype=np.float32) if not chunks else None
+        embeddings = np.empty((0, 384), dtype=np.float32) if not semantic_chunks else None
 
         capture = Capture(
             capture_id=capture_id,
@@ -883,6 +945,7 @@ class EphemeralEngine:
             raw_lines=lines,
             input_byte_size=capture_bytes,
             chunks=chunks,
+            semantic_chunks=semantic_chunks,
             embeddings=embeddings,
             fts_conn=None,
             content_type=classified_type,
@@ -1216,9 +1279,10 @@ class EphemeralEngine:
 
     def search_semantic(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
-        Dense vector cosine similarity search. Returns list of (chunk_id, score).
+        Dense vector cosine similarity search over the semantic windows.
+        Returns list of (semantic_chunk_id, score).
         """
-        if not capture.chunks:
+        if not capture.semantic_chunks:
             return []
 
         self._wait_for_prefetch(capture)
@@ -1252,7 +1316,7 @@ class EphemeralEngine:
                 and not getattr(capture, "active_readers", 0)
             ):
                 return
-            chunk_texts = [chunk.text for chunk in capture.chunks]
+            chunk_texts = [chunk.text for chunk in capture.semantic_chunks]
         with self._embedding_lock:
             with self._lock:
                 if capture.embeddings is not None:
@@ -1352,31 +1416,56 @@ class EphemeralEngine:
                     error_type=semantic_fallback,
                 )
 
-        rrf_scores: Dict[int, float] = {}
+        # Lexical and semantic hits come from different chunk grids, so fusion
+        # happens in line space: a semantic window boosts every lexical hit it
+        # overlaps, and stands on its own only when nothing lexical matched
+        # inside it.  Exact BM25 line ranges are therefore preserved.
         k_const = 60.0
+        candidates: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+        def add_candidate(index: str, chunk: Chunk, score: float) -> None:
+            key = (index, chunk.chunk_id)
+            entry = candidates.get(key)
+            if entry is None:
+                candidates[key] = {"index": index, "chunk": chunk, "score": score}
+            else:
+                entry["score"] += score
 
         if mode == "bm25":
-            for rank, (cid, score) in enumerate(bm25_results):
-                rrf_scores[cid] = score
+            for cid, score in bm25_results:
+                add_candidate("lexical", capture.chunks[cid], score)
         elif mode == "semantic":
-            for rank, (cid, score) in enumerate(semantic_results):
-                rrf_scores[cid] = score
-        else: # hybrid
+            for sid, score in semantic_results:
+                add_candidate("semantic", capture.semantic_chunks[sid], score)
+        else:  # hybrid
             for rank, (cid, _) in enumerate(bm25_results):
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + HYBRID_LEXICAL_WEIGHT / (k_const + rank + 1)
-            for rank, (cid, _) in enumerate(semantic_results):
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k_const + rank + 1)
+                add_candidate("lexical", capture.chunks[cid], HYBRID_LEXICAL_WEIGHT / (k_const + rank + 1))
+            for rank, (sid, _) in enumerate(semantic_results):
+                semantic_chunk = capture.semantic_chunks[sid]
+                contribution = 1.0 / (k_const + rank + 1)
+                overlapping = [
+                    entry for entry in candidates.values()
+                    if entry["index"] == "lexical"
+                    and entry["chunk"].start_line <= semantic_chunk.end_line
+                    and semantic_chunk.start_line <= entry["chunk"].end_line
+                ]
+                if overlapping:
+                    for entry in overlapping:
+                        entry["score"] += contribution
+                else:
+                    add_candidate("semantic", semantic_chunk, contribution)
 
         # Deduplicate overlapping context windows before applying top_k.  The
         # search backends intentionally over-fetch candidates so a sliding
         # window cannot consume the result quota with duplicate context.
-        sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        ranked = sorted(candidates.values(), key=lambda entry: entry["score"], reverse=True)
 
         matches = []
         seen_line_ranges = []
 
-        for cid, score in sorted_chunks:
-            chunk = capture.chunks[cid]
+        for entry in ranked:
+            chunk = entry["chunk"]
+            score = entry["score"]
             ctx_start = max(1, chunk.start_line - context_lines)
             ctx_end = min(capture.line_count, chunk.end_line + context_lines)
             
@@ -1403,7 +1492,8 @@ class EphemeralEngine:
 
             snippet = "\n".join(lines_with_numbers)
             matches.append({
-                "chunk_id": cid,
+                "chunk_id": chunk.chunk_id,
+                "chunk_index": entry["index"],
                 "score": round(score, 4),
                 "matched_range": f"L{chunk.start_line}-L{chunk.end_line}",
                 "context_range": f"L{ctx_start}-L{ctx_end}",
@@ -1703,6 +1793,7 @@ class EphemeralEngine:
         """Returns aggregate capture and memory-accounting metrics."""
         total_lines = sum(cap.line_count for cap in self.captures.values())
         total_chunks = sum(len(cap.chunks) for cap in self.captures.values())
+        total_semantic_chunks = sum(len(cap.semantic_chunks) for cap in self.captures.values())
         embedding_bytes = sum(
             int(cap.embeddings.nbytes) for cap in self.captures.values()
             if cap.embeddings is not None
@@ -1714,6 +1805,10 @@ class EphemeralEngine:
             "max_captures": self.max_captures,
             "total_lines": total_lines,
             "total_chunks": total_chunks,
+            "total_semantic_chunks": total_semantic_chunks,
+            "semantic_chunk_lines": self.semantic_chunk_lines,
+            "semantic_chunk_bytes": self.semantic_chunk_bytes,
+            "semantic_chunk_overlap": self.semantic_chunk_overlap,
             "indexed_chunks": self._indexed_chunks,
             "max_indexed_chunks": self.max_indexed_chunks,
             "last_index_budget_adjustment": dict(self._last_index_budget_adjustment),
