@@ -528,6 +528,12 @@ class TestSchemaFile(unittest.TestCase):
             self.assertTrue(set(wr.STATISTICS) <= set(properties))
         self.assertEqual(SCHEMA["$defs"]["name"]["pattern"], wr._NAME.pattern)
         self.assertTrue(set(wr.CANONICAL_MEASUREMENTS.values()) <= set(wr.UNITS))
+        # Canonical names pin their unit in the schema exactly as the validator does.
+        pinned = SCHEMA["$defs"]["measurements"]["properties"]
+        self.assertEqual(set(pinned), set(wr.CANONICAL_MEASUREMENTS))
+        for name, unit in wr.CANONICAL_MEASUREMENTS.items():
+            self.assertEqual(pinned[name], {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": unit}}})
+        self.assertTrue(SCHEMA["properties"]["runs"]["uniqueItems"])
         experiment = SCHEMA["properties"]["experiment"]
         self.assertEqual(experiment["required"], ["group", "metadata"])
         metadata = experiment["properties"]["metadata"]
@@ -549,6 +555,9 @@ class TestSchemaFile(unittest.TestCase):
         for invalid in (
             sample_result(format="other"),
             sample_result(measurements={"x": {"unit": "bytes"}}),
+            sample_result(measurements={"wall_time_seconds": {"unit": "bytes", "value": 1}}),
+            sample_result(runs=[run("r", measurements={"output_bytes": measurement("seconds", value=1)})]),
+            sample_result(runs=[run("r"), run("r")]),
             sample_result(runs=[{**run("r"), "extra": 1}]),
             sample_result(runs=[run("r", phases=[{"name": "p", "unit": "bytes", "value": 1}])]),
             sample_result(experiment={"group": "g"}),
@@ -558,6 +567,14 @@ class TestSchemaFile(unittest.TestCase):
             sample_result(experiment={"group": "g", "metadata": {"prompt": "x" * 257}}),
         ):
             self.assertTrue(list(validator.iter_errors(invalid)), invalid)
+        # A canonical measurement in a run is accepted when its unit matches.
+        validator.validate(sample_result(runs=[run("r", measurements={"output_bytes": measurement("bytes", value=1)})]))
+        # Run id uniqueness is beyond JSON Schema: two runs that share an id but differ
+        # elsewhere pass the schema, so consumers need the reference validator for it.
+        same_id = sample_result(runs=[run("r", labels={"variant": "a"}), run("r", labels={"variant": "b"})])
+        validator.validate(same_id)
+        with self.assertRaisesRegex(WorkloadResultError, "runs\\[1\\].id 'r' is duplicated"):
+            wr.validate_result(same_id)
 
 
 class TestCliHelpers(unittest.TestCase):

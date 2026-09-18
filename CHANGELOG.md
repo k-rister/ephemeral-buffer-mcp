@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Reject duplicate `--line-counts` values in `benchmark_latency.py`,
+  `benchmark_semantic_index.py`, and `benchmark_routing.py` before any
+  measurement runs, since each size becomes a workload run id and a repeated
+  size made `--result` fail with a duplicate-id error after the benchmark had
+  finished. The workload result JSON Schema now pins canonical measurement
+  names to their unit and rejects identical runs, matching the reference
+  validator; run-id uniqueness beyond that stays with
+  `workload_results.validate_result`, and the schema and documentation say so.
 - Run on-demand semantic indexing on a pool bounded by
   `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` instead of one thread per capture, and
   cancel queued on-demand jobs when their capture is evicted or cleared, so

@@ -601,10 +601,13 @@ section "Machine-readable workload results"). Comparison tooling, regression
 checks, and dashboards should read that document instead of producer-specific
 records:
 
-- Validate first. `python workload_results.py result.json` (or the JSON Schema
-  in `workload_result.schema.json`) rejects documents that do not match the
-  format; refuse to compare an invalid or differently versioned document
-  rather than guessing at its contents. `format_version` changes only when a
+- Validate first. `python workload_results.py result.json` rejects documents
+  that do not match the format; refuse to compare an invalid or differently
+  versioned document rather than guessing at its contents. The JSON Schema in
+  `workload_result.schema.json` checks the same structure, including the unit
+  pinned to each canonical measurement name, but it cannot enforce unique run
+  ids beyond rejecting identical runs, so a schema-only consumer must check
+  ids itself before matching runs. `format_version` changes only when a
   consumer would otherwise misread a document; new optional fields do not
   bump it.
 - Compare like with like. Two results are comparable when `workload.name` and

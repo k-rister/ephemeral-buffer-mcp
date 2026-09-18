@@ -80,6 +80,28 @@ class TestBenchmarkLatency(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in warm["phases"]], list(benchmark_latency.PHASE_NAMES))
         self.assertEqual(result["details"], results)
 
+    def test_benchmark_rejects_invalid_inputs(self):
+        with self.assertRaises(ValueError):
+            benchmark_latency.run_benchmark((), samples=1)
+        with self.assertRaises(ValueError):
+            benchmark_latency.run_benchmark((0,), samples=1)
+        with self.assertRaises(ValueError):
+            benchmark_latency.run_benchmark((1,), samples=0)
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            benchmark_latency.run_benchmark((1, 1), samples=1)
+
+    def test_duplicate_line_counts_are_rejected_before_the_benchmark_runs(self):
+        FakeEngine.instances = []
+        argv = ["benchmark_latency.py", "--line-counts", "16", "16", "--samples", "1", "--result", "-"]
+        with patch.object(benchmark_latency, "EphemeralEngine", FakeEngine), patch("sys.argv", argv), patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout, patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as exit_info:
+            benchmark_latency.main()
+        self.assertEqual(exit_info.exception.code, 2)
+        self.assertIn("line_counts must not contain duplicates", stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(FakeEngine.instances, [])
+
     def test_result_flag_moves_the_report_to_stderr(self):
         FakeEngine.instances = []
         argv = ["benchmark_latency.py", "--line-counts", "1", "--samples", "1", "--result", "-"]

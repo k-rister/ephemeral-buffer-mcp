@@ -68,6 +68,9 @@ class TestRoutingBenchmark(unittest.TestCase):
             run_benchmark((0,), samples=1)
         with self.assertRaises(ValueError):
             run_benchmark((1,), samples=0)
+        # Sizes become run IDs, so a repeated size is rejected before any work runs.
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            run_benchmark((2, 2), samples=1)
 
 
     def test_workload_result_reports_one_run_per_profile(self):
