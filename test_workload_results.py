@@ -106,6 +106,20 @@ class TestMeasurements(unittest.TestCase):
         with self.assertRaises(ValueError):
             wr.nearest_rank([1], percentile=0)
 
+    def test_statistic_treats_absent_null_and_zero_samples_as_unavailable(self):
+        self.assertEqual(wr.statistic(measurement("seconds", median=0.5, samples=3), "median"), 0.5)
+        self.assertEqual(wr.statistic(measurement("count", value=0), "value"), 0)
+        self.assertIsNone(wr.statistic(measurement("seconds", median=0.5), "p95"))
+        self.assertIsNone(wr.statistic(measurement("seconds", median=None), "median"))
+        self.assertIsNone(wr.statistic(measurement("seconds", median=0.5, samples=0), "median"))
+        self.assertIsNone(wr.statistic(unavailable("tokens"), "value"))
+
+    def test_canonical_directions_cover_every_canonical_measurement(self):
+        self.assertEqual(set(wr.CANONICAL_DIRECTIONS), set(wr.CANONICAL_MEASUREMENTS))
+        self.assertTrue(set(wr.CANONICAL_DIRECTIONS.values()) <= {"lower", "higher", None})
+        self.assertEqual(wr.CANONICAL_DIRECTIONS["success_rate"], "higher")
+        self.assertIsNone(wr.CANONICAL_DIRECTIONS["input_bytes"])
+
     def test_phase_is_a_named_seconds_measurement(self):
         self.assertEqual(phase("ingest", median=0.1), {"name": "ingest", "unit": "seconds", "median": 0.1})
         with self.assertRaisesRegex(WorkloadResultError, "phase name"):

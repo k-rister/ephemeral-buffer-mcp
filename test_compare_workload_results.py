@@ -147,8 +147,18 @@ class TestDirectionsAndClassification(unittest.TestCase):
         self.assertIsNone(cw.direction_for("quality", "score"))
         self.assertEqual(cw.direction_for("needle_rank", "count", {"needle_rank": "lower"}), "lower")
         self.assertEqual(cw.direction_for("wall_time_seconds", "seconds", {"wall_time_seconds": "higher"}), "higher")
-        self.assertEqual(set(cw.CANONICAL_DIRECTIONS), set(wr.CANONICAL_MEASUREMENTS))
         self.assertEqual(set(cw.UNIT_DIRECTIONS), set(wr.UNITS))
+
+    def test_label_matches_keeps_booleans_and_numbers_apart(self):
+        self.assertTrue(cw.label_matches(1, 1))
+        self.assertTrue(cw.label_matches(256, 256.0))
+        self.assertTrue(cw.label_matches("mcp", "mcp"))
+        self.assertTrue(cw.label_matches(None, None))
+        self.assertTrue(cw.label_matches(True, True))
+        self.assertFalse(cw.label_matches(True, 1))
+        self.assertFalse(cw.label_matches(1, True))
+        self.assertFalse(cw.label_matches(0, False))
+        self.assertFalse(cw.label_matches(False, 0))
 
     def test_classify_covers_every_outcome(self):
         self.assertEqual(cw.classify(0, 0.0, "lower", 0.0), "unchanged")
@@ -213,8 +223,25 @@ class TestCompareMeasurement(unittest.TestCase):
         self.assertEqual((entry["direction"], entry["outcome"]), ("higher", "improved"))
         # Only the requested statistics are compared.
         self.assertEqual(self.entries(wr.measurement("seconds", stdev=1.0), wr.measurement("seconds", stdev=2.0)), [])
+        # Dispersion has no better direction, whatever the metric's level direction says.
         [entry] = self.entries(wr.measurement("seconds", stdev=1.0), wr.measurement("seconds", stdev=2.0), statistics=("stdev",))
+        self.assertEqual((entry["direction"], entry["outcome"]), (None, "changed"))
+        [entry] = self.entries(wr.measurement("ratio", stdev=0.1), wr.measurement("ratio", stdev=0.3), statistics=("stdev",), directions={"metric": "higher"})
+        self.assertEqual((entry["direction"], entry["outcome"]), (None, "changed"))
+        [entry] = self.entries(wr.measurement("ratio", stdev=0.1), wr.measurement("ratio", stdev=0.1), statistics=("stdev",))
+        self.assertEqual(entry["outcome"], "unchanged")
+
+    def test_non_finite_deltas_stay_json_serializable(self):
+        # A subnormal baseline overflows the percentage; the absolute delta survives.
+        [entry] = self.entries(wr.measurement("seconds", median=5e-324), wr.measurement("seconds", median=1.0))
+        self.assertIsNone(entry["delta_percent"])
+        self.assertAlmostEqual(entry["delta"], 1.0)
         self.assertEqual(entry["outcome"], "regressed")
+        # Values at the float limits overflow the delta itself.
+        [entry] = self.entries(wr.measurement("count", value=-1e308), wr.measurement("count", value=1e308))
+        self.assertIsNone(entry["delta"])
+        self.assertEqual((entry["outcome"], entry["reason"]), ("changed", "difference is too large to represent"))
+        json.dumps(entry, allow_nan=False)
 
 
 class TestPairRuns(unittest.TestCase):
@@ -345,6 +372,45 @@ class TestCompare(ResultFiles):
         self.assertEqual({entry["name"] for entry in item["entries"]}, {"wall_time_seconds", "ingest"})
         self.assertEqual(comparison["options"]["metrics"], ["ingest", "wall_time_seconds"])
 
+    def test_metrics_iterator_applies_to_every_candidate(self):
+        comparison = self.compare(latency_result(), latency_result(), latency_result(), metrics=iter(["wall_time_seconds", "wall_time_seconds"]))
+        self.assertEqual(comparison["options"]["metrics"], ["wall_time_seconds"])
+        for item in comparison["comparisons"]:
+            self.assertEqual({entry["name"] for entry in item["entries"]}, {"wall_time_seconds"})
+
+    def test_narrowed_documents_are_judged_by_their_selected_runs(self):
+        path = self.write("ab.json", agent_result(control_status="partial", mcp_status="success"))
+        whole = cw.compare([path, path])
+        self.assertEqual(whole["comparisons"][0]["summary"]["statuses"], ["partial", "partial"])
+        self.assertFalse(cw.check_passes(whole))
+        narrowed = cw.compare([f"{path}#mcp", f"{path}#mcp"])
+        self.assertEqual([document["status"] for document in narrowed["documents"]], ["success", "success"])
+        self.assertEqual([document["document_status"] for document in narrowed["documents"]], ["partial", "partial"])
+        self.assertEqual(narrowed["comparisons"][0]["summary"]["statuses"], ["success", "success"])
+        self.assertTrue(cw.check_passes(narrowed))
+        self.assertIn("status=success  document_status=partial  runs=1", cw.format_report(narrowed))
+        filtered = cw.compare([path, path], label_filters=[("mode", "control")])
+        self.assertEqual(filtered["comparisons"][0]["summary"]["statuses"], ["partial", "partial"])
+        self.assertEqual(cw.selected_status([wr.run("a", status="timeout")], []), "timeout")
+        self.assertEqual(cw.selected_status([wr.run("a", status="timeout"), wr.run("b", status="failure")], []), "failure")
+        self.assertEqual(cw.selected_status([wr.run("a"), wr.run("b", status="failure")], []), "partial")
+        self.assertEqual(cw.selected_status([wr.run("a")], ["boom"]), "error")
+        self.assertEqual(cw.selected_status([], []), "success")
+        # Top-level errors still make a narrowed document an error.
+        errored = agent_result()
+        errored["errors"] = ["harness crashed"]
+        errored["status"] = "error"
+        error_path = self.write("err.json", errored)
+        self.assertEqual(cw.compare([f"{error_path}#mcp", f"{error_path}#mcp"])["documents"][0]["status"], "error")
+
+    def test_same_file_is_loaded_once_per_comparison(self):
+        path = self.write("ab.json", agent_result())
+        with patch.object(cw.wr, "load_result", wraps=cw.wr.load_result) as load:
+            cw.compare([f"{path}#control", f"{path}#mcp", path])
+        self.assertEqual(load.call_count, 1)
+        # Without a cache every call loads.
+        self.assertEqual(cw.load_document(path)["runs"][0]["id"], "control")
+
     def test_label_filters_and_multiple_candidates(self):
         results = [
             agent_result(mcp_tokens=600),
@@ -420,8 +486,7 @@ class TestReport(ResultFiles):
         self.assertIn("parameter differences: samples: 3 -> 5", report)
         self.assertIn("environment differences: cpu_count: 8 -> 16; source_revision:", report)
         self.assertIn('tool: {"name": "ephemeral-buffer-mcp", "version": "0.4.0"} -> {"name": "ephemeral-buffer-mcp", "version": null}', report)
-        self.assertIn("lines-2048  (run)", report)
-        self.assertIn("missing: absent in baseline", report)
+        self.assertRegex(report, r"lines-2048\s+\(run\)\s+timeout\s+missing: absent in baseline \(exceeded 30 s\)\n")
         self.assertRegex(report, r"lines-256\s+wall_time_seconds\s+median\s+0\.01 s\s+0\.02 s\s+\+0\.01 s\s+\+100\.0%\s+regressed\n")
         self.assertRegex(report, r"lines-256\s+phase:ingest\s+median\s+0\.006 s\s+0\.006 s\s+0 s\s+0\.0%\s+unchanged\n")
         self.assertRegex(report, r"lines-256\s+payload\s+n/a\s+n/a\s+-\s+-\s+incompatible: unit bytes in baseline but count in candidate\n")
@@ -480,6 +545,8 @@ class TestMain(ResultFiles):
         code, stdout, _ = self.run_main(path, path, "--select", "mode=mcp", "--select", "missing=null", "--format", "json")
         self.assertEqual(code, cw.EXIT_OK)
         self.assertEqual(json.loads(stdout)["comparisons"][0]["runs"], [])
+        code, stdout, _ = self.run_main(path, path, "--select", "mode=mcp", "--format", "json")
+        self.assertEqual(json.loads(stdout)["comparisons"][0]["runs"][0]["id"], "mcp")
 
     def test_check_mode_and_error_exit_codes(self):
         baseline = self.write("a.json", latency_result())

@@ -1343,8 +1343,12 @@ EPHEMERAL_SEMANTIC_PREFETCH=0 .venv/bin/python benchmark_latency.py --result laz
 when possible, so `line_count=256` compares a number), `--metric NAME` limits
 the report to named measurements or phases, and `--statistic NAME` chooses the
 statistics (default `value`, `median`, `mean`, and `p95`; `all` adds `sum`,
-`min`, `max`, and `stdev`). `--format json` prints, and `--output PATH`
-writes, a `coding-agent-workload-comparison` document (format version 1) with
-the same entries plus each document's workload and environment blocks.
-`--check` exits with status 2 when any metric regressed or any document has a
-non-success status, which `OPERATIONS.md` uses for regression checks.
+`min`, `max`, and `stdev`; `stdev` describes spread rather than level, so its
+changes are reported as `changed` and never judged). `--format json` prints,
+and `--output PATH` writes, a `coding-agent-workload-comparison` document
+(format version 1) with the same entries plus each document's workload and
+environment blocks. `--check` exits with status 2 when any metric regressed or
+any document has a non-success status, which `OPERATIONS.md` uses for
+regression checks. A document narrowed with `PATH#RUN_ID` or `--select` is
+judged by its selected runs, and the report shows the whole file's
+`document_status` beside it when the two differ.

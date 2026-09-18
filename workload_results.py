@@ -80,6 +80,28 @@ CANONICAL_MEASUREMENTS = {
     "success_rate": "ratio",
     "throughput_per_second": "per_second",
 }
+# Which direction is better for each canonical measurement, for consumers that
+# judge a change.  ``None`` means a change cannot be judged: ``input_bytes`` is
+# the size of the work, not a cost of doing it.
+CANONICAL_DIRECTIONS: dict[str, str | None] = {
+    "wall_time_seconds": "lower",
+    "queue_wait_seconds": "lower",
+    "tool_call_seconds": "lower",
+    "tool_calls": "lower",
+    "repeated_commands": "lower",
+    "input_bytes": None,
+    "output_bytes": "lower",
+    "context_bytes": "lower",
+    "retained_summary_bytes": "lower",
+    "estimated_tokens": "lower",
+    "retained_summary_tokens": "lower",
+    "input_tokens": "lower",
+    "output_tokens": "lower",
+    "peak_rss_bytes": "lower",
+    "rss_delta_bytes": "lower",
+    "success_rate": "higher",
+    "throughput_per_second": "higher",
+}
 # Labels with conventional values.  ``cache_state`` distinguishes cold and warm
 # measurements; the others identify what a run measured.
 CANONICAL_LABELS = ("cache_state", "mode", "task_id", "repetition", "line_count", "profile")
@@ -88,7 +110,7 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 # PEP 621 version line; a regex keeps this module free of tomllib, which
 # Python 3.10 lacks.
 _PYPROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
-_LABEL_TYPES = (str, int, float, bool, type(None))
+LABEL_TYPES = (str, int, float, bool, type(None))
 
 
 class WorkloadResultError(ValueError):
@@ -142,6 +164,18 @@ def measurement(unit: str, *, samples: int | None = None, note: str | None = Non
 def unavailable(unit: str, note: str | None = None) -> dict[str, Any]:
     """Return a measurement whose value is explicitly missing."""
     return measurement(unit, value=None, samples=0, note=note)
+
+
+def statistic(measurement: dict[str, Any], name: str) -> float | None:
+    """Return one statistic of a measurement, or ``None`` when it is unavailable.
+
+    A statistic is unavailable when it is absent, ``null``, or the measurement
+    records ``samples: 0``; consumers must treat all three the same way.
+    """
+    value = measurement.get(name)
+    if value is None or measurement.get("samples") == 0:
+        return None
+    return value
 
 
 def summarize(values: Iterable[float | None], unit: str, note: str | None = None) -> dict[str, Any]:
@@ -347,7 +381,7 @@ def _validate_run(item: Any, where: str) -> None:
     _expect(isinstance(item["labels"], dict), f"{where}.labels must be an object")
     for key, value in item["labels"].items():
         _expect(isinstance(key, str) and bool(_NAME.match(key)), f"{where}.labels key {key!r} must match {_NAME.pattern}")
-        _expect(isinstance(value, _LABEL_TYPES), f"{where}.labels.{key} must be a string, number, boolean, or null")
+        _expect(isinstance(value, LABEL_TYPES), f"{where}.labels.{key} must be a string, number, boolean, or null")
     _expect(item["status"] in STATUSES, f"{where}.status must be one of {', '.join(STATUSES)}")
     _validate_measurements(item["measurements"], f"{where}.measurements")
     _expect(isinstance(item["phases"], list), f"{where}.phases must be a list")

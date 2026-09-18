@@ -37,6 +37,7 @@ against it.  The JSON output is a ``coding-agent-workload-comparison`` document
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -50,29 +51,12 @@ FORMAT_VERSION = 1
 OUTCOMES = ("improved", "regressed", "changed", "unchanged", "missing", "incompatible")
 DIRECTIONS = ("lower", "higher")
 DEFAULT_STATISTICS = ("value", "median", "mean", "p95")
+# Dispersion statistics describe spread, not level, so a metric's better
+# direction does not apply to them; their changes are reported as ``changed``.
+DISPERSION_STATISTICS = ("stdev",)
 
-# Better direction for the canonical measurement names.  ``None`` means a
-# change is reported as ``changed`` rather than judged.
-CANONICAL_DIRECTIONS: dict[str, str | None] = {
-    "wall_time_seconds": "lower",
-    "queue_wait_seconds": "lower",
-    "tool_call_seconds": "lower",
-    "tool_calls": "lower",
-    "repeated_commands": "lower",
-    "input_bytes": None,
-    "output_bytes": "lower",
-    "context_bytes": "lower",
-    "retained_summary_bytes": "lower",
-    "estimated_tokens": "lower",
-    "retained_summary_tokens": "lower",
-    "input_tokens": "lower",
-    "output_tokens": "lower",
-    "peak_rss_bytes": "lower",
-    "rss_delta_bytes": "lower",
-    "success_rate": "higher",
-    "throughput_per_second": "higher",
-}
-# Fallback by unit for producer-specific names.  Counts, ratios, and scores
+# Fallback by unit for producer-specific names; canonical names take their
+# direction from ``workload_results.CANONICAL_DIRECTIONS``.  Counts, ratios, and scores
 # are ambiguous (a rank, an overhead ratio, and a quality score all differ),
 # so they stay unjudged unless ``--direction`` says otherwise.
 UNIT_DIRECTIONS: dict[str, str | None] = {
@@ -125,9 +109,20 @@ def parse_label_filter(text: str) -> tuple[str, Any]:
         value = json.loads(raw)
     except json.JSONDecodeError:
         value = raw
-    if not isinstance(value, wr._LABEL_TYPES):
+    if not isinstance(value, wr.LABEL_TYPES):
         raise ComparisonError(f"label filter {text!r} must compare against a string, number, boolean, or null")
     return key, value
+
+
+def label_matches(label: Any, wanted: Any) -> bool:
+    """Return whether a label equals a filter value.
+
+    Booleans only match booleans: Python's ``True == 1`` would otherwise let a
+    numeric filter select boolean labels and vice versa.
+    """
+    if isinstance(label, bool) or isinstance(wanted, bool):
+        return isinstance(label, bool) and isinstance(wanted, bool) and label is wanted
+    return label == wanted
 
 
 def parse_direction(text: str) -> tuple[str, str]:
@@ -138,25 +133,57 @@ def parse_direction(text: str) -> tuple[str, str]:
     return name, direction
 
 
-def load_document(reference: str, label_filters: Iterable[tuple[str, Any]] = ()) -> dict[str, Any]:
-    """Load one reference into a comparison document with its selected runs."""
+def selected_status(runs: list[dict[str, Any]], errors: list[str]) -> str:
+    """Return the status of a narrowed selection of runs.
+
+    Top-level errors still mean ``error``; runs that all share one status keep
+    it (one ``partial`` run stays ``partial``); mixed selections follow
+    ``workload_results.derive_status``.
+    """
+    statuses = {item["status"] for item in runs}
+    if not errors and len(statuses) == 1:
+        return statuses.pop()
+    return wr.derive_status(runs, errors)
+
+
+def load_document(
+    reference: str,
+    label_filters: Iterable[tuple[str, Any]] = (),
+    loaded: dict[Path, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Load one reference into a comparison document with its selected runs.
+
+    ``loaded`` caches validated results by path so several references into the
+    same file (``PATH#control PATH#mcp``) read and validate it once.  When the
+    reference or the filters narrow the document to some of its runs, ``status``
+    is derived from those runs alone and the whole document's status is kept
+    as ``document_status``.
+    """
     path, run_id = parse_reference(reference)
-    result = wr.load_result(path)
+    if loaded is None or path not in loaded:
+        result = wr.load_result(path)
+        if loaded is not None:
+            loaded[path] = result
+    else:
+        result = loaded[path]
     runs = list(result["runs"])
     if run_id is not None:
         runs = [item for item in runs if item["id"] == run_id]
         if not runs:
             available = ", ".join(item["id"] for item in result["runs"]) or "none"
             raise ComparisonError(f"{path} has no run {run_id!r} (available: {available})")
-    for key, value in label_filters:
-        runs = [item for item in runs if key in item["labels"] and item["labels"][key] == value]
+    filters = list(label_filters)
+    for key, value in filters:
+        runs = [item for item in runs if key in item["labels"] and label_matches(item["labels"][key], value)]
+    narrowed = run_id is not None or bool(filters)
     return {
         "reference": reference,
         "path": str(path),
         "selected_run": run_id,
         "workload": result["workload"],
         "environment": result["environment"],
-        "status": result["status"],
+        "status": selected_status(runs, result["errors"]) if narrowed else result["status"],
+        "document_status": result["status"],
         "errors": list(result["errors"]),
         "measurements": result["measurements"],
         "runs": runs,
@@ -171,8 +198,8 @@ def direction_for(name: str, unit: str, overrides: dict[str, str] | None = None)
     """Return the better direction for a measurement, if one is known."""
     if overrides and name in overrides:
         return overrides[name]
-    if name in CANONICAL_DIRECTIONS:
-        return CANONICAL_DIRECTIONS[name]
+    if name in wr.CANONICAL_DIRECTIONS:
+        return wr.CANONICAL_DIRECTIONS[name]
     return UNIT_DIRECTIONS[unit]
 
 
@@ -186,17 +213,6 @@ def classify(delta: float, delta_percent: float | None, direction: str | None, t
         return "changed"
     better = delta < 0 if direction == "lower" else delta > 0
     return "improved" if better else "regressed"
-
-
-def _available(measurement: dict[str, Any], statistic: str) -> float | None:
-    """Return the statistic when it is usable, else ``None``.
-
-    ``null`` and ``samples: 0`` both mean the value is unavailable.
-    """
-    value = measurement.get(statistic)
-    if value is None or measurement.get("samples") == 0:
-        return None
-    return value
 
 
 def _entry(**fields: Any) -> dict[str, Any]:
@@ -242,13 +258,14 @@ def compare_measurement(
             reason=f"unit {baseline['unit']} in baseline but {candidate['unit']} in candidate",
         )]
     unit = baseline["unit"]
-    direction = direction_for(name, unit, directions)
+    level_direction = direction_for(name, unit, directions)
     entries = []
     for statistic in statistics:
         if statistic not in baseline and statistic not in candidate:
             continue
-        before = _available(baseline, statistic)
-        after = _available(candidate, statistic)
+        before = wr.statistic(baseline, statistic)
+        after = wr.statistic(candidate, statistic)
+        direction = None if statistic in DISPERSION_STATISTICS else level_direction
         common_stat = dict(common, statistic=statistic, unit=unit, baseline=before, candidate=after, direction=direction)
         if before is None or after is None:
             if before is None and after is None:
@@ -258,7 +275,12 @@ def compare_measurement(
             entries.append(_entry(**common_stat, outcome="missing", reason=reason))
             continue
         delta = after - before
+        if not math.isfinite(delta):
+            entries.append(_entry(**common_stat, outcome="changed", reason="difference is too large to represent"))
+            continue
         delta_percent = (delta / abs(before)) * 100.0 if before != 0 else None
+        if delta_percent is not None and not math.isfinite(delta_percent):
+            delta_percent = None
         entries.append(_entry(
             **common_stat,
             delta=delta,
@@ -327,6 +349,7 @@ def compare_documents(
     """Compare one candidate document against the baseline."""
     statistics = tuple(statistics)
     wanted = set(metrics) if metrics is not None else None
+    metrics = wanted
     options = dict(statistics=statistics, tolerance_percent=tolerance_percent, directions=directions)
     entries = compare_measurement_blocks(
         baseline["measurements"], candidate["measurements"], run=None, kind="measurement", **options
@@ -392,7 +415,9 @@ def compare(
     if unknown:
         raise ComparisonError(f"unknown statistic {', '.join(unknown)}; expected one of {', '.join(wr.STATISTICS)}")
     filters = list(label_filters)
-    documents = [load_document(reference, filters) for reference in references]
+    wanted = sorted(set(metrics)) if metrics is not None else None
+    loaded: dict[Path, dict[str, Any]] = {}
+    documents = [load_document(reference, filters, loaded) for reference in references]
     baseline = documents[0]
     for document in documents[1:]:
         if document["workload"]["name"] != baseline["workload"]["name"] and not allow_workload_mismatch:
@@ -407,7 +432,7 @@ def compare(
             statistics=statistics,
             tolerance_percent=tolerance_percent,
             directions=directions,
-            metrics=metrics,
+            metrics=wanted,
         )
         for document in documents[1:]
     ]
@@ -420,7 +445,7 @@ def compare(
             "statistics": list(statistics),
             "tolerance_percent": tolerance_percent,
             "directions": dict(directions or {}),
-            "metrics": sorted(metrics) if metrics is not None else None,
+            "metrics": wanted,
             "label_filters": [[key, value] for key, value in filters],
         },
         "documents": [
@@ -432,6 +457,7 @@ def compare(
                 "workload": document["workload"],
                 "environment": document["environment"],
                 "status": document["status"],
+                "document_status": document["document_status"],
                 "errors": document["errors"],
                 "runs": [item["id"] for item in document["runs"]],
             }
@@ -446,7 +472,11 @@ def compare(
 
 
 def check_passes(comparison: dict[str, Any]) -> bool:
-    """Return whether a regression check should pass: no regressions, every document succeeded."""
+    """Return whether a regression check should pass: no regressions and every compared document succeeded.
+
+    A document narrowed with ``PATH#RUN_ID`` or a label filter is judged by
+    its selected runs, so failures elsewhere in the file do not fail the check.
+    """
     return comparison["summary"]["regressions"] == 0 and comparison["summary"]["all_succeeded"]
 
 
@@ -492,6 +522,7 @@ def _describe_document(document: dict[str, Any]) -> str:
         f"producer={document['workload']['producer']}",
         f"kind={document['workload']['kind']}",
         f"status={document['status']}",
+        *([f"document_status={document['document_status']}"] if document["document_status"] != document["status"] else []),
         f"runs={len(document['runs'])}",
         f"recorded={env['recorded_at']}",
         f"python={env['python_version']}",
@@ -522,12 +553,16 @@ def format_report(comparison: dict[str, Any]) -> str:
                 lines.append(f"  {title} differences: {described}")
         rows = []
         for record in item["runs"]:
+            errors = "; ".join(record["baseline_errors"] + record["candidate_errors"])
             if record["outcome"] == "missing":
-                rows.append([record["id"], "(run)", "", "", "", "", "", f"missing: {record['reason']}"])
+                rows.append([
+                    record["id"], "(run)", "", record["baseline_status"] or "", record["candidate_status"] or "", "", "",
+                    f"missing: {record['reason']}" + (f" ({errors})" if errors else ""),
+                ])
             elif record["baseline_status"] != "success" or record["candidate_status"] != "success":
                 rows.append([
                     record["id"], "(run status)", "", record["baseline_status"], record["candidate_status"], "", "",
-                    "; ".join(record["baseline_errors"] + record["candidate_errors"]) or "non-success status",
+                    errors or "non-success status",
                 ])
         for entry in item["entries"]:
             absolute, percent = format_delta(entry)
@@ -579,7 +614,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-workload-mismatch", action="store_true", help="Compare documents whose workload names differ")
     parser.add_argument(
         "--check", action="store_true",
-        help=f"Exit with status {EXIT_CHECK_FAILED} when any metric regressed or any document has a non-success status",
+        help=(
+            f"Exit with status {EXIT_CHECK_FAILED} when any metric regressed or any document (its selected runs, "
+            "when narrowed with PATH#RUN_ID or --select) has a non-success status"
+        ),
     )
     return parser
 
