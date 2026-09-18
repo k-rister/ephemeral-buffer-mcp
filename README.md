@@ -258,6 +258,22 @@ export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5"
 export EPHEMERAL_FASTEMBED_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
 ```
 
+Embedding inference speed depends on the ONNX file and thread count. The
+catalogue entry for the default model is a reduced-precision export that does
+not parallelize on every CPU platform; the `BAAI/bge-small-en-v1.5-fp32` alias
+selects the upstream fp32 export of the same model, which produces identical
+vectors and scales with threads at the cost of a larger download. Bound the
+threads with `EPHEMERAL_EMBEDDING_THREADS` when the server shares a host with
+an interactive coding agent:
+
+```bash
+export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5-fp32"
+export EPHEMERAL_EMBEDDING_THREADS=4
+```
+
+Measure both settings on the deployment host with `benchmark_semantic_index.py`
+before relying on them; `get_buffer_stats` reports the active thread setting.
+
 Warm-up failures do not stop the server. BM25 remains available, and hybrid
 search returns lexical results with a `semantic_fallback` error-class field
 when semantic initialization fails. `get_buffer_stats` and
@@ -781,6 +797,22 @@ The prefetch harness reports ingestion, first semantic search, and subsequent
 semantic search medians for both modes. Prefetch should reduce first-query
 latency when work completes during ingestion, while adding bounded background
 resource use; treat the output as deployment-specific diagnostic evidence.
+
+Measure semantic indexing cost and first hybrid-search latency by capture size:
+```bash
+.venv/bin/python benchmark_semantic_index.py \
+  --samples 3 --output benchmark-semantic-index.json
+```
+The semantic-index harness ingests a fresh deterministic log-like capture per
+sample, then reports median and p95 timings for ingestion, lazy embedding
+materialization, the first hybrid (or `--mode semantic`) search that triggers
+it, and a subsequent search over the warm index, plus chunk count, indexing
+throughput, and the rank of a known needle line in the first result set.
+Default sizes are 16, 256, 2,048, and 8,192 lines. Run it without
+`EPHEMERAL_TEST_EMBEDDINGS=1` to measure the configured FastEmbed model; with
+deterministic test embeddings it only validates the harness. Prefetch and
+startup warm-up are disabled inside the harness so the lazy cost is visible.
+Results are host-specific diagnostic evidence, not a required CI gate.
 
 Compare lazy model loading with background startup warm-up:
 ```bash

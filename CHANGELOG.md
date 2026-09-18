@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add a semantic-index latency benchmark that reports ingestion, lazy embedding
+  materialization, first and subsequent hybrid or semantic search timings,
+  indexing throughput, and needle rank by capture size with the real model.
+- Add `EPHEMERAL_EMBEDDING_THREADS` to bound ONNX Runtime threads for embedding
+  inference, and register `BAAI/bge-small-en-v1.5-fp32` as a selectable fp32
+  export of the default model that produces identical vectors but parallelizes
+  on platforms where the reduced-precision catalogue file does not.
 - Add durable phase-level executions with persisted outputs, metrics, status
   history, restart recovery, explicit retries, and unsafe-side-effect resume
   confirmation for long-running agent workflows, including recoverable compact

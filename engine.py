@@ -23,12 +23,15 @@ from functools import wraps
 from logging_utils import get_logger, log_event
 from metrics import LocalMetrics
 from fastembed import TextEmbedding
+from fastembed.common.model_description import ModelSource, PoolingType
 from config import (
     DEFAULT_EMBEDDING_MODEL,
+    FP32_EMBEDDING_MODEL,
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
     embedding_cache_dir,
     embedding_model_name as configured_embedding_model_name,
+    embedding_threads as configured_embedding_threads,
     embedding_warmup_enabled as configured_embedding_warmup_enabled,
     max_indexed_chunks as configured_max_indexed_chunks,
     semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
@@ -512,6 +515,38 @@ class Capture:
         return self.byte_size + self.label_byte_size
 
 
+_BUNDLED_MODELS_REGISTERED = False
+
+
+def register_bundled_embedding_models() -> None:
+    """Register the fp32 alias of the default model with FastEmbed once per process.
+
+    FastEmbed's catalogue entry for the default model downloads a reduced-precision
+    ONNX export whose matrix kernels do not parallelize on some CPU platforms. The
+    upstream fp32 export produces identical vectors, so it is exposed under an
+    alias that ``EPHEMERAL_EMBEDDING_MODEL`` can select.
+    """
+    global _BUNDLED_MODELS_REGISTERED
+    if _BUNDLED_MODELS_REGISTERED:
+        return
+    try:
+        TextEmbedding.add_custom_model(
+            model=FP32_EMBEDDING_MODEL,
+            pooling=PoolingType.CLS,
+            normalization=True,
+            sources=ModelSource(hf=DEFAULT_EMBEDDING_MODEL),
+            dim=384,
+            model_file="onnx/model.onnx",
+            description="fp32 ONNX export of BAAI/bge-small-en-v1.5",
+            license="mit",
+            size_in_gb=0.13,
+        )
+    except ValueError:
+        # Another engine in this process already registered the alias.
+        pass
+    _BUNDLED_MODELS_REGISTERED = True
+
+
 class _DeterministicTestEmbedding:
     """Small deterministic substitute used only by the CI test environment."""
 
@@ -548,6 +583,7 @@ class EphemeralEngine:
         embedding_model_name: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
         embedding_warmup: Optional[bool] = None,
+        embedding_threads: Optional[int] = None,
         metrics: Optional[LocalMetrics] = None,
         semantic_prefetch: Optional[bool] = None,
         semantic_prefetch_workers: Optional[int] = None,
@@ -579,6 +615,11 @@ class EphemeralEngine:
         self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
         
         self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
+        self.embedding_threads = (
+            configured_embedding_threads() if embedding_threads is None else embedding_threads
+        )
+        if self.embedding_threads is not None and self.embedding_threads < 1:
+            raise ValueError("embedding_threads must be at least 1")
         self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
         self.embedding_model = None
         self.embedding_warmup_enabled = (
@@ -693,6 +734,10 @@ class EphemeralEngine:
             kwargs = {"model_name": self.embedding_model_name}
             if self.embedding_cache_path:
                 kwargs["cache_dir"] = self.embedding_cache_path
+            if self.embedding_threads is not None:
+                kwargs["threads"] = self.embedding_threads
+            if self.embedding_model_name == FP32_EMBEDDING_MODEL:
+                register_bundled_embedding_models()
             try:
                 self.embedding_model = TextEmbedding(**kwargs)
             except Exception:
@@ -1678,6 +1723,7 @@ class EphemeralEngine:
             "embedding_bytes": embedding_bytes,
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
+            "embedding_threads": self.embedding_threads,
             "embedding_warmup_enabled": self.embedding_warmup_enabled,
             "embedding_warmup_state": self.embedding_warmup_state,
             "embedding_warmup_failure": self.embedding_warmup_failure,

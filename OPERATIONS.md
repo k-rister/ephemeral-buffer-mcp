@@ -111,7 +111,15 @@ the MCP handshake and BM25 search remain available while model loading and one
 small deterministic embedding complete. Set `EPHEMERAL_EMBEDDING_WARMUP=0` for
 lexical-only or memory-constrained deployments. Set `EPHEMERAL_EMBEDDING_MODEL`
 to select a compatible model and `EPHEMERAL_FASTEMBED_CACHE_DIR` to place its
-downloaded model files in a controlled cache directory. Warm-up failure does
+downloaded model files in a controlled cache directory. Set
+`EPHEMERAL_EMBEDDING_THREADS` to a small positive integer to bound the ONNX
+Runtime threads used for embedding inference; leave it unset for the runtime
+default. The catalogue file for the default model is a reduced-precision ONNX
+export whose matrix kernels do not parallelize on every CPU platform. Setting
+`EPHEMERAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5-fp32` selects the upstream
+fp32 export instead; it produces identical vectors, downloads about 130 MB
+rather than 67 MB, and scales with the thread count. Measure both with
+`benchmark_semantic_index.py` on the deployment host before choosing. Warm-up failure does
 not block startup: BM25 remains available and hybrid search degrades to lexical
 results. `get_buffer_stats` and `get_runtime_diagnostics` report warm-up state
 and a content-free exception class on failure.

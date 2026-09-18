@@ -12,7 +12,9 @@ import numpy as np
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
+from config import FP32_EMBEDDING_MODEL
 from engine import (
+    register_bundled_embedding_models,
     Capture,
     EphemeralEngine,
     PREVIEW_MAX_BYTES,
@@ -1426,6 +1428,52 @@ class TestEmbeddingStartup(unittest.TestCase):
             self.assertEqual(engine.embedding_warmup_failure, "RuntimeError")
         finally:
             engine.shutdown()
+
+    def test_embedding_threads_configuration_and_validation(self):
+        with patch.dict("os.environ", {"EPHEMERAL_EMBEDDING_THREADS": "3"}, clear=False):
+            configured = EphemeralEngine(max_captures=1)
+        self.assertEqual(configured.embedding_threads, 3)
+        self.assertEqual(configured.get_buffer_stats()["embedding_threads"], 3)
+
+        explicit = EphemeralEngine(max_captures=1, embedding_threads=2)
+        self.assertEqual(explicit.embedding_threads, 2)
+        with self.assertRaisesRegex(ValueError, "embedding_threads"):
+            EphemeralEngine(max_captures=1, embedding_threads=0)
+
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                patch("engine.TextEmbedding") as embedding, \
+                patch("sys.stderr", new_callable=io.StringIO):
+            explicit._get_embedding_model()
+        embedding.assert_called_once_with(model_name=explicit.embedding_model_name, threads=2)
+        embedding.add_custom_model.assert_not_called()
+
+    def test_fp32_model_alias_is_registered_once_per_process(self):
+        import engine as engine_module
+
+        original_flag = engine_module._BUNDLED_MODELS_REGISTERED
+        engine_module._BUNDLED_MODELS_REGISTERED = False
+        try:
+            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                    patch("engine.TextEmbedding") as embedding, \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                first = EphemeralEngine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
+                first._get_embedding_model()
+                second = EphemeralEngine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
+                second._get_embedding_model()
+            embedding.add_custom_model.assert_called_once()
+            registration = embedding.add_custom_model.call_args.kwargs
+            self.assertEqual(registration["model"], FP32_EMBEDDING_MODEL)
+            self.assertEqual(registration["sources"].hf, "BAAI/bge-small-en-v1.5")
+            self.assertEqual(registration["model_file"], "onnx/model.onnx")
+            self.assertEqual(embedding.call_count, 2)
+
+            engine_module._BUNDLED_MODELS_REGISTERED = False
+            with patch("engine.TextEmbedding") as embedding:
+                embedding.add_custom_model.side_effect = ValueError("already registered")
+                register_bundled_embedding_models()
+            self.assertTrue(engine_module._BUNDLED_MODELS_REGISTERED)
+        finally:
+            engine_module._BUNDLED_MODELS_REGISTERED = original_flag
 
 
 if __name__ == "__main__":
