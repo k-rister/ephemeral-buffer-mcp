@@ -945,7 +945,7 @@ def main() -> None:
         write_results(args.output, record)
     print(json.dumps(record, indent=2, sort_keys=True), file=wr.report_stream(args.result))
     if args.result:
-        wr.write_result(workload_result(record), args.result)
+        wr.write_result(workload_result(record), args.result, experiment=wr.experiment_from_args(args))
 
 
 if __name__ == "__main__":

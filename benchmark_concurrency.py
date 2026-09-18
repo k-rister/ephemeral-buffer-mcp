@@ -194,7 +194,7 @@ def main() -> None:
     if args.output:
         write_results(args.output, results, baseline, failures)
     if args.result:
-        wr.write_result(workload_result(build_record(results, baseline, failures)), args.result)
+        wr.write_result(workload_result(build_record(results, baseline, failures)), args.result, experiment=wr.experiment_from_args(args))
     for failure in failures:
         print(f"REGRESSION: {failure}", file=report)
     if failures:

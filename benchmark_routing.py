@@ -192,7 +192,7 @@ def main() -> None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if args.result:
-        wr.write_result(workload_result(results), args.result)
+        wr.write_result(workload_result(results), args.result, experiment=wr.experiment_from_args(args))
 
 
 if __name__ == "__main__":

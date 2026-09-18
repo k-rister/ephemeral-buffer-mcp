@@ -1115,7 +1115,10 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 
 Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
 `AGENT_AB_SEED`, `AGENT_AB_TIMEOUT_SECONDS`, or `AGENT_AB_TEST_EMBEDDINGS` to
-repeat a different experiment. The test embedding setting defaults to `1` for
+repeat a different experiment. The script also writes
+`records.result.json` and `summary.result.json` in the common workload result
+format; set `AGENT_AB_EXPERIMENT` and `AGENT_AB_VARIANT` to assign them to an
+experiment group (see "Organizing experiments"). The test embedding setting defaults to `1` for
 deterministic, offline runs; set it to `0` to exercise the configured FastEmbed
 model and measure real model startup and first-query behavior. Keep the model,
 embedding cache, and other environment settings identical across paired runs.
@@ -1220,6 +1223,8 @@ CLI, as above) and the same contract is published as JSON Schema in
        {"name": "ingest", "unit": "seconds", "median": 0.006, "p95": 0.008, "samples": 3}],
      "errors": []}
   ],
+  "experiment": {"group": "chunk-sweep",
+                 "metadata": {"variant": "chunk-8", "model": "bge-small-fp32"}},
   "details": {"...": "the producer's own record, for humans"}
 }
 ```
@@ -1247,6 +1252,11 @@ CLI, as above) and the same contract is published as JSON Schema in
 - `details` carries the producer's native record for people who need it; its
   shape is producer-specific and versioned separately by
   `workload.producer_schema_version`.
+- The optional **experiment** block assigns the document to a named `group`
+  of related runs and carries flat `metadata` (scalar values only) describing
+  what varied; see "Organizing experiments" below. Every producer accepts
+  `--experiment GROUP`, `--metadata KEY=VALUE` (repeatable; values parse as
+  JSON when possible), and `--redact KEY`.
 
 `OPERATIONS.md` describes how comparison tooling and regression checks should
 consume these documents. The shared format is not a privacy exemption: apply
@@ -1352,3 +1362,118 @@ any document has a non-success status, which `OPERATIONS.md` uses for
 regression checks. A document narrowed with `PATH#RUN_ID` or `--select` is
 judged by its selected runs, and the report shows the whole file's
 `document_status` beside it when the two differ.
+
+### Organizing experiments
+
+A performance or token-efficiency study is rarely one comparison: a chunk-size
+sweep, a model change, or a prompt-policy A/B produces several result
+documents whose relationship is otherwise only in their file names. Every
+producer therefore accepts `--experiment GROUP` to assign its result document
+to an experiment or run group, and `--metadata KEY=VALUE` to record what
+varied. The workflow is: tag each run when it is recorded, list the group to
+see what exists and which runs failed, and compare documents by group and
+metadata instead of by path.
+
+**Record.** Give every run of one study the same group and describe the
+variable under test in metadata. Conventional keys are `task_type`,
+`repository_revision`, `agent_configuration`, `model`, `tool_version`,
+`variant`, `environment`, `workload_size`, and `started_at`; any other
+`snake_case` key is allowed. Values are identifiers (at most 256 characters),
+never prompts or captured content:
+
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
+  --result results/chunk-8.result.json --experiment chunk-sweep \
+  --metadata variant=chunk-8 --metadata model=bge-small-fp32
+EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=4 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
+  --result results/chunk-4.result.json --experiment chunk-sweep \
+  --metadata variant=chunk-4 --metadata model=bge-small-fp32
+EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=16 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
+  --result results/chunk-16.result.json --experiment chunk-sweep \
+  --metadata variant=chunk-16 --metadata model=bge-small-fp32
+```
+
+For coding-agent runs, `run_agent_ab_experiment.sh` tags both of its result
+documents (`records.result.json` and `summary.result.json`) with the model,
+fixture profile, repetition count, embedding environment, and start time, and
+takes the group from `AGENT_AB_EXPERIMENT` and the variant from
+`AGENT_AB_VARIANT`:
+
+```bash
+AGENT_AB_EXPERIMENT=policy-ab AGENT_AB_VARIANT=summarize-first \
+  CODEX_HOME=/path/to/writable/authenticated-codex-home ./run_agent_ab_experiment.sh
+```
+
+**List.** `list_workload_results.py` searches files and directories
+(recursively) for result documents, ignores other JSON files such as records
+and schedules, and prints one row per document with its group, status, run
+count, time, and metadata. `--group NAME` and `--where KEY=VALUE` filter by
+group and metadata, `--workload NAME` and `--status STATUS` narrow further,
+`--field KEY` shows chosen metadata keys as columns, and `--runs` lists every
+run with its labels and status so failed, timed-out, and partial runs inside a
+document are visible:
+
+```bash
+.venv/bin/python list_workload_results.py results --field variant --field model
+```
+
+```text
+path                          group        workload           status   runs  time                       variant   model           errors
+results/chunk-8.result.json   chunk-sweep  capture-latency    success  2     2026-09-18T18:52:02+00:00  chunk-8   bge-small-fp32
+results/chunk-16.result.json  chunk-sweep  capture-latency    success  2     2026-09-18T18:52:03+00:00  chunk-16  bge-small-fp32
+results/chunk-4.result.json   chunk-sweep  capture-latency    success  2     2026-09-18T18:52:03+00:00  chunk-4   bge-small-fp32
+results/prefetch.result.json  -            semantic-prefetch  success  2     2026-09-18T18:52:04+00:00  -         bge-small-fp32
+```
+
+Rows are ordered by group, then by `started_at` metadata (or the recording
+time when it is absent), then by path. Documents that do not satisfy the
+format are listed as `invalid` with the reason and make the command exit with
+status 1, so a broken file is never mistaken for an absent one. `--format
+json` prints a `coding-agent-workload-listing` document whose entries carry
+each document's group, metadata, status, errors, and per-run status, and
+`--format paths` prints only the selected paths for shell substitution.
+
+**Compare.** `compare_workload_results.py` accepts `DIR@GROUP` references
+beside file references: the reference expands to every document under the
+directory that belongs to the group, in the same order as the listing, and
+`DIR@GROUP,KEY=VALUE` keeps only documents whose metadata matches. A lone
+`results@chunk-sweep` compares every later document of the sweep against the
+earliest; naming two selectors picks the baseline explicitly, and `#RUN_ID`
+still selects one run from each document:
+
+```bash
+.venv/bin/python compare_workload_results.py results@chunk-sweep,variant=chunk-8 results@chunk-sweep,variant=chunk-4 \
+  --statistic median --metric wall_time_seconds --metric semantic_index
+```
+
+```text
+workload: capture-latency
+  baseline: results/chunk-8.result.json  group=chunk-sweep  producer=benchmark_latency.py  kind=benchmark  status=success  runs=2  recorded=2026-09-18T18:52:02+00:00  python=3.12.14  tool=ephemeral-buffer-mcp 0.4.0  revision=0a9e8da36b46
+  candidate: results/chunk-4.result.json  group=chunk-sweep  producer=benchmark_latency.py  kind=benchmark  status=success  runs=2  recorded=2026-09-18T18:52:03+00:00  python=3.12.14  tool=ephemeral-buffer-mcp 0.4.0  revision=0a9e8da36b46
+  statistics=median tolerance=0% metrics=semantic_index,wall_time_seconds
+
+results/chunk-8.result.json -> results/chunk-4.result.json
+  experiment differences: variant: "chunk-8" -> "chunk-4"
+  run        metric                stat    baseline    candidate   delta         change  outcome
+  lines-256  wall_time_seconds     median  0.0159 s    0.01414 s   -0.00176 s    -11.1%  improved
+  lines-256  phase:semantic_index  median  0.001104 s  0.001814 s  +0.0007096 s  +64.3%  regressed
+  summary: 1 improved, 1 regressed, 0 changed, 0 unchanged, 0 missing, 0 incompatible; runs compared=2 missing=0; status success -> success
+```
+
+The report and the JSON comparison show the group beside each document and
+list the metadata that differs (`experiment differences`) next to the
+parameter and environment differences, so a delta can be read together with
+the variable that caused it. Selector values may not contain commas; a value
+containing `@` is fine because only the first `@` separates the directory from
+the group.
+
+**Sensitive metadata.** Metadata keys that name credentials (`token`, `key`,
+`password`, `secret`, `credentials`, `authorization`, `bearer`, or any
+`*_token` or `*_key`) are stored as `[redacted]` by every producer, the
+validator rejects a document that carries a real value under such a key, and
+`--redact KEY` stores `[redacted]` for any other key whose value should not
+leave the machine (the key stays visible so readers know it was set). The
+listing tool's `--redact KEY` masks a value in its output without changing the
+file. Metadata that should not be recorded at all is simply not passed; the
+result format is still not a privacy exemption, so review documents before
+sharing them as with any other benchmark output.

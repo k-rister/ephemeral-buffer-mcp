@@ -605,7 +605,7 @@ def main() -> None:
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"runs": len(payload["runs"]), "output": str(args.output)}), file=wr.report_stream(args.result))
     if args.result:
-        wr.write_result(records_workload_result(payload, producer="run_codex_agent_ab.py"), args.result)
+        wr.write_result(records_workload_result(payload, producer="run_codex_agent_ab.py"), args.result, experiment=wr.experiment_from_args(args))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,24 @@
     "errors": {"type": "array", "items": {"type": "string"}},
     "measurements": {"$ref": "#/$defs/measurements", "description": "Workload-wide measurements that do not belong to one run"},
     "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}},
+    "experiment": {
+      "type": "object",
+      "required": ["group", "metadata"],
+      "additionalProperties": false,
+      "description": "Optional experiment or run-group assignment plus flat metadata describing what varied",
+      "properties": {
+        "group": {"type": ["string", "null"], "minLength": 1, "description": "Experiment or run-group identifier shared by related documents; null records metadata alone"},
+        "metadata": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {
+            "type": ["string", "number", "boolean", "null"],
+            "maxLength": 256,
+            "description": "Identifiers only, never prompts or content; keys that name credentials hold \"[redacted]\". Conventional keys: task_type, repository_revision, agent_configuration, model, tool_version, variant, environment, workload_size, started_at"
+          }
+        }
+      }
+    },
     "details": {"type": "object", "description": "The producer's native record, kept for humans and producer-specific tooling"}
   },
   "$defs": {

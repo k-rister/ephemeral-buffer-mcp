@@ -34,12 +34,17 @@ class TestPrefetchBenchmark(unittest.TestCase):
             self.assertTrue(all(entry["samples"] == 1 for entry in item["phases"]))
 
     def test_result_flag_emits_json_on_stdout(self):
-        argv = ["benchmark_prefetch.py", "--line-count", "2", "--samples", "1", "--result", "-"]
+        argv = [
+            "benchmark_prefetch.py", "--line-count", "2", "--samples", "1", "--result", "-",
+            "--experiment", "prefetch-sweep", "--metadata", "variant=default", "--metadata", "api_key=hidden",
+        ]
         with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
             "sys.stderr", new_callable=io.StringIO
         ) as stderr:
             benchmark_prefetch.main()
-        self.assertEqual(wr.validate_result(json.loads(stdout.getvalue()))["workload"]["name"], "semantic-prefetch")
+        result = wr.validate_result(json.loads(stdout.getvalue()))
+        self.assertEqual(result["workload"]["name"], "semantic-prefetch")
+        self.assertEqual(result["experiment"], {"group": "prefetch-sweep", "metadata": {"variant": "default", "api_key": wr.REDACTED}})
         self.assertIn("prefetch=true", stderr.getvalue())
 
 

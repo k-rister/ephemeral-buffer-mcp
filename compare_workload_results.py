@@ -24,11 +24,13 @@ Missing and incompatible data is always listed rather than silently skipped,
 and the comparison carries each document's workload parameters and
 environment so a reader can tell a regression from a different setup.
 
-References name a whole document (``PATH``) or one run inside it
-(``PATH#RUN_ID``).  Runs pair by ``id``; when the baseline and a candidate
-each select exactly one run, those two runs pair regardless of their ids, which
-compares two configurations recorded in the same document (for example the
-``control`` and ``mcp`` runs of an A/B summary).
+References name a whole document (``PATH``), one run inside it
+(``PATH#RUN_ID``), or the documents of an experiment group recorded under a
+directory (``DIR@GROUP``, narrowed by metadata with ``DIR@GROUP,KEY=VALUE``;
+see ``parse_reference``).  Runs pair by ``id``; when the baseline and a
+candidate each select exactly one run, those two runs pair regardless of their
+ids, which compares two configurations recorded in the same document (for
+example the ``control`` and ``mcp`` runs of an A/B summary).
 
 The first reference is the baseline and every later reference is compared
 against it.  The JSON output is a ``coding-agent-workload-comparison`` document
@@ -40,7 +42,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 import workload_results as wr
 
@@ -86,43 +88,60 @@ class ComparisonError(ValueError):
 # References and documents
 
 
-def parse_reference(text: str) -> tuple[Path, str | None]:
-    """Split ``PATH`` or ``PATH#RUN_ID`` into its parts.
+class Reference(NamedTuple):
+    """A parsed reference: a file or a group of documents under a directory."""
 
-    A path that exists as written wins over the ``#`` split, so file names
-    containing ``#`` still work when no run is selected.
+    path: Path
+    run_id: str | None
+    group: str | None
+    where: tuple[tuple[str, Any], ...]
+
+
+REFERENCE_FORMS = "PATH, PATH#RUN_ID, DIR@GROUP, or DIR@GROUP,KEY=VALUE[,KEY=VALUE...]"
+
+
+def parse_reference(text: str) -> Reference:
+    """Parse ``PATH[#RUN_ID]`` or ``DIR@GROUP[,KEY=VALUE...][#RUN_ID]``.
+
+    A path that exists as written wins over the ``#`` and ``@`` splits, so
+    file names containing those characters still work when nothing is
+    selected.  ``DIR@GROUP`` names every result document under ``DIR``
+    (searched recursively) whose ``experiment.group`` is ``GROUP``, ordered by
+    ``started_at`` metadata or ``recorded_at``; each ``KEY=VALUE`` keeps only
+    documents whose metadata has that value, and ``#RUN_ID`` applies to every
+    selected document.
     """
-    if Path(text).is_file() or "#" not in text:
-        return Path(text), None
-    path, _, run_id = text.rpartition("#")
-    if not path or not run_id:
-        raise ComparisonError(f"reference {text!r} must be PATH or PATH#RUN_ID")
-    return Path(path), run_id
+    if Path(text).exists() or ("#" not in text and "@" not in text):
+        return Reference(Path(text), None, None, ())
+    rest, run_id = text, None
+    if "#" in text:
+        rest, _, run_id = text.rpartition("#")
+        if not rest or not run_id:
+            raise ComparisonError(f"reference {text!r} must be {REFERENCE_FORMS}")
+    if "@" not in rest or Path(rest).exists():
+        return Reference(Path(rest), run_id, None, ())
+    path, _, selector = rest.partition("@")
+    group, *selectors = selector.split(",")
+    if not path or not group:
+        raise ComparisonError(f"reference {text!r} must be {REFERENCE_FORMS}")
+    try:
+        where = tuple(wr.parse_key_value(item, "metadata selector") for item in selectors)
+    except wr.WorkloadResultError as exc:
+        raise ComparisonError(f"reference {text!r}: {exc}") from exc
+    return Reference(Path(path), run_id, group, where)
 
 
 def parse_label_filter(text: str) -> tuple[str, Any]:
     """Parse ``key=value`` where value is JSON when possible, else a string."""
-    key, separator, raw = text.partition("=")
-    if not separator or not key:
-        raise ComparisonError(f"label filter {text!r} must be KEY=VALUE")
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        value = raw
-    if not isinstance(value, wr.LABEL_TYPES):
-        raise ComparisonError(f"label filter {text!r} must compare against a string, number, boolean, or null")
-    return key, value
+        return wr.parse_key_value(text, "label filter")
+    except wr.WorkloadResultError as exc:
+        raise ComparisonError(str(exc)) from exc
 
 
 def label_matches(label: Any, wanted: Any) -> bool:
-    """Return whether a label equals a filter value.
-
-    Booleans only match booleans: Python's ``True == 1`` would otherwise let a
-    numeric filter select boolean labels and vice versa.
-    """
-    if isinstance(label, bool) or isinstance(wanted, bool):
-        return isinstance(label, bool) and isinstance(wanted, bool) and label is wanted
-    return label == wanted
+    """Return whether a label equals a filter value (booleans only match booleans)."""
+    return wr.value_matches(label, wanted)
 
 
 def parse_direction(text: str) -> tuple[str, str]:
@@ -146,20 +165,40 @@ def selected_status(runs: list[dict[str, Any]], errors: list[str]) -> str:
     return wr.derive_status(runs, errors)
 
 
-def load_document(
-    reference: str,
-    label_filters: Iterable[tuple[str, Any]] = (),
-    loaded: dict[Path, dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Load one reference into a comparison document with its selected runs.
+def resolve_group(reference: str, parsed: Reference, loaded: dict[Path, dict[str, Any]] | None = None) -> list[Path]:
+    """Return the documents a ``DIR@GROUP`` reference selects, in group order.
 
-    ``loaded`` caches validated results by path so several references into the
-    same file (``PATH#control PATH#mcp``) read and validate it once.  When the
-    reference or the filters narrow the document to some of its runs, ``status``
-    is derived from those runs alone and the whole document's status is kept
-    as ``document_status``.
+    Every document under the directory is validated on the way (an invalid one
+    is an error, not skipped) and cached in ``loaded``.
     """
-    path, run_id = parse_reference(reference)
+    if not parsed.path.is_dir():
+        raise ComparisonError(f"reference {reference!r} names group {parsed.group!r} but {parsed.path} is not a directory")
+    selected: list[tuple[str, Path]] = []
+    groups: set[str] = set()
+    for path, result, error in wr.iter_result_files([parsed.path]):
+        if result is None:
+            raise wr.WorkloadResultError(f"{path}: {error}")
+        if loaded is not None:
+            loaded[path] = result
+        block = result.get("experiment") or {"group": None}
+        if block["group"] is not None:
+            groups.add(block["group"])
+        if wr.experiment_matches(result, [parsed.group], parsed.where):
+            selected.append((wr.experiment_timestamp(result), path))
+    if not selected:
+        available = ", ".join(sorted(groups)) or "none"
+        raise ComparisonError(f"{reference!r} selects no result document under {parsed.path} (groups there: {available})")
+    return [path for _, path in sorted(selected)]
+
+
+def _load_selected(
+    reference: str,
+    path: Path,
+    run_id: str | None,
+    label_filters: list[tuple[str, Any]],
+    loaded: dict[Path, dict[str, Any]] | None,
+    selected_by: str | None,
+) -> dict[str, Any]:
     if loaded is None or path not in loaded:
         result = wr.load_result(path)
         if loaded is not None:
@@ -178,16 +217,57 @@ def load_document(
     narrowed = run_id is not None or bool(filters)
     return {
         "reference": reference,
+        "selected_by": selected_by,
         "path": str(path),
         "selected_run": run_id,
         "workload": result["workload"],
         "environment": result["environment"],
+        "experiment": result.get("experiment") or wr.experiment(),
         "status": selected_status(runs, result["errors"]) if narrowed else result["status"],
         "document_status": result["status"],
         "errors": list(result["errors"]),
         "measurements": result["measurements"],
         "runs": runs,
     }
+
+
+def load_documents(
+    reference: str,
+    label_filters: Iterable[tuple[str, Any]] = (),
+    loaded: dict[Path, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Load one reference into comparison documents with their selected runs.
+
+    A file reference yields one document; a ``DIR@GROUP`` reference yields one
+    per selected result, each with the concrete ``PATH[#RUN_ID]`` as its
+    ``reference`` and the group reference as ``selected_by``.  ``loaded``
+    caches validated results by path so several references into the same file
+    (``PATH#control PATH#mcp``) read and validate it once.  When the reference
+    or the filters narrow the document to some of its runs, ``status`` is
+    derived from those runs alone and the whole document's status is kept as
+    ``document_status``.
+    """
+    parsed = parse_reference(reference)
+    filters = list(label_filters)
+    if parsed.group is None:
+        return [_load_selected(reference, parsed.path, parsed.run_id, filters, loaded, None)]
+    documents = []
+    for path in resolve_group(reference, parsed, loaded):
+        concrete = str(path) + (f"#{parsed.run_id}" if parsed.run_id else "")
+        documents.append(_load_selected(concrete, path, parsed.run_id, filters, loaded, reference))
+    return documents
+
+
+def load_document(
+    reference: str,
+    label_filters: Iterable[tuple[str, Any]] = (),
+    loaded: dict[Path, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Load a file reference (``PATH`` or ``PATH#RUN_ID``) into one comparison document."""
+    documents = load_documents(reference, label_filters, loaded)
+    if len(documents) != 1:
+        raise ComparisonError(f"reference {reference!r} selects {len(documents)} documents; use load_documents for groups")
+    return documents[0]
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +417,14 @@ def _differences(before: dict[str, Any], after: dict[str, Any], ignore: frozense
     return {key: [before.get(key), after.get(key)] for key in keys if before.get(key) != after.get(key)}
 
 
+def _flatten_experiment(block: dict[str, Any]) -> dict[str, Any]:
+    """Return ``group`` and the metadata keys side by side for difference reports."""
+    flat = {"group": block["group"]}
+    for key, value in block["metadata"].items():
+        flat["metadata.group" if key == "group" else key] = value
+    return flat
+
+
 def compare_documents(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
@@ -389,6 +477,7 @@ def compare_documents(
         "candidate": candidate["reference"],
         "parameter_differences": _differences(baseline["workload"]["parameters"], candidate["workload"]["parameters"]),
         "environment_differences": _differences(baseline["environment"], candidate["environment"], UNINFORMATIVE_ENVIRONMENT),
+        "experiment_differences": _differences(_flatten_experiment(baseline["experiment"]), _flatten_experiment(candidate["experiment"])),
         "runs": runs,
         "entries": entries,
         "summary": summary,
@@ -405,9 +494,13 @@ def compare(
     metrics: Iterable[str] | None = None,
     allow_workload_mismatch: bool = False,
 ) -> dict[str, Any]:
-    """Compare every later reference against the first and return the comparison document."""
-    if len(references) < 2:
-        raise ComparisonError("at least two references are required")
+    """Compare every later reference against the first and return the comparison document.
+
+    A single ``DIR@GROUP`` reference is enough when the group holds at least
+    two documents: the earliest is the baseline.
+    """
+    if not references:
+        raise ComparisonError("at least two documents are required")
     if tolerance_percent < 0:
         raise ComparisonError("tolerance must not be negative")
     statistics = tuple(statistics)
@@ -417,7 +510,9 @@ def compare(
     filters = list(label_filters)
     wanted = sorted(set(metrics)) if metrics is not None else None
     loaded: dict[Path, dict[str, Any]] = {}
-    documents = [load_document(reference, filters, loaded) for reference in references]
+    documents = [document for reference in references for document in load_documents(reference, filters, loaded)]
+    if len(documents) < 2:
+        raise ComparisonError(f"at least two documents are required; {', '.join(map(repr, references))} selects {len(documents)}")
     baseline = documents[0]
     for document in documents[1:]:
         if document["workload"]["name"] != baseline["workload"]["name"] and not allow_workload_mismatch:
@@ -452,10 +547,12 @@ def compare(
             {
                 "role": "baseline" if index == 0 else "candidate",
                 "reference": document["reference"],
+                "selected_by": document["selected_by"],
                 "path": document["path"],
                 "selected_run": document["selected_run"],
                 "workload": document["workload"],
                 "environment": document["environment"],
+                "experiment": document["experiment"],
                 "status": document["status"],
                 "document_status": document["document_status"],
                 "errors": document["errors"],
@@ -505,20 +602,17 @@ def format_delta(entry: dict[str, Any]) -> tuple[str, str]:
     return absolute, percent
 
 
-def _table(rows: list[list[str]], headers: list[str]) -> list[str]:
-    widths = [max(len(text) for text in column) for column in zip(headers, *rows)]
-    lines = ["  ".join(text.ljust(width) for text, width in zip(headers, widths)).rstrip()]
-    for row in rows:
-        lines.append("  ".join(text.ljust(width) for text, width in zip(row, widths)).rstrip())
-    return lines
+_table = wr.format_table
 
 
 def _describe_document(document: dict[str, Any]) -> str:
     env = document["environment"]
     tool = env.get("tool") or {}
     revision = env.get("source_revision")
+    group = document["experiment"]["group"]
     parts = [
         f"{document['role']}: {document['reference']}",
+        *([f"group={group}"] if group is not None else []),
         f"producer={document['workload']['producer']}",
         f"kind={document['workload']['kind']}",
         f"status={document['status']}",
@@ -547,7 +641,11 @@ def format_report(comparison: dict[str, Any]) -> str:
     for item in comparison["comparisons"]:
         lines.append("")
         lines.append(f"{item['baseline']} -> {item['candidate']}")
-        for title, differences in (("parameter", item["parameter_differences"]), ("environment", item["environment_differences"])):
+        for title, differences in (
+            ("parameter", item["parameter_differences"]),
+            ("environment", item["environment_differences"]),
+            ("experiment", item["experiment_differences"]),
+        ):
             if differences:
                 described = "; ".join(f"{key}: {json.dumps(before)} -> {json.dumps(after)}" for key, (before, after) in differences.items())
                 lines.append(f"  {title} differences: {described}")
@@ -598,9 +696,12 @@ def format_report(comparison: dict[str, Any]) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Compare coding-agent workload result documents.",
-        epilog="References are PATH or PATH#RUN_ID; the first is the baseline.",
+        epilog=(
+            f"References are {REFERENCE_FORMS}; the first is the baseline. DIR@GROUP expands to every "
+            "result document under DIR in that experiment group, ordered by started_at metadata or recorded_at."
+        ),
     )
-    parser.add_argument("references", nargs="+", help="Workload result files to compare (baseline first)")
+    parser.add_argument("references", nargs="+", help="Workload result files or DIR@GROUP experiment groups to compare (baseline first)")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="What to print on stdout (default: text)")
     parser.add_argument("--output", metavar="PATH", help="Also write the JSON comparison document to PATH")
     parser.add_argument(
