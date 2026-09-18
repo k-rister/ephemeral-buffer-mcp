@@ -642,7 +642,9 @@ tolerance wide enough for run-to-run noise on that host:
 ```
 
 `--check` exits with status 2 when any compared metric regressed by more than
-the tolerance or when either document has a non-success `status`; invalid or
+the tolerance or when either document has a non-success `status` (a document
+narrowed with `PATH#RUN_ID` or `--select` is judged by its selected runs, so a
+failure elsewhere in the file does not fail the check); invalid or
 incomparable input exits with status 1. The JSON written by `--output` is a
 `coding-agent-workload-comparison` document that records the options, every
 document's workload block and environment, and each entry's outcome, so a
