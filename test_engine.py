@@ -1584,7 +1584,10 @@ class TestEmbeddingStartup(unittest.TestCase):
                 patch("engine.TextEmbedding") as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO):
             explicit._get_embedding_model()
-        embedding.assert_called_once_with(model_name=explicit.embedding_model_name, threads=2)
+        # CI may set EPHEMERAL_FASTEMBED_CACHE_DIR, so only assert the settings under test.
+        self.assertEqual(embedding.call_count, 1)
+        self.assertEqual(embedding.call_args.kwargs["model_name"], explicit.embedding_model_name)
+        self.assertEqual(embedding.call_args.kwargs["threads"], 2)
         embedding.add_custom_model.assert_not_called()
 
     def test_fp32_model_alias_is_registered_once_per_process(self):
