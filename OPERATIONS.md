@@ -146,11 +146,16 @@ reports the active window settings and the semantic window count.
 Semantic indexing prefetch is disabled by default. To opt in, set
 `EPHEMERAL_SEMANTIC_PREFETCH=1`; optionally set
 `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` (default `1`) to a small positive value.
-The bounded worker pool indexes captures after ingestion. Semantic and hybrid
-search wait for an active job and retry failed jobs synchronously, preserving
-the lazy path as the correctness fallback. Eviction and explicit cleanup cancel
-queued work, and process shutdown waits for running jobs to finish. Use the
-content-free prefetch counts in runtime diagnostics when checking host impact.
+Ingestion queues every eligible capture and the bounded worker pool drains the
+queue newest-first, so bursts are never silently dropped; the queue is bounded
+by the capture limit because eviction removes queued work. Semantic and hybrid
+search wait for an active job, index a still-queued capture inline instead of
+waiting behind older work, and retry failed jobs synchronously, preserving the
+lazy path as the correctness fallback. Explicit cleanup and process shutdown
+drop queued work and let running jobs finish. Embedding inference is serialized
+by one model lock, so raise `EPHEMERAL_EMBEDDING_THREADS` rather than the
+worker count for throughput. Use the content-free pending, queued, running,
+and failed counts in runtime diagnostics when checking host impact.
 
 Override the limits before starting the server:
 

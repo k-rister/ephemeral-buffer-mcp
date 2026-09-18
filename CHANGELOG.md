@@ -16,6 +16,10 @@
   space so exact BM25 ranges are preserved, and report `chunk_index` per match.
   This stops embedding the two-line overlap twice and roughly halves first
   semantic or hybrid search latency on large captures.
+- Replace best-effort semantic prefetch admission with a queue drained
+  newest-first by the bounded worker pool, so ingestion bursts never silently
+  leave captures unprefetched; searches index a still-queued capture inline,
+  and diagnostics report queued and running counts.
 - Add durable phase-level executions with persisted outputs, metrics, status
   history, restart recovery, explicit retries, and unsafe-side-effect resume
   confirmation for long-running agent workflows, including recoverable compact

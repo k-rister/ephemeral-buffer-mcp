@@ -9,11 +9,12 @@ import threading
 import time
 import unittest
 import numpy as np
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 from config import FP32_EMBEDDING_MODEL
 from engine import (
+    Chunk,
     register_bundled_embedding_models,
     Capture,
     EphemeralEngine,
@@ -1076,13 +1077,18 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertTrue(started.wait(timeout=2))
             self.assertEqual(capture.semantic_index_state, "pending")
             self.assertIsNone(capture.embeddings)
+            self.assertIn(capture.capture_id, engine._prefetch_running)
             engine._schedule_semantic_prefetch(capture)
-            self.assertEqual(len(engine._prefetch_futures), 1)
+            self.assertEqual(engine._prefetch_queue, {})
+            stats = engine.get_buffer_stats()
+            self.assertEqual((stats["semantic_prefetch_queued"], stats["semantic_prefetch_running"]), (0, 1))
 
             release.set()
             self.assertTrue(engine.search_semantic(capture, "payload"))
             self.assertEqual(capture.semantic_index_state, "ready")
             self.assertIsNotNone(capture.embeddings)
+            engine._schedule_semantic_prefetch(capture)
+            self.assertEqual(engine._prefetch_queue, {})
         finally:
             release.set()
             engine.shutdown()
@@ -1107,29 +1113,76 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         finally:
             engine.shutdown()
 
-    def test_async_prefetch_is_bounded_and_clear_cancels_queued_work(self):
+    def test_async_prefetch_burst_is_queued_newest_first_and_clear_drops_queued_work(self):
         started = threading.Event()
         release = threading.Event()
+        embedded_order = []
 
         class BlockingEmbedding:
             def embed(self, texts):
+                embedded_order.append(texts[0])
                 started.set()
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine = EphemeralEngine(max_captures=8, semantic_prefetch=True, semantic_prefetch_workers=1)
         engine.embedding_model = BlockingEmbedding()
         try:
             first = engine.ingest("first payload", label="first")
             self.assertTrue(started.wait(timeout=2))
             second = engine.ingest("second payload", label="second")
             third = engine.ingest("third payload", label="third")
-            self.assertLessEqual(len(engine._prefetch_futures), 2)
+            fourth = engine.ingest("fourth payload", label="fourth")
+            # A burst never drops eligible captures: every one is queued behind the running job.
+            self.assertEqual(
+                list(engine._prefetch_queue),
+                [second.capture_id, third.capture_id, fourth.capture_id],
+            )
+            self.assertEqual(engine.get_buffer_stats()["semantic_prefetch_queued"], 3)
             self.assertEqual(engine.clear(second.capture_id), "Cleared capture 'cap_2'.")
-            self.assertNotIn(second.capture_id, engine._prefetch_futures)
+            self.assertNotIn(second.capture_id, engine._prefetch_queue)
+            self.assertEqual(second.semantic_index_state, "evicted")
             self.assertEqual(first.semantic_index_state, "pending")
+
             release.set()
-            engine.clear("all")
+            deadline = time.time() + 2
+            while (engine._prefetch_queue or engine._prefetch_running) and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(embedded_order, ["first payload", "fourth payload", "third payload"])
+            self.assertEqual(
+                [cap.semantic_index_state for cap in (first, third, fourth)],
+                ["ready", "ready", "ready"],
+            )
+            self.assertEqual(engine._prefetch_workers_active, 0)
+        finally:
+            release.set()
+            engine.shutdown()
+
+    def test_search_on_queued_capture_dequeues_it_and_indexes_inline(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                if texts[0] == "first payload":
+                    started.set()
+                    release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            engine.ingest("first payload", label="first")
+            self.assertTrue(started.wait(timeout=2))
+            queued = engine.ingest("queued payload", label="queued")
+            self.assertIn(queued.capture_id, engine._prefetch_queue)
+
+            engine._wait_for_prefetch(queued)
+            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
+            self.assertEqual(queued.semantic_index_state, "pending")
+            release.set()
+            self.assertTrue(engine.search_semantic(queued, "payload"))
+            self.assertEqual(queued.semantic_index_state, "ready")
         finally:
             release.set()
             engine.shutdown()
@@ -1138,7 +1191,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with self.assertRaisesRegex(ValueError, "semantic_prefetch_workers"):
             EphemeralEngine(semantic_prefetch=True, semantic_prefetch_workers=0)
 
-        submit_failure = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        submit_failure = EphemeralEngine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
         try:
             with patch.object(
                 submit_failure._prefetch_executor,
@@ -1146,36 +1199,42 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 side_effect=RuntimeError("executor closed"),
             ):
                 capture = submit_failure.ingest("submit failure", label="submit-failure")
-            self.assertEqual(capture.semantic_index_state, "failed")
+                self.assertEqual(capture.semantic_index_state, "failed")
+                self.assertEqual(submit_failure._prefetch_queue, {})
+                # With a worker already active, a submit failure leaves the capture queued.
+                submit_failure._prefetch_workers_active = 1
+                queued = submit_failure.ingest("still queued", label="still-queued")
+                self.assertEqual(queued.semantic_index_state, "pending")
+                self.assertIn(queued.capture_id, submit_failure._prefetch_queue)
+                submit_failure._prefetch_workers_active = 0
             submit_failure.captures.clear()
             submit_failure._schedule_semantic_prefetch(capture)
+            self.assertNotIn(capture.capture_id, submit_failure._prefetch_queue)
         finally:
             submit_failure.shutdown()
             submit_failure.shutdown()
+            self.assertEqual(queued.semantic_index_state, "not-requested")
 
-        callback_engine = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        evicted_engine = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
         try:
             capture = SimpleNamespace(
-                capture_id="cap-callback",
+                capture_id="cap-evicted",
                 embeddings=None,
                 semantic_index_state="pending",
+                semantic_chunks=[Chunk(0, 1, 1, "x")],
+                active_readers=0,
             )
-            callback_engine.captures[capture.capture_id] = capture
-            future = Future()
-            callback_engine._prefetch_futures[capture.capture_id] = future
-            future.cancel()
-            callback_engine._prefetch_slots.acquire(blocking=False)
-            callback_engine._prefetch_finished(capture.capture_id, future)
+            # A worker that finds its capture already evicted leaves it lazily indexable.
+            evicted_engine._prefetch_queue[capture.capture_id] = capture
+            evicted_engine._prefetch_workers_active = 1
+            evicted_engine._prefetch_worker()
             self.assertEqual(capture.semantic_index_state, "not-requested")
-
-            failed_future = Future()
-            failed_future.set_exception(RuntimeError("background failure"))
-            callback_engine._prefetch_futures[capture.capture_id] = failed_future
-            callback_engine._wait_for_prefetch(capture)
+            self.assertEqual(evicted_engine._prefetch_running, {})
+            self.assertEqual(evicted_engine._prefetch_workers_active, 0)
         finally:
-            callback_engine.shutdown()
+            evicted_engine.shutdown()
 
-    def test_shutdown_snapshots_prefetch_futures_before_cancellation(self):
+    def test_shutdown_drops_queued_prefetch_and_lets_running_work_finish(self):
         started = threading.Event()
         release = threading.Event()
 
@@ -1191,20 +1250,22 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             first = engine.ingest("first shutdown payload", label="shutdown-first")
             self.assertTrue(started.wait(timeout=2))
             second = engine.ingest("queued shutdown payload", label="shutdown-second")
-            self.assertIn(second.capture_id, engine._prefetch_futures)
+            self.assertIn(second.capture_id, engine._prefetch_queue)
 
             shutdown_thread = threading.Thread(target=engine.shutdown)
             shutdown_thread.start()
             deadline = time.time() + 2
-            while second.capture_id in engine._prefetch_futures and time.time() < deadline:
+            while second.capture_id in engine._prefetch_queue and time.time() < deadline:
                 time.sleep(0.01)
-            self.assertNotIn(second.capture_id, engine._prefetch_futures)
+            self.assertNotIn(second.capture_id, engine._prefetch_queue)
+            self.assertEqual(second.semantic_index_state, "not-requested")
 
             release.set()
             shutdown_thread.join(timeout=2)
             self.assertFalse(shutdown_thread.is_alive())
             self.assertTrue(engine._shutdown)
-            self.assertEqual(engine._prefetch_futures, {})
+            self.assertEqual(engine._prefetch_queue, {})
+            self.assertEqual(engine._prefetch_running, {})
             self.assertEqual(first.semantic_index_state, "ready")
         finally:
             release.set()
