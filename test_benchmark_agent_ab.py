@@ -294,10 +294,12 @@ def json_text(value):
             self.assertEqual(result["workload"]["name"], "agent-ab")
             self.assertEqual(json.loads(stderr.getvalue())["benchmark"], "agent-ab")
 
-            argv = ["benchmark_agent_ab.py", "--schedule-output", str(Path(directory) / "s.json"), "--result", "-"]
-            with patch("sys.argv", argv), patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as raised:
-                benchmark_agent_ab.main()
-            self.assertEqual(raised.exception.code, 2)
+            for extra in (["--result", "-"], ["--experiment", "policy-ab"], ["--metadata", "model=x"], ["--redact", "owner"]):
+                argv = ["benchmark_agent_ab.py", "--schedule-output", str(Path(directory) / "s.json"), *extra]
+                with patch("sys.argv", argv), patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+                    benchmark_agent_ab.main()
+                self.assertEqual(raised.exception.code, 2, extra)
+                self.assertIn("require --records", stderr.getvalue())
 
 
 if __name__ == "__main__":

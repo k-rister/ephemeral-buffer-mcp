@@ -632,7 +632,10 @@ records:
   `DIR@GROUP,KEY=VALUE` references (README section "Organizing
   experiments"). Consumers must accept documents without the block and
   metadata without a group, and must never match an absent metadata key,
-  even against `null`.
+  even against `null`. Order the documents of a group by `started_at`
+  metadata (an ISO 8601 timestamp with a UTC offset, validated by the format)
+  and fall back to `environment.recorded_at`, comparing instants rather than
+  strings.
 - Treat metadata as identifiers. Values are scalars of at most 256
   characters, keys that name credentials always hold `[redacted]`, and a
   producer's `--redact KEY` masks any other value; a consumer that publishes

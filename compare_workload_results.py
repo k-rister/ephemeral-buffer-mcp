@@ -165,24 +165,57 @@ def selected_status(runs: list[dict[str, Any]], errors: list[str]) -> str:
     return wr.derive_status(runs, errors)
 
 
-def resolve_group(reference: str, parsed: Reference, loaded: dict[Path, dict[str, Any]] | None = None) -> list[Path]:
+Scanned = list[tuple[Path, dict[str, Any] | None, str | None]]
+
+
+def _claimed_group(path: Path) -> Any:
+    """Return the ``experiment.group`` an invalid document claims, or ``None`` when it cannot be read."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value["experiment"]["group"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def scan_directory(directory: Path, scanned: dict[Path, Scanned] | None = None) -> Scanned:
+    """Return every result document under ``directory``, reading it once per comparison."""
+    key = directory.resolve()
+    if scanned is not None and key in scanned:
+        return scanned[key]
+    entries: Scanned = list(wr.iter_result_files([directory]))
+    if scanned is not None:
+        scanned[key] = entries
+    return entries
+
+
+def resolve_group(
+    reference: str,
+    parsed: Reference,
+    loaded: dict[Path, dict[str, Any]] | None = None,
+    scanned: dict[Path, Scanned] | None = None,
+) -> list[Path]:
     """Return the documents a ``DIR@GROUP`` reference selects, in group order.
 
-    Every document under the directory is validated on the way (an invalid one
-    is an error, not skipped) and cached in ``loaded``.
+    Valid documents are cached in ``loaded`` and the directory scan in
+    ``scanned``.  An invalid document is an error only when it claims the
+    requested group; invalid documents in other groups, or with no group,
+    cannot be selected and are ignored here (``list_workload_results.py``
+    reports them).
     """
     if not parsed.path.is_dir():
         raise ComparisonError(f"reference {reference!r} names group {parsed.group!r} but {parsed.path} is not a directory")
     selected: list[tuple[str, Path]] = []
     groups: set[str] = set()
-    for path, result, error in wr.iter_result_files([parsed.path]):
+    for path, result, error in scan_directory(parsed.path, scanned):
         if result is None:
-            raise wr.WorkloadResultError(f"{path}: {error}")
+            if _claimed_group(path) == parsed.group:
+                raise wr.WorkloadResultError(f"{path}: {error}")
+            continue
         if loaded is not None:
             loaded[path] = result
-        block = result.get("experiment") or {"group": None}
-        if block["group"] is not None:
-            groups.add(block["group"])
+        group = wr.experiment_block(result)["group"]
+        if group is not None:
+            groups.add(group)
         if wr.experiment_matches(result, [parsed.group], parsed.where):
             selected.append((wr.experiment_timestamp(result), path))
     if not selected:
@@ -222,7 +255,7 @@ def _load_selected(
         "selected_run": run_id,
         "workload": result["workload"],
         "environment": result["environment"],
-        "experiment": result.get("experiment") or wr.experiment(),
+        "experiment": wr.experiment_block(result),
         "status": selected_status(runs, result["errors"]) if narrowed else result["status"],
         "document_status": result["status"],
         "errors": list(result["errors"]),
@@ -235,6 +268,7 @@ def load_documents(
     reference: str,
     label_filters: Iterable[tuple[str, Any]] = (),
     loaded: dict[Path, dict[str, Any]] | None = None,
+    scanned: dict[Path, Scanned] | None = None,
 ) -> list[dict[str, Any]]:
     """Load one reference into comparison documents with their selected runs.
 
@@ -242,32 +276,21 @@ def load_documents(
     per selected result, each with the concrete ``PATH[#RUN_ID]`` as its
     ``reference`` and the group reference as ``selected_by``.  ``loaded``
     caches validated results by path so several references into the same file
-    (``PATH#control PATH#mcp``) read and validate it once.  When the reference
-    or the filters narrow the document to some of its runs, ``status`` is
-    derived from those runs alone and the whole document's status is kept as
-    ``document_status``.
+    (``PATH#control PATH#mcp``) read and validate it once, and ``scanned``
+    caches directory scans so several group references into one directory
+    walk it once.  When the reference or the filters narrow the document to
+    some of its runs, ``status`` is derived from those runs alone and the
+    whole document's status is kept as ``document_status``.
     """
     parsed = parse_reference(reference)
     filters = list(label_filters)
     if parsed.group is None:
         return [_load_selected(reference, parsed.path, parsed.run_id, filters, loaded, None)]
     documents = []
-    for path in resolve_group(reference, parsed, loaded):
+    for path in resolve_group(reference, parsed, loaded, scanned):
         concrete = str(path) + (f"#{parsed.run_id}" if parsed.run_id else "")
         documents.append(_load_selected(concrete, path, parsed.run_id, filters, loaded, reference))
     return documents
-
-
-def load_document(
-    reference: str,
-    label_filters: Iterable[tuple[str, Any]] = (),
-    loaded: dict[Path, dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Load a file reference (``PATH`` or ``PATH#RUN_ID``) into one comparison document."""
-    documents = load_documents(reference, label_filters, loaded)
-    if len(documents) != 1:
-        raise ComparisonError(f"reference {reference!r} selects {len(documents)} documents; use load_documents for groups")
-    return documents[0]
 
 
 # --------------------------------------------------------------------------
@@ -510,7 +533,8 @@ def compare(
     filters = list(label_filters)
     wanted = sorted(set(metrics)) if metrics is not None else None
     loaded: dict[Path, dict[str, Any]] = {}
-    documents = [document for reference in references for document in load_documents(reference, filters, loaded)]
+    scanned: dict[Path, Scanned] = {}
+    documents = [document for reference in references for document in load_documents(reference, filters, loaded, scanned)]
     if len(documents) < 2:
         raise ComparisonError(f"at least two documents are required; {', '.join(map(repr, references))} selects {len(documents)}")
     baseline = documents[0]

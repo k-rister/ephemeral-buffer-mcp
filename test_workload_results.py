@@ -266,6 +266,8 @@ class TestBuildAndValidate(unittest.TestCase):
         self.assertInvalid(with_experiment({"group": "g", "metadata": {"nested": {}}}), "experiment.metadata.nested must be a string")
         self.assertInvalid(with_experiment({"group": "g", "metadata": {"prompt": "x" * 257}}), "experiment.metadata.prompt must be at most 256")
         self.assertInvalid(with_experiment({"group": "g", "metadata": {"api_key": "s3cret"}}), "experiment.metadata.api_key looks like a credential")
+        self.assertInvalid(with_experiment({"group": "g", "metadata": {"ratio": float("inf")}}), "experiment.metadata.ratio must be a finite number")
+        self.assertInvalid(with_experiment({"group": "g", "metadata": {"started_at": "2026-09-18"}}), "experiment.metadata.started_at must be an ISO 8601")
         accepted = with_experiment({"group": None, "metadata": {"api_key": wr.REDACTED, "model": "m", "size": 5, "flag": False, "none": None}})
         self.assertIs(validate_result(accepted), accepted)
 
@@ -310,12 +312,24 @@ class TestExperiment(unittest.TestCase):
             wr.parse_key_value("=x", "label filter")
         with self.assertRaisesRegex(WorkloadResultError, "must be a string, number, boolean, or null"):
             wr.parse_key_value("sizes=[1, 2]")
+        # A short SHA that looks like an exponent, and JSON's NaN, are not finite numbers.
+        for text in ("repository_revision=12e5678", "variant=NaN", "x=-Infinity"):
+            with self.assertRaisesRegex(WorkloadResultError, "must be a finite number"):
+                wr.parse_key_value(text)
         self.assertEqual(wr.parse_metadata("variant=a"), ("variant", "a"))
         self.assertEqual(wr.parse_metadata("size=5"), ("size", 5))
+        self.assertEqual(wr.parse_metadata("started_at=2026-09-18T10:00:00Z"), ("started_at", "2026-09-18T10:00:00Z"))
+        # Credential-looking keys pass here because experiment() redacts them.
+        self.assertEqual(wr.parse_metadata("api_key=s3cret"), ("api_key", "s3cret"))
         with self.assertRaisesRegex(WorkloadResultError, "metadata key 'Variant' must match"):
             wr.parse_metadata("Variant=a")
-        with self.assertRaisesRegex(WorkloadResultError, "metadata prompt must be at most 256 characters"):
+        with self.assertRaisesRegex(WorkloadResultError, "metadata.prompt must be at most 256 characters"):
             wr.parse_metadata("prompt=" + "x" * 257)
+        with self.assertRaisesRegex(WorkloadResultError, "metadata.started_at must be an ISO 8601 timestamp"):
+            wr.parse_metadata("started_at=2026-09-18 10:00")
+        self.assertEqual(wr.experiment_group("sweep"), "sweep")
+        with self.assertRaisesRegex(WorkloadResultError, "must not be empty"):
+            wr.experiment_group("")
         self.assertEqual(wr.metadata_key("owner"), "owner")
         with self.assertRaisesRegex(WorkloadResultError, "metadata key 'Owner' must match"):
             wr.metadata_key("Owner")
@@ -350,8 +364,24 @@ class TestExperiment(unittest.TestCase):
         self.assertEqual(wr.experiment_timestamp(plain), recorded)
         started = sample_result(experiment=wr.experiment("g", {"started_at": "2026-09-18T10:00:00+00:00", "owner": "me"}))
         self.assertEqual(wr.experiment_timestamp(started), "2026-09-18T10:00:00+00:00")
-        for unusable in ("", 5, None):
-            self.assertEqual(wr.experiment_timestamp(sample_result(experiment=wr.experiment("g", {"started_at": unusable}))), recorded)
+        # Offsets are normalised to UTC so documents order by instant, not by spelling.
+        def at(started_at):
+            return wr.experiment_timestamp(sample_result(experiment=wr.experiment("g", {"started_at": started_at})))
+        self.assertEqual(at("2026-09-17T10:00:00-05:00"), "2026-09-17T15:00:00+00:00")
+        self.assertEqual(at("2026-09-17T15:00:00Z"), "2026-09-17T15:00:00+00:00")
+        self.assertLess(at("2026-09-17T10:00:00-05:00"), at("2026-09-17T16:00:00+00:00"))
+        for unusable in ("", "2026-09-18 10:00", "2026-09-18T10:00:00", "yesterday", 5, None):
+            with self.assertRaisesRegex(WorkloadResultError, "started_at must be an ISO 8601 timestamp"):
+                wr.experiment("g", {"started_at": unusable})
+        self.assertIsNone(wr.parse_timestamp("2026-09-18T10:00:00"))
+        self.assertIsNone(wr.parse_timestamp("nope"))
+        # recorded_at without an offset is read as UTC; a non-ISO one is used as written.
+        naive = sample_result(environment={"python_version": "3", "platform": "p", "recorded_at": "2026-09-18T10:00:00"})
+        self.assertEqual(wr.experiment_timestamp(naive), "2026-09-18T10:00:00+00:00")
+        odd = sample_result(environment={"python_version": "3", "platform": "p", "recorded_at": "Thursday"})
+        self.assertEqual(wr.experiment_timestamp(odd), "Thursday")
+        self.assertEqual(wr.experiment_block(plain), {"group": None, "metadata": {}})
+        self.assertIs(wr.experiment_block(started), started["experiment"])
         summary = wr.result_summary(started)
         self.assertEqual(summary["workload"], {"name": "sample", "kind": "benchmark", "producer": "test"})
         self.assertEqual(summary["group"], "g")
@@ -447,6 +477,9 @@ class TestExperiment(unittest.TestCase):
             (["--metadata", "Bad=1"], "metadata key 'Bad' must match"),
             (["--metadata", "novalue"], "metadata 'novalue' must be KEY=VALUE"),
             (["--metadata", "prompt=" + "x" * 300], "at most 256 characters"),
+            (["--metadata", "repository_revision=12e5678"], "must be a finite number"),
+            (["--metadata", "started_at=2026"], "started_at must be an ISO 8601 timestamp"),
+            (["--experiment", ""], "experiment group must not be empty"),
             (["--redact", "Bad"], "metadata key 'Bad' must match"),
         ):
             with patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
@@ -470,6 +503,16 @@ class TestExperiment(unittest.TestCase):
         self.assertNotIn("experiment", json.loads(stdout.getvalue()))
         with self.assertRaisesRegex(WorkloadResultError, "looks like a credential"):
             write_result(result, "-", experiment={"group": "g", "metadata": {"api_key": "s3cret"}})
+        # A producer's own block is merged with the command line, which wins key by key.
+        produced = build_result(workload="w", kind="benchmark", producer="p", experiment=wr.experiment("nightly", {"tool_version": "0.4.0", "model": "old"}))
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            write_result(produced, "-", experiment=wr.experiment(None, {"model": "new"}))
+        self.assertEqual(json.loads(stdout.getvalue())["experiment"], {"group": "nightly", "metadata": {"tool_version": "0.4.0", "model": "new"}})
+        self.assertEqual(produced["experiment"]["metadata"]["model"], "old")
+        self.assertEqual(wr.merge_experiment(None, None), None)
+        self.assertEqual(wr.merge_experiment(None, block), block)
+        self.assertEqual(wr.merge_experiment(block, None), block)
+        self.assertEqual(wr.merge_experiment(block, wr.experiment("other")), {"group": "other", "metadata": {"variant": "a"}})
 
 
 class TestSchemaFile(unittest.TestCase):
