@@ -60,9 +60,13 @@
 - Use the upstream fp32 ONNX export of bge-small-en-v1.5, registered with
   FastEmbed as `BAAI/bge-small-en-v1.5-fp32`, as the default embedding model.
   It produces identical vectors to FastEmbed's reduced-precision catalogue file
-  but its kernels parallelize, indexing 23x faster on a Linux x86_64 host and
-  3x faster on Apple silicon; the catalogue file remains selectable as
-  `BAAI/bge-small-en-v1.5`. First use downloads about 130 MB instead of 67 MB.
+  but its kernels parallelize. A release-preparation comparison on a 16-vCPU
+  Linux x86_64 host measured 69.1 semantic chunks per second and 1.85 seconds
+  median indexing for the fp32 export versus 3.1 chunks per second and 41.15
+  seconds for the catalogue file at 1,024 lines (about 22x); these are
+  host-specific diagnostic measurements, not universal guarantees. The
+  catalogue file remains selectable as `BAAI/bge-small-en-v1.5`. First use
+  downloads about 130 MB instead of 67 MB.
 - Add `EPHEMERAL_EMBEDDING_THREADS` to bound ONNX Runtime threads for embedding
   inference; the runtime default is fastest but uses every core.
 - Index semantic embeddings over windows packed separately from the BM25
