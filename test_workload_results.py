@@ -1,5 +1,6 @@
 """Tests for the versioned coding-agent workload result format."""
 
+import argparse
 import importlib.util
 import io
 import json
@@ -252,6 +253,224 @@ class TestBuildAndValidate(unittest.TestCase):
         self.assertInvalid(with_run(errors=[None]), "errors must be a list of strings")
         self.assertInvalid(sample_result(runs=[run("dup"), run("dup")]), "runs\\[1\\].id 'dup' is duplicated")
 
+    def test_validation_rejects_experiment_problems(self):
+        def with_experiment(block):
+            return sample_result(experiment=block)
+
+        self.assertInvalid(with_experiment([]), "experiment must be an object")
+        self.assertInvalid(with_experiment({"group": "g"}), "exactly group and metadata")
+        self.assertInvalid(with_experiment({"group": "", "metadata": {}}), "experiment.group must be a non-empty string or null")
+        self.assertInvalid(with_experiment({"group": 5, "metadata": {}}), "experiment.group must be")
+        self.assertInvalid(with_experiment({"group": None, "metadata": []}), "experiment.metadata must be an object")
+        self.assertInvalid(with_experiment({"group": "g", "metadata": {"Bad": 1}}), "experiment.metadata key 'Bad' must match")
+        self.assertInvalid(with_experiment({"group": "g", "metadata": {"nested": {}}}), "experiment.metadata.nested must be a string")
+        self.assertInvalid(with_experiment({"group": "g", "metadata": {"prompt": "x" * 257}}), "experiment.metadata.prompt must be at most 256")
+        self.assertInvalid(with_experiment({"group": "g", "metadata": {"api_key": "s3cret"}}), "experiment.metadata.api_key looks like a credential")
+        accepted = with_experiment({"group": None, "metadata": {"api_key": wr.REDACTED, "model": "m", "size": 5, "flag": False, "none": None}})
+        self.assertIs(validate_result(accepted), accepted)
+
+
+class TestExperiment(unittest.TestCase):
+    def test_sensitive_keys_match_parts_and_suffixes_not_substrings(self):
+        for key in ("token", "key", "access_token", "api_key", "ssh_key", "client_secret", "secrets", "password", "passwd", "credentials", "credential_id", "apikey", "authorization", "bearer_value", "cache_key"):
+            self.assertTrue(wr.is_sensitive_metadata_key(key), key)
+        for key in ("max_tokens", "token_budget", "keyboard", "model", "secretary", "keys_pressed", "repository_revision"):
+            self.assertFalse(wr.is_sensitive_metadata_key(key), key)
+
+    def test_experiment_builder_redacts_and_validates(self):
+        self.assertEqual(wr.experiment(), {"group": None, "metadata": {}})
+        block = wr.experiment(
+            "sweep",
+            {"variant": "a", "workload_size": 5, "flag": True, "none": None, "api_key": "s3cret", "owner": "me"},
+            redact=["owner", "absent"],
+        )
+        self.assertEqual(block, {
+            "group": "sweep",
+            "metadata": {"variant": "a", "workload_size": 5, "flag": True, "none": None, "api_key": wr.REDACTED, "owner": wr.REDACTED},
+        })
+        with self.assertRaisesRegex(WorkloadResultError, "group must be a non-empty string or None"):
+            wr.experiment("")
+        with self.assertRaisesRegex(WorkloadResultError, "key 'Bad' must match"):
+            wr.experiment("g", {"Bad": 1})
+        with self.assertRaisesRegex(WorkloadResultError, "metadata.sizes must be a string, number, boolean, or null"):
+            wr.experiment("g", {"sizes": [1]})
+        with self.assertRaisesRegex(WorkloadResultError, "at most 256 characters"):
+            wr.experiment("g", {"prompt": "x" * 257})
+
+    def test_parse_key_value_and_metadata_arguments(self):
+        self.assertEqual(wr.parse_key_value("line_count=256"), ("line_count", 256))
+        self.assertEqual(wr.parse_key_value("mode=mcp"), ("mode", "mcp"))
+        self.assertEqual(wr.parse_key_value("flag=true"), ("flag", True))
+        self.assertEqual(wr.parse_key_value("missing=null"), ("missing", None))
+        self.assertEqual(wr.parse_key_value("profile="), ("profile", ""))
+        self.assertEqual(wr.parse_key_value("when=2026-09-18T10:00:00+00:00"), ("when", "2026-09-18T10:00:00+00:00"))
+        with self.assertRaisesRegex(WorkloadResultError, "metadata 'mode' must be KEY=VALUE"):
+            wr.parse_key_value("mode")
+        with self.assertRaisesRegex(WorkloadResultError, "label filter '=x' must be KEY=VALUE"):
+            wr.parse_key_value("=x", "label filter")
+        with self.assertRaisesRegex(WorkloadResultError, "must be a string, number, boolean, or null"):
+            wr.parse_key_value("sizes=[1, 2]")
+        self.assertEqual(wr.parse_metadata("variant=a"), ("variant", "a"))
+        self.assertEqual(wr.parse_metadata("size=5"), ("size", 5))
+        with self.assertRaisesRegex(WorkloadResultError, "metadata key 'Variant' must match"):
+            wr.parse_metadata("Variant=a")
+        with self.assertRaisesRegex(WorkloadResultError, "metadata prompt must be at most 256 characters"):
+            wr.parse_metadata("prompt=" + "x" * 257)
+        self.assertEqual(wr.metadata_key("owner"), "owner")
+        with self.assertRaisesRegex(WorkloadResultError, "metadata key 'Owner' must match"):
+            wr.metadata_key("Owner")
+
+    def test_value_and_experiment_matching(self):
+        self.assertTrue(wr.value_matches(1, 1))
+        self.assertTrue(wr.value_matches("a", "a"))
+        self.assertTrue(wr.value_matches(None, None))
+        self.assertTrue(wr.value_matches(True, True))
+        self.assertFalse(wr.value_matches(True, False))
+        self.assertFalse(wr.value_matches(True, 1))
+        self.assertFalse(wr.value_matches(1, True))
+        self.assertFalse(wr.value_matches(0, False))
+        grouped = sample_result(experiment=wr.experiment("sweep", {"variant": "a", "size": 5, "flag": True}))
+        ungrouped = sample_result()
+        self.assertTrue(wr.experiment_matches(grouped))
+        self.assertTrue(wr.experiment_matches(ungrouped))
+        self.assertTrue(wr.experiment_matches(grouped, ["other", "sweep"]))
+        self.assertFalse(wr.experiment_matches(grouped, ["other"]))
+        self.assertFalse(wr.experiment_matches(ungrouped, ["sweep"]))
+        self.assertTrue(wr.experiment_matches(grouped, where=[("variant", "a"), ("size", 5)]))
+        self.assertTrue(wr.experiment_matches(grouped, ["sweep"], [("flag", True)]))
+        self.assertFalse(wr.experiment_matches(grouped, where=[("variant", "b")]))
+        self.assertFalse(wr.experiment_matches(grouped, where=[("size", True)]))
+        # Absent metadata never matches, even a filter for null.
+        self.assertFalse(wr.experiment_matches(grouped, where=[("missing", None)]))
+        self.assertFalse(wr.experiment_matches(ungrouped, where=[("variant", "a")]))
+
+    def test_experiment_timestamp_and_summaries(self):
+        plain = sample_result()
+        recorded = plain["environment"]["recorded_at"]
+        self.assertEqual(wr.experiment_timestamp(plain), recorded)
+        started = sample_result(experiment=wr.experiment("g", {"started_at": "2026-09-18T10:00:00+00:00", "owner": "me"}))
+        self.assertEqual(wr.experiment_timestamp(started), "2026-09-18T10:00:00+00:00")
+        for unusable in ("", 5, None):
+            self.assertEqual(wr.experiment_timestamp(sample_result(experiment=wr.experiment("g", {"started_at": unusable}))), recorded)
+        summary = wr.result_summary(started)
+        self.assertEqual(summary["workload"], {"name": "sample", "kind": "benchmark", "producer": "test"})
+        self.assertEqual(summary["group"], "g")
+        self.assertEqual(summary["metadata"], {"started_at": "2026-09-18T10:00:00+00:00", "owner": "me"})
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(summary["errors"], [])
+        self.assertEqual(summary["recorded_at"], recorded)
+        self.assertEqual(summary["ordered_at"], "2026-09-18T10:00:00+00:00")
+        self.assertEqual(summary["tool_version"], started["environment"]["tool"]["version"])
+        self.assertEqual(summary["source_revision"], started["environment"]["source_revision"])
+        self.assertEqual(
+            [(item["id"], item["status"], item["errors"]) for item in summary["runs"]],
+            [("lines-16", "success", []), ("lines-256", "failure", ["needle missed"])],
+        )
+        self.assertEqual(summary["runs"][0]["labels"]["line_count"], 16)
+        self.assertNotIn("measurements", summary["runs"][0])
+        json.dumps(summary, allow_nan=False)
+        plain_summary = wr.result_summary(plain)
+        self.assertIsNone(plain_summary["group"])
+        self.assertEqual(plain_summary["metadata"], {})
+        self.assertEqual(plain_summary["ordered_at"], recorded)
+        bare = wr.result_summary(sample_result(environment={"python_version": "3", "platform": "p", "recorded_at": "t"}))
+        self.assertIsNone(bare["tool_version"])
+        self.assertIsNone(bare["source_revision"])
+        redacted = wr.redact_summary(summary, ["owner", "absent"])
+        self.assertEqual(redacted["metadata"], {"started_at": "2026-09-18T10:00:00+00:00", "owner": wr.REDACTED})
+        self.assertEqual(summary["metadata"]["owner"], "me")
+        self.assertEqual(redacted["runs"], summary["runs"])
+
+    def test_format_helpers_show_groups_and_metadata(self):
+        self.assertEqual(wr.format_metadata_value("a b"), "a b")
+        self.assertEqual(wr.format_metadata_value(5), "5")
+        self.assertEqual(wr.format_metadata_value(True), "true")
+        self.assertEqual(wr.format_metadata_value(None), "null")
+        self.assertEqual(wr.format_metadata({"variant": "a", "size": 5}), "variant=a size=5")
+        self.assertEqual(wr.format_metadata({}), "")
+        plain = wr.format_summary(sample_result())
+        self.assertEqual(plain, "workload=sample kind=benchmark producer=test status=partial runs=2 errors=0")
+        self.assertEqual(wr.format_summary(sample_result(experiment=wr.experiment("g", {"variant": "a"}))), plain + " group=g variant=a")
+        self.assertEqual(wr.format_summary(sample_result(experiment=wr.experiment(None, {"variant": "a"}))), plain + " variant=a")
+        self.assertEqual(wr.format_summary(sample_result(experiment=wr.experiment("g"))), plain + " group=g")
+        self.assertEqual(wr.format_table([["a", "bb"], ["ccc", "d"]], ["h1", "h2"]), ["h1   h2", "a    bb", "ccc  d"])
+
+    def test_iter_result_files_scans_directories_and_reports_invalid_documents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "good.json"
+            write_result(sample_result(), good)
+            nested = root / "sub" / "nested.json"
+            write_result(sample_result(), nested, experiment=wr.experiment("g"))
+            records = root / "records.json"
+            records.write_text('{"schedule": []}', encoding="utf-8")
+            (root / "list.json").write_text("[]", encoding="utf-8")
+            broken = root / "broken.json"
+            broken.write_text("{", encoding="utf-8")
+            text = root / "notes.txt"
+            text.write_text(json.dumps(sample_result()), encoding="utf-8")
+            bad = root / "bad.json"
+            bad.write_text(json.dumps({"format": wr.FORMAT, "format_version": wr.FORMAT_VERSION}), encoding="utf-8")
+            found = [(path.name, result is not None, error) for path, result, error in wr.iter_result_files([root])]
+            self.assertEqual(found, [
+                ("bad.json", False, "result is missing environment, errors, measurements, runs, status, workload"),
+                ("good.json", True, None),
+                ("nested.json", True, None),
+            ])
+            explicit = list(wr.iter_result_files([str(good), records, broken, root / "missing.json", text]))
+            self.assertEqual([(path.name, result is not None) for path, result, _ in explicit], [
+                ("good.json", True), ("records.json", False), ("broken.json", False), ("missing.json", False), ("notes.txt", True),
+            ])
+            self.assertEqual(explicit[1][2], f"format must be {wr.FORMAT!r}")
+            self.assertTrue(explicit[2][2].startswith("cannot read workload result"))
+            self.assertTrue(explicit[3][2].startswith("cannot read workload result"))
+
+    def test_result_arguments_build_experiment_blocks(self):
+        parser = argparse.ArgumentParser()
+        wr.add_result_argument(parser)
+        args = parser.parse_args([])
+        self.assertIsNone(args.experiment)
+        self.assertEqual((args.metadata, args.redact), ([], []))
+        self.assertIsNone(wr.experiment_from_args(args))
+        self.assertIsNone(wr.experiment_from_args(argparse.Namespace(result=None)))
+        args = parser.parse_args([
+            "--experiment", "sweep", "--metadata", "variant=a", "--metadata", "size=5",
+            "--metadata", "owner=me", "--metadata", "api_key=s3cret", "--redact", "owner",
+        ])
+        self.assertEqual(args.metadata, [("variant", "a"), ("size", 5), ("owner", "me"), ("api_key", "s3cret")])
+        self.assertEqual(wr.experiment_from_args(args), {
+            "group": "sweep", "metadata": {"variant": "a", "size": 5, "owner": wr.REDACTED, "api_key": wr.REDACTED},
+        })
+        self.assertEqual(wr.experiment_from_args(parser.parse_args(["--metadata", "model=x"])), {"group": None, "metadata": {"model": "x"}})
+        self.assertEqual(wr.experiment_from_args(parser.parse_args(["--experiment", "g"])), {"group": "g", "metadata": {}})
+        for argv, message in (
+            (["--metadata", "Bad=1"], "metadata key 'Bad' must match"),
+            (["--metadata", "novalue"], "metadata 'novalue' must be KEY=VALUE"),
+            (["--metadata", "prompt=" + "x" * 300], "at most 256 characters"),
+            (["--redact", "Bad"], "metadata key 'Bad' must match"),
+        ):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+                parser.parse_args(argv)
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(message, stderr.getvalue())
+
+    def test_write_and_build_attach_experiment_blocks(self):
+        block = wr.experiment("g", {"variant": "a"})
+        built = build_result(workload="w", kind="benchmark", producer="p", experiment=block)
+        self.assertEqual(built["experiment"], block)
+        self.assertNotIn("experiment", build_result(workload="w", kind="benchmark", producer="p"))
+        result = sample_result()
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            write_result(result, "-", experiment=block)
+        self.assertEqual(json.loads(stdout.getvalue())["experiment"], block)
+        # The caller's document is left untouched.
+        self.assertNotIn("experiment", result)
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            write_result(result, "-")
+        self.assertNotIn("experiment", json.loads(stdout.getvalue()))
+        with self.assertRaisesRegex(WorkloadResultError, "looks like a credential"):
+            write_result(result, "-", experiment={"group": "g", "metadata": {"api_key": "s3cret"}})
+
 
 class TestSchemaFile(unittest.TestCase):
     def test_schema_constants_match_the_reference_validator(self):
@@ -266,6 +485,14 @@ class TestSchemaFile(unittest.TestCase):
             self.assertTrue(set(wr.STATISTICS) <= set(properties))
         self.assertEqual(SCHEMA["$defs"]["name"]["pattern"], wr._NAME.pattern)
         self.assertTrue(set(wr.CANONICAL_MEASUREMENTS.values()) <= set(wr.UNITS))
+        experiment = SCHEMA["properties"]["experiment"]
+        self.assertEqual(experiment["required"], ["group", "metadata"])
+        metadata = experiment["properties"]["metadata"]
+        self.assertEqual(metadata["propertyNames"]["pattern"], wr._NAME.pattern)
+        self.assertEqual(metadata["additionalProperties"]["maxLength"], wr.MAX_METADATA_LENGTH)
+        self.assertIn(wr.REDACTED, metadata["additionalProperties"]["description"])
+        for key in wr.CANONICAL_METADATA:
+            self.assertIn(key, metadata["additionalProperties"]["description"])
 
     def test_schema_accepts_sample_and_rejects_invalid_results(self):
         if importlib.util.find_spec("jsonschema") is None:
@@ -274,11 +501,18 @@ class TestSchemaFile(unittest.TestCase):
 
         validator = jsonschema.Draft202012Validator(SCHEMA)
         validator.validate(sample_result())
+        validator.validate(sample_result(experiment=wr.experiment("g", {"variant": "a", "size": 1, "flag": True, "none": None, "api_key": "x"})))
+        validator.validate(sample_result(experiment=wr.experiment(None, {"model": "m"})))
         for invalid in (
             sample_result(format="other"),
             sample_result(measurements={"x": {"unit": "bytes"}}),
             sample_result(runs=[{**run("r"), "extra": 1}]),
             sample_result(runs=[run("r", phases=[{"name": "p", "unit": "bytes", "value": 1}])]),
+            sample_result(experiment={"group": "g"}),
+            sample_result(experiment={"group": "", "metadata": {}}),
+            sample_result(experiment={"group": "g", "metadata": {"nested": {}}}),
+            sample_result(experiment={"group": "g", "metadata": {"Bad": 1}}),
+            sample_result(experiment={"group": "g", "metadata": {"prompt": "x" * 257}}),
         ):
             self.assertTrue(list(validator.iter_errors(invalid)), invalid)
 
@@ -328,8 +562,13 @@ class TestCliHelpers(unittest.TestCase):
             bad.write_text("[]", encoding="utf-8")
             with patch("sys.stdout", new_callable=io.StringIO) as stdout, patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 self.assertEqual(wr.main([str(good), str(bad)]), 1)
-            self.assertIn("workload=sample kind=benchmark producer=test status=partial runs=2 errors=0", stdout.getvalue())
+            self.assertIn("workload=sample kind=benchmark producer=test status=partial runs=2 errors=0\n", stdout.getvalue())
             self.assertIn("INVALID: result must be an object", stderr.getvalue())
+            grouped = Path(directory) / "grouped.json"
+            write_result(sample_result(), grouped, experiment=wr.experiment("sweep", {"variant": "a"}))
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(wr.main([str(grouped)]), 0)
+            self.assertIn("errors=0 group=sweep variant=a\n", stdout.getvalue())
             with patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(wr.main([str(good)]), 0)
 

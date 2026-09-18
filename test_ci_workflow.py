@@ -37,6 +37,14 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("test_execution.py", source)
         self.assertIn("test_execution_server.py", source)
 
+    def test_ci_compiles_and_executes_workload_result_tooling(self):
+        workflow = Path(__file__).with_name(".github") / "workflows" / "ci.yml"
+        source = workflow.read_text()
+
+        for module in ("workload_results.py", "compare_workload_results.py", "list_workload_results.py"):
+            self.assertIn(f" {module}", source)
+            self.assertIn(f" test_{module}", source)
+
 
 if __name__ == "__main__":
     unittest.main()

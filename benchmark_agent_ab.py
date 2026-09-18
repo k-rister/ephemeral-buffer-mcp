@@ -553,7 +553,7 @@ def main() -> None:
         args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, sort_keys=True), file=wr.report_stream(args.result))
     if args.result:
-        wr.write_result(summary_workload_result(summary), args.result)
+        wr.write_result(summary_workload_result(summary), args.result, experiment=wr.experiment_from_args(args))
 
 
 if __name__ == "__main__":

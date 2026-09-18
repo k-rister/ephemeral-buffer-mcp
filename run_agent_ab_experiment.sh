@@ -10,6 +10,9 @@ TIMEOUT_SECONDS="${AGENT_AB_TIMEOUT_SECONDS:-900}"
 FIXTURE_PROFILE="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
 TEST_EMBEDDINGS="${AGENT_AB_TEST_EMBEDDINGS:-1}"
 RUN_DIR="${AGENT_AB_RUN_DIR:-/tmp/agent-ab-run-$(date +%Y%m%d-%H%M%S)}"
+EXPERIMENT="${AGENT_AB_EXPERIMENT:-}"
+VARIANT="${AGENT_AB_VARIANT:-}"
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 if [[ -z "${CODEX_HOME:-}" ]]; then
     echo "CODEX_HOME must point to a writable, authenticated Codex home" >&2
@@ -34,6 +37,22 @@ fi
 
 CODEX_HOME="$CODEX_HOME" codex login status >/dev/null
 mkdir -p "$RUN_DIR"
+
+# Experiment group and metadata recorded in both workload result documents so
+# list_workload_results.py and compare_workload_results.py can organise runs.
+EXPERIMENT_ARGS=(
+    --metadata "model=$MODEL"
+    --metadata "task_type=$FIXTURE_PROFILE"
+    --metadata "workload_size=$REPETITIONS"
+    --metadata "environment=$([[ "$TEST_EMBEDDINGS" == "1" ]] && echo test-embeddings || echo fastembed)"
+    --metadata "started_at=$STARTED_AT"
+)
+if [[ -n "$EXPERIMENT" ]]; then
+    EXPERIMENT_ARGS+=(--experiment "$EXPERIMENT")
+fi
+if [[ -n "$VARIANT" ]]; then
+    EXPERIMENT_ARGS+=(--metadata "variant=$VARIANT")
+fi
 
 if [[ "$FIXTURE_PROFILE" == "repository-shaped-v1" ]]; then
     "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab_repository_fixture.py" \
@@ -64,13 +83,18 @@ EPHEMERAL_TEST_EMBEDDINGS="$TEST_EMBEDDINGS" CODEX_HOME="$CODEX_HOME" \
     --sandbox read-only \
     --timeout "$TIMEOUT_SECONDS" \
     --diagnostic-log-dir "$RUN_DIR/lifecycle" \
-    --output "$RUN_DIR/records.json"
+    --output "$RUN_DIR/records.json" \
+    --result "$RUN_DIR/records.result.json" \
+    "${EXPERIMENT_ARGS[@]}"
 
 "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab.py" \
     --records "$RUN_DIR/records.json" \
-    --output "$RUN_DIR/summary.json"
+    --output "$RUN_DIR/summary.json" \
+    --result "$RUN_DIR/summary.result.json" \
+    "${EXPERIMENT_ARGS[@]}"
 
 echo "Run complete:"
 echo "  records: $RUN_DIR/records.json"
 echo "  summary: $RUN_DIR/summary.json"
+echo "  workload results: $RUN_DIR/records.result.json $RUN_DIR/summary.result.json"
 echo "  lifecycle: $RUN_DIR/lifecycle/"

@@ -513,9 +513,13 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 
 The script checks Codex authentication, creates a timestamped `/tmp` run
 directory, executes paired control and MCP sessions, and writes metadata
-records, an aggregate summary, and content-free lifecycle logs there. Set
-`AGENT_AB_RUN_DIR` to choose another output directory. Use the lower-level
-runner commands for privacy-reviewed repository fixtures.
+records, an aggregate summary, the corresponding `records.result.json` and
+`summary.result.json` workload result documents, and content-free lifecycle
+logs there. Set `AGENT_AB_RUN_DIR` to choose another output directory, and
+`AGENT_AB_EXPERIMENT` and `AGENT_AB_VARIANT` to tag the result documents with
+an experiment group and variant so a series of runs can be listed and
+compared by group. Use the lower-level runner commands for privacy-reviewed
+repository fixtures.
 
 The repeatable script enables `--require-mcp-calls`, so a run that completes
 without any MCP tool call is recorded as `mcp_not_used` rather than being
@@ -621,6 +625,18 @@ records:
   `wall_time_seconds` for the headline number.
 - Ignore `details` unless you are the producer. It is the native record and
   may change shape with `workload.producer_schema_version`.
+- Organise by experiment, not by file name. The optional `experiment` block
+  (`group` plus flat `metadata`) says which study a document belongs to and
+  what varied; `list_workload_results.py` filters by `--group` and `--where
+  KEY=VALUE`, and `compare_workload_results.py` accepts `DIR@GROUP` and
+  `DIR@GROUP,KEY=VALUE` references (README section "Organizing
+  experiments"). Consumers must accept documents without the block and
+  metadata without a group, and must never match an absent metadata key,
+  even against `null`.
+- Treat metadata as identifiers. Values are scalars of at most 256
+  characters, keys that name credentials always hold `[redacted]`, and a
+  producer's `--redact KEY` masks any other value; a consumer that publishes
+  a listing should offer the same (`list_workload_results.py --redact KEY`).
 
 `compare_workload_results.py` applies these rules (see the README section
 "Comparing workload results"). It refuses invalid documents and mismatched
@@ -633,7 +649,11 @@ and prints the parameter and environment differences next to the deltas.
 Keep a baseline result per workload and host class (results from different
 hosts are different setups, not regressions), regenerate it deliberately when
 the workload or its parameters change, and gate on the headline metrics with a
-tolerance wide enough for run-to-run noise on that host:
+tolerance wide enough for run-to-run noise on that host. Recording the
+baseline and each candidate with `--experiment GROUP --metadata
+environment=HOST_CLASS` lets `list_workload_results.py --group GROUP` show the
+series and `DIR@GROUP,variant=baseline` name the baseline without a fixed
+path:
 
 ```bash
 .venv/bin/python compare_workload_results.py baseline.result.json candidate.result.json \

@@ -18,6 +18,7 @@ Top-level shape (``FORMAT_VERSION`` 1)::
       "errors": ["..."],
       "measurements": {name: measurement},
       "runs": [{"id", "labels", "status", "measurements", "phases", "errors"}],
+      "experiment": {"group": "...", "metadata": {key: scalar}},  # optional
       "details": {...producer-native record, optional...}
     }
 
@@ -32,6 +33,15 @@ rather than as zero.  Phase timings are an ordered list of ``seconds``
 measurements with a ``name``.  Producers should prefer the canonical
 measurement names in ``CANONICAL_MEASUREMENTS`` whenever the meaning matches so
 results from different tools line up; other names are allowed.
+
+The optional ``experiment`` block assigns a document to a named group of
+related runs (a sweep, an A/B study, a regression series) and carries flat
+metadata describing what varied: task type, repository revision, agent
+configuration, model, prompt or policy variant, workload size, start time.
+Metadata values are scalars, keys that look like credentials are stored as
+``REDACTED``, and every producer accepts ``--experiment``, ``--metadata``, and
+``--redact`` (see ``add_result_argument``).  Listing and comparison tools
+filter documents by group and metadata field with ``experiment_matches``.
 """
 
 import argparse
@@ -105,6 +115,32 @@ CANONICAL_DIRECTIONS: dict[str, str | None] = {
 # Labels with conventional values.  ``cache_state`` distinguishes cold and warm
 # measurements; the others identify what a run measured.
 CANONICAL_LABELS = ("cache_state", "mode", "task_id", "repetition", "line_count", "profile")
+# Experiment metadata keys with a conventional meaning, so listings and
+# filters line up across producers.  ``started_at`` (UTC ISO 8601) orders the
+# documents of a group; without it ``environment.recorded_at`` is used.
+CANONICAL_METADATA = (
+    "task_type",
+    "repository_revision",
+    "agent_configuration",
+    "model",
+    "tool_version",
+    "variant",
+    "environment",
+    "workload_size",
+    "started_at",
+)
+# Metadata values are identifiers, not content: a bound keeps prompts,
+# transcripts, and command output from being pasted into a shared document.
+MAX_METADATA_LENGTH = 256
+# Value stored for metadata whose key names a credential or that a producer
+# was asked to redact; the key stays visible so readers know it was set.
+REDACTED = "[redacted]"
+_SENSITIVE_PARTS = frozenset({
+    "secret", "secrets", "password", "passwd", "credential", "credentials",
+    "apikey", "authorization", "bearer",
+})
+_SENSITIVE_KEYS = frozenset({"token", "key"})
+_SENSITIVE_SUFFIXES = ("_token", "_key")
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 # PEP 621 version line; a regex keeps this module free of tomllib, which
@@ -115,6 +151,161 @@ LABEL_TYPES = (str, int, float, bool, type(None))
 
 class WorkloadResultError(ValueError):
     """Raised when a result does not satisfy the format."""
+
+
+# --------------------------------------------------------------------------
+# Experiment groups and metadata
+
+
+def is_sensitive_metadata_key(key: str) -> bool:
+    """Return whether a metadata key names something that must not be stored.
+
+    Matches whole underscore-separated parts (``client_secret``,
+    ``password``), the bare keys ``token`` and ``key``, and the suffixes
+    ``_token`` and ``_key`` (``access_token``, ``api_key``), never substrings,
+    so ``max_tokens`` and ``token_budget`` stay ordinary metadata.
+    """
+    return (
+        key in _SENSITIVE_KEYS
+        or key.endswith(_SENSITIVE_SUFFIXES)
+        or any(part in _SENSITIVE_PARTS for part in key.split("_"))
+    )
+
+
+def _check_metadata_key(key: Any, where: str) -> None:
+    _expect(isinstance(key, str) and bool(_NAME.match(key)), f"{where} key {key!r} must match {_NAME.pattern}")
+
+
+def _check_metadata_value(key: str, value: Any, where: str) -> None:
+    _expect(isinstance(value, LABEL_TYPES), f"{where}.{key} must be a string, number, boolean, or null")
+    if isinstance(value, str):
+        _expect(len(value) <= MAX_METADATA_LENGTH, f"{where}.{key} must be at most {MAX_METADATA_LENGTH} characters")
+    _expect(
+        not is_sensitive_metadata_key(key) or value == REDACTED,
+        f"{where}.{key} looks like a credential and must be omitted or redacted",
+    )
+
+
+def parse_key_value(text: str, where: str = "metadata") -> tuple[str, Any]:
+    """Parse ``KEY=VALUE`` into a scalar: JSON when it parses, else a string."""
+    key, separator, raw = text.partition("=")
+    if not separator or not key:
+        raise WorkloadResultError(f"{where} {text!r} must be KEY=VALUE")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw
+    if not isinstance(value, LABEL_TYPES):
+        raise WorkloadResultError(f"{where} {text!r} must be a string, number, boolean, or null")
+    return key, value
+
+
+def parse_metadata(text: str) -> tuple[str, Any]:
+    """Parse one ``--metadata KEY=VALUE`` argument and check it fits the format."""
+    key, value = parse_key_value(text, "metadata")
+    _check_metadata_key(key, "metadata")
+    if isinstance(value, str) and len(value) > MAX_METADATA_LENGTH:
+        raise WorkloadResultError(f"metadata {key} must be at most {MAX_METADATA_LENGTH} characters")
+    return key, value
+
+
+def metadata_key(text: str) -> str:
+    """Check a bare metadata key given on a command line."""
+    _check_metadata_key(text, "metadata")
+    return text
+
+
+def experiment(
+    group: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    *,
+    redact: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Return an experiment block, redacting credentials and requested keys.
+
+    ``group`` names the experiment or run group; ``None`` records metadata
+    alone.  Keys in ``redact`` and keys that look like credentials keep their
+    name but store ``REDACTED`` so a document never carries the value.
+    """
+    if group is not None:
+        _expect(isinstance(group, str) and bool(group), "experiment group must be a non-empty string or None")
+    hidden = set(redact)
+    described: dict[str, Any] = {}
+    for key, value in (metadata or {}).items():
+        _check_metadata_key(key, "experiment.metadata")
+        if key in hidden or is_sensitive_metadata_key(key):
+            value = REDACTED
+        _check_metadata_value(key, value, "experiment.metadata")
+        described[key] = value
+    return {"group": group, "metadata": described}
+
+
+def value_matches(value: Any, wanted: Any) -> bool:
+    """Return whether a label or metadata value equals a filter value.
+
+    Booleans only match booleans: Python's ``True == 1`` would otherwise let a
+    numeric filter select boolean values and vice versa.
+    """
+    if isinstance(value, bool) or isinstance(wanted, bool):
+        return isinstance(value, bool) and isinstance(wanted, bool) and value is wanted
+    return value == wanted
+
+
+def experiment_matches(
+    result: dict[str, Any],
+    groups: Iterable[str] = (),
+    where: Iterable[tuple[str, Any]] = (),
+) -> bool:
+    """Return whether a result belongs to one of ``groups`` and has every ``where`` value.
+
+    An empty ``groups`` accepts any document, including ungrouped ones;
+    metadata that is absent never matches, even a filter for ``null``.
+    """
+    block = result.get("experiment") or {"group": None, "metadata": {}}
+    wanted = list(groups)
+    if wanted and block["group"] not in wanted:
+        return False
+    metadata = block["metadata"]
+    return all(key in metadata and value_matches(metadata[key], value) for key, value in where)
+
+
+def experiment_timestamp(result: dict[str, Any]) -> str:
+    """Return the time that orders a document within its group."""
+    block = result.get("experiment") or {"metadata": {}}
+    started = block["metadata"].get("started_at")
+    return started if isinstance(started, str) and started else result["environment"]["recorded_at"]
+
+
+def result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the group, metadata, status, and per-run status of a result.
+
+    This is the record listing tools return: enough to organise and filter
+    documents without their measurements.
+    """
+    block = result.get("experiment") or {"group": None, "metadata": {}}
+    env = result["environment"]
+    return {
+        "workload": {key: result["workload"][key] for key in ("name", "kind", "producer")},
+        "group": block["group"],
+        "metadata": dict(block["metadata"]),
+        "status": result["status"],
+        "errors": list(result["errors"]),
+        "recorded_at": env["recorded_at"],
+        "ordered_at": experiment_timestamp(result),
+        "source_revision": env.get("source_revision"),
+        "tool_version": (env.get("tool") or {}).get("version"),
+        "runs": [
+            {"id": item["id"], "labels": dict(item["labels"]), "status": item["status"], "errors": list(item["errors"])}
+            for item in result["runs"]
+        ],
+    }
+
+
+def redact_summary(summary: dict[str, Any], keys: Iterable[str]) -> dict[str, Any]:
+    """Return a copy of a summary with the named metadata values replaced by ``REDACTED``."""
+    hidden = set(keys)
+    metadata = {key: REDACTED if key in hidden else value for key, value in summary["metadata"].items()}
+    return {**summary, "metadata": metadata}
 
 
 def _is_number(value: Any) -> bool:
@@ -311,6 +502,7 @@ def build_result(
     fixture_version: int | None = None,
     description: str | None = None,
     privacy: str | None = None,
+    experiment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble and validate a complete workload result."""
     run_list = list(runs)
@@ -341,6 +533,8 @@ def build_result(
     }
     if details is not None:
         result["details"] = details
+    if experiment is not None:
+        result["experiment"] = experiment
     return validate_result(result)
 
 
@@ -395,6 +589,17 @@ def _validate_run(item: Any, where: str) -> None:
     _expect(isinstance(item["errors"], list) and all(isinstance(error, str) for error in item["errors"]), f"{where}.errors must be a list of strings")
 
 
+def _validate_experiment(block: Any) -> None:
+    _expect(isinstance(block, dict), "experiment must be an object")
+    _expect(set(block) == {"group", "metadata"}, "experiment must have exactly group and metadata")
+    group = block["group"]
+    _expect(group is None or (isinstance(group, str) and bool(group)), "experiment.group must be a non-empty string or null")
+    _expect(isinstance(block["metadata"], dict), "experiment.metadata must be an object")
+    for key, value in block["metadata"].items():
+        _check_metadata_key(key, "experiment.metadata")
+        _check_metadata_value(key, value, "experiment.metadata")
+
+
 def validate_result(result: Any) -> dict[str, Any]:
     """Raise ``WorkloadResultError`` unless ``result`` satisfies the format."""
     _expect(isinstance(result, dict), "result must be an object")
@@ -403,7 +608,7 @@ def validate_result(result: Any) -> dict[str, Any]:
     required = {"format", "format_version", "workload", "environment", "status", "errors", "measurements", "runs"}
     missing = required - set(result)
     _expect(not missing, f"result is missing {', '.join(sorted(missing))}")
-    unknown = set(result) - required - {"details"}
+    unknown = set(result) - required - {"details", "experiment"}
     _expect(not unknown, f"result has unexpected fields {', '.join(sorted(unknown))}")
 
     workload = result["workload"]
@@ -438,6 +643,8 @@ def validate_result(result: Any) -> dict[str, Any]:
         ids.add(item["id"])
     if "details" in result:
         _expect(isinstance(result["details"], dict), "details must be an object")
+    if "experiment" in result:
+        _validate_experiment(result["experiment"])
     try:
         json.dumps(result, allow_nan=False)
     except (TypeError, ValueError) as exc:
@@ -455,7 +662,7 @@ def load_result(path: Path) -> dict[str, Any]:
 
 
 def add_result_argument(parser: argparse.ArgumentParser) -> None:
-    """Add the shared ``--result`` option to a producer's argument parser."""
+    """Add the shared ``--result``, ``--experiment``, ``--metadata``, and ``--redact`` options."""
     parser.add_argument(
         "--result",
         metavar="PATH",
@@ -464,6 +671,50 @@ def add_result_argument(parser: argparse.ArgumentParser) -> None:
             "in which case the human-readable report moves to stderr"
         ),
     )
+    parser.add_argument(
+        "--experiment",
+        metavar="GROUP",
+        help="Assign the result document to this experiment or run group",
+    )
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        metavar="KEY=VALUE",
+        type=_argument(parse_metadata),
+        default=[],
+        help=(
+            "Record experiment metadata in the result document (repeatable; values parse as JSON when "
+            f"possible; conventional keys: {', '.join(CANONICAL_METADATA)})"
+        ),
+    )
+    parser.add_argument(
+        "--redact",
+        action="append",
+        metavar="KEY",
+        type=_argument(metadata_key),
+        default=[],
+        help=f"Store {REDACTED} instead of the value of this metadata key (repeatable)",
+    )
+
+
+def _argument(parse: Any) -> Any:
+    """Wrap a parser so argparse reports ``WorkloadResultError`` as a usage error."""
+    def convert(text: str) -> Any:
+        try:
+            return parse(text)
+        except WorkloadResultError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from exc
+    convert.__name__ = getattr(parse, "__name__", "value")
+    return convert
+
+
+def experiment_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    """Return the experiment block requested by ``add_result_argument`` options, if any."""
+    metadata = dict(getattr(args, "metadata", None) or [])
+    group = getattr(args, "experiment", None)
+    if group is None and not metadata:
+        return None
+    return experiment(group, metadata, redact=getattr(args, "redact", None) or ())
 
 
 def result_to_stdout(result_path: str | os.PathLike[str] | None) -> bool:
@@ -476,10 +727,21 @@ def report_stream(result_path: str | os.PathLike[str] | None) -> TextIO:
     return sys.stderr if result_to_stdout(result_path) else sys.stdout
 
 
-def write_result(result: dict[str, Any], result_path: str | os.PathLike[str] | None) -> None:
-    """Validate ``result`` and write it to the requested destination, if any."""
+def write_result(
+    result: dict[str, Any],
+    result_path: str | os.PathLike[str] | None,
+    *,
+    experiment: dict[str, Any] | None = None,
+) -> None:
+    """Validate ``result`` and write it to the requested destination, if any.
+
+    ``experiment`` (usually ``experiment_from_args(args)``) is attached to the
+    document before validation so every producer assigns groups the same way.
+    """
     if result_path is None:
         return
+    if experiment is not None:
+        result = {**result, "experiment": experiment}
     text = json.dumps(validate_result(result), indent=2, sort_keys=True, allow_nan=False) + "\n"
     if result_to_stdout(result_path):
         sys.stdout.write(text)
@@ -490,13 +752,70 @@ def write_result(result: dict[str, Any], result_path: str | os.PathLike[str] | N
     path.write_text(text, encoding="utf-8")
 
 
+def format_metadata_value(value: Any) -> str:
+    """Return a label or metadata value for display: strings bare, other values JSON."""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def format_metadata(metadata: dict[str, Any]) -> str:
+    """Return metadata as ``key=value`` words."""
+    return " ".join(f"{key}={format_metadata_value(value)}" for key, value in metadata.items())
+
+
 def format_summary(result: dict[str, Any]) -> str:
     """Return a one-line human-readable description of a result."""
     workload = result["workload"]
-    return (
+    block = result.get("experiment") or {"group": None, "metadata": {}}
+    described = (
         f"workload={workload['name']} kind={workload['kind']} producer={workload['producer']} "
         f"status={result['status']} runs={len(result['runs'])} errors={len(result['errors'])}"
     )
+    if block["group"] is not None:
+        described += f" group={block['group']}"
+    if block["metadata"]:
+        described += " " + format_metadata(block["metadata"])
+    return described
+
+
+def format_table(rows: list[list[str]], headers: list[str]) -> list[str]:
+    """Return aligned text rows under a header line."""
+    widths = [max(len(text) for text in column) for column in zip(headers, *rows)]
+    lines = ["  ".join(text.ljust(width) for text, width in zip(headers, widths)).rstrip()]
+    for row in rows:
+        lines.append("  ".join(text.ljust(width) for text, width in zip(row, widths)).rstrip())
+    return lines
+
+
+def iter_result_files(paths: Iterable[str | os.PathLike[str]]) -> Iterable[tuple[Path, dict[str, Any] | None, str | None]]:
+    """Yield ``(path, result, error)`` for every result document under ``paths``.
+
+    A file is loaded as written.  A directory is searched recursively for
+    ``*.json`` files, and only those that are ``coding-agent-workload-result``
+    documents are yielded; other JSON files (producer records, schedules,
+    manifests) are ignored.  A document that fails validation is yielded with
+    ``result`` set to ``None`` and the error text, never silently dropped.
+    """
+    for item in paths:
+        path = Path(item)
+        if path.is_dir():
+            candidates = sorted(candidate for candidate in path.rglob("*.json") if candidate.is_file())
+            explicit = False
+        else:
+            candidates = [path]
+            explicit = True
+        for candidate in candidates:
+            try:
+                value = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                if explicit:
+                    yield candidate, None, f"cannot read workload result {candidate}: {exc}"
+                continue
+            if not explicit and not (isinstance(value, dict) and value.get("format") == FORMAT):
+                continue
+            try:
+                yield candidate, validate_result(value), None
+            except WorkloadResultError as exc:
+                yield candidate, None, str(exc)
 
 
 def main(argv: list[str] | None = None) -> int:

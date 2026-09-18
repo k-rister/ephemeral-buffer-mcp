@@ -93,9 +93,9 @@ class ResultFiles(unittest.TestCase):
         self.addCleanup(self._directory.cleanup)
         self.directory = Path(self._directory.name)
 
-    def write(self, name, result):
+    def write(self, name, result, experiment=None):
         path = self.directory / name
-        wr.write_result(result, path)
+        wr.write_result(result, path, experiment=experiment)
         return str(path)
 
     def compare(self, *results, **options):
@@ -104,16 +104,29 @@ class ResultFiles(unittest.TestCase):
 
 
 class TestParsing(unittest.TestCase):
-    def test_parse_reference_prefers_existing_paths_over_run_selection(self):
+    def test_parse_reference_prefers_existing_paths_over_selection_syntax(self):
         with tempfile.TemporaryDirectory() as directory:
-            hashed = Path(directory) / "result#1.json"
-            hashed.write_text("{}", encoding="utf-8")
-            self.assertEqual(cw.parse_reference(str(hashed)), (hashed, None))
-            self.assertEqual(cw.parse_reference(f"{hashed}#control"), (hashed, "control"))
-        self.assertEqual(cw.parse_reference("plain.json"), (Path("plain.json"), None))
-        for bad in ("#run", "path#"):
-            with self.assertRaisesRegex(ComparisonError, "must be PATH or PATH#RUN_ID"):
+            odd = Path(directory) / "result#1@x.json"
+            odd.write_text("{}", encoding="utf-8")
+            self.assertEqual(cw.parse_reference(str(odd)), (odd, None, None, ()))
+            self.assertEqual(cw.parse_reference(f"{odd}#control"), (odd, "control", None, ()))
+            self.assertEqual(cw.parse_reference(directory), (Path(directory), None, None, ()))
+            self.assertEqual(cw.parse_reference(f"{directory}@sweep"), (Path(directory), None, "sweep", ()))
+        self.assertEqual(cw.parse_reference("plain.json"), (Path("plain.json"), None, None, ()))
+        self.assertEqual(cw.parse_reference("plain.json#mcp"), (Path("plain.json"), "mcp", None, ()))
+        self.assertEqual(cw.parse_reference("results@sweep"), (Path("results"), None, "sweep", ()))
+        self.assertEqual(
+            cw.parse_reference("results@sweep,variant=a,size=5#mcp"),
+            (Path("results"), "mcp", "sweep", (("variant", "a"), ("size", 5))),
+        )
+        self.assertEqual(cw.parse_reference("results@sweep,owner=me@example.com"), (Path("results"), None, "sweep", (("owner", "me@example.com"),)))
+        for bad in ("#run", "path#", "@sweep", "results@", "results@sweep#"):
+            with self.assertRaisesRegex(ComparisonError, "must be PATH, PATH#RUN_ID, DIR@GROUP, or DIR@GROUP,KEY=VALUE"):
                 cw.parse_reference(bad)
+        with self.assertRaisesRegex(ComparisonError, "metadata selector 'variant' must be KEY=VALUE"):
+            cw.parse_reference("results@sweep,variant")
+        with self.assertRaisesRegex(ComparisonError, "must be a string, number, boolean, or null"):
+            cw.parse_reference("results@sweep,sizes=[1]")
 
     def test_parse_label_filter_reads_json_values_or_strings(self):
         self.assertEqual(cw.parse_label_filter("line_count=256"), ("line_count", 256))
@@ -282,8 +295,11 @@ class TestCompare(ResultFiles):
         self.assertEqual((missing["name"], missing["reason"]), ("estimated_tokens", "unavailable in both"))
         self.assertEqual(item["parameter_differences"], {})
         self.assertEqual(item["environment_differences"], {})
+        self.assertEqual(item["experiment_differences"], {})
         self.assertTrue(cw.check_passes(comparison))
         self.assertEqual([document["role"] for document in comparison["documents"]], ["baseline", "candidate"])
+        self.assertEqual([document["experiment"] for document in comparison["documents"]], [{"group": None, "metadata": {}}] * 2)
+        self.assertEqual([document["selected_by"] for document in comparison["documents"]], [None, None])
         json.dumps(comparison, allow_nan=False)
 
     def test_latency_regression_is_identified_with_phase_attribution(self):
@@ -429,10 +445,89 @@ class TestCompare(ResultFiles):
         empty = self.compare(agent_result(), agent_result(), label_filters=[("mode", "other")])
         self.assertEqual(empty["comparisons"][0]["runs"], [])
 
+    def test_group_references_expand_to_ordered_documents(self):
+        sweep = self.directory / "sweep"
+        later = self.write(
+            "sweep/later.json", latency_result(wall=0.020),
+            experiment=wr.experiment("sweep", {"variant": "b", "started_at": "2026-09-18T12:00:00+00:00"}),
+        )
+        earlier = self.write(
+            "sweep/nested/earlier.json", latency_result(),
+            experiment=wr.experiment("sweep", {"variant": "a", "started_at": "2026-09-18T10:00:00+00:00"}),
+        )
+        other = self.write("sweep/other.json", latency_result(wall=0.030), experiment=wr.experiment("other", {"variant": "c"}))
+        ungrouped = self.write("sweep/plain.json", latency_result())
+        (sweep / "records.json").write_text('{"runs": []}', encoding="utf-8")
+        comparison = cw.compare([f"{sweep}@sweep"], statistics=("median",), metrics=["wall_time_seconds"])
+        self.assertEqual([document["reference"] for document in comparison["documents"]], [earlier, later])
+        self.assertEqual([document["selected_by"] for document in comparison["documents"]], [f"{sweep}@sweep"] * 2)
+        self.assertEqual(comparison["documents"][0]["path"], earlier)
+        self.assertEqual(comparison["documents"][0]["experiment"], {"group": "sweep", "metadata": {"variant": "a", "started_at": "2026-09-18T10:00:00+00:00"}})
+        [item] = comparison["comparisons"]
+        self.assertEqual(item["experiment_differences"], {
+            "variant": ["a", "b"],
+            "started_at": ["2026-09-18T10:00:00+00:00", "2026-09-18T12:00:00+00:00"],
+        })
+        self.assertEqual(item["summary"]["regressed"], 1)
+        # Selectors pick documents by metadata, #RUN_ID applies to each, and the
+        # baseline need not be the earliest document.
+        narrowed = cw.compare(
+            [f"{sweep}@sweep,variant=b#lines-256", f"{sweep}@sweep,variant=a#lines-256"],
+            statistics=("median",), metrics=["wall_time_seconds"],
+        )
+        self.assertEqual([document["reference"] for document in narrowed["documents"]], [f"{later}#lines-256", f"{earlier}#lines-256"])
+        self.assertEqual([document["selected_run"] for document in narrowed["documents"]], ["lines-256", "lines-256"])
+        self.assertEqual(narrowed["comparisons"][0]["summary"]["improved"], 1)
+        # File and group references mix, and a document scanned for a group is not loaded again.
+        with patch.object(cw.wr, "load_result", wraps=cw.wr.load_result) as load:
+            mixed = cw.compare([ungrouped, f"{sweep}@sweep", f"{sweep}@other"], metrics=["wall_time_seconds"])
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual([document["reference"] for document in mixed["documents"]], [ungrouped, earlier, later, other])
+        self.assertEqual([document["selected_by"] for document in mixed["documents"]], [None, f"{sweep}@sweep", f"{sweep}@sweep", f"{sweep}@other"])
+        self.assertEqual(mixed["comparisons"][0]["experiment_differences"], {
+            "group": [None, "sweep"], "variant": [None, "a"], "started_at": [None, "2026-09-18T10:00:00+00:00"],
+        })
+        report = cw.format_report(mixed)
+        lines = report.splitlines()
+        self.assertIn(f"baseline: {ungrouped}  producer=", lines[1])
+        self.assertNotIn("group=", lines[1])
+        self.assertIn(f"candidate: {earlier}  group=sweep  producer=", lines[2])
+        # Files are written with sorted keys, so metadata differences read back alphabetically.
+        self.assertIn('experiment differences: group: null -> "sweep"; started_at: null -> "2026-09-18T10:00:00+00:00"; variant: null -> "a"', report)
+        self.assertEqual(cw._flatten_experiment({"group": "g", "metadata": {"group": "inner", "variant": "a"}}), {"group": "g", "metadata.group": "inner", "variant": "a"})
+        # A metadata-only experiment block has no group to print.
+        tagged = self.write("tagged.json", latency_result(), experiment=wr.experiment(None, {"model": "m"}))
+        self.assertNotIn("group=", cw.format_report(cw.compare([tagged, tagged])))
+
+    def test_group_reference_errors(self):
+        sweep = self.directory / "sweep"
+        path = self.write("sweep/a.json", latency_result(), experiment=wr.experiment("sweep"))
+        with self.assertRaisesRegex(ComparisonError, "names group 'sweep' but .* is not a directory"):
+            cw.compare([f"{path}@sweep", path])
+        with self.assertRaisesRegex(ComparisonError, r"selects no result document under .* \(groups there: sweep\)"):
+            cw.compare([f"{sweep}@nope", path])
+        with self.assertRaisesRegex(ComparisonError, "groups there: sweep"):
+            cw.compare([f"{sweep}@sweep,variant=zzz", path])
+        with self.assertRaisesRegex(ComparisonError, "at least two documents are required; .* selects 1"):
+            cw.compare([f"{sweep}@sweep"])
+        empty = self.directory / "empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(ComparisonError, "groups there: none"):
+            cw.compare([f"{empty}@sweep", path])
+        self.write("sweep/b.json", latency_result(), experiment=wr.experiment("sweep"))
+        with self.assertRaisesRegex(ComparisonError, "selects 2 documents; use load_documents"):
+            cw.load_document(f"{sweep}@sweep")
+        self.assertEqual(len(cw.load_documents(f"{sweep}@sweep")), 2)
+        (sweep / "bad.json").write_text(json.dumps({"format": wr.FORMAT, "format_version": 99}), encoding="utf-8")
+        with self.assertRaisesRegex(wr.WorkloadResultError, "bad.json: format_version must be 1"):
+            cw.compare([f"{sweep}@sweep", path])
+
     def test_rejects_unusable_inputs(self):
         path = self.write("a.json", latency_result())
-        with self.assertRaisesRegex(ComparisonError, "at least two references"):
+        with self.assertRaisesRegex(ComparisonError, "at least two documents are required; .* selects 1"):
             cw.compare([path])
+        with self.assertRaisesRegex(ComparisonError, "at least two documents are required"):
+            cw.compare([])
         with self.assertRaisesRegex(ComparisonError, "tolerance must not be negative"):
             cw.compare([path, path], tolerance_percent=-1)
         with self.assertRaisesRegex(ComparisonError, "unknown statistic average"):
@@ -531,6 +626,8 @@ class TestMain(ResultFiles):
             "statistics": ["median"], "tolerance_percent": 20.0, "directions": {}, "metrics": ["wall_time_seconds"], "label_filters": [],
         })
         self.assertEqual(printed["comparisons"][0]["summary"]["unchanged"], 1)
+        self.assertEqual(printed["documents"][0]["experiment"], {"group": None, "metadata": {}})
+        self.assertIsNone(printed["documents"][0]["selected_by"])
 
     def test_statistic_all_directions_and_select(self):
         path = self.write("ab.json", agent_result(mcp_tokens=800))
@@ -566,6 +663,8 @@ class TestMain(ResultFiles):
         for argv in (
             [baseline, f"{baseline}#nope"],
             [baseline, str(self.directory / "missing.json")],
+            [baseline, f"{self.directory}@nope"],
+            [f"{self.directory}@nope"],
             [baseline, baseline, "--select", "mode"],
             [baseline, baseline, "--direction", "x=up"],
             [baseline, baseline, "--statistic", "average"],

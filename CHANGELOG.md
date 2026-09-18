@@ -18,6 +18,18 @@
   environment differences that explain a delta, filters runs by label and
   metrics by name, and offers JSON output plus a `--check` mode that fails on
   regressions or non-success results for automated regression checks.
+- Add experiment groups and metadata to workload results: every benchmark,
+  evaluation, and the Codex A/B runner accept `--experiment GROUP`,
+  `--metadata KEY=VALUE`, and `--redact KEY`, recorded in an optional
+  `experiment` block that consumers read alongside run summaries. Metadata
+  keys that name credentials are always stored as `[redacted]`. Add
+  `list_workload_results.py` to find result documents under directories and
+  list or filter them by group, metadata, workload, and status (per document
+  or per run, keeping failed and invalid documents visible), and teach
+  `compare_workload_results.py` `DIR@GROUP` and `DIR@GROUP,KEY=VALUE`
+  references plus an `experiment differences` line. `run_agent_ab_experiment.sh`
+  now writes workload result documents tagged from `AGENT_AB_EXPERIMENT` and
+  `AGENT_AB_VARIANT`.
 - Add a semantic-index latency benchmark that reports ingestion, lazy embedding
   materialization, first and subsequent hybrid or semantic search timings,
   indexing throughput, and needle rank by capture size with the real model.
