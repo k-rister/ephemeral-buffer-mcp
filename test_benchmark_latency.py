@@ -29,6 +29,9 @@ class FakeEngine:
     def _ensure_embeddings(self, capture):
         self.events.append(("ensure_embeddings", capture.capture_id))
 
+    def shutdown(self):
+        self.events.append(("shutdown",))
+
     def get_summary(self, capture_id):
         self.events.append(("summary", capture_id))
         return {}

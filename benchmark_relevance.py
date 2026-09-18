@@ -90,28 +90,32 @@ def run_relevance_benchmark(top_k: int = 3) -> dict[str, Any]:
 
     cases = relevance_cases()
     engine = EphemeralEngine(max_captures=len(cases))
-    captures = {
-        case["id"]: engine.ingest("\n".join(case["lines"]), label=f"relevance-{case['id']}")
-        for case in cases
-    }
     records = []
-    for mode in MODES:
-        for case in cases:
-            result = engine.search(
-                case["query"], mode=mode, capture_id=captures[case["id"]].capture_id,
-                top_k=top_k, context_lines=1,
-            )
-            rank = _marker_rank(result.get("matches", []), case["marker"])
-            records.append({
-                "case": case["id"],
-                "mode": mode,
-                "query": case["query"],
-                "expected_marker": case["marker"],
-                "rank": rank,
-                "hit_at_1": rank == 1,
-                "hit_at_k": rank is not None and rank <= top_k,
-                "reciprocal_rank": 1.0 / rank if rank is not None else 0.0,
-            })
+    try:
+        captures = {
+            case["id"]: engine.ingest("\n".join(case["lines"]), label=f"relevance-{case['id']}")
+            for case in cases
+        }
+        for mode in MODES:
+            for case in cases:
+                result = engine.search(
+                    case["query"], mode=mode, capture_id=captures[case["id"]].capture_id,
+                    top_k=top_k, context_lines=1,
+                )
+                rank = _marker_rank(result.get("matches", []), case["marker"])
+                records.append({
+                    "case": case["id"],
+                    "mode": mode,
+                    "query": case["query"],
+                    "expected_marker": case["marker"],
+                    "rank": rank,
+                    "hit_at_1": rank == 1,
+                    "hit_at_k": rank is not None and rank <= top_k,
+                    "reciprocal_rank": 1.0 / rank if rank is not None else 0.0,
+                })
+    finally:
+        # Background index work must not outlive the run and delay process exit.
+        engine.shutdown()
 
     summaries = {}
     for mode in MODES:

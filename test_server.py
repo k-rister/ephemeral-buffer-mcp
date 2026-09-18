@@ -950,7 +950,7 @@ class TestServerTools(unittest.TestCase):
 
     def test_buffer_stats_reports_semantic_wait_budget(self):
         result = server.get_buffer_stats()
-        self.assertRegex(result, r"Semantic wait budget: [0-9.]+s \(0 on-demand index jobs running\)")
+        self.assertRegex(result, r"Semantic wait budget: [0-9.]+s \(0 on-demand index jobs running, 0 queued\)")
 
     def test_context_responses_bound_long_labels(self):
         long_label = "label-" + ("x" * 10_000)
