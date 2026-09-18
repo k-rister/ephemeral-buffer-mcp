@@ -306,6 +306,15 @@ def direction_for(name: str, unit: str, overrides: dict[str, str] | None = None)
     return UNIT_DIRECTIONS[unit]
 
 
+def validate_tolerance(tolerance_percent: float) -> float:
+    """Return ``tolerance_percent`` after checking it is a finite, non-negative percentage."""
+    if not math.isfinite(tolerance_percent):
+        raise ComparisonError(f"tolerance must be a finite percentage, not {tolerance_percent}")
+    if tolerance_percent < 0:
+        raise ComparisonError("tolerance must not be negative")
+    return tolerance_percent
+
+
 def classify(delta: float, delta_percent: float | None, direction: str | None, tolerance_percent: float) -> str:
     """Return the outcome for one numeric delta."""
     if delta == 0:
@@ -458,6 +467,7 @@ def compare_documents(
     metrics: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Compare one candidate document against the baseline."""
+    tolerance_percent = validate_tolerance(tolerance_percent)
     statistics = tuple(statistics)
     wanted = set(metrics) if metrics is not None else None
     metrics = wanted
@@ -524,10 +534,7 @@ def compare(
     """
     if not references:
         raise ComparisonError("at least two documents are required")
-    if not math.isfinite(tolerance_percent):
-        raise ComparisonError(f"tolerance must be a finite percentage, not {tolerance_percent}")
-    if tolerance_percent < 0:
-        raise ComparisonError("tolerance must not be negative")
+    tolerance_percent = validate_tolerance(tolerance_percent)
     statistics = tuple(statistics)
     unknown = [name for name in statistics if name not in wr.STATISTICS]
     if unknown:
