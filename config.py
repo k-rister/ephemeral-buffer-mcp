@@ -15,6 +15,7 @@ DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_INDEXED_CHUNKS = 32768
 DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+FP32_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5-fp32"
 DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 DEFAULT_SOCKET_TIMEOUT_SECONDS = 10.0
@@ -125,6 +126,14 @@ def embedding_cache_dir() -> str | None:
     return os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR") or None
 
 
+def embedding_threads() -> int | None:
+    """Return the optional ONNX Runtime thread count for embedding inference.
+
+    ``None`` leaves ONNX Runtime's own default in place.
+    """
+    return optional_positive_int_env("EPHEMERAL_EMBEDDING_THREADS")
+
+
 def embedding_warmup_enabled() -> bool:
     """Return whether the embedding model is warmed in the background at startup."""
     return os.environ.get("EPHEMERAL_EMBEDDING_WARMUP", "1").strip().lower() in {
@@ -154,6 +163,21 @@ def runtime_index_budget_adjustment_enabled() -> bool:
     return os.environ.get("EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET", "0").strip().lower() in {
         "1", "true", "yes", "on"
     }
+
+
+def optional_positive_int_env(name: str) -> int | None:
+    """Return a positive integer environment setting, or ``None`` when unset or invalid."""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value)
+        if parsed < 1:
+            raise ValueError
+        return parsed
+    except ValueError:
+        print(f"Ignoring invalid {name}={value!r}; using the runtime default", file=sys.stderr)
+        return None
 
 
 def positive_int_env(name: str, default: int) -> int:

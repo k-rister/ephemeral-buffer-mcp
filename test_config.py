@@ -16,8 +16,10 @@ from config import (
     cleanup_default_execution_state_dir,
     embedding_cache_dir,
     embedding_model_name,
+    embedding_threads,
     embedding_warmup_enabled,
     execution_state_dir,
+    optional_positive_int_env,
     positive_int_env,
     runtime_index_budget_adjustment_enabled,
     semantic_prefetch_enabled,
@@ -169,6 +171,19 @@ class TestPositiveIntEnv(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(embedding_model_name(), DEFAULT_EMBEDDING_MODEL)
             self.assertIsNone(embedding_cache_dir())
+            self.assertIsNone(embedding_threads())
+
+    def test_embedding_threads_accepts_positive_integers_only(self):
+        with patch.dict(os.environ, {"EPHEMERAL_EMBEDDING_THREADS": "4"}, clear=True):
+            self.assertEqual(embedding_threads(), 4)
+        with patch.dict(os.environ, {"EPHEMERAL_EMBEDDING_THREADS": " "}, clear=True):
+            self.assertIsNone(embedding_threads())
+        for invalid in ("0", "-2", "many"):
+            with patch.dict(os.environ, {"EPHEMERAL_EMBEDDING_THREADS": invalid}, clear=True):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertIsNone(optional_positive_int_env("EPHEMERAL_EMBEDDING_THREADS"))
+                self.assertIn("Ignoring invalid EPHEMERAL_EMBEDDING_THREADS", stderr.getvalue())
 
     def test_embedding_settings_can_be_overridden(self):
         with patch.dict(
