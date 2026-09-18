@@ -13,12 +13,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 from unittest.mock import patch
 
+import workload_results as wr
 from engine import EphemeralEngine, process_rss_bytes
 import server
 
 
 SCHEMA_VERSION = 1
 CONTEXT_LINES = 2
+NO_MODEL_NOTE = "the harness does not invoke a model"
+TOKEN_PROXY_NOTE = "ceil(UTF-8 bytes / 4) proxy; no model was invoked"
+PRIVACY_NOTE = "fixtures are generated in code; no user content, captures, or prompts are recorded"
 
 
 class _IsolatedSummaryEngine(ContextDecorator):
@@ -702,6 +706,214 @@ def run_benchmark(mode: str = "both") -> Dict[str, Any]:
     }
 
 
+def _rate_status(rate: float) -> str:
+    return "success" if rate >= 1.0 else "failure" if rate <= 0.0 else "partial"
+
+
+def _scenario_runs(results: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Map per-scenario smoke records onto workload runs."""
+    runs = []
+    for record in results:
+        runs.append(wr.run(
+            f"{record['scenario']}-{record['mode']}",
+            labels={"scenario": record["scenario"], "mode": record["mode"]},
+            status="success" if record["success"] else "failure",
+            measurements={
+                "wall_time_seconds": wr.measurement("seconds", value=record["time_seconds"], samples=1),
+                "input_bytes": wr.measurement("bytes", value=record["input_bytes"]),
+                "bytes_examined": wr.measurement("bytes", value=record["bytes_examined"]),
+                "bytes_retrieved": wr.measurement("bytes", value=record["bytes_retrieved"]),
+                "searches": wr.measurement("count", value=record["searches"]),
+                "retrievals": wr.measurement("count", value=record["retrievals"]),
+                "repeated_commands": wr.measurement("count", value=record["reruns"]),
+                "estimated_tokens": wr.unavailable("tokens", NO_MODEL_NOTE),
+            },
+        ))
+    return runs
+
+
+def _smoke_result(record: Dict[str, Any]) -> Dict[str, Any]:
+    aggregate = record.get("aggregate")
+    measurements = {}
+    if aggregate:
+        measurements = {
+            "scenario_count": wr.measurement("count", value=aggregate["scenario_count"]),
+            "baseline_success_rate": wr.measurement(
+                "ratio", value=aggregate["baseline_successes"] / aggregate["scenario_count"]
+            ),
+            "mcp_success_rate": wr.measurement("ratio", value=aggregate["mcp_successes"] / aggregate["scenario_count"]),
+            "bytes_examined_reduction": wr.measurement("ratio", value=aggregate["mean_bytes_reduction"]),
+        }
+    return wr.build_result(
+        workload="mcp-effectiveness-smoke",
+        kind="evaluation",
+        producer="benchmark_effectiveness.py",
+        producer_schema_version=record["schema_version"],
+        parameters={"mode": record["mode"], "scoring": record["scoring"]},
+        measurements=measurements,
+        runs=_scenario_runs(record["results"]),
+        details=record,
+        privacy=PRIVACY_NOTE,
+    )
+
+
+def _ab_result(record: Dict[str, Any]) -> Dict[str, Any]:
+    runs = []
+    for comparison in record["comparisons"]:
+        for mode in ("baseline", "mcp"):
+            summary = comparison[mode]
+            measurements = {
+                "success_rate": wr.measurement("ratio", value=summary["success_rate"], samples=summary["runs"]),
+                "wall_time_seconds": wr.measurement(
+                    "seconds",
+                    mean=summary["mean_time_seconds"],
+                    stdev=summary["stdev_time_seconds"],
+                    min=summary["min_time_seconds"],
+                    max=summary["max_time_seconds"],
+                    samples=summary["runs"],
+                ),
+                "bytes_examined": wr.measurement("bytes", mean=summary["mean_bytes_examined"], samples=summary["runs"]),
+                "repeated_commands": wr.measurement(
+                    "count", mean=summary["mean_repeated_commands"], samples=summary["runs"]
+                ),
+                "rss_delta_bytes": wr.measurement("bytes", mean=summary["mean_rss_delta_bytes"], samples=summary["runs"]),
+                "estimated_tokens": wr.unavailable("tokens", NO_MODEL_NOTE),
+            }
+            if mode == "mcp":
+                measurements["useful_search_rate"] = wr.measurement(
+                    "ratio", value=comparison["mcp_useful_search_rate"], samples=summary["runs"]
+                )
+                measurements["bytes_examined_reduction"] = wr.measurement(
+                    "ratio", value=comparison["mean_bytes_reduction"], note="relative to the paired baseline"
+                )
+                measurements["local_overhead_ratio"] = wr.measurement(
+                    "ratio", value=comparison["local_mcp_overhead_ratio"], note="MCP time over baseline time"
+                )
+            runs.append(wr.run(
+                f"{comparison['scenario']}-{mode}",
+                labels={"scenario": comparison["scenario"], "mode": mode},
+                status=_rate_status(summary["success_rate"]),
+                measurements=measurements,
+            ))
+    return wr.build_result(
+        workload="mcp-effectiveness-paired-ab",
+        kind="evaluation",
+        producer="benchmark_effectiveness.py",
+        producer_schema_version=record["schema_version"],
+        parameters={"repetitions": record["repetitions"], "seed": record["seed"], "controls": record["controls"]},
+        runs=runs,
+        details=record,
+        privacy=PRIVACY_NOTE,
+    )
+
+
+def _consolidation_result(record: Dict[str, Any]) -> Dict[str, Any]:
+    runs = []
+    for mode, summary in record["summaries"].items():
+        runs.append(wr.run(
+            mode,
+            labels={"mode": mode},
+            status=_rate_status(summary["success_rate"]),
+            measurements={
+                "success_rate": wr.measurement("ratio", value=summary["success_rate"], samples=summary["runs"]),
+                "wall_time_seconds": wr.measurement("seconds", mean=summary["mean_time_seconds"], samples=summary["runs"]),
+                "overview_bytes": wr.measurement("bytes", mean=summary["mean_overview_bytes"], samples=summary["runs"]),
+                "retrieval_bytes": wr.measurement("bytes", mean=summary["mean_retrieval_bytes"], samples=summary["runs"]),
+                "searches": wr.measurement("count", mean=summary["mean_searches"], samples=summary["runs"]),
+                "retrievals": wr.measurement("count", mean=summary["mean_retrievals"], samples=summary["runs"]),
+                "estimated_tokens": wr.unavailable("tokens", NO_MODEL_NOTE),
+            },
+        ))
+    comparison = record["comparison"]
+    return wr.build_result(
+        workload="mcp-effectiveness-consolidation",
+        kind="evaluation",
+        producer="benchmark_effectiveness.py",
+        producer_schema_version=record["schema_version"],
+        parameters={"repetitions": record["repetitions"], "seed": record["seed"], "controls": record["controls"]},
+        measurements={
+            "overview_bytes_reduction": wr.measurement("ratio", value=comparison["overview_bytes_reduction"]),
+            "retrieval_bytes_reduction": wr.measurement("ratio", value=comparison["retrieval_bytes_reduction"]),
+            "time_ratio": wr.measurement("ratio", value=comparison["time_ratio"], note="consolidated over sequential"),
+        },
+        runs=runs,
+        details=record,
+        privacy=PRIVACY_NOTE,
+    )
+
+
+def _summary_result(record: Dict[str, Any]) -> Dict[str, Any]:
+    runs = []
+    for item in record["records"]:
+        verified = item["retrieval_verified"] and item["payload_shapes_aligned"]
+        runs.append(wr.run(
+            item["task_id"],
+            labels={"task_id": item["task_id"], "capture_status": item["status"]},
+            status="success" if verified else "failure",
+            measurements={
+                "retained_summary_bytes": wr.measurement("bytes", value=item["compact_summary_bytes"]),
+                "retained_summary_tokens": wr.measurement(
+                    "tokens", value=item["compact_token_proxy"], note=TOKEN_PROXY_NOTE
+                ),
+                "preview_summary_bytes": wr.measurement("bytes", value=item["preview_summary_bytes"]),
+                "preview_summary_tokens": wr.measurement(
+                    "tokens", value=item["preview_token_proxy"], note=TOKEN_PROXY_NOTE
+                ),
+                "legacy_prompt_bytes": wr.measurement("bytes", value=item["legacy_prompt_bytes"]),
+                "legacy_prompt_tokens": wr.measurement(
+                    "tokens", value=item["legacy_prompt_token_proxy"], note=TOKEN_PROXY_NOTE
+                ),
+                "context_bytes": wr.measurement(
+                    "bytes", value=item["summary_prompt_bytes"], note="initial agent prompt carrying the compact summary"
+                ),
+                "estimated_tokens": wr.measurement(
+                    "tokens", value=item["summary_prompt_token_proxy"], note=TOKEN_PROXY_NOTE
+                ),
+                "summary_byte_reduction": wr.measurement("ratio", value=item["byte_reduction"]),
+                "summary_token_reduction": wr.measurement("ratio", value=item["token_proxy_reduction"]),
+                "prompt_byte_reduction": wr.measurement("ratio", value=item["prompt_byte_reduction"]),
+                "prompt_token_reduction": wr.measurement("ratio", value=item["prompt_token_proxy_reduction"]),
+                "retrieval_bytes": wr.measurement("bytes", value=item["retrieval_bytes"]),
+            },
+            errors=[] if verified else ["retrieval or payload shape verification failed"],
+        ))
+    aggregate = record["aggregate"]
+    count = aggregate["task_count"]
+    return wr.build_result(
+        workload="capture-summary",
+        kind="evaluation",
+        producer="benchmark_effectiveness.py",
+        producer_schema_version=record["schema_version"],
+        parameters={"evaluation": record["evaluation"], "controls": record["controls"]},
+        measurements={
+            "task_count": wr.measurement("count", value=count),
+            "summary_byte_reduction": wr.measurement("ratio", mean=aggregate["mean_byte_reduction"], samples=count),
+            "summary_token_reduction": wr.measurement(
+                "ratio", mean=aggregate["mean_token_proxy_reduction"], samples=count
+            ),
+            "prompt_byte_reduction": wr.measurement("ratio", mean=aggregate["mean_prompt_byte_reduction"], samples=count),
+            "prompt_token_reduction": wr.measurement(
+                "ratio", mean=aggregate["mean_prompt_token_proxy_reduction"], samples=count
+            ),
+        },
+        runs=runs,
+        details=record,
+        privacy=PRIVACY_NOTE,
+    )
+
+
+def workload_result(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the tool-agnostic workload result for any effectiveness record."""
+    if record["benchmark"] == "capture-summary":
+        return _summary_result(record)
+    evaluation = record.get("evaluation")
+    if evaluation == "paired-ab":
+        return _ab_result(record)
+    if evaluation == "sequential-vs-consolidated":
+        return _consolidation_result(record)
+    return _smoke_result(record)
+
+
 def write_results(path: Path, record: Dict[str, Any]) -> None:
     """Write benchmark output as stable, machine-readable JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -719,6 +931,7 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=20260907, help="Seed for paired A/B task and mode order")
     parser.add_argument("--output", type=Path, help="Write machine-readable results to this JSON file")
+    wr.add_result_argument(parser)
     args = parser.parse_args()
     if args.summary:
         record = run_summary_benchmark()
@@ -730,7 +943,9 @@ def main() -> None:
         record = run_benchmark(args.mode)
     if args.output:
         write_results(args.output, record)
-    print(json.dumps(record, indent=2, sort_keys=True))
+    print(json.dumps(record, indent=2, sort_keys=True), file=wr.report_stream(args.result))
+    if args.result:
+        wr.write_result(workload_result(record), args.result)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,13 @@
 """Tests for the command-capture latency benchmark."""
 
+import io
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmark_latency
+import workload_results as wr
 
 
 class FakeEngine:
@@ -51,6 +54,43 @@ class TestBenchmarkLatency(unittest.TestCase):
             warm_events.index(("ensure_embeddings", "cap-1")),
             warm_events.index(("ingest", "latency-1", "benchmark line\n")),
         )
+
+
+    def test_workload_result_reports_cold_and_warm_runs_with_phases(self):
+        FakeEngine.instances = []
+        with patch.object(benchmark_latency, "EphemeralEngine", FakeEngine), patch.object(
+            benchmark_latency,
+            "run_command_bounded",
+            return_value=("benchmark line\n", 0, False, 15, False),
+        ):
+            results = benchmark_latency.run_benchmark((1, 2), samples=2)
+        result = benchmark_latency.workload_result(results)
+        self.assertEqual(result["workload"]["name"], "capture-latency")
+        self.assertEqual(result["workload"]["parameters"], {"line_counts": [1, 2], "samples": 2})
+        self.assertEqual(result["environment"]["embedding_model"], "test-model")
+        self.assertEqual([item["id"] for item in result["runs"]], ["cold-start", "lines-1", "lines-2"])
+        self.assertEqual(result["runs"][0]["labels"], {"cache_state": "cold", "line_count": 1})
+        warm = result["runs"][1]
+        self.assertEqual(warm["labels"], {"cache_state": "warm", "line_count": 1})
+        self.assertEqual(warm["measurements"]["output_bytes"], {"unit": "bytes", "value": 15})
+        self.assertEqual(warm["measurements"]["wall_time_seconds"]["samples"], 2)
+        self.assertEqual([entry["name"] for entry in warm["phases"]], list(benchmark_latency.PHASE_NAMES))
+        self.assertEqual(result["details"], results)
+
+    def test_result_flag_moves_the_report_to_stderr(self):
+        FakeEngine.instances = []
+        argv = ["benchmark_latency.py", "--line-counts", "1", "--samples", "1", "--result", "-"]
+        with patch.object(benchmark_latency, "EphemeralEngine", FakeEngine), patch.object(
+            benchmark_latency,
+            "run_command_bounded",
+            return_value=("benchmark line\n", 0, False, 15, False),
+        ), patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            benchmark_latency.main()
+        result = wr.validate_result(json.loads(stdout.getvalue()))
+        self.assertEqual(result["workload"]["name"], "capture-latency")
+        self.assertIn("cold_start=", stderr.getvalue())
 
 
 if __name__ == "__main__":

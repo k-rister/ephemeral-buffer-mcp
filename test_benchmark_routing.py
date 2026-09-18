@@ -1,9 +1,16 @@
 """Tests for direct-versus-captured routing measurements."""
 
+import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import benchmark_routing
+import workload_results as wr
 from benchmark_latency import _nearest_rank, _summary as latency_summary
-from benchmark_routing import _summary as routing_summary, run_benchmark
+from benchmark_routing import _summary as routing_summary, run_benchmark, workload_result
 
 
 class TestRoutingBenchmark(unittest.TestCase):
@@ -61,6 +68,32 @@ class TestRoutingBenchmark(unittest.TestCase):
             run_benchmark((0,), samples=1)
         with self.assertRaises(ValueError):
             run_benchmark((1,), samples=0)
+
+
+    def test_workload_result_reports_one_run_per_profile(self):
+        results = run_benchmark((2,), samples=1)
+        result = workload_result(results)
+        self.assertEqual(result["workload"]["name"], "capture-routing")
+        self.assertEqual(result["workload"]["parameters"], {"line_counts": [2], "samples": 1})
+        run = result["runs"][0]
+        self.assertEqual(run["id"], "custom-2")
+        self.assertEqual(run["labels"], {"profile": "custom", "line_count": 2})
+        self.assertEqual(
+            set(run["measurements"]),
+            {"output_bytes", "direct_seconds", "captured_seconds", "capture_overhead_seconds", "capture_overhead_ratio"},
+        )
+        self.assertEqual(run["measurements"]["capture_overhead_ratio"]["unit"], "ratio")
+        self.assertEqual(result["details"], results)
+
+    def test_result_flag_writes_a_file_next_to_the_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "routing-result.json"
+            argv = ["benchmark_routing.py", "--line-counts", "2", "--samples", "1", "--result", str(path)]
+            with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                benchmark_routing.main()
+            result = wr.load_result(path)
+        self.assertEqual(result["runs"][0]["id"], "custom-2")
+        self.assertIn("profile=custom", stdout.getvalue())
 
 
 if __name__ == "__main__":

@@ -585,6 +585,47 @@ real session, and sanitize all shared output. Never include an entire capture
 or raw query merely to make a report reproducible; provide the smallest safe
 excerpt or line range only when it is necessary.
 
+## Consuming workload results
+
+Benchmarks, evaluations, and the Codex A/B runner emit a common
+`coding-agent-workload-result` document with `--result PATH` (see the README
+section "Machine-readable workload results"). Comparison tooling, regression
+checks, and dashboards should read that document instead of producer-specific
+records:
+
+- Validate first. `python workload_results.py result.json` (or the JSON Schema
+  in `workload_result.schema.json`) rejects documents that do not match the
+  format; refuse to compare an invalid or differently versioned document
+  rather than guessing at its contents. `format_version` changes only when a
+  consumer would otherwise misread a document; new optional fields do not
+  bump it.
+- Compare like with like. Two results are comparable when `workload.name` and
+  `format_version` match; then match runs by `id` and measurements by name and
+  statistic (`median` against `median`, never `median` against `mean`).
+  Report differences in `workload.parameters` and `environment` (host,
+  CPU count, tool version, source revision) alongside any delta so the
+  reader can see whether a change is a regression or a different setup.
+- Treat `null` as missing. A statistic of `null`, a measurement with
+  `samples: 0`, or a name present in only one document means the metric was
+  unavailable; report it as incomparable instead of computing a delta. Tokens
+  are the usual example: server-side harnesses report `estimated_tokens` as
+  unavailable or as a labelled byte proxy, while agent runs report
+  provider-counted `input_tokens` and `output_tokens`.
+- Respect status. `status` is `success` only when every run succeeded;
+  `partial`, `failure`, `timeout`, and `error` runs stay in the document with
+  their `errors`. A regression check should fail on a non-success status
+  before it looks at numbers, and a comparison should show success rates
+  next to cost metrics rather than averaging over failed runs silently.
+- Use phases for attribution. `phases` is an ordered timeline in seconds;
+  compare it phase by phase to see where time moved, and use run-level
+  `wall_time_seconds` for the headline number.
+- Ignore `details` unless you are the producer. It is the native record and
+  may change shape with `workload.producer_schema_version`.
+
+Result documents contain workload parameters and host details but never
+captured content, prompts, or user data; review any wrapper or attached
+`details` block before sharing, as with every other benchmark output.
+
 ## Operational logging
 
 Runtime events are emitted as one privacy-safe JSON object per stderr line.

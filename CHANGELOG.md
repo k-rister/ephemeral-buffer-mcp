@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add a versioned, tool-agnostic workload result format
+  (`coding-agent-workload-result`, format version 1) with a reference
+  validator and JSON Schema in `workload_results.py` and
+  `workload_result.schema.json`. Every benchmark, evaluation, and the Codex
+  A/B runner accept `--result PATH` (`-` for stdout) to emit it alongside
+  their existing reports, so latency, phase timings, output volume, token
+  estimates, resource use, and success status can be compared across
+  producers without reading producer-specific records.
 - Add a semantic-index latency benchmark that reports ingestion, lazy embedding
   materialization, first and subsequent hybrid or semantic search timings,
   indexing throughput, and needle rank by capture size with the real model.

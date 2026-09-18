@@ -1,9 +1,13 @@
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from benchmark_concurrency import check_regression, load_baseline, write_results
+import benchmark_concurrency
+import workload_results as wr
+from benchmark_concurrency import build_record, check_regression, load_baseline, workload_result, write_results
 
 
 class TestBenchmarkResults(unittest.TestCase):
@@ -54,6 +58,51 @@ class TestBenchmarkResults(unittest.TestCase):
         self.assertTrue(record["passed"])
         self.assertEqual(record["baseline"], self.baseline)
         self.assertEqual(record["regressions"], [])
+
+
+    def test_workload_result_reports_throughput_and_regression_status(self):
+        results = {
+            "schema_version": 1,
+            "captures": 4,
+            "workers": 2,
+            "ingest_seconds": 0.5,
+            "ingest_per_second": 8.0,
+            "read_seconds": 0.25,
+            "reads_per_second": 16.0,
+            "buffer_stats": {},
+        }
+        passed = workload_result(build_record(results, None, []))
+        self.assertEqual(passed["workload"]["name"], "concurrency")
+        self.assertEqual(passed["status"], "success")
+        run = passed["runs"][0]
+        self.assertEqual(run["id"], "captures-4-workers-2")
+        self.assertEqual(run["measurements"]["ingest_per_second"], {"unit": "per_second", "value": 8.0, "samples": 1})
+        self.assertEqual([entry["name"] for entry in run["phases"]], ["ingest", "read"])
+        failed = workload_result(build_record(results, self.baseline, ["ingest too slow"]))
+        self.assertEqual(failed["status"], "failure")
+        self.assertEqual(failed["runs"][0]["errors"], ["ingest too slow"])
+        self.assertEqual(failed["workload"]["parameters"]["baseline"], self.baseline)
+
+    def test_result_flag_reports_regressions_and_still_exits_non_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "baseline.json"
+            baseline.write_text(
+                json.dumps({"ingest_per_second": 1e9, "reads_per_second": 1e9, "minimum_ratio": 1.0}),
+                encoding="utf-8",
+            )
+            argv = [
+                "benchmark_concurrency.py", "--captures", "2", "--workers", "2",
+                "--baseline", str(baseline), "--result", "-",
+            ]
+            with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr, self.assertRaises(SystemExit) as raised:
+                benchmark_concurrency.main()
+        self.assertEqual(raised.exception.code, 1)
+        result = wr.validate_result(json.loads(stdout.getvalue()))
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(len(result["runs"][0]["errors"]), 2)
+        self.assertIn("REGRESSION:", stderr.getvalue())
 
 
 if __name__ == "__main__":

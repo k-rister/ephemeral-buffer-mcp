@@ -1,9 +1,12 @@
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import benchmark_effectiveness
+import workload_results as wr
 from benchmark_effectiveness import (
     run_ab_evaluation,
     run_baseline,
@@ -12,6 +15,7 @@ from benchmark_effectiveness import (
     run_mcp,
     run_summary_benchmark,
     scenarios,
+    workload_result,
     write_results,
 )
 from engine import EphemeralEngine
@@ -127,6 +131,67 @@ class TestEffectivenessBenchmark(unittest.TestCase):
         finally:
             server.engine = previous_engine
             original_engine.shutdown()
+
+
+    def test_smoke_workload_result_reports_scenarios_and_aggregate(self):
+        result = workload_result(run_benchmark())
+        self.assertEqual(result["workload"]["name"], "mcp-effectiveness-smoke")
+        self.assertEqual(result["workload"]["kind"], "evaluation")
+        self.assertEqual(len(result["runs"]), 2 * len(scenarios()))
+        self.assertEqual(result["runs"][0]["id"], "large-build-baseline")
+        self.assertEqual(result["runs"][0]["measurements"]["estimated_tokens"]["value"], None)
+        self.assertEqual(result["measurements"]["mcp_success_rate"]["value"], 1.0)
+        self.assertGreater(result["measurements"]["bytes_examined_reduction"]["value"], 0)
+        baseline_only = workload_result(run_benchmark("baseline"))
+        self.assertEqual(baseline_only["measurements"], {})
+        self.assertEqual(len(baseline_only["runs"]), len(scenarios()))
+
+    def test_paired_ab_workload_result_reports_both_modes_per_scenario(self):
+        result = workload_result(run_ab_evaluation(repetitions=2, seed=5))
+        self.assertEqual(result["workload"]["name"], "mcp-effectiveness-paired-ab")
+        self.assertEqual(result["workload"]["parameters"]["seed"], 5)
+        self.assertEqual(len(result["runs"]), 2 * len(scenarios()))
+        mcp = next(item for item in result["runs"] if item["labels"]["mode"] == "mcp")
+        self.assertEqual(mcp["measurements"]["wall_time_seconds"]["samples"], 2)
+        self.assertIn("bytes_examined_reduction", mcp["measurements"])
+        self.assertIn("local_overhead_ratio", mcp["measurements"])
+        baseline = next(item for item in result["runs"] if item["labels"]["mode"] == "baseline")
+        self.assertNotIn("bytes_examined_reduction", baseline["measurements"])
+        self.assertEqual(benchmark_effectiveness._rate_status(0.5), "partial")
+        self.assertEqual(benchmark_effectiveness._rate_status(0.0), "failure")
+
+    def test_consolidation_workload_result_reports_reductions(self):
+        result = workload_result(run_consolidation_benchmark(repetitions=2, seed=5))
+        self.assertEqual(result["workload"]["name"], "mcp-effectiveness-consolidation")
+        self.assertEqual([item["id"] for item in result["runs"]], ["sequential", "consolidated"])
+        self.assertEqual(set(result["measurements"]), {"overview_bytes_reduction", "retrieval_bytes_reduction", "time_ratio"})
+        self.assertEqual(result["runs"][0]["measurements"]["success_rate"]["value"], 1.0)
+
+    def test_summary_workload_result_reports_token_proxies_and_verification(self):
+        record = run_summary_benchmark()
+        result = workload_result(record)
+        self.assertEqual(result["workload"]["name"], "capture-summary")
+        self.assertEqual(result["status"], "success")
+        run = result["runs"][0]
+        self.assertEqual(run["labels"]["task_id"], record["records"][0]["task_id"])
+        self.assertEqual(run["measurements"]["retained_summary_tokens"]["value"], record["records"][0]["compact_token_proxy"])
+        self.assertEqual(run["measurements"]["estimated_tokens"]["note"], benchmark_effectiveness.TOKEN_PROXY_NOTE)
+        self.assertEqual(result["measurements"]["task_count"]["value"], len(record["records"]))
+        record["records"][0]["retrieval_verified"] = False
+        failed = workload_result(record)
+        self.assertEqual(failed["status"], "partial")
+        self.assertEqual(failed["runs"][0]["status"], "failure")
+        self.assertTrue(failed["runs"][0]["errors"])
+
+    def test_result_flag_emits_json_on_stdout(self):
+        argv = ["benchmark_effectiveness.py", "--mode", "baseline", "--result", "-"]
+        with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            benchmark_effectiveness.main()
+        result = wr.validate_result(json.loads(stdout.getvalue()))
+        self.assertEqual(result["workload"]["parameters"]["mode"], "baseline")
+        self.assertEqual(json.loads(stderr.getvalue())["mode"], "baseline")
 
 
 if __name__ == "__main__":

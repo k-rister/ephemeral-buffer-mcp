@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
 from engine import EphemeralEngine
 
 
@@ -71,25 +72,55 @@ def run_benchmark(line_count: int, samples: int) -> dict[str, Any]:
     }
 
 
+def workload_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for a benchmark record."""
+    runs = []
+    for mode, summary in result["summaries"].items():
+        prefetch = mode == "true"
+        runs.append(wr.run(
+            "prefetch-on" if prefetch else "prefetch-off",
+            labels={"mode": "prefetch" if prefetch else "lazy", "prefetch": prefetch, "line_count": result["line_count"]},
+            phases=[
+                wr.phase("ingest", median=summary["ingest_seconds"], samples=result["samples"]),
+                wr.phase("first_search", median=summary["first_search_seconds"], samples=result["samples"]),
+                wr.phase("subsequent_search", median=summary["second_search_seconds"], samples=result["samples"]),
+            ],
+        ))
+    return wr.build_result(
+        workload="semantic-prefetch",
+        kind="benchmark",
+        producer="benchmark_prefetch.py",
+        producer_schema_version=result["schema_version"],
+        parameters={"line_count": result["line_count"], "samples": result["samples"]},
+        runs=runs,
+        details=result,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--line-count", type=int, default=256)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--output", type=Path)
+    wr.add_result_argument(parser)
     args = parser.parse_args()
     try:
         result = run_benchmark(args.line_count, args.samples)
     except ValueError as exc:
         parser.error(str(exc))
+    report = wr.report_stream(args.result)
     for mode, summary in result["summaries"].items():
         print(
             f"prefetch={mode} ingest_median={summary['ingest_seconds']:.6f}s "
             f"first_search_median={summary['first_search_seconds']:.6f}s "
-            f"second_search_median={summary['second_search_seconds']:.6f}s"
+            f"second_search_median={summary['second_search_seconds']:.6f}s",
+            file=report,
         )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.result:
+        wr.write_result(workload_result(result), args.result)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+import workload_results as wr
 from engine import EphemeralEngine
 
 
@@ -318,6 +319,92 @@ def run_benchmark(
     }
 
 
+def _json_safe(value: Any) -> Any:
+    """Replace non-finite floats (an unbounded wait budget) so strict JSON accepts them."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "unbounded"
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
+
+
+def workload_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for a benchmark record."""
+    runs = [
+        wr.run(
+            "model-load",
+            labels={"cache_state": "cold"},
+            measurements={
+                "wall_time_seconds": wr.measurement(
+                    "seconds",
+                    value=result["model_load_seconds"],
+                    samples=1,
+                    note="embedding model load plus one tiny capture",
+                ),
+            },
+        )
+    ]
+    for measurement in result["measurements"]:
+        samples = measurement["samples"]
+        runs.append(wr.run(
+            f"lines-{measurement['line_count']}",
+            labels={"line_count": measurement["line_count"], "mode": result["mode"], "cache_state": "warm"},
+            measurements={
+                "output_bytes": wr.measurement("bytes", value=measurement["output_bytes"]),
+                "chunk_count": wr.measurement("count", value=measurement["chunk_count"]),
+                "semantic_chunk_count": wr.measurement("count", value=measurement["semantic_chunk_count"]),
+                "throughput_per_second": wr.measurement(
+                    "per_second",
+                    median=measurement["semantic_chunks_per_second_median"],
+                    samples=samples,
+                    note="semantic chunks embedded per second",
+                ),
+                "first_search_pending_rate": wr.measurement(
+                    "ratio", value=measurement["first_search_pending_rate"], samples=samples
+                ),
+                "first_search_needle_hit_at_1": wr.measurement(
+                    "score", value=measurement["first_search_needle_hit_at_1"], samples=samples
+                ),
+                "first_search_needle_mrr": wr.measurement(
+                    "score", value=measurement["first_search_needle_mrr"], samples=samples
+                ),
+                "needle_hit_at_1": wr.measurement("score", value=measurement["needle_hit_at_1"], samples=samples),
+                "needle_mrr": wr.measurement("score", value=measurement["needle_mrr"], samples=samples),
+            },
+            phases=[
+                wr.phase(
+                    field.removesuffix("_seconds"),
+                    median=measurement[f"{field}_median"],
+                    p95=measurement[f"{field}_p95"],
+                    samples=samples,
+                )
+                for field in PHASES
+            ],
+        ))
+    return wr.build_result(
+        workload="semantic-index",
+        kind="benchmark",
+        producer="benchmark_semantic_index.py",
+        producer_schema_version=result["schema_version"],
+        fixture_version=result["fixture_version"],
+        parameters=_json_safe({
+            "line_counts": [measurement["line_count"] for measurement in result["measurements"]],
+            "samples": result["samples"],
+            "mode": result["mode"],
+            "semantic_wait_seconds": result["semantic_wait_seconds"],
+            "semantic_chunking": result["semantic_chunking"],
+            "engine_options": result["engine_options"],
+            "test_embeddings": result["test_embeddings"],
+        }),
+        environment=wr.environment(
+            embedding_model=result["embedding_model"],
+            embedding_threads=result["embedding_threads"],
+        ),
+        runs=runs,
+        details=_json_safe(result),
+    )
+
+
 def format_measurement(measurement: dict[str, Any]) -> str:
     """Return one human-readable summary line for a capture size."""
     throughput = measurement["semantic_chunks_per_second_median"]
@@ -370,6 +457,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("--output", type=Path, help="Optional JSON output path")
+    wr.add_result_argument(parser)
     args = parser.parse_args()
 
     engine_options = {}
@@ -393,18 +481,22 @@ def main() -> None:
         parser.error(str(exc))
 
     chunking = result["semantic_chunking"]
+    report = wr.report_stream(args.result)
     print(
         f"model={result['embedding_model']} threads={result['embedding_threads']} "
         f"semantic_chunking=lines:{chunking['lines']}/bytes:{chunking['bytes']}/overlap:{chunking['overlap']} "
         f"test_embeddings={result['test_embeddings']} "
         f"mode={result['mode']} semantic_wait={result['semantic_wait_seconds']:g}s "
-        f"model_load={result['model_load_seconds']:.3f}s"
+        f"model_load={result['model_load_seconds']:.3f}s",
+        file=report,
     )
     for measurement in result["measurements"]:
-        print(format_measurement(measurement))
+        print(format_measurement(measurement), file=report)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.result:
+        wr.write_result(workload_result(result), args.result)
 
 
 if __name__ == "__main__":

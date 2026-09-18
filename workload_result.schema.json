@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/k-rister/ephemeral-buffer-mcp/workload_result.schema.json",
+  "title": "Coding-agent workload result",
+  "description": "Versioned, tool-agnostic measurements of one benchmark, evaluation, or agent run. See workload_results.py for the reference validator.",
+  "type": "object",
+  "required": ["format", "format_version", "workload", "environment", "status", "errors", "measurements", "runs"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {"const": "coding-agent-workload-result"},
+    "format_version": {"const": 1},
+    "workload": {
+      "type": "object",
+      "required": ["name", "kind", "producer", "parameters"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "description": "Stable workload identifier shared by every run of the same measurement"},
+        "kind": {"enum": ["benchmark", "evaluation", "agent-run"]},
+        "producer": {"type": "string", "minLength": 1, "description": "Command or module that produced the result"},
+        "parameters": {"type": "object", "description": "Everything needed to reproduce the run: sizes, seeds, modes, option overrides"},
+        "producer_schema_version": {"type": "integer", "minimum": 0, "description": "Version of the producer's own record embedded in details"},
+        "fixture_version": {"type": "integer", "minimum": 0},
+        "description": {"type": "string", "minLength": 1},
+        "privacy": {"type": "string", "minLength": 1, "description": "What the result deliberately excludes"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["python_version", "platform", "recorded_at"],
+      "properties": {
+        "python_version": {"type": "string", "minLength": 1},
+        "platform": {"type": "string", "minLength": 1},
+        "machine": {"type": ["string", "null"]},
+        "cpu_count": {"type": ["integer", "null"]},
+        "recorded_at": {"type": "string", "minLength": 1, "description": "UTC ISO 8601 timestamp"},
+        "tool": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "version": {"type": ["string", "null"]}
+          }
+        },
+        "source_revision": {"type": ["string", "null"], "description": "Version-control revision of the producer, when known"}
+      }
+    },
+    "status": {"$ref": "#/$defs/status"},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "measurements": {"$ref": "#/$defs/measurements", "description": "Workload-wide measurements that do not belong to one run"},
+    "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}},
+    "details": {"type": "object", "description": "The producer's native record, kept for humans and producer-specific tooling"}
+  },
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "status": {"enum": ["success", "failure", "timeout", "error", "partial"]},
+    "statistic": {"type": ["number", "null"], "description": "null means unavailable, never zero"},
+    "measurement": {
+      "type": "object",
+      "required": ["unit"],
+      "additionalProperties": false,
+      "anyOf": [
+        {"required": ["value"]},
+        {"required": ["sum"]},
+        {"required": ["mean"]},
+        {"required": ["median"]},
+        {"required": ["min"]},
+        {"required": ["max"]},
+        {"required": ["p95"]},
+        {"required": ["stdev"]}
+      ],
+      "properties": {
+        "unit": {"enum": ["seconds", "bytes", "count", "tokens", "ratio", "per_second", "score"]},
+        "value": {"$ref": "#/$defs/statistic"},
+        "sum": {"$ref": "#/$defs/statistic"},
+        "mean": {"$ref": "#/$defs/statistic"},
+        "median": {"$ref": "#/$defs/statistic"},
+        "min": {"$ref": "#/$defs/statistic"},
+        "max": {"$ref": "#/$defs/statistic"},
+        "p95": {"$ref": "#/$defs/statistic", "description": "Nearest-rank 95th percentile"},
+        "stdev": {"$ref": "#/$defs/statistic"},
+        "samples": {"type": "integer", "minimum": 0},
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/measurement"}
+    },
+    "phase": {
+      "type": "object",
+      "required": ["name", "unit"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "unit": {"const": "seconds"}
+      },
+      "allOf": [{"$ref": "#/$defs/measurement_fields"}]
+    },
+    "measurement_fields": {
+      "type": "object",
+      "anyOf": [
+        {"required": ["value"]},
+        {"required": ["sum"]},
+        {"required": ["mean"]},
+        {"required": ["median"]},
+        {"required": ["min"]},
+        {"required": ["max"]},
+        {"required": ["p95"]},
+        {"required": ["stdev"]}
+      ],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "unit": {"enum": ["seconds", "bytes", "count", "tokens", "ratio", "per_second", "score"]},
+        "value": {"$ref": "#/$defs/statistic"},
+        "sum": {"$ref": "#/$defs/statistic"},
+        "mean": {"$ref": "#/$defs/statistic"},
+        "median": {"$ref": "#/$defs/statistic"},
+        "min": {"$ref": "#/$defs/statistic"},
+        "max": {"$ref": "#/$defs/statistic"},
+        "p95": {"$ref": "#/$defs/statistic"},
+        "stdev": {"$ref": "#/$defs/statistic"},
+        "samples": {"type": "integer", "minimum": 0},
+        "note": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "run": {
+      "type": "object",
+      "required": ["id", "labels", "status", "measurements", "phases", "errors"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "description": "Unique within the result; consumers match runs across results by id"},
+        "labels": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {"type": ["string", "number", "boolean", "null"]}
+        },
+        "status": {"$ref": "#/$defs/status"},
+        "measurements": {"$ref": "#/$defs/measurements"},
+        "phases": {"type": "array", "items": {"$ref": "#/$defs/phase"}, "description": "Ordered timeline of timed phases"},
+        "errors": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

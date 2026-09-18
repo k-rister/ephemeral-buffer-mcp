@@ -20,6 +20,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
 from config import DEFAULT_EMBEDDING_MODEL
 from benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
@@ -27,6 +28,7 @@ from benchmark_agent_ab import (
     RECORDS_SCHEMA_VERSION,
     TASKS,
     _read_json,
+    records_workload_result,
     validate_records,
 )
 
@@ -590,6 +592,7 @@ def main() -> None:
         help="Optional directory for content-free MCP lifecycle logs",
     )
     parser.add_argument("--dry-run", action="store_true")
+    wr.add_result_argument(parser)
     args = parser.parse_args()
     if args.timeout < 1:
         parser.error("--timeout must be positive")
@@ -600,7 +603,9 @@ def main() -> None:
         return
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"runs": len(payload["runs"]), "output": str(args.output)}))
+    print(json.dumps({"runs": len(payload["runs"]), "output": str(args.output)}), file=wr.report_stream(args.result))
+    if args.result:
+        wr.write_result(records_workload_result(payload, producer="run_codex_agent_ab.py"), args.result)
 
 
 if __name__ == "__main__":

@@ -1171,3 +1171,84 @@ evaluation name, success rate, useful-search rate, byte reduction, and timing
 scope. Do not attach generated captures or paste raw command output. Check any
 surrounding report or wrapper for repository-specific content before sharing
 the benchmark JSON.
+
+### Machine-readable workload results
+
+Every benchmark, evaluation, and the Codex A/B runner can emit one common,
+versioned JSON document in addition to its own report and `--output` record.
+Pass `--result PATH` to write it to a file, or `--result -` to print it on
+stdout; the human-readable report then moves to stderr so stdout stays valid
+JSON:
+
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
+  --samples 3 --result benchmark-latency.result.json
+.venv/bin/python benchmark_semantic_index.py --samples 3 --result - > semantic-index.result.json
+.venv/bin/python workload_results.py benchmark-latency.result.json semantic-index.result.json
+```
+
+The document is a `coding-agent-workload-result` (format version 1). It is
+tool- and task-agnostic: it records *what* was measured, never how, so a
+consumer does not need to know about embeddings, BM25, or any other producer
+mechanism. The reference validator is `workload_results.py` (also usable as a
+CLI, as above) and the same contract is published as JSON Schema in
+`workload_result.schema.json`.
+
+```json
+{
+  "format": "coding-agent-workload-result",
+  "format_version": 1,
+  "workload": {"name": "capture-latency", "kind": "benchmark",
+               "producer": "benchmark_latency.py",
+               "parameters": {"line_counts": [16, 256, 2048], "samples": 3}},
+  "environment": {"python_version": "3.12.14", "platform": "...",
+                  "cpu_count": 8, "recorded_at": "2026-09-18T15:00:00+00:00",
+                  "tool": {"name": "ephemeral-buffer-mcp", "version": "0.4.0"},
+                  "source_revision": "..."},
+  "status": "success",
+  "errors": [],
+  "measurements": {},
+  "runs": [
+    {"id": "lines-256",
+     "labels": {"cache_state": "warm", "line_count": 256},
+     "status": "success",
+     "measurements": {
+       "output_bytes": {"unit": "bytes", "value": 3840},
+       "wall_time_seconds": {"unit": "seconds", "median": 0.012, "p95": 0.015, "samples": 3}},
+     "phases": [
+       {"name": "command", "unit": "seconds", "median": 0.004, "p95": 0.005, "samples": 3},
+       {"name": "ingest", "unit": "seconds", "median": 0.006, "p95": 0.008, "samples": 3}],
+     "errors": []}
+  ],
+  "details": {"...": "the producer's own record, for humans"}
+}
+```
+
+- `workload.name` identifies the measurement and `workload.parameters` holds
+  everything needed to repeat it (sizes, seeds, modes, option overrides);
+  `environment` explains why two results may legitimately differ.
+- Each **run** is one comparable unit of work with a stable `id`, descriptive
+  `labels` (`cache_state`, `mode`, `task_id`, `repetition`, `line_count`,
+  `profile`, ...), a `status` of `success`, `failure`, `timeout`, `error`, or
+  `partial`, and its own `errors`. Failed, timed-out, and partial runs are kept
+  with their status rather than dropped.
+- A **measurement** has a `unit` (`seconds`, `bytes`, `count`, `tokens`,
+  `ratio`, `per_second`, or `score`) and one or more statistics (`value`,
+  `sum`, `mean`, `median`, `min`, `max`, `p95`, `stdev`), optionally with the
+  number of `samples` and a `note` explaining a proxy. `null` means the
+  statistic is unavailable, never zero. `phases` is an ordered timeline of
+  `seconds` measurements.
+- Canonical names such as `wall_time_seconds`, `queue_wait_seconds`,
+  `tool_calls`, `output_bytes`, `context_bytes`, `estimated_tokens`,
+  `retained_summary_tokens`, `input_tokens`, `output_tokens`,
+  `peak_rss_bytes`, `rss_delta_bytes`, `success_rate`, and
+  `throughput_per_second` pin their unit so results from different producers
+  line up; producers add their own names beside them.
+- `details` carries the producer's native record for people who need it; its
+  shape is producer-specific and versioned separately by
+  `workload.producer_schema_version`.
+
+`OPERATIONS.md` describes how comparison tooling and regression checks should
+consume these documents. The shared format is not a privacy exemption: apply
+the same review to a result file as to any other benchmark output before
+sharing it.

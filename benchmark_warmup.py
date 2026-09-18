@@ -11,10 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
 from engine import EphemeralEngine, process_rss_bytes
 
 
 SCHEMA_VERSION = 1
+TIMING_FIELDS = ("engine_init_seconds", "startup_ready_seconds", "embedding_ready_seconds", "first_search_seconds")
 
 
 def _measure_in_process(warmup: bool) -> dict[str, Any]:
@@ -114,10 +116,39 @@ def run_benchmark(samples: int) -> dict[str, Any]:
     }
 
 
+def workload_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for a benchmark record."""
+    runs = []
+    for mode, summary in result["summaries"].items():
+        warmup = mode == "true"
+        measurements = {
+            field: wr.measurement("seconds", median=summary[field], samples=result["samples"])
+            for field in TIMING_FIELDS
+        }
+        measurements["rss_delta_bytes"] = wr.measurement(
+            "bytes", median=summary["rss_delta_bytes"], samples=result["samples"]
+        )
+        runs.append(wr.run(
+            "warmup-on" if warmup else "warmup-off",
+            labels={"mode": "warmup" if warmup else "lazy", "warmup": warmup, "cache_state": "cold"},
+            measurements=measurements,
+        ))
+    return wr.build_result(
+        workload="embedding-warmup",
+        kind="benchmark",
+        producer="benchmark_warmup.py",
+        producer_schema_version=result["schema_version"],
+        parameters={"samples": result["samples"]},
+        runs=runs,
+        details=result,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--output", type=Path)
+    wr.add_result_argument(parser)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--warmup", choices=("true", "false"), help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -128,16 +159,20 @@ def main() -> None:
         result = run_benchmark(args.samples)
     except ValueError as exc:
         parser.error(str(exc))
+    report = wr.report_stream(args.result)
     for mode, summary in result["summaries"].items():
         print(
             f"warmup={mode} startup_ready_median={summary['startup_ready_seconds']:.6f}s "
             f"embedding_ready_median={summary['embedding_ready_seconds']:.6f}s "
             f"first_search_median={summary['first_search_seconds']:.6f}s "
-            f"rss_delta_median={summary['rss_delta_bytes']}"
+            f"rss_delta_median={summary['rss_delta_bytes']}",
+            file=report,
         )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.result:
+        wr.write_result(workload_result(result), args.result)
 
 
 if __name__ == "__main__":
