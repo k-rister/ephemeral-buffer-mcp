@@ -8,6 +8,8 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
+
 
 SCHEMA_VERSION = 1
 RECORDS_SCHEMA_VERSION = 5
@@ -73,6 +75,26 @@ PROTOCOL_FIELDS = (
     "embedding_cache",
 )
 LEGACY_PROTOCOL_FIELDS = PROTOCOL_FIELDS[:5]
+CONTEXT_PROXY_NOTE = "prompt plus event envelope bytes; the agent CLI does not expose context size"
+# Record and summary field -> (workload measurement name, unit).
+RECORD_MEASUREMENTS = {
+    "duration_seconds": ("wall_time_seconds", "seconds"),
+    "tool_calls": ("tool_calls", "count"),
+    "mcp_tool_calls": ("mcp_tool_calls", "count"),
+    "repeated_commands": ("repeated_commands", "count"),
+    "context_bytes_proxy": ("context_bytes", "bytes"),
+    "prompt_bytes_proxy": ("prompt_bytes", "bytes"),
+    "output_bytes_proxy": ("output_bytes", "bytes"),
+    "peak_rss_bytes": ("peak_rss_bytes", "bytes"),
+    "input_tokens": ("input_tokens", "tokens"),
+    "output_tokens": ("output_tokens", "tokens"),
+    **{field: (field, "bytes") for field in DATA_PATH_BYTE_FIELDS},
+}
+PAIRED_MEASUREMENTS = {
+    "completed": ("success_rate", "ratio"),
+    "signal_retrieved": ("signal_retrieval_rate", "ratio"),
+    **RECORD_MEASUREMENTS,
+}
 
 
 def build_schedule(repetitions: int = 5, seed: int = 20260909) -> dict[str, Any]:
@@ -392,6 +414,114 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     }
 
 
+def _stats_measurement(stats: dict[str, Any], unit: str, note: str | None = None) -> dict[str, Any]:
+    """Map an aggregate ``_stats`` block onto a workload measurement."""
+    if stats.get("available") is False or not stats.get("count"):
+        return wr.unavailable(unit, note)
+    return wr.measurement(unit, mean=stats["mean"], stdev=stats["stdev"], samples=stats["count"], note=note)
+
+
+def _rate_status(rate: float) -> str:
+    return "success" if rate >= 1.0 else "failure" if rate <= 0.0 else "partial"
+
+
+def summary_workload_result(summary: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for an aggregate A/B summary."""
+    runs = []
+    for mode, block in summary["mode_summaries"].items():
+        count = block["runs"]
+        measurements = {
+            "success_rate": wr.measurement("ratio", value=block["completion_rate"], samples=count),
+            "signal_retrieval_rate": wr.measurement("ratio", value=block["signal_retrieval_rate"], samples=count),
+        }
+        for field, (name, unit) in RECORD_MEASUREMENTS.items():
+            stats = block["data_path_bytes"].get(field) if field in DATA_PATH_BYTE_FIELDS else block.get(field)
+            if stats is None:
+                continue
+            note = CONTEXT_PROXY_NOTE if field == "context_bytes_proxy" else None
+            measurements[name] = _stats_measurement(stats, unit, note)
+        runs.append(wr.run(
+            mode,
+            labels={"mode": mode},
+            status=_rate_status(block["completion_rate"]),
+            measurements=measurements,
+            errors=[f"{reason}: {total}" for reason, total in block["failure_reasons"].items()],
+        ))
+    paired = {}
+    for metric, stats in summary["paired_deltas_mcp_minus_control"].items():
+        name, unit = PAIRED_MEASUREMENTS[metric]
+        paired[name] = _stats_measurement(stats, unit, "mcp minus control, paired by task and repetition")
+    runs.append(wr.run("paired-delta", labels={"comparison": "mcp_minus_control"}, measurements=paired))
+    return wr.build_result(
+        workload="agent-ab",
+        kind="evaluation",
+        producer="benchmark_agent_ab.py",
+        producer_schema_version=summary["records_schema_version"],
+        fixture_version=summary["task_fixture_version"],
+        parameters={
+            "seed": summary["seed"],
+            "repetitions": summary["repetitions"],
+            "protocol": summary["protocol"],
+        },
+        runs=runs,
+        details=summary,
+        privacy=summary["privacy"],
+    )
+
+
+def records_workload_result(
+    payload: dict[str, Any], schedule: dict[str, Any] | None = None, producer: str = "benchmark_agent_ab.py"
+) -> dict[str, Any]:
+    """Return one workload run per agent execution in a records envelope."""
+    schedule = schedule if schedule is not None else payload["schedule"]
+    runs = []
+    for record in validate_records(payload, schedule):
+        failure_reason = record.get("failure_reason")
+        if record["completed"]:
+            status = "success"
+        elif failure_reason == "timeout":
+            status = "timeout"
+        else:
+            status = "failure"
+        measurements = {
+            "signal_retrieval_rate": wr.measurement("ratio", value=1.0 if record["signal_retrieved"] else 0.0, samples=1),
+            "context_bytes": wr.measurement(
+                "bytes", value=_metric_value(record, "context_bytes_proxy"), samples=1, note=CONTEXT_PROXY_NOTE
+            ),
+        }
+        for field, (name, unit) in RECORD_MEASUREMENTS.items():
+            if field == "context_bytes_proxy" or field not in record:
+                continue
+            value = record[field]
+            if field == "peak_rss_bytes" and (value is None or value <= 0):
+                measurements[name] = wr.unavailable(unit, "zero peak RSS means the adapter could not measure it")
+            elif value is None:
+                measurements[name] = wr.unavailable(unit)
+            else:
+                measurements[name] = wr.measurement(unit, value=value, samples=1)
+        runs.append(wr.run(
+            f"{record['task_id']}-r{record['repetition']}-{record['mode']}",
+            labels={"task_id": record["task_id"], "repetition": record["repetition"], "mode": record["mode"]},
+            status=status,
+            measurements=measurements,
+            errors=[failure_reason] if failure_reason else [],
+        ))
+    return wr.build_result(
+        workload="agent-ab",
+        kind="agent-run",
+        producer=producer,
+        producer_schema_version=payload.get("records_schema_version", 1),
+        fixture_version=schedule["task_fixture_version"],
+        parameters={
+            "seed": schedule["seed"],
+            "repetitions": schedule["repetitions"],
+            "protocol": payload["protocol"],
+        },
+        runs=runs,
+        privacy=payload.get("privacy", "records contain metadata only"),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schedule-output", type=Path, help="Write a deterministic run schedule")
@@ -400,9 +530,12 @@ def main() -> None:
     parser.add_argument("--records", type=Path, help="Analyze an external metadata-only records envelope")
     parser.add_argument("--schedule", type=Path, help="Schedule JSON when it is not embedded in records")
     parser.add_argument("--output", type=Path, help="Write an aggregate summary JSON")
+    wr.add_result_argument(parser)
     args = parser.parse_args()
     if bool(args.schedule_output) == bool(args.records):
         parser.error("provide exactly one of --schedule-output or --records")
+    if args.schedule_output and args.result:
+        parser.error("--result requires --records")
     if args.schedule_output:
         schedule = build_schedule(args.repetitions, args.seed)
         args.schedule_output.parent.mkdir(parents=True, exist_ok=True)
@@ -418,7 +551,9 @@ def main() -> None:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(json.dumps(summary, indent=2, sort_keys=True), file=wr.report_stream(args.result))
+    if args.result:
+        wr.write_result(summary_workload_result(summary), args.result)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import workload_results as wr
 from config import DEFAULT_MAX_CAPTURES
 from engine import EphemeralEngine
 
@@ -81,14 +82,54 @@ def check_regression(results: dict, baseline: dict) -> list[str]:
     return failures
 
 
-def write_results(path: Path, results: dict, baseline: dict | None, failures: list[str]) -> None:
-    """Write a stable JSON record suitable for workflow artifacts."""
+def build_record(results: dict, baseline: dict | None, failures: list[str]) -> dict:
+    """Return the stable JSON record combining measurements and regression status."""
     record = dict(results)
     record["baseline"] = baseline
-    record["regressions"] = failures
+    record["regressions"] = list(failures)
     record["passed"] = not failures
+    return record
+
+
+def write_results(path: Path, results: dict, baseline: dict | None, failures: list[str]) -> None:
+    """Write a stable JSON record suitable for workflow artifacts."""
+    record = build_record(results, baseline, failures)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def workload_result(record: dict) -> dict:
+    """Return the tool-agnostic workload result for a benchmark record."""
+    regressions = list(record.get("regressions", []))
+    run_item = wr.run(
+        f"captures-{record['captures']}-workers-{record['workers']}",
+        labels={"captures": record["captures"], "workers": record["workers"]},
+        status="failure" if regressions else "success",
+        measurements={
+            "ingest_seconds": wr.measurement("seconds", value=record["ingest_seconds"], samples=1),
+            "ingest_per_second": wr.measurement("per_second", value=record["ingest_per_second"], samples=1),
+            "read_seconds": wr.measurement("seconds", value=record["read_seconds"], samples=1),
+            "reads_per_second": wr.measurement("per_second", value=record["reads_per_second"], samples=1),
+        },
+        phases=[
+            wr.phase("ingest", value=record["ingest_seconds"], samples=1),
+            wr.phase("read", value=record["read_seconds"], samples=1),
+        ],
+        errors=regressions,
+    )
+    return wr.build_result(
+        workload="concurrency",
+        kind="benchmark",
+        producer="benchmark_concurrency.py",
+        producer_schema_version=record["schema_version"],
+        parameters={
+            "captures": record["captures"],
+            "workers": record["workers"],
+            "baseline": record.get("baseline"),
+        },
+        runs=[run_item],
+        details=record,
+    )
 
 
 def main() -> None:
@@ -117,6 +158,7 @@ def main() -> None:
         type=Path,
         help="Write machine-readable benchmark results to this JSON file",
     )
+    wr.add_result_argument(parser)
     args = parser.parse_args()
     if args.captures < 1 or args.workers < 1:
         parser.error("--captures and --workers must be positive")
@@ -129,10 +171,14 @@ def main() -> None:
         parser.error(str(exc))
 
     results = run_benchmark(args.captures, args.workers)
-    print(f"captures={results['captures']} workers={results['workers']}")
-    print(f"ingest_seconds={results['ingest_seconds']:.3f} ingest_per_second={results['ingest_per_second']:.2f}")
-    print(f"read_seconds={results['read_seconds']:.3f} reads_per_second={results['reads_per_second']:.2f}")
-    print(f"buffer_stats={results['buffer_stats']}")
+    report = wr.report_stream(args.result)
+    print(f"captures={results['captures']} workers={results['workers']}", file=report)
+    print(
+        f"ingest_seconds={results['ingest_seconds']:.3f} ingest_per_second={results['ingest_per_second']:.2f}",
+        file=report,
+    )
+    print(f"read_seconds={results['read_seconds']:.3f} reads_per_second={results['reads_per_second']:.2f}", file=report)
+    print(f"buffer_stats={results['buffer_stats']}", file=report)
 
     failures = check_regression(results, baseline) if baseline else []
     if args.min_ingest_per_second and results["ingest_per_second"] < args.min_ingest_per_second:
@@ -147,8 +193,10 @@ def main() -> None:
         )
     if args.output:
         write_results(args.output, results, baseline, failures)
+    if args.result:
+        wr.write_result(workload_result(build_record(results, baseline, failures)), args.result)
     for failure in failures:
-        print(f"REGRESSION: {failure}")
+        print(f"REGRESSION: {failure}", file=report)
     if failures:
         raise SystemExit(1)
 

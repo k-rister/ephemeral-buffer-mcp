@@ -36,9 +36,9 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m coverage run \
   test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_warmup.py test_benchmark_relevance.py \
   test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
   test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py \
-  test_run_codex_agent_ab.py test_release_checks.py test_engine.py \
-  test_capture_utils.py test_config.py test_cli.py test_server.py test_metrics.py \
-  test_logging_utils.py
+  test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py \
+  test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py \
+  test_metrics.py test_logging_utils.py
 .venv/bin/python -m coverage report --fail-under=100
 .venv/bin/python -m unittest test_e2e_pipe.py
 ```

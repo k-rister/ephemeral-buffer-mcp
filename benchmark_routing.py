@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
 from benchmark_latency import _nearest_rank
 from capture_utils import run_command_bounded
 from engine import EphemeralEngine
@@ -121,26 +122,77 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
     }
 
 
+def workload_result(results: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for a benchmark record."""
+    runs = []
+    for profile in results["profiles"]:
+        samples = profile["samples"]
+        runs.append(wr.run(
+            f"{profile['profile']}-{profile['line_count']}",
+            labels={"profile": profile["profile"], "line_count": profile["line_count"]},
+            measurements={
+                "output_bytes": wr.measurement("bytes", value=profile["output_bytes"]),
+                "direct_seconds": wr.measurement(
+                    "seconds",
+                    median=profile["direct_seconds_median"],
+                    p95=profile["direct_seconds_p95"],
+                    samples=samples,
+                    note="direct execution returning complete output",
+                ),
+                "captured_seconds": wr.measurement(
+                    "seconds",
+                    median=profile["captured_seconds_median"],
+                    p95=profile["captured_seconds_p95"],
+                    samples=samples,
+                    note="bounded capture, ingestion, and summary",
+                ),
+                "capture_overhead_seconds": wr.measurement(
+                    "seconds", median=profile["capture_overhead_seconds_median"], samples=samples
+                ),
+                "capture_overhead_ratio": wr.measurement(
+                    "ratio", median=profile["capture_overhead_ratio_median"], samples=samples
+                ),
+            },
+        ))
+    return wr.build_result(
+        workload="capture-routing",
+        kind="benchmark",
+        producer="benchmark_routing.py",
+        producer_schema_version=results["schema_version"],
+        parameters={
+            "line_counts": [profile["line_count"] for profile in results["profiles"]],
+            "samples": results["profiles"][0]["samples"] if results["profiles"] else 0,
+        },
+        runs=runs,
+        details=results,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--line-counts", nargs="+", type=int, default=DEFAULT_LINE_COUNTS)
     parser.add_argument("--samples", type=int, default=5, help="Samples per output size")
     parser.add_argument("--output", type=Path, help="Optional JSON output path")
+    wr.add_result_argument(parser)
     args = parser.parse_args()
     try:
         results = run_benchmark(tuple(args.line_counts), args.samples)
     except ValueError as exc:
         parser.error(str(exc))
+    report = wr.report_stream(args.result)
     for profile in results["profiles"]:
         print(
             f"profile={profile['profile']} lines={profile['line_count']} bytes={profile['output_bytes']} "
             f"direct_median={profile['direct_seconds_median']:.6f}s "
             f"captured_median={profile['captured_seconds_median']:.6f}s "
-            f"overhead_ratio={profile['capture_overhead_ratio_median']:.2f}x"
+            f"overhead_ratio={profile['capture_overhead_ratio_median']:.2f}x",
+            file=report,
         )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.result:
+        wr.write_result(workload_result(results), args.result)
 
 
 if __name__ == "__main__":

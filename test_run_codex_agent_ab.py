@@ -1,6 +1,7 @@
 """Tests for the Codex-specific agent A/B runner."""
 
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -9,7 +10,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmark_agent_ab import build_schedule
+import run_codex_agent_ab
+import workload_results as wr
+from benchmark_agent_ab import build_schedule, records_workload_result
 from run_codex_agent_ab import (
     _data_path_bytes,
     _event_metrics,
@@ -353,6 +356,12 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
+        result = records_workload_result(payload, producer="run_codex_agent_ab.py")
+        self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")
+        self.assertEqual(result["workload"]["parameters"]["protocol"]["agent_adapter"], "codex-cli")
+        self.assertEqual(len(result["runs"]), 8)
+        self.assertTrue(all(item["status"] == "success" for item in result["runs"]))
+        self.assertIn("capture_input_bytes", result["runs"][0]["measurements"])
         self.assertEqual(payload["protocol"]["embedding_mode"], "fastembed")
         self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5-fp32")
         self.assertEqual(payload["protocol"]["embedding_cache"], "default")
@@ -360,6 +369,29 @@ class TestCodexAgentRunner(unittest.TestCase):
 
 def subprocess_result(**kwargs):
     return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": "", **kwargs})()
+
+
+    def test_main_emits_a_workload_result_next_to_the_records(self):
+        schedule = build_schedule(repetitions=1, seed=3)
+        manifest = {"tasks": {task["id"]: {"prompt": task["id"], "signal_marker": "ok"} for task in schedule["tasks"]}}
+        completed = subprocess_result(stdout=json.dumps({"type": "completed"}) + "\nok\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "schedule.json").write_text(json.dumps(schedule), encoding="utf-8")
+            (root / "tasks.json").write_text(json.dumps(manifest), encoding="utf-8")
+            argv = [
+                "run_codex_agent_ab.py", "--schedule", str(root / "schedule.json"), "--tasks", str(root / "tasks.json"),
+                "--output", str(root / "records.json"), "--repository", ".", "--result", str(root / "result.json"),
+            ]
+            with patch("run_codex_agent_ab._run_codex_process", return_value=completed), patch(
+                "sys.argv", argv
+            ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                run_codex_agent_ab.main()
+            result = wr.load_result(root / "result.json")
+            self.assertEqual(json.loads((root / "records.json").read_text(encoding="utf-8"))["benchmark"], "agent-ab")
+        self.assertEqual(result["workload"]["kind"], "agent-run")
+        self.assertEqual(len(result["runs"]), 8)
+        self.assertEqual(json.loads(stdout.getvalue())["runs"], 8)
 
 
 if __name__ == "__main__":

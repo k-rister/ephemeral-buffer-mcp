@@ -1,10 +1,12 @@
 """Tests for the semantic indexing latency benchmark."""
 
 import io
+import json
 import unittest
 from unittest.mock import patch
 
 import benchmark_semantic_index
+import workload_results as wr
 from benchmark_semantic_index import (
     NEEDLES,
     build_fixture,
@@ -197,6 +199,38 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             benchmark_semantic_index._nearest_rank([])
         with self.assertRaises(ValueError):
             benchmark_semantic_index._nearest_rank([1.0], percentile=0)
+
+
+    def test_workload_result_reports_model_load_and_sized_runs(self):
+        record = run_benchmark((8,), samples=1, engine_options={"semantic_wait_seconds": float("inf")})
+        result = benchmark_semantic_index.workload_result(record)
+        self.assertEqual(result["workload"]["name"], "semantic-index")
+        self.assertEqual(result["workload"]["fixture_version"], benchmark_semantic_index.FIXTURE_VERSION)
+        parameters = result["workload"]["parameters"]
+        self.assertEqual(parameters["semantic_wait_seconds"], "unbounded")
+        self.assertEqual(parameters["engine_options"]["semantic_wait_seconds"], "unbounded")
+        self.assertEqual(parameters["line_counts"], [8])
+        self.assertEqual(result["environment"]["embedding_model"], record["embedding_model"])
+        self.assertEqual([item["id"] for item in result["runs"]], ["model-load", "lines-8"])
+        sized = result["runs"][1]
+        self.assertEqual(sized["labels"], {"line_count": 8, "mode": "hybrid", "cache_state": "warm"})
+        self.assertEqual(
+            [entry["name"] for entry in sized["phases"]],
+            ["ingest", "semantic_index", "first_search", "subsequent_search"],
+        )
+        self.assertEqual(sized["measurements"]["needle_mrr"]["unit"], "score")
+        self.assertEqual(sized["measurements"]["throughput_per_second"]["unit"], "per_second")
+        json.dumps(result, allow_nan=False)
+
+    def test_result_flag_emits_json_on_stdout(self):
+        argv = ["benchmark_semantic_index.py", "--line-counts", "4", "--samples", "1", "--result", "-"]
+        with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            benchmark_semantic_index.main()
+        result = wr.validate_result(json.loads(stdout.getvalue()))
+        self.assertEqual(result["runs"][1]["id"], "lines-4")
+        self.assertIn("first_search_pending_rate", stderr.getvalue())
 
 
 if __name__ == "__main__":

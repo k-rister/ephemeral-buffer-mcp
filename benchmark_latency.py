@@ -10,12 +10,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
 from capture_utils import run_command_bounded
 from engine import EphemeralEngine
 
 
 SCHEMA_VERSION = 1
 DEFAULT_LINE_COUNTS = (16, 256, 2048)
+PHASE_NAMES = ("command", "ingest", "semantic_index", "summary")
 
 
 def _command_for_lines(line_count: int) -> str:
@@ -124,6 +126,62 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
     }
 
 
+def workload_result(results: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for a benchmark record."""
+    warm = results["warm_measurements"]
+    runs = [
+        wr.run(
+            "cold-start",
+            labels={"cache_state": "cold", "line_count": warm[0]["line_count"] if warm else None},
+            measurements={
+                "wall_time_seconds": wr.measurement(
+                    "seconds",
+                    value=results["cold_start_seconds"],
+                    samples=1,
+                    note="fresh engine: model setup plus one complete capture pipeline",
+                ),
+            },
+        )
+    ]
+    for measurement in warm:
+        samples = measurement["samples"]
+        runs.append(wr.run(
+            f"lines-{measurement['line_count']}",
+            labels={"cache_state": "warm", "line_count": measurement["line_count"]},
+            measurements={
+                "output_bytes": wr.measurement("bytes", value=measurement["output_bytes"]),
+                "wall_time_seconds": wr.measurement(
+                    "seconds",
+                    median=measurement["total_seconds_median"],
+                    p95=measurement["total_seconds_p95"],
+                    samples=samples,
+                ),
+            },
+            phases=[
+                wr.phase(
+                    name,
+                    median=measurement[f"{name}_seconds_median"],
+                    p95=measurement[f"{name}_seconds_p95"],
+                    samples=samples,
+                )
+                for name in PHASE_NAMES
+            ],
+        ))
+    return wr.build_result(
+        workload="capture-latency",
+        kind="benchmark",
+        producer="benchmark_latency.py",
+        producer_schema_version=results["schema_version"],
+        parameters={
+            "line_counts": [measurement["line_count"] for measurement in warm],
+            "samples": warm[0]["samples"] if warm else 0,
+        },
+        environment=wr.environment(embedding_model=results["embedding_model"]),
+        runs=runs,
+        details=results,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -135,6 +193,7 @@ def main() -> None:
     )
     parser.add_argument("--samples", type=int, default=5, help="Warm samples per output size")
     parser.add_argument("--output", type=Path, help="Optional JSON output path")
+    wr.add_result_argument(parser)
     args = parser.parse_args()
 
     try:
@@ -142,6 +201,7 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
+    report = wr.report_stream(args.result)
     for measurement in results["warm_measurements"]:
         print(
             f"lines={measurement['line_count']} bytes={measurement['output_bytes']} "
@@ -149,12 +209,15 @@ def main() -> None:
             f"command_median={measurement['command_seconds_median']:.6f}s "
             f"ingest_median={measurement['ingest_seconds_median']:.6f}s "
             f"semantic_index_median={measurement['semantic_index_seconds_median']:.6f}s "
-            f"summary_median={measurement['summary_seconds_median']:.6f}s"
+            f"summary_median={measurement['summary_seconds_median']:.6f}s",
+            file=report,
         )
-    print(f"cold_start={results['cold_start_seconds']:.6f}s")
+    print(f"cold_start={results['cold_start_seconds']:.6f}s", file=report)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.result:
+        wr.write_result(workload_result(results), args.result)
 
 
 if __name__ == "__main__":

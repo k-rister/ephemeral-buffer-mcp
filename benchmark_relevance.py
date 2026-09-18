@@ -8,6 +8,7 @@ import platform
 from pathlib import Path
 from typing import Any
 
+import workload_results as wr
 from engine import EphemeralEngine
 
 
@@ -213,10 +214,49 @@ def compare_relevance(result: dict[str, Any], baseline: dict[str, Any]) -> dict[
     }
 
 
+def workload_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the tool-agnostic workload result for a relevance record."""
+    comparison = result.get("baseline_comparison")
+    regressions = list(comparison["regressions"]) if comparison else []
+    runs = []
+    for mode, summary in result["summaries"].items():
+        mode_regressions = [message for message in regressions if message.startswith(f"{mode}.")]
+        runs.append(wr.run(
+            mode,
+            labels={"mode": mode, "top_k": result["top_k"]},
+            status="failure" if mode_regressions else "success",
+            measurements={
+                "queries": wr.measurement("count", value=summary["queries"]),
+                "hit_at_1": wr.measurement("score", value=summary["hit_at_1"], samples=summary["queries"]),
+                "hit_at_k": wr.measurement("score", value=summary["hit_at_k"], samples=summary["queries"]),
+                "mrr": wr.measurement("score", value=summary["mrr"], samples=summary["queries"]),
+            },
+            errors=mode_regressions,
+        ))
+    return wr.build_result(
+        workload="search-relevance",
+        kind="evaluation",
+        producer="benchmark_relevance.py",
+        producer_schema_version=result["schema_version"],
+        fixture_version=result["fixture_version"],
+        parameters={
+            "top_k": result["top_k"],
+            "evaluation": result["evaluation"],
+            "embedding_mode": result["embedding_mode"],
+            "baseline_compared": comparison is not None,
+            "tolerances": comparison["tolerances"] if comparison else None,
+        },
+        runs=runs,
+        details=result,
+        privacy="synthetic fixtures with explicit expected markers; no user queries or captures",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--output", type=Path)
+    wr.add_result_argument(parser)
     parser.add_argument("--baseline", type=Path, help="Optional checked-in relevance baseline JSON")
     parser.add_argument(
         "--fail-on-regression",
@@ -238,7 +278,9 @@ def main() -> None:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(result, indent=2, sort_keys=True), file=wr.report_stream(args.result))
+    if args.result:
+        wr.write_result(workload_result(result), args.result)
     if args.fail_on_regression and comparison and not comparison["passed"]:
         raise SystemExit(1)
 

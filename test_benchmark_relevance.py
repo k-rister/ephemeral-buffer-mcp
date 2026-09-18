@@ -1,16 +1,21 @@
 """Tests for deterministic search relevance evaluation."""
 
+import io
+import json
 import unittest
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import benchmark_relevance
+import workload_results as wr
 from benchmark_relevance import (
     compare_relevance,
     load_baseline,
     relevance_cases,
     run_relevance_benchmark,
+    workload_result,
 )
 
 
@@ -72,6 +77,41 @@ class TestRelevanceBenchmark(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 load_baseline(path)
+
+
+    def test_workload_result_reports_modes_and_baseline_regressions(self):
+        record = run_relevance_benchmark()
+        result = workload_result(record)
+        self.assertEqual(result["workload"]["name"], "search-relevance")
+        self.assertEqual(result["workload"]["fixture_version"], 1)
+        self.assertFalse(result["workload"]["parameters"]["baseline_compared"])
+        self.assertEqual([item["id"] for item in result["runs"]], ["bm25", "semantic", "hybrid"])
+        self.assertEqual(result["runs"][0]["labels"], {"mode": "bm25", "top_k": 3})
+        self.assertEqual(set(result["runs"][0]["measurements"]), {"queries", "hit_at_1", "hit_at_k", "mrr"})
+
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "1"}):
+            record["baseline_comparison"] = compare_relevance(
+                record, load_baseline(Path(__file__).with_name("benchmark_relevance_baseline.json"))
+            )
+        compared = workload_result(record)
+        self.assertTrue(compared["workload"]["parameters"]["baseline_compared"])
+        self.assertEqual(compared["status"], "success")
+        record["baseline_comparison"]["regressions"] = ["hybrid.mrr dropped from 1.0000 to 0.5000 (allowed drop 0.0500)"]
+        regressed = workload_result(record)
+        self.assertEqual(regressed["status"], "partial")
+        self.assertEqual(regressed["runs"][2]["status"], "failure")
+        self.assertEqual(regressed["runs"][2]["errors"], record["baseline_comparison"]["regressions"])
+        self.assertEqual(regressed["runs"][0]["status"], "success")
+
+    def test_result_flag_emits_json_on_stdout(self):
+        argv = ["benchmark_relevance.py", "--top-k", "2", "--result", "-"]
+        with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            benchmark_relevance.main()
+        result = wr.validate_result(json.loads(stdout.getvalue()))
+        self.assertEqual(result["workload"]["parameters"]["top_k"], 2)
+        self.assertEqual(json.loads(stderr.getvalue())["top_k"], 2)
 
 
 if __name__ == "__main__":
