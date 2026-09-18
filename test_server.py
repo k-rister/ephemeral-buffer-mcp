@@ -435,7 +435,7 @@ class TestServerTools(unittest.TestCase):
             result = server.get_runtime_diagnostics()
 
         self.assertIn("Runtime diagnostics (content-free):", result)
-        self.assertIn("Package version: 0.4.0", result)
+        self.assertIn("Package version: 0.5.0", result)
         self.assertIn("Python:", result)
         self.assertIn("Socket mode: session-derived path", result)
         self.assertIn("Socket lifecycle:", result)
