@@ -1422,9 +1422,11 @@ class EphemeralEngine:
                 )
 
         # Lexical and semantic hits come from different chunk grids, so fusion
-        # happens in line space: a semantic window boosts every lexical hit it
-        # overlaps, and stands on its own only when nothing lexical matched
-        # inside it.  Exact BM25 line ranges are therefore preserved.
+        # happens in line space: each lexical window belongs to the semantic
+        # window that contains its first line, a semantic hit boosts the lexical
+        # hits that belong to it, and it stands on its own only when none do.
+        # Exact BM25 line ranges are therefore preserved, and a lexical window
+        # straddling two semantic windows cannot collect both boosts.
         k_const = 60.0
         candidates: Dict[Tuple[str, int], Dict[str, Any]] = {}
 
@@ -1448,21 +1450,23 @@ class EphemeralEngine:
             for rank, (sid, _) in enumerate(semantic_results):
                 semantic_chunk = capture.semantic_chunks[sid]
                 contribution = 1.0 / (k_const + rank + 1)
-                overlapping = [
+                members = [
                     entry for entry in candidates.values()
                     if entry["index"] == "lexical"
-                    and entry["chunk"].start_line <= semantic_chunk.end_line
-                    and semantic_chunk.start_line <= entry["chunk"].end_line
+                    and semantic_chunk.start_line <= entry["chunk"].start_line <= semantic_chunk.end_line
                 ]
-                if overlapping:
-                    for entry in overlapping:
+                if members:
+                    for entry in members:
                         entry["score"] += contribution
                 else:
                     add_candidate("semantic", semantic_chunk, contribution)
 
-        # Deduplicate overlapping context windows before applying top_k.  The
-        # search backends intentionally over-fetch candidates so a sliding
-        # window cannot consume the result quota with duplicate context.
+        # Deduplicate before applying top_k: a candidate adds nothing when its
+        # matched lines overlap an earlier match's matched lines or are already
+        # fully visible inside an earlier match's context.  The search backends
+        # intentionally over-fetch candidates so a sliding window cannot consume
+        # the result quota with duplicate context, while adjacent windows that
+        # would reveal new lines are still returned.
         ranked = sorted(candidates.values(), key=lambda entry: entry["score"], reverse=True)
 
         matches = []
@@ -1474,15 +1478,15 @@ class EphemeralEngine:
             ctx_start = max(1, chunk.start_line - context_lines)
             ctx_end = min(capture.line_count, chunk.end_line + context_lines)
             
-            overlap = False
-            for prev_s, prev_e in seen_line_ranges:
-                if not (ctx_end < prev_s or ctx_start > prev_e):
-                    overlap = True
-                    break
-            if overlap:
+            redundant = any(
+                (chunk.start_line <= core_e and core_s <= chunk.end_line)
+                or (prev_s <= chunk.start_line and chunk.end_line <= prev_e)
+                for core_s, core_e, prev_s, prev_e in seen_line_ranges
+            )
+            if redundant:
                 continue
-                
-            seen_line_ranges.append((ctx_start, ctx_end))
+
+            seen_line_ranges.append((chunk.start_line, chunk.end_line, ctx_start, ctx_end))
 
             lines_with_numbers = []
             for line_no in range(ctx_start, ctx_end + 1):

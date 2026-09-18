@@ -15,6 +15,7 @@ from unittest.mock import patch
 from config import FP32_EMBEDDING_MODEL
 from engine import (
     Chunk,
+    HYBRID_LEXICAL_WEIGHT,
     register_bundled_embedding_models,
     Capture,
     EphemeralEngine,
@@ -378,6 +379,22 @@ STEP 3: Summary
             )
 
         self.assertEqual([match["chunk_id"] for match in result["matches"]], [0, 3])
+
+    def test_search_dedup_keeps_matches_that_reveal_new_lines(self):
+        engine = EphemeralEngine(max_captures=1, semantic_chunk_lines=8)
+        capture = engine.ingest("\n".join(f"line {i}" for i in range(1, 17)), label="dedup-visibility")
+        # Semantic windows L1-8 and L9-16: contexts overlap, but the second reveals lines 12-16.
+        with patch.object(engine, "search_semantic", return_value=[(0, 0.9), (1, 0.8)]):
+            result = engine.search("line", mode="semantic", capture_id=capture.capture_id, top_k=5, context_lines=3)
+        self.assertEqual([m["matched_range"] for m in result["matches"]], ["L1-L8", "L9-L16"])
+
+        # Lexical windows L9-12, L13-16, L7-10: L7-10 overlaps the first match's lines, and
+        # L13-16 is dropped only when the first match's context already shows all of it.
+        with patch.object(engine, "search_bm25", return_value=[(4, 1.0), (6, 0.9), (3, 0.8)]):
+            wide = engine.search("line", mode="bm25", capture_id=capture.capture_id, top_k=5, context_lines=4)
+            narrow = engine.search("line", mode="bm25", capture_id=capture.capture_id, top_k=5, context_lines=1)
+        self.assertEqual([m["matched_range"] for m in wide["matches"]], ["L9-L12"])
+        self.assertEqual([m["matched_range"] for m in narrow["matches"]], ["L9-L12", "L13-L16"])
 
     def test_search_snippet_bounds_long_utf8_lines(self):
         engine = EphemeralEngine(max_captures=1)
@@ -1562,6 +1579,16 @@ class TestEmbeddingStartup(unittest.TestCase):
         with patch.object(engine, "search_bm25", return_value=[(2, 0.5), (2, 0.25)]):
             duplicated = engine.search("line", mode="bm25", capture_id=capture.capture_id, top_k=1)
         self.assertEqual(duplicated["matches"][0]["score"], 0.75)
+
+        # A lexical window that merely straddles a semantic window is not a member of it.
+        with patch.object(engine, "search_bm25", return_value=[(1, 0.5)]), \
+                patch.object(engine, "search_semantic", return_value=[(1, 0.9)]):
+            straddle = engine.search("line", mode="hybrid", capture_id=capture.capture_id, top_k=3, context_lines=0)
+        # It gets no boost, and the semantic window is then redundant with the lexical match's lines.
+        self.assertEqual(
+            [(m["chunk_index"], m["chunk_id"], m["matched_range"], m["score"]) for m in straddle["matches"]],
+            [("lexical", 1, "L3-L6", round(HYBRID_LEXICAL_WEIGHT / 61, 4))],
+        )
 
         with patch.object(engine, "search_semantic", return_value=[(2, 0.9)]):
             semantic_only = engine.search("line", mode="semantic", capture_id=capture.capture_id, top_k=1)
