@@ -180,10 +180,27 @@ def _check_metadata_value(key: str, value: Any, where: str) -> None:
     _expect(isinstance(value, LABEL_TYPES), f"{where}.{key} must be a string, number, boolean, or null")
     if isinstance(value, str):
         _expect(len(value) <= MAX_METADATA_LENGTH, f"{where}.{key} must be at most {MAX_METADATA_LENGTH} characters")
+    elif isinstance(value, float):
+        _expect(math.isfinite(value), f"{where}.{key} must be a finite number")
     _expect(
         not is_sensitive_metadata_key(key) or value == REDACTED,
         f"{where}.{key} looks like a credential and must be omitted or redacted",
     )
+    if key == "started_at":
+        _expect(
+            isinstance(value, str) and parse_timestamp(value) is not None,
+            f"{where}.started_at must be an ISO 8601 timestamp with a UTC offset, such as 2026-09-18T10:00:00+00:00",
+        )
+
+
+def parse_timestamp(text: str) -> _datetime.datetime | None:
+    """Parse an ISO 8601 timestamp with a UTC offset (``Z`` accepted) as an aware datetime, or ``None``."""
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = _datetime.datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def parse_key_value(text: str, where: str = "metadata") -> tuple[str, Any]:
@@ -197,16 +214,30 @@ def parse_key_value(text: str, where: str = "metadata") -> tuple[str, Any]:
         value = raw
     if not isinstance(value, LABEL_TYPES):
         raise WorkloadResultError(f"{where} {text!r} must be a string, number, boolean, or null")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise WorkloadResultError(f"{where} {text!r} must be a finite number")
     return key, value
 
 
 def parse_metadata(text: str) -> tuple[str, Any]:
-    """Parse one ``--metadata KEY=VALUE`` argument and check it fits the format."""
+    """Parse one ``--metadata KEY=VALUE`` argument and check it fits the format.
+
+    Credential-looking keys are accepted here because ``experiment`` redacts
+    them; every other rule is enforced now so a bad value fails before the
+    workload runs rather than when its result is written.
+    """
     key, value = parse_key_value(text, "metadata")
     _check_metadata_key(key, "metadata")
-    if isinstance(value, str) and len(value) > MAX_METADATA_LENGTH:
-        raise WorkloadResultError(f"metadata {key} must be at most {MAX_METADATA_LENGTH} characters")
+    if not is_sensitive_metadata_key(key):
+        _check_metadata_value(key, value, "metadata")
     return key, value
+
+
+def experiment_group(text: str) -> str:
+    """Check an experiment group name given on a command line."""
+    if not text:
+        raise WorkloadResultError("experiment group must not be empty")
+    return text
 
 
 def metadata_key(text: str) -> str:
@@ -240,6 +271,24 @@ def experiment(
     return {"group": group, "metadata": described}
 
 
+def experiment_block(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a result's experiment block, or the empty block when it has none."""
+    return result.get("experiment") or {"group": None, "metadata": {}}
+
+
+def merge_experiment(existing: dict[str, Any] | None, override: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Combine a producer's experiment block with one given on the command line.
+
+    The command line wins key by key: its group replaces the producer's only
+    when set, and its metadata keys replace matching producer keys while the
+    rest are kept.
+    """
+    if existing is None or override is None:
+        return override if existing is None else existing
+    group = override["group"] if override["group"] is not None else existing["group"]
+    return {"group": group, "metadata": {**existing["metadata"], **override["metadata"]}}
+
+
 def value_matches(value: Any, wanted: Any) -> bool:
     """Return whether a label or metadata value equals a filter value.
 
@@ -261,7 +310,7 @@ def experiment_matches(
     An empty ``groups`` accepts any document, including ungrouped ones;
     metadata that is absent never matches, even a filter for ``null``.
     """
-    block = result.get("experiment") or {"group": None, "metadata": {}}
+    block = experiment_block(result)
     wanted = list(groups)
     if wanted and block["group"] not in wanted:
         return False
@@ -270,10 +319,18 @@ def experiment_matches(
 
 
 def experiment_timestamp(result: dict[str, Any]) -> str:
-    """Return the time that orders a document within its group."""
-    block = result.get("experiment") or {"metadata": {}}
-    started = block["metadata"].get("started_at")
-    return started if isinstance(started, str) and started else result["environment"]["recorded_at"]
+    """Return the time that orders a document within its group, as a UTC ISO 8601 string.
+
+    ``started_at`` metadata (validated as an aware timestamp) wins; otherwise
+    ``environment.recorded_at`` is used, read as UTC when it has no offset.
+    A ``recorded_at`` that is not ISO 8601 is returned as written.
+    """
+    started = experiment_block(result)["metadata"].get("started_at")
+    recorded = result["environment"]["recorded_at"]
+    if isinstance(started, str) and (parsed := parse_timestamp(started)) is not None:
+        return parsed.astimezone(_datetime.timezone.utc).isoformat()
+    parsed = parse_timestamp(recorded) or parse_timestamp(recorded + "+00:00")
+    return parsed.astimezone(_datetime.timezone.utc).isoformat() if parsed is not None else recorded
 
 
 def result_summary(result: dict[str, Any]) -> dict[str, Any]:
@@ -282,7 +339,7 @@ def result_summary(result: dict[str, Any]) -> dict[str, Any]:
     This is the record listing tools return: enough to organise and filter
     documents without their measurements.
     """
-    block = result.get("experiment") or {"group": None, "metadata": {}}
+    block = experiment_block(result)
     env = result["environment"]
     return {
         "workload": {key: result["workload"][key] for key in ("name", "kind", "producer")},
@@ -674,13 +731,14 @@ def add_result_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--experiment",
         metavar="GROUP",
+        type=argument_type(experiment_group),
         help="Assign the result document to this experiment or run group",
     )
     parser.add_argument(
         "--metadata",
         action="append",
         metavar="KEY=VALUE",
-        type=_argument(parse_metadata),
+        type=argument_type(parse_metadata),
         default=[],
         help=(
             "Record experiment metadata in the result document (repeatable; values parse as JSON when "
@@ -691,14 +749,14 @@ def add_result_argument(parser: argparse.ArgumentParser) -> None:
         "--redact",
         action="append",
         metavar="KEY",
-        type=_argument(metadata_key),
+        type=argument_type(metadata_key),
         default=[],
         help=f"Store {REDACTED} instead of the value of this metadata key (repeatable)",
     )
 
 
-def _argument(parse: Any) -> Any:
-    """Wrap a parser so argparse reports ``WorkloadResultError`` as a usage error."""
+def argument_type(parse: Any) -> Any:
+    """Wrap a parser for argparse ``type=`` so ``WorkloadResultError`` becomes a usage error."""
     def convert(text: str) -> Any:
         try:
             return parse(text)
@@ -735,13 +793,14 @@ def write_result(
 ) -> None:
     """Validate ``result`` and write it to the requested destination, if any.
 
-    ``experiment`` (usually ``experiment_from_args(args)``) is attached to the
-    document before validation so every producer assigns groups the same way.
+    ``experiment`` (usually ``experiment_from_args(args)``) is merged into the
+    document before validation (see ``merge_experiment``) so every producer
+    assigns groups the same way and a producer's own block is kept.
     """
     if result_path is None:
         return
     if experiment is not None:
-        result = {**result, "experiment": experiment}
+        result = {**result, "experiment": merge_experiment(result.get("experiment"), experiment)}
     text = json.dumps(validate_result(result), indent=2, sort_keys=True, allow_nan=False) + "\n"
     if result_to_stdout(result_path):
         sys.stdout.write(text)
@@ -765,7 +824,7 @@ def format_metadata(metadata: dict[str, Any]) -> str:
 def format_summary(result: dict[str, Any]) -> str:
     """Return a one-line human-readable description of a result."""
     workload = result["workload"]
-    block = result.get("experiment") or {"group": None, "metadata": {}}
+    block = experiment_block(result)
     described = (
         f"workload={workload['name']} kind={workload['kind']} producer={workload['producer']} "
         f"status={result['status']} runs={len(result['runs'])} errors={len(result['errors'])}"

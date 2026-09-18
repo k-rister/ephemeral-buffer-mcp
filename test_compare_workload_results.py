@@ -425,7 +425,7 @@ class TestCompare(ResultFiles):
             cw.compare([f"{path}#control", f"{path}#mcp", path])
         self.assertEqual(load.call_count, 1)
         # Without a cache every call loads.
-        self.assertEqual(cw.load_document(path)["runs"][0]["id"], "control")
+        self.assertEqual(cw.load_documents(path)[0]["runs"][0]["id"], "control")
 
     def test_label_filters_and_multiple_candidates(self):
         results = [
@@ -515,12 +515,29 @@ class TestCompare(ResultFiles):
         with self.assertRaisesRegex(ComparisonError, "groups there: none"):
             cw.compare([f"{empty}@sweep", path])
         self.write("sweep/b.json", latency_result(), experiment=wr.experiment("sweep"))
-        with self.assertRaisesRegex(ComparisonError, "selects 2 documents; use load_documents"):
-            cw.load_document(f"{sweep}@sweep")
         self.assertEqual(len(cw.load_documents(f"{sweep}@sweep")), 2)
-        (sweep / "bad.json").write_text(json.dumps({"format": wr.FORMAT, "format_version": 99}), encoding="utf-8")
-        with self.assertRaisesRegex(wr.WorkloadResultError, "bad.json: format_version must be 1"):
-            cw.compare([f"{sweep}@sweep", path])
+        # Invalid documents matter only when they claim the requested group.
+        stale = sweep / "stale.json"
+        stale.write_text(json.dumps({"format": wr.FORMAT, "format_version": 99, "experiment": {"group": "old", "metadata": {}}}), encoding="utf-8")
+        (sweep / "ungrouped.json").write_text(json.dumps({"format": wr.FORMAT, "format_version": 99}), encoding="utf-8")
+        (sweep / "odd.json").write_text(json.dumps({"format": wr.FORMAT, "format_version": 99, "experiment": []}), encoding="utf-8")
+        self.assertEqual(len(cw.compare([f"{sweep}@sweep"])["documents"]), 2)
+        with self.assertRaisesRegex(wr.WorkloadResultError, "stale.json: format_version must be 1"):
+            cw.compare([f"{sweep}@old", path])
+        with patch.object(cw.Path, "read_text", side_effect=OSError("gone")):
+            self.assertIsNone(cw._claimed_group(stale))
+
+    def test_group_references_scan_a_directory_once_per_comparison(self):
+        sweep = self.directory / "sweep"
+        self.write("sweep/a.json", latency_result(), experiment=wr.experiment("sweep", {"variant": "a"}))
+        self.write("sweep/b.json", latency_result(), experiment=wr.experiment("sweep", {"variant": "b"}))
+        with patch.object(cw.wr, "iter_result_files", wraps=cw.wr.iter_result_files) as scan, patch.object(cw.wr, "load_result", wraps=cw.wr.load_result) as load:
+            comparison = cw.compare([f"{sweep}@sweep,variant=a", f"{sweep}@sweep,variant=b", f"{sweep}@sweep"])
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(load.call_count, 0)
+        self.assertEqual(len(comparison["documents"]), 4)
+        # Without a cache every call scans.
+        self.assertEqual(len(cw.scan_directory(sweep)), 2)
 
     def test_rejects_unusable_inputs(self):
         path = self.write("a.json", latency_result())

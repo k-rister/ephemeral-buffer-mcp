@@ -534,8 +534,8 @@ def main() -> None:
     args = parser.parse_args()
     if bool(args.schedule_output) == bool(args.records):
         parser.error("provide exactly one of --schedule-output or --records")
-    if args.schedule_output and args.result:
-        parser.error("--result requires --records")
+    if args.schedule_output and (args.result or args.experiment or args.metadata or args.redact):
+        parser.error("--result, --experiment, --metadata, and --redact require --records")
     if args.schedule_output:
         schedule = build_schedule(args.repetitions, args.seed)
         args.schedule_output.parent.mkdir(parents=True, exist_ok=True)

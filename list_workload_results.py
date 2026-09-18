@@ -35,18 +35,8 @@ EXIT_OK = 0
 EXIT_INVALID = 1
 
 
-def _key_value(text: str) -> tuple[str, Any]:
-    try:
-        return wr.parse_key_value(text, "metadata filter")
-    except wr.WorkloadResultError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
-
-
-def _metadata_key(text: str) -> str:
-    try:
-        return wr.metadata_key(text)
-    except wr.WorkloadResultError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
+def _metadata_filter(text: str) -> tuple[str, Any]:
+    return wr.parse_key_value(text, "metadata filter")
 
 
 def build_listing(
@@ -162,11 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("paths", nargs="+", help="Workload result files or directories to list")
     parser.add_argument("--group", action="append", metavar="NAME", default=[], help="Only list documents in this experiment group (repeatable; any matches)")
-    parser.add_argument("--where", action="append", metavar="KEY=VALUE", type=_key_value, default=[], help="Only list documents whose metadata KEY equals VALUE (repeatable; all must match; values parse as JSON when possible)")
+    parser.add_argument("--where", action="append", metavar="KEY=VALUE", type=wr.argument_type(_metadata_filter), default=[], help="Only list documents whose metadata KEY equals VALUE (repeatable; all must match; values parse as JSON when possible)")
     parser.add_argument("--workload", action="append", metavar="NAME", default=[], help="Only list documents for this workload name (repeatable)")
     parser.add_argument("--status", action="append", metavar="STATUS", choices=wr.STATUSES, default=[], help="Only list documents with this status (repeatable)")
-    parser.add_argument("--field", action="append", metavar="KEY", type=_metadata_key, default=[], help="Show this metadata key as its own column instead of the combined metadata column (repeatable)")
-    parser.add_argument("--redact", action="append", metavar="KEY", type=_metadata_key, default=[], help=f"Show {wr.REDACTED} instead of this metadata key's value (repeatable)")
+    parser.add_argument("--field", action="append", metavar="KEY", type=wr.argument_type(wr.metadata_key), default=[], help="Show this metadata key as its own column instead of the combined metadata column (repeatable)")
+    parser.add_argument("--redact", action="append", metavar="KEY", type=wr.argument_type(wr.metadata_key), default=[], help=f"Show {wr.REDACTED} instead of this metadata key's value (repeatable)")
     parser.add_argument("--runs", action="store_true", help="Print one row per run with its labels and status")
     parser.add_argument("--format", choices=("text", "json", "paths"), default="text", help="What to print on stdout (default: text)")
     return parser

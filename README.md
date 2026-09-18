@@ -1379,7 +1379,10 @@ variable under test in metadata. Conventional keys are `task_type`,
 `repository_revision`, `agent_configuration`, `model`, `tool_version`,
 `variant`, `environment`, `workload_size`, and `started_at`; any other
 `snake_case` key is allowed. Values are identifiers (at most 256 characters),
-never prompts or captured content:
+never prompts or captured content, and `started_at` must be an ISO 8601
+timestamp with a UTC offset (`2026-09-18T10:00:00+00:00` or a trailing `Z`)
+so documents order by instant. A value that breaks these rules is rejected
+when the arguments are parsed, before the workload runs:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
@@ -1426,7 +1429,7 @@ results/prefetch.result.json  -            semantic-prefetch  success  2     202
 ```
 
 Rows are ordered by group, then by `started_at` metadata (or the recording
-time when it is absent), then by path. Documents that do not satisfy the
+time when it is absent, both normalised to UTC), then by path. Documents that do not satisfy the
 format are listed as `invalid` with the reason and make the command exit with
 status 1, so a broken file is never mistaken for an absent one. `--format
 json` prints a `coding-agent-workload-listing` document whose entries carry
@@ -1465,7 +1468,10 @@ list the metadata that differs (`experiment differences`) next to the
 parameter and environment differences, so a delta can be read together with
 the variable that caused it. Selector values may not contain commas; a value
 containing `@` is fine because only the first `@` separates the directory from
-the group.
+the group. A group reference fails on an invalid document only when that
+document claims the requested group; stale or broken files in other groups do
+not block the comparison (the listing still reports them). Several group
+references into one directory scan it once.
 
 **Sensitive metadata.** Metadata keys that name credentials (`token`, `key`,
 `password`, `secret`, `credentials`, `authorization`, `bearer`, or any
