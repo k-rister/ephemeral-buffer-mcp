@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import json
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections import Counter, OrderedDict
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
@@ -559,11 +559,12 @@ def register_bundled_embedding_models() -> None:
 class _SemanticIndexJob:
     """Completion state for one background embedding job."""
 
-    __slots__ = ("done", "error")
+    __slots__ = ("done", "error", "future")
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.error: Optional[BaseException] = None
+        self.future: Optional[Future] = None
 
 
 class _DeterministicTestEmbedding:
@@ -703,10 +704,16 @@ class EphemeralEngine:
         self._prefetch_running: Dict[str, threading.Event] = {}
         self._prefetch_workers_active = 0
         # Searches that find no prefetch job running index the capture on a
-        # dedicated thread and wait for it only up to the configured budget, so
-        # a very large capture yields lexical-first results instead of blocking.
+        # bounded pool and wait for it only up to the configured budget, so a
+        # very large capture yields lexical-first results instead of blocking.
+        # The pool shares the prefetch worker count, so timed-out searches over
+        # churning captures cannot accumulate threads beyond that bound; work
+        # for evicted captures is cancelled while queued and skipped once run.
         self._on_demand_jobs: Dict[str, _SemanticIndexJob] = {}
-        self._on_demand_threads: Dict[str, threading.Thread] = {}
+        self._on_demand_executor = ThreadPoolExecutor(
+            max_workers=self.semantic_prefetch_workers,
+            thread_name_prefix="semantic-index",
+        )
         self._shutdown = False
 
     def start_embedding_warmup(self) -> bool:
@@ -1169,8 +1176,9 @@ class EphemeralEngine:
 
         A running prefetch job is reused.  Otherwise the capture is pulled out
         of the prefetch queue, because a search is a stronger signal than queue
-        position, and indexed on a dedicated thread that outlives the caller's
-        wait budget.  Returns ``None`` when the embeddings are already ready.
+        position, and indexed on the bounded on-demand pool, where the job
+        outlives the caller's wait budget.  Returns ``None`` when the
+        embeddings are already ready.
         """
         with self._lock:
             if capture.embeddings is not None:
@@ -1191,14 +1199,7 @@ class EphemeralEngine:
             job = _SemanticIndexJob()
             self._on_demand_jobs[capture.capture_id] = job
             capture.semantic_index_state = "pending"
-            thread = threading.Thread(
-                target=self._on_demand_index_worker,
-                args=(capture, job),
-                name=f"semantic-index-{capture.capture_id}",
-                daemon=True,
-            )
-            self._on_demand_threads[capture.capture_id] = thread
-            thread.start()
+            job.future = self._on_demand_executor.submit(self._on_demand_index_worker, capture, job)
             return job.done, job
 
     def _on_demand_index_worker(self, capture: Capture, job: _SemanticIndexJob) -> None:
@@ -1213,7 +1214,6 @@ class EphemeralEngine:
         finally:
             with self._lock:
                 self._on_demand_jobs.pop(capture.capture_id, None)
-                self._on_demand_threads.pop(capture.capture_id, None)
                 if capture.semantic_index_state == "pending":
                     # The capture was evicted before its embeddings were published.
                     capture.semantic_index_state = "not-requested"
@@ -1301,6 +1301,17 @@ class EphemeralEngine:
         capture = self._prefetch_queue.pop(capture_id, None)
         if capture is not None:
             capture.semantic_index_state = "not-requested"
+        job = self._on_demand_jobs.get(capture_id)
+        if job is not None and job.future is not None and job.future.cancel():
+            # The job never started, so no worker will run its cleanup; a
+            # waiter past its budget has already answered, and one still
+            # blocked falls through to the lazy path when the event is set.
+            self._on_demand_jobs.pop(capture_id, None)
+            live = self.captures.get(capture_id)
+            if live is not None and live.semantic_index_state == "pending":
+                # Cancelled at shutdown while still buffered: leave it lazily indexable.
+                live.semantic_index_state = "not-requested"
+            job.done.set()
 
     def shutdown(self) -> None:
         """Stop background embedding work without holding the engine lock while waiting."""
@@ -1310,15 +1321,16 @@ class EphemeralEngine:
             self._shutdown = True
             executor = self._prefetch_executor
             warmup_thread = self._embedding_warmup_thread
-            on_demand_threads = list(self._on_demand_threads.values())
+            on_demand_executor = self._on_demand_executor
             for capture_id in list(self._prefetch_queue):
+                self._cancel_prefetch(capture_id)
+            for capture_id in list(self._on_demand_jobs):
                 self._cancel_prefetch(capture_id)
         if warmup_thread is not None and warmup_thread is not threading.current_thread():
             warmup_thread.join()
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
-        for thread in on_demand_threads:
-            thread.join()
+        on_demand_executor.shutdown(wait=True, cancel_futures=True)
 
     @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
@@ -1498,12 +1510,15 @@ class EphemeralEngine:
 
         if capture.line_count == 0:
             self.metrics.record_search(capture.capture_id, 0)
+            # No lines means no semantic windows to index, so a semantic or
+            # hybrid request is trivially complete rather than pending.
             return {
                 "status": "ok",
                 "capture_id": capture.capture_id,
                 "label": capture.label,
                 "matches": [],
-                "message": "Capture is empty (0 lines)."
+                "semantic_coverage": "complete" if mode in ("semantic", "hybrid") else "not-requested",
+                "message": "Capture is empty (0 lines).",
             }
 
         bm25_results = []

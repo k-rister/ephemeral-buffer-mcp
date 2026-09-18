@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Run on-demand semantic indexing on a pool bounded by
+  `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` instead of one thread per capture, and
+  cancel queued on-demand jobs when their capture is evicted or cleared, so
+  hybrid searches that exceed the wait budget on captures that are then
+  evicted no longer accumulate indexing threads beyond the bound. A capture
+  pulled out of the prefetch queue whose indexing then fails is marked `failed`
+  and retries through the lazy path. Empty captures now report
+  `semantic_coverage` (`complete` for semantic and hybrid searches,
+  `not-requested` for BM25) like every other search response.
 - Add a versioned, tool-agnostic workload result format
   (`coding-agent-workload-result`, format version 1) with a reference
   validator and JSON Schema in `workload_results.py` and

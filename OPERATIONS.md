@@ -178,7 +178,11 @@ previous wait-for-index behavior. Semantic mode always waits because an empty
 result would only cost the caller a retry. `get_buffer_stats` reports the
 budget and the number of on-demand index jobs; a persistently nonzero count
 means searches keep arriving before prefetch finishes, so consider
-`EPHEMERAL_EMBEDDING_THREADS` or a smaller capture size.
+`EPHEMERAL_EMBEDDING_THREADS` or a smaller capture size. On-demand jobs run on
+a pool bounded by `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` (default `1`), and a
+job whose capture is evicted or cleared is cancelled while queued and skipped
+once it runs, so timed-out searches over churning captures never accumulate
+threads beyond that bound.
 
 Override the limits before starting the server:
 

@@ -315,13 +315,15 @@ Every eligible capture is queued at ingestion and a bounded worker pool drains
 the queue newest-first, since the latest capture is the most likely search
 target; a burst of captures is never silently skipped. A semantic or hybrid
 search waits for a job that is already running, and pulls a still-queued
-capture out of the queue to index it on a dedicated thread so it does not wait
-behind older work. Failed jobs retry through the normal lazy path, and evicted
-or cleared captures drop their queued work. Embedding inference is serialized
-by one model lock, so extra workers only overlap bookkeeping; tune
-`EPHEMERAL_EMBEDDING_THREADS` instead of the worker count for throughput.
-`get_buffer_stats` and `get_runtime_diagnostics` expose only aggregate pending,
-queued, running, and failed counts.
+capture out of the queue to index it on a separate on-demand pool so it does
+not wait behind older work. That pool is bounded by the same worker count, so
+searches that give up waiting on captures that are then evicted cannot
+accumulate indexing threads. Failed jobs retry through the normal lazy path,
+and evicted or cleared captures drop their queued prefetch and on-demand work.
+Embedding inference is serialized by one model lock, so extra workers only
+overlap bookkeeping; tune `EPHEMERAL_EMBEDDING_THREADS` instead of the worker
+count for throughput. `get_buffer_stats` and `get_runtime_diagnostics` expose
+only aggregate pending, queued, running, and failed counts.
 
 Indexing cost grows linearly with capture size, so a hybrid search that arrives
 before a large capture's index is ready waits at most a configurable budget:
@@ -348,8 +350,10 @@ sizes. The lexical-first answer ranked every needle in the benchmark fixture
 first on both hosts.
 Set `0` to always answer lexical-first while the index builds, or `inf` to
 wait for the index unconditionally. Semantic mode has no lexical result to
-fall back on, so it always waits for the index. `get_buffer_stats` reports the
-budget and the number of on-demand index jobs running.
+fall back on, so it always waits for the index. An empty capture has nothing
+to index, so it reports `complete` coverage for semantic and hybrid searches.
+`get_buffer_stats` reports the budget and the number of on-demand index jobs
+running or queued.
 
 The exact model and cache location can also be supplied in the MCP client's
 `env` configuration. Keep the model cache writable by the user running the
