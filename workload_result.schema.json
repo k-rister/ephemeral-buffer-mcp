@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/k-rister/ephemeral-buffer-mcp/workload_result.schema.json",
   "title": "Coding-agent workload result",
-  "description": "Versioned, tool-agnostic measurements of one benchmark, evaluation, or agent run. See workload_results.py for the reference validator.",
+  "description": "Versioned, tool-agnostic measurements of one benchmark, evaluation, or agent run. workload_results.py is the reference validator; this schema covers the structure but cannot enforce unique run ids.",
   "type": "object",
   "required": ["format", "format_version", "workload", "environment", "status", "errors", "measurements", "runs"],
   "additionalProperties": false,
@@ -46,7 +46,7 @@
     "status": {"$ref": "#/$defs/status"},
     "errors": {"type": "array", "items": {"type": "string"}},
     "measurements": {"$ref": "#/$defs/measurements", "description": "Workload-wide measurements that do not belong to one run"},
-    "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}},
+    "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}, "uniqueItems": true, "description": "Run ids must be unique; uniqueItems only catches identical runs, so consumers must also check ids or use the reference validator"},
     "experiment": {
       "type": "object",
       "required": ["group", "metadata"],
@@ -101,7 +101,27 @@
     },
     "measurements": {
       "type": "object",
+      "description": "Canonical names (CANONICAL_MEASUREMENTS in workload_results.py) are pinned to their unit; other names may use any unit",
       "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "properties": {
+        "wall_time_seconds": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "seconds"}}},
+        "queue_wait_seconds": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "seconds"}}},
+        "tool_call_seconds": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "seconds"}}},
+        "tool_calls": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "count"}}},
+        "repeated_commands": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "count"}}},
+        "input_bytes": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "bytes"}}},
+        "output_bytes": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "bytes"}}},
+        "context_bytes": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "bytes"}}},
+        "retained_summary_bytes": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "bytes"}}},
+        "estimated_tokens": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "tokens"}}},
+        "retained_summary_tokens": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "tokens"}}},
+        "input_tokens": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "tokens"}}},
+        "output_tokens": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "tokens"}}},
+        "peak_rss_bytes": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "bytes"}}},
+        "rss_delta_bytes": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "bytes"}}},
+        "success_rate": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "ratio"}}},
+        "throughput_per_second": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "per_second"}}}
+      },
       "additionalProperties": {"$ref": "#/$defs/measurement"}
     },
     "phase": {
@@ -146,7 +166,7 @@
       "required": ["id", "labels", "status", "measurements", "phases", "errors"],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string", "minLength": 1, "description": "Unique within the result; consumers match runs across results by id"},
+        "id": {"type": "string", "minLength": 1, "description": "Unique within the result; consumers match runs across results by id. JSON Schema cannot express this uniqueness, so validate ids with workload_results.validate_result or an equivalent check"},
         "labels": {
           "type": "object",
           "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},

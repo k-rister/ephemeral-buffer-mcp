@@ -269,6 +269,9 @@ def run_benchmark(
     """Measure semantic index and search latency for each capture size."""
     if not line_counts or any(line_count < 1 for line_count in line_counts):
         raise ValueError("line_counts must contain only positive values")
+    if len(set(line_counts)) != len(line_counts):
+        # Sizes become workload run IDs, so a repeated size would yield duplicate IDs.
+        raise ValueError("line_counts must not contain duplicates")
     if samples < 1:
         raise ValueError("samples must be positive")
     if mode not in SEARCH_MODES:

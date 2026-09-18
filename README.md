@@ -1252,7 +1252,12 @@ CLI, as above) and the same contract is published as JSON Schema in
   `retained_summary_tokens`, `input_tokens`, `output_tokens`,
   `peak_rss_bytes`, `rss_delta_bytes`, `success_rate`, and
   `throughput_per_second` pin their unit so results from different producers
-  line up; producers add their own names beside them.
+  line up; producers add their own names beside them. The JSON Schema pins
+  those units too.
+- Run `id`s are unique within a document. JSON Schema cannot express that
+  rule (its `uniqueItems` only rejects fully identical runs), so a consumer
+  that validates with the schema alone must check ids itself or run
+  `workload_results.py` on the document first.
 - `details` carries the producer's native record for people who need it; its
   shape is producer-specific and versioned separately by
   `workload.producer_schema_version`.

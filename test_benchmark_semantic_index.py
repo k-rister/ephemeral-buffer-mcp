@@ -191,6 +191,8 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             run_benchmark((0,), samples=1)
         with self.assertRaises(ValueError):
             run_benchmark((4,), samples=0)
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            run_benchmark((4, 4), samples=1)
         with self.assertRaises(ValueError):
             run_benchmark((4,), samples=1, mode="bm25")
         with self.assertRaises(ValueError):
