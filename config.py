@@ -17,6 +17,9 @@ DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 FP32_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5-fp32"
 DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
+DEFAULT_SEMANTIC_CHUNK_LINES = 8
+DEFAULT_SEMANTIC_CHUNK_BYTES = 1024
+DEFAULT_SEMANTIC_CHUNK_OVERLAP = 0
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 DEFAULT_SOCKET_TIMEOUT_SECONDS = 10.0
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
@@ -153,6 +156,21 @@ def semantic_prefetch_workers() -> int:
     return positive_int_env("EPHEMERAL_SEMANTIC_PREFETCH_WORKERS", DEFAULT_SEMANTIC_PREFETCH_WORKERS)
 
 
+def semantic_chunk_lines() -> int:
+    """Return the maximum number of lines packed into one semantic chunk."""
+    return positive_int_env("EPHEMERAL_SEMANTIC_CHUNK_LINES", DEFAULT_SEMANTIC_CHUNK_LINES)
+
+
+def semantic_chunk_bytes() -> int:
+    """Return the UTF-8 byte budget that closes a semantic chunk early."""
+    return positive_int_env("EPHEMERAL_SEMANTIC_CHUNK_BYTES", DEFAULT_SEMANTIC_CHUNK_BYTES)
+
+
+def semantic_chunk_overlap() -> int:
+    """Return how many trailing lines consecutive semantic chunks share."""
+    return non_negative_int_env("EPHEMERAL_SEMANTIC_CHUNK_OVERLAP", DEFAULT_SEMANTIC_CHUNK_OVERLAP)
+
+
 def max_indexed_chunks() -> int:
     """Return the maximum total number of indexed chunks retained in memory."""
     return positive_int_env("EPHEMERAL_MAX_INDEXED_CHUNKS", DEFAULT_MAX_INDEXED_CHUNKS)
@@ -178,6 +196,21 @@ def optional_positive_int_env(name: str) -> int | None:
     except ValueError:
         print(f"Ignoring invalid {name}={value!r}; using the runtime default", file=sys.stderr)
         return None
+
+
+def non_negative_int_env(name: str, default: int) -> int:
+    """Return a non-negative integer environment setting or its safe default."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        if parsed < 0:
+            raise ValueError
+        return parsed
+    except ValueError:
+        print(f"Ignoring invalid {name}={value!r}; using {default}", file=sys.stderr)
+        return default
 
 
 def positive_int_env(name: str, default: int) -> int:

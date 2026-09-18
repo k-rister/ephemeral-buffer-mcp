@@ -131,6 +131,18 @@ matching coverage but may be slower and does not provide FTS5 BM25 ranking.
 `get_buffer_stats` reports the active lexical backend. FTS5 is therefore an
 optional capability rather than a package-level platform prerequisite.
 
+Semantic embeddings are computed over windows packed separately from the
+BM25 grid: up to `EPHEMERAL_SEMANTIC_CHUNK_LINES` lines (default `8`) or
+`EPHEMERAL_SEMANTIC_CHUNK_BYTES` UTF-8 bytes (default `1024`) per window, with
+`EPHEMERAL_SEMANTIC_CHUNK_OVERLAP` shared lines (default `0`). The byte cap
+keeps windows under the model's 512-token limit for ordinary text, and a single
+oversized line becomes its own window. Embedding cost scales with total tokens,
+so overlap and window count are the main levers; windows beyond about eight
+short lines cost more per token without reducing total work. The index budget
+counts lexical chunks; semantic windows are never more numerous than lexical
+ones unless overlap is raised above the lexical grid's. `get_buffer_stats`
+reports the active window settings and the semantic window count.
+
 Semantic indexing prefetch is disabled by default. To opt in, set
 `EPHEMERAL_SEMANTIC_PREFETCH=1`; optionally set
 `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` (default `1`) to a small positive value.
