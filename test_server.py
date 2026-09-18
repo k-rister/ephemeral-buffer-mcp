@@ -2055,6 +2055,9 @@ class TestSocketServerStartup(unittest.TestCase):
             def start(self):
                 self.started = True
 
+            def join(self, timeout=None):
+                pass
+
         fake_thread = FakeThread()
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
                 patch.object(server.threading, "Thread", return_value=fake_thread), \
