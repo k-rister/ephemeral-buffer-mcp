@@ -302,17 +302,18 @@ per token; overlap improves recall across window boundaries at proportional
 embedding cost. Compare strategies on the deployment host with
 `benchmark_semantic_index.py --semantic-chunk-lines ... --semantic-chunk-overlap ...`.
 
-Semantic indexing can optionally be prefetched after ingestion:
+Semantic indexing is prefetched after ingestion by default, so a search that
+arrives after the background job finishes pays no indexing cost. Disable it for
+lexical-only or CPU-constrained hosts, or bound the worker pool:
 
 ```bash
-export EPHEMERAL_SEMANTIC_PREFETCH=1
+export EPHEMERAL_SEMANTIC_PREFETCH=0
 export EPHEMERAL_SEMANTIC_PREFETCH_WORKERS=1
 ```
 
-Prefetch is disabled by default. When enabled, every eligible capture is queued
-at ingestion and a bounded worker pool drains the queue newest-first, since the
-latest capture is the most likely search target; a burst of captures is never
-silently skipped. A semantic or hybrid search waits for a job that is already
+Every eligible capture is queued at ingestion and a bounded worker pool drains
+the queue newest-first, since the latest capture is the most likely search
+target; a burst of captures is never silently skipped. A semantic or hybrid search waits for a job that is already
 running, and pulls a still-queued capture out of the queue to index it inline
 so it does not wait behind older work. Failed jobs retry through the normal
 lazy path, and evicted or cleared captures drop their queued work. Embedding
@@ -814,7 +815,7 @@ start includes the first engine's model and embedding setup, while warm samples
 reuse the configured model cache and engine. The benchmark is diagnostic and
 optional, not a required pull-request check.
 
-Compare lazy semantic indexing with opt-in asynchronous prefetch:
+Compare lazy semantic indexing with the default asynchronous prefetch:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_prefetch.py \
   --line-count 256 --samples 5 --output benchmark-prefetch.json

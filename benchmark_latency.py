@@ -98,12 +98,14 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
     if samples < 1:
         raise ValueError("samples must be positive")
 
-    cold_engine = EphemeralEngine(max_captures=2)
+    # These harnesses time the lazy indexing path explicitly, so background
+    # prefetch (on by default) is disabled to keep the phases distinct.
+    cold_engine = EphemeralEngine(max_captures=2, semantic_prefetch=False)
     started = time.perf_counter()
     _measure_once(line_counts[0], cold_engine)
     cold_start_seconds = time.perf_counter() - started
 
-    engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1))
+    engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1), semantic_prefetch=False)
     # Keep the reported size measurements focused on capture work, not model setup.
     warmup = engine.ingest("warmup", label="latency-warmup")
     engine._ensure_embeddings(warmup)

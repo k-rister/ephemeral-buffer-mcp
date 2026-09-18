@@ -203,10 +203,12 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertEqual(embedding_model_name(), "custom/model")
             self.assertEqual(embedding_cache_dir(), "/tmp/fastembed")
 
-    def test_semantic_prefetch_defaults_disabled_and_one_worker(self):
+    def test_semantic_prefetch_defaults_enabled_and_one_worker(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(semantic_prefetch_enabled())
+            self.assertTrue(semantic_prefetch_enabled())
             self.assertEqual(semantic_prefetch_workers(), DEFAULT_SEMANTIC_PREFETCH_WORKERS)
+        with patch.dict(os.environ, {"EPHEMERAL_SEMANTIC_PREFETCH": "0"}, clear=True):
+            self.assertFalse(semantic_prefetch_enabled())
 
     def test_embedding_warmup_defaults_enabled_and_can_be_disabled(self):
         with patch.dict(os.environ, {}, clear=True):

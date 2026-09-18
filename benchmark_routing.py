@@ -96,7 +96,8 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
         raise ValueError("line_counts must contain only positive values")
     if samples < 1:
         raise ValueError("samples must be positive")
-    engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1))
+    # Prefetch is disabled so captured-path timings reflect ingestion and summary only.
+    engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1), semantic_prefetch=False)
     measurements = []
     for line_count in line_counts:
         command = _command_for_lines(line_count)

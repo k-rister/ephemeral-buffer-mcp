@@ -1285,9 +1285,9 @@ def search_capture(
 ) -> str:
     """
     Searches the captured command output using BM25, Semantic embedding, or Hybrid (RRF) ranking.
-    When opt-in semantic prefetch is enabled, semantic and hybrid searches wait
-    for the relevant background index job; failed jobs fall back to synchronous
-    lazy indexing.
+    Semantic prefetch is on by default: semantic and hybrid searches wait for a
+    running background index job, index a still-queued capture inline, and fall
+    back to synchronous lazy indexing when a job failed or prefetch is disabled.
     
     Args:
         query: Search keywords or natural language question (e.g. 'auth failure', 'ECONNREFUSED', 'why did the build fail?').

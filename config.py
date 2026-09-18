@@ -151,8 +151,8 @@ def embedding_warmup_enabled() -> bool:
 
 
 def semantic_prefetch_enabled() -> bool:
-    """Return whether post-ingestion semantic indexing is enabled."""
-    return os.environ.get("EPHEMERAL_SEMANTIC_PREFETCH", "0").strip().lower() in {
+    """Return whether post-ingestion semantic indexing is enabled (default on)."""
+    return os.environ.get("EPHEMERAL_SEMANTIC_PREFETCH", "1").strip().lower() in {
         "1", "true", "yes", "on"
     }
 
