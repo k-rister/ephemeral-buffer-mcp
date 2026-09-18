@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-09-18
 
 - Reject duplicate `--line-counts` values in `benchmark_latency.py`,
   `benchmark_semantic_index.py`, and `benchmark_routing.py` before any
