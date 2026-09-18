@@ -24,6 +24,9 @@
   newest-first by the bounded worker pool, so ingestion bursts never silently
   leave captures unprefetched; searches index a still-queued capture inline,
   and diagnostics report queued and running counts.
+- Enable semantic prefetch by default so the first semantic or hybrid search
+  after a capture usually finds the index ready; set
+  `EPHEMERAL_SEMANTIC_PREFETCH=0` to restore lazy-only indexing.
 - Add durable phase-level executions with persisted outputs, metrics, status
   history, restart recovery, explicit retries, and unsafe-side-effect resume
   confirmation for long-running agent workflows, including recoverable compact

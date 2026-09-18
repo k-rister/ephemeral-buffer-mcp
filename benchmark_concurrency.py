@@ -14,7 +14,8 @@ from engine import EphemeralEngine
 
 def run_benchmark(captures: int, workers: int) -> dict:
     """Run the benchmark and return machine-readable measurements."""
-    engine = EphemeralEngine(max_captures=max(captures, DEFAULT_MAX_CAPTURES))
+    # Prefetch is disabled so the workload stays comparable with the stored baseline.
+    engine = EphemeralEngine(max_captures=max(captures, DEFAULT_MAX_CAPTURES), semantic_prefetch=False)
     payload = "benchmark line with representative output\n" * 20
 
     started = time.perf_counter()

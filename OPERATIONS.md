@@ -146,10 +146,13 @@ counts lexical chunks; semantic windows are never more numerous than lexical
 ones unless overlap is raised above the lexical grid's. `get_buffer_stats`
 reports the active window settings and the semantic window count.
 
-Semantic indexing prefetch is disabled by default. To opt in, set
-`EPHEMERAL_SEMANTIC_PREFETCH=1`; optionally set
-`EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` (default `1`) to a small positive value.
-Ingestion queues every eligible capture and the bounded worker pool drains the
+Semantic indexing prefetch is enabled by default. Set
+`EPHEMERAL_SEMANTIC_PREFETCH=0` for lexical-only or CPU-constrained hosts, and
+optionally set `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` (default `1`) to a small
+positive value. Each capture then costs background embedding work right after
+ingestion, on the same host as the coding agent; bound it with
+`EPHEMERAL_EMBEDDING_THREADS` rather than disabling prefetch when only host
+impact is the concern. Ingestion queues every eligible capture and the bounded worker pool drains the
 queue newest-first, so bursts are never silently dropped; the queue is bounded
 by the capture limit because eviction removes queued work. Semantic and hybrid
 search wait for an active job, index a still-queued capture inline instead of

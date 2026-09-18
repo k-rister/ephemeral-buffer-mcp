@@ -20,7 +20,8 @@ SCHEMA_VERSION = 1
 def _measure_in_process(warmup: bool) -> dict[str, Any]:
     rss_before = process_rss_bytes()
     started = time.perf_counter()
-    engine = EphemeralEngine(max_captures=1, embedding_warmup=warmup)
+    # Prefetch is disabled so first-search latency isolates model warm-up.
+    engine = EphemeralEngine(max_captures=1, embedding_warmup=warmup, semantic_prefetch=False)
     engine_init_seconds = time.perf_counter() - started
     try:
         started = time.perf_counter()

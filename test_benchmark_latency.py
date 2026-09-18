@@ -10,7 +10,7 @@ import benchmark_latency
 class FakeEngine:
     instances = []
 
-    def __init__(self, max_captures):
+    def __init__(self, max_captures, **_kwargs):
         self.max_buffer_bytes = 1024
         self.embedding_model_name = "test-model"
         self.events = []
