@@ -557,14 +557,19 @@ def register_bundled_embedding_models() -> None:
 
 
 class _SemanticIndexJob:
-    """Completion state for one background embedding job."""
+    """Completion state for one on-demand embedding job.
 
-    __slots__ = ("done", "error", "future")
+    ``future`` is assigned by ``_start_semantic_index`` before the job is
+    published to waiters, so it is always present once the job is visible.
+    """
+
+    __slots__ = ("done", "error", "future", "cancelled")
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.error: Optional[BaseException] = None
-        self.future: Optional[Future] = None
+        self.future: Future
+        self.cancelled = False
 
 
 class _DeterministicTestEmbedding:
@@ -1090,6 +1095,7 @@ class EphemeralEngine:
         )
         old_cap.semantic_index_state = "evicted"
         self._cancel_prefetch(capture_id)
+        self._cancel_on_demand_job(capture_id)
         self._close_capture_storage(old_cap)
         self.metrics.record_event("evictions")
         self.metrics.forget_capture(capture_id)
@@ -1197,9 +1203,9 @@ class EphemeralEngine:
                 finished.set()
                 return finished, None
             job = _SemanticIndexJob()
+            job.future = self._on_demand_executor.submit(self._on_demand_index_worker, capture, job)
             self._on_demand_jobs[capture.capture_id] = job
             capture.semantic_index_state = "pending"
-            job.future = self._on_demand_executor.submit(self._on_demand_index_worker, capture, job)
             return job.done, job
 
     def _on_demand_index_worker(self, capture: Capture, job: _SemanticIndexJob) -> None:
@@ -1224,7 +1230,9 @@ class EphemeralEngine:
 
         Returns ``"ready"`` or ``"pending"``.  ``None`` and ``inf`` wait until
         the index is ready or its job fails, in which case the job's exception
-        is re-raised so callers keep the lazy-path error semantics.
+        is re-raised so callers keep the lazy-path error semantics.  A bounded
+        wait never indexes inline: if the job was cancelled or the capture was
+        evicted, it reports ``"pending"`` instead.
         """
         started = self._start_semantic_index(capture)
         if started is None:
@@ -1238,6 +1246,14 @@ class EphemeralEngine:
         with self._lock:
             if capture.embeddings is not None:
                 return "ready"
+            retained = self.captures.get(capture.capture_id) is capture
+        if wait_seconds is not None and (not retained or (job is not None and job.cancelled)):
+            # The job was cancelled (eviction or shutdown) or finished without
+            # publishing for an evicted capture.  Indexing inline would ignore
+            # the budget and could block behind the model lock, so a bounded
+            # waiter answers lexical-first; an unbounded one still indexes
+            # under its reader lease below.
+            return "pending"
         # The finished job could not publish (failed prefetch, or the capture
         # was evicted mid-flight); index inline so a retained capture still
         # gets a result and a failed one raises its error.
@@ -1297,21 +1313,32 @@ class EphemeralEngine:
                 self._close_capture_storage(capture)
 
     def _cancel_prefetch(self, capture_id: str) -> None:
-        """Drop queued work for a capture; running work is allowed to finish."""
+        """Drop queued prefetch work for a capture; running work is allowed to finish."""
         capture = self._prefetch_queue.pop(capture_id, None)
         if capture is not None:
             capture.semantic_index_state = "not-requested"
+
+    def _cancel_on_demand_job(self, capture_id: str) -> None:
+        """Cancel a capture's on-demand job unless it already holds a pool thread.
+
+        The caller holds ``self._lock``.  A running job finishes on its own
+        and skips publishing for an evicted capture.  A cancelled job runs no
+        worker cleanup, so its waiters are released here: one past its budget
+        has already answered, and ``_await_semantic_index`` keeps a bounded
+        waiter from indexing inline.  Reached from eviction, ``clear``, and
+        ``shutdown``; the capture is still buffered when clearing all captures
+        (it is marked evicted right after) or at shutdown (it then stays
+        lazily indexable).
+        """
         job = self._on_demand_jobs.get(capture_id)
-        if job is not None and job.future is not None and job.future.cancel():
-            # The job never started, so no worker will run its cleanup; a
-            # waiter past its budget has already answered, and one still
-            # blocked falls through to the lazy path when the event is set.
-            self._on_demand_jobs.pop(capture_id, None)
-            live = self.captures.get(capture_id)
-            if live is not None and live.semantic_index_state == "pending":
-                # Cancelled at shutdown while still buffered: leave it lazily indexable.
-                live.semantic_index_state = "not-requested"
-            job.done.set()
+        if job is None or not job.future.cancel():
+            return
+        job.cancelled = True
+        self._on_demand_jobs.pop(capture_id, None)
+        live = self.captures.get(capture_id)
+        if live is not None and live.semantic_index_state == "pending":
+            live.semantic_index_state = "not-requested"
+        job.done.set()
 
     def shutdown(self) -> None:
         """Stop background embedding work without holding the engine lock while waiting."""
@@ -1325,7 +1352,7 @@ class EphemeralEngine:
             for capture_id in list(self._prefetch_queue):
                 self._cancel_prefetch(capture_id)
             for capture_id in list(self._on_demand_jobs):
-                self._cancel_prefetch(capture_id)
+                self._cancel_on_demand_job(capture_id)
         if warmup_thread is not None and warmup_thread is not threading.current_thread():
             warmup_thread.join()
         if executor is not None:
@@ -1990,7 +2017,13 @@ class EphemeralEngine:
             ),
             "semantic_prefetch_queued": len(self._prefetch_queue),
             "semantic_prefetch_running": len(self._prefetch_running),
-            "semantic_index_on_demand_running": len(self._on_demand_jobs),
+            "semantic_index_on_demand_running": sum(
+                1 for job in self._on_demand_jobs.values() if job.future.running()
+            ),
+            "semantic_index_on_demand_queued": sum(
+                1 for job in self._on_demand_jobs.values()
+                if not job.future.running() and not job.future.done()
+            ),
             "semantic_wait_seconds": self.semantic_wait_seconds,
             "semantic_prefetch_failed": sum(
                 1 for cap in self.captures.values() if cap.semantic_index_state == "failed"
@@ -2011,6 +2044,7 @@ class EphemeralEngine:
             capture_ids = list(self.captures)
             for cap in self.captures.values():
                 self._cancel_prefetch(cap.capture_id)
+                self._cancel_on_demand_job(cap.capture_id)
                 cap.semantic_index_state = "evicted"
                 self._close_capture_storage(cap)
             self.captures.clear()
@@ -2024,6 +2058,7 @@ class EphemeralEngine:
         elif capture_id in self.captures:
             cap = self.captures.pop(capture_id)
             self._cancel_prefetch(capture_id)
+            self._cancel_on_demand_job(capture_id)
             cap.semantic_index_state = "evicted"
             self._total_bytes -= cap.retained_byte_size
             self._indexed_chunks -= len(cap.chunks)

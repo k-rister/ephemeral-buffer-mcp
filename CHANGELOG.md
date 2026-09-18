@@ -6,7 +6,12 @@
   `EPHEMERAL_SEMANTIC_PREFETCH_WORKERS` instead of one thread per capture, and
   cancel queued on-demand jobs when their capture is evicted or cleared, so
   hybrid searches that exceed the wait budget on captures that are then
-  evicted no longer accumulate indexing threads beyond the bound. A capture
+  evicted no longer accumulate indexing threads beyond the bound. A hybrid
+  search whose capture is evicted while it waits answers lexical-first within
+  its budget instead of indexing the evicted capture inline, and
+  `get_buffer_stats` reports queued on-demand jobs separately as
+  `semantic_index_on_demand_queued`. Benchmarks shut their engines down so
+  background indexing never delays process exit. A capture
   pulled out of the prefetch queue whose indexing then fails is marked `failed`
   and retries through the lazy path. Empty captures now report
   `semantic_coverage` (`complete` for semantic and hybrid searches,

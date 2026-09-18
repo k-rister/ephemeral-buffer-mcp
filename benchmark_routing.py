@@ -100,17 +100,21 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
     # Prefetch is disabled so captured-path timings reflect ingestion and summary only.
     engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1), semantic_prefetch=False)
     measurements = []
-    for line_count in line_counts:
-        command = _command_for_lines(line_count)
-        for _ in range(samples):
-            direct = _measure_direct(command)
-            captured = _measure_captured(command, engine, PROFILE_NAMES.get(line_count, "custom"))
-            measurements.append({
-                "line_count": line_count,
-                "output_bytes": direct["output_bytes"],
-                "direct_seconds": direct["seconds"],
-                "captured_seconds": captured["seconds"],
-            })
+    try:
+        for line_count in line_counts:
+            command = _command_for_lines(line_count)
+            for _ in range(samples):
+                direct = _measure_direct(command)
+                captured = _measure_captured(command, engine, PROFILE_NAMES.get(line_count, "custom"))
+                measurements.append({
+                    "line_count": line_count,
+                    "output_bytes": direct["output_bytes"],
+                    "direct_seconds": direct["seconds"],
+                    "captured_seconds": captured["seconds"],
+                })
+    finally:
+        # Background index work must not outlive the run and delay process exit.
+        engine.shutdown()
     return {
         "schema_version": SCHEMA_VERSION,
         "python_version": platform.python_version(),

@@ -103,18 +103,25 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
     # These harnesses time the lazy indexing path explicitly, so background
     # prefetch (on by default) is disabled to keep the phases distinct.
     cold_engine = EphemeralEngine(max_captures=2, semantic_prefetch=False)
-    started = time.perf_counter()
-    _measure_once(line_counts[0], cold_engine)
-    cold_start_seconds = time.perf_counter() - started
+    try:
+        started = time.perf_counter()
+        _measure_once(line_counts[0], cold_engine)
+        cold_start_seconds = time.perf_counter() - started
+    finally:
+        # Background index work must not outlive the run and delay process exit.
+        cold_engine.shutdown()
 
     engine = EphemeralEngine(max_captures=max(25, samples * len(line_counts) + 1), semantic_prefetch=False)
-    # Keep the reported size measurements focused on capture work, not model setup.
-    warmup = engine.ingest("warmup", label="latency-warmup")
-    engine._ensure_embeddings(warmup)
-    by_size = []
-    for line_count in line_counts:
-        measurements = [_measure_once(line_count, engine) for _ in range(samples)]
-        by_size.append(_summary(measurements))
+    try:
+        # Keep the reported size measurements focused on capture work, not model setup.
+        warmup = engine.ingest("warmup", label="latency-warmup")
+        engine._ensure_embeddings(warmup)
+        by_size = []
+        for line_count in line_counts:
+            measurements = [_measure_once(line_count, engine) for _ in range(samples)]
+            by_size.append(_summary(measurements))
+    finally:
+        engine.shutdown()
 
     return {
         "schema_version": SCHEMA_VERSION,

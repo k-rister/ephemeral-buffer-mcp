@@ -353,7 +353,7 @@ wait for the index unconditionally. Semantic mode has no lexical result to
 fall back on, so it always waits for the index. An empty capture has nothing
 to index, so it reports `complete` coverage for semantic and hybrid searches.
 `get_buffer_stats` reports the budget and the number of on-demand index jobs
-running or queued.
+running and queued.
 
 The exact model and cache location can also be supplied in the MCP client's
 `env` configuration. Keep the model cache writable by the user running the

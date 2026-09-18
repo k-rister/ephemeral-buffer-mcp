@@ -19,21 +19,25 @@ def run_benchmark(captures: int, workers: int) -> dict:
     engine = EphemeralEngine(max_captures=max(captures, DEFAULT_MAX_CAPTURES), semantic_prefetch=False)
     payload = "benchmark line with representative output\n" * 20
 
-    started = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        captured = list(executor.map(
-            lambda index: engine.ingest(payload, label=f"benchmark-{index}"),
-            range(captures),
-        ))
-    ingest_seconds = time.perf_counter() - started
+    try:
+        started = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            captured = list(executor.map(
+                lambda index: engine.ingest(payload, label=f"benchmark-{index}"),
+                range(captures),
+            ))
+        ingest_seconds = time.perf_counter() - started
 
-    started = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        summaries = list(executor.map(
-            lambda capture: engine.get_summary(capture.capture_id),
-            captured,
-        ))
-    read_seconds = time.perf_counter() - started
+        started = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            summaries = list(executor.map(
+                lambda capture: engine.get_summary(capture.capture_id),
+                captured,
+            ))
+        read_seconds = time.perf_counter() - started
+    finally:
+        # Background index work must not outlive the run and delay process exit.
+        engine.shutdown()
 
     return {
         "schema_version": 1,
