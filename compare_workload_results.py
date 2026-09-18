@@ -317,6 +317,7 @@ def validate_tolerance(tolerance_percent: float) -> float:
 
 def classify(delta: float, delta_percent: float | None, direction: str | None, tolerance_percent: float) -> str:
     """Return the outcome for one numeric delta."""
+    tolerance_percent = validate_tolerance(tolerance_percent)
     if delta == 0:
         return "unchanged"
     if delta_percent is not None and abs(delta_percent) <= tolerance_percent:
