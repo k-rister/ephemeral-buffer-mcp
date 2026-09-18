@@ -174,6 +174,8 @@ class TestPositiveIntEnv(unittest.TestCase):
     def test_embedding_defaults(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(embedding_model_name(), DEFAULT_EMBEDDING_MODEL)
+            self.assertEqual(DEFAULT_EMBEDDING_MODEL, config.FP32_EMBEDDING_MODEL)
+            self.assertEqual(config.CATALOGUE_EMBEDDING_MODEL, config.BGE_SMALL_HF_REPO)
             self.assertIsNone(embedding_cache_dir())
             self.assertIsNone(embedding_threads())
 

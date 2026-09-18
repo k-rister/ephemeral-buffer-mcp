@@ -20,6 +20,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from config import DEFAULT_EMBEDDING_MODEL
 from benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
     MODES,
@@ -32,7 +33,6 @@ from benchmark_agent_ab import (
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_TIMEOUT = 900
-DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 
 

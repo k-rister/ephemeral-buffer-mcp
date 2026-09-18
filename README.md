@@ -254,25 +254,25 @@ deployments, or to select a compatible model and cache location, set:
 
 ```bash
 export EPHEMERAL_EMBEDDING_WARMUP=0
-export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5"
+export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5-fp32"
 export EPHEMERAL_FASTEMBED_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
 ```
 
-Embedding inference speed depends on the ONNX file and thread count. The
-catalogue entry for the default model is a reduced-precision export that does
-not parallelize on every CPU platform; the `BAAI/bge-small-en-v1.5-fp32` alias
-selects the upstream fp32 export of the same model, which produces identical
-vectors and scales with threads at the cost of a larger download. Bound the
-threads with `EPHEMERAL_EMBEDDING_THREADS` when the server shares a host with
-an interactive coding agent:
+The default model is `BAAI/bge-small-en-v1.5-fp32`, the upstream fp32 ONNX
+export of bge-small-en-v1.5 (about 130 MB), which the server registers with
+FastEmbed itself. FastEmbed's own catalogue entry, selectable as
+`BAAI/bge-small-en-v1.5`, is a smaller reduced-precision export that produces
+identical vectors but whose matrix kernels do not parallelize on common CPU
+hosts; measured first-search latency with it was 3x to 23x worse. Embedding
+inference uses ONNX Runtime's default thread count; bound it with
+`EPHEMERAL_EMBEDDING_THREADS` when the server shares a host with an
+interactive coding agent, and check both settings on the deployment host with
+`benchmark_semantic_index.py`. `get_buffer_stats` reports the active thread
+setting.
 
 ```bash
-export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5-fp32"
 export EPHEMERAL_EMBEDDING_THREADS=4
 ```
-
-Measure both settings on the deployment host with `benchmark_semantic_index.py`
-before relying on them; `get_buffer_stats` reports the active thread setting.
 
 Warm-up failures do not stop the server. BM25 remains available, and hybrid
 search returns lexical results with a `semantic_fallback` error-class field

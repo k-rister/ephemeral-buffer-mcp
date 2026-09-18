@@ -5,10 +5,14 @@
 - Add a semantic-index latency benchmark that reports ingestion, lazy embedding
   materialization, first and subsequent hybrid or semantic search timings,
   indexing throughput, and needle rank by capture size with the real model.
+- Use the upstream fp32 ONNX export of bge-small-en-v1.5, registered with
+  FastEmbed as `BAAI/bge-small-en-v1.5-fp32`, as the default embedding model.
+  It produces identical vectors to FastEmbed's reduced-precision catalogue file
+  but its kernels parallelize, indexing 23x faster on a Linux x86_64 host and
+  3x faster on Apple silicon; the catalogue file remains selectable as
+  `BAAI/bge-small-en-v1.5`. First use downloads about 130 MB instead of 67 MB.
 - Add `EPHEMERAL_EMBEDDING_THREADS` to bound ONNX Runtime threads for embedding
-  inference, and register `BAAI/bge-small-en-v1.5-fp32` as a selectable fp32
-  export of the default model that produces identical vectors but parallelizes
-  on platforms where the reduced-precision catalogue file does not.
+  inference; the runtime default is fastest but uses every core.
 - Index semantic embeddings over windows packed separately from the BM25
   sliding grid, bounded by `EPHEMERAL_SEMANTIC_CHUNK_LINES` (default 8),
   `EPHEMERAL_SEMANTIC_CHUNK_BYTES` (default 1024), and

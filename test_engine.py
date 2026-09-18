@@ -12,7 +12,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
-from config import FP32_EMBEDDING_MODEL
+from config import CATALOGUE_EMBEDDING_MODEL, FP32_EMBEDDING_MODEL
 from engine import (
     Chunk,
     HYBRID_LEXICAL_WEIGHT,
@@ -1602,7 +1602,9 @@ class TestEmbeddingStartup(unittest.TestCase):
         self.assertEqual(configured.embedding_threads, 3)
         self.assertEqual(configured.get_buffer_stats()["embedding_threads"], 3)
 
-        explicit = EphemeralEngine(max_captures=1, embedding_threads=2)
+        explicit = EphemeralEngine(
+            max_captures=1, embedding_threads=2, embedding_model_name=CATALOGUE_EMBEDDING_MODEL
+        )
         self.assertEqual(explicit.embedding_threads, 2)
         with self.assertRaisesRegex(ValueError, "embedding_threads"):
             EphemeralEngine(max_captures=1, embedding_threads=0)
