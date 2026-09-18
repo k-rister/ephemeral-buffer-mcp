@@ -37,6 +37,7 @@ from config import (
     max_indexed_chunks as configured_max_indexed_chunks,
     semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
     semantic_prefetch_workers as configured_semantic_prefetch_workers,
+    semantic_wait_seconds as configured_semantic_wait_seconds,
     semantic_chunk_lines as configured_semantic_chunk_lines,
     semantic_chunk_bytes as configured_semantic_chunk_bytes,
     semantic_chunk_overlap as configured_semantic_chunk_overlap,
@@ -555,6 +556,16 @@ def register_bundled_embedding_models() -> None:
     _BUNDLED_MODELS_REGISTERED = True
 
 
+class _SemanticIndexJob:
+    """Completion state for one background embedding job."""
+
+    __slots__ = ("done", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: Optional[BaseException] = None
+
+
 class _DeterministicTestEmbedding:
     """Small deterministic substitute used only by the CI test environment."""
 
@@ -598,6 +609,7 @@ class EphemeralEngine:
         semantic_chunk_lines: Optional[int] = None,
         semantic_chunk_bytes: Optional[int] = None,
         semantic_chunk_overlap: Optional[int] = None,
+        semantic_wait_seconds: Optional[float] = None,
     ):
         self._lock = threading.RLock()
         if max_captures < 1:
@@ -671,6 +683,11 @@ class EphemeralEngine:
         )
         if self.semantic_prefetch_workers < 1:
             raise ValueError("semantic_prefetch_workers must be at least 1")
+        self.semantic_wait_seconds = (
+            configured_semantic_wait_seconds() if semantic_wait_seconds is None else semantic_wait_seconds
+        )
+        if math.isnan(self.semantic_wait_seconds) or self.semantic_wait_seconds < 0:
+            raise ValueError("semantic_wait_seconds must be non-negative")
         self._prefetch_executor = (
             ThreadPoolExecutor(
                 max_workers=self.semantic_prefetch_workers,
@@ -685,6 +702,11 @@ class EphemeralEngine:
         self._prefetch_queue: "OrderedDict[str, Capture]" = OrderedDict()
         self._prefetch_running: Dict[str, threading.Event] = {}
         self._prefetch_workers_active = 0
+        # Searches that find no prefetch job running index the capture on a
+        # dedicated thread and wait for it only up to the configured budget, so
+        # a very large capture yields lexical-first results instead of blocking.
+        self._on_demand_jobs: Dict[str, _SemanticIndexJob] = {}
+        self._on_demand_threads: Dict[str, threading.Thread] = {}
         self._shutdown = False
 
     def start_embedding_warmup(self) -> bool:
@@ -1099,6 +1121,7 @@ class EphemeralEngine:
                 capture.embeddings is not None
                 or capture.capture_id in self._prefetch_queue
                 or capture.capture_id in self._prefetch_running
+                or capture.capture_id in self._on_demand_jobs
             ):
                 return
             self._prefetch_queue[capture.capture_id] = capture
@@ -1141,16 +1164,96 @@ class EphemeralEngine:
                         capture.semantic_index_state = "not-requested"
                     done.set()
 
-    def _wait_for_prefetch(self, capture: Capture) -> None:
-        """Wait for running prefetch work; dequeue pending work so the caller indexes it now."""
+    def _start_semantic_index(self, capture: Capture) -> Optional[Tuple[threading.Event, Optional[_SemanticIndexJob]]]:
+        """Return the completion event for the job indexing ``capture``, starting one if needed.
+
+        A running prefetch job is reused.  Otherwise the capture is pulled out
+        of the prefetch queue, because a search is a stronger signal than queue
+        position, and indexed on a dedicated thread that outlives the caller's
+        wait budget.  Returns ``None`` when the embeddings are already ready.
+        """
         with self._lock:
-            done = self._prefetch_running.get(capture.capture_id)
-            if done is None:
-                # A search is a stronger signal than queue position: index inline
-                # rather than waiting behind other captures.
-                self._prefetch_queue.pop(capture.capture_id, None)
-        if done is not None:
-            done.wait()
+            if capture.embeddings is not None:
+                return None
+            running = self._prefetch_running.get(capture.capture_id)
+            if running is not None:
+                return running, None
+            job = self._on_demand_jobs.get(capture.capture_id)
+            if job is not None:
+                return job.done, job
+            self._prefetch_queue.pop(capture.capture_id, None)
+            if self._shutdown:
+                # No background thread may start after shutdown; the caller
+                # indexes inline as the lazy path always could.
+                finished = threading.Event()
+                finished.set()
+                return finished, None
+            job = _SemanticIndexJob()
+            self._on_demand_jobs[capture.capture_id] = job
+            capture.semantic_index_state = "pending"
+            thread = threading.Thread(
+                target=self._on_demand_index_worker,
+                args=(capture, job),
+                name=f"semantic-index-{capture.capture_id}",
+                daemon=True,
+            )
+            self._on_demand_threads[capture.capture_id] = thread
+            thread.start()
+            return job.done, job
+
+    def _on_demand_index_worker(self, capture: Capture, job: _SemanticIndexJob) -> None:
+        """Materialize one capture's embeddings and publish the outcome to waiters."""
+        try:
+            self._ensure_embeddings(capture)
+        except Exception as exc:
+            job.error = exc
+            capture.semantic_index_state = "failed"
+            log_event(LOGGER, logging.ERROR, "semantic_index_failed", capture_id=capture.capture_id)
+            LOGGER.exception("semantic_index_exception")
+        finally:
+            with self._lock:
+                self._on_demand_jobs.pop(capture.capture_id, None)
+                self._on_demand_threads.pop(capture.capture_id, None)
+                if capture.semantic_index_state == "pending":
+                    # The capture was evicted before its embeddings were published.
+                    capture.semantic_index_state = "not-requested"
+                job.done.set()
+
+    def _await_semantic_index(self, capture: Capture, timeout: Optional[float] = None) -> str:
+        """Wait up to ``timeout`` seconds for the capture's semantic index.
+
+        Returns ``"ready"`` or ``"pending"``.  ``None`` and ``inf`` wait until
+        the index is ready or its job fails, in which case the job's exception
+        is re-raised so callers keep the lazy-path error semantics.
+        """
+        started = self._start_semantic_index(capture)
+        if started is None:
+            return "ready"
+        done, job = started
+        wait_seconds = None if timeout is None or math.isinf(timeout) else timeout
+        if not done.wait(wait_seconds):
+            return "pending"
+        if job is not None and job.error is not None:
+            raise job.error
+        with self._lock:
+            if capture.embeddings is not None:
+                return "ready"
+        # The finished job could not publish (failed prefetch, or the capture
+        # was evicted mid-flight); index inline so a retained capture still
+        # gets a result and a failed one raises its error.
+        self._ensure_embeddings(capture)
+        return "ready"
+
+    def wait_for_semantic_index(self, capture: Capture, timeout: Optional[float] = None) -> str:
+        """Block until the capture's semantic index is ready, failed, or ``timeout`` elapses.
+
+        Returns ``"ready"``, ``"pending"``, or ``"failed"``; it never raises for
+        an indexing error, so callers can poll from tests and benchmarks.
+        """
+        try:
+            return self._await_semantic_index(capture, timeout)
+        except Exception:
+            return "failed"
 
     def _close_capture_storage(self, capture: Capture) -> None:
         """Close per-capture search storage and report cleanup failures."""
@@ -1207,12 +1310,15 @@ class EphemeralEngine:
             self._shutdown = True
             executor = self._prefetch_executor
             warmup_thread = self._embedding_warmup_thread
+            on_demand_threads = list(self._on_demand_threads.values())
             for capture_id in list(self._prefetch_queue):
                 self._cancel_prefetch(capture_id)
         if warmup_thread is not None and warmup_thread is not threading.current_thread():
             warmup_thread.join()
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+        for thread in on_demand_threads:
+            thread.join()
 
     @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
@@ -1291,8 +1397,7 @@ class EphemeralEngine:
         if not capture.semantic_chunks:
             return []
 
-        self._wait_for_prefetch(capture)
-        self._ensure_embeddings(capture)
+        self._await_semantic_index(capture)
         with self._lock:
             embeddings = capture.embeddings
         if embeddings is None or len(embeddings) == 0:
@@ -1408,13 +1513,34 @@ class EphemeralEngine:
             bm25_results = self.search_bm25(capture, query, top_k=top_k * 3)
             
         semantic_fallback = None
+        semantic_coverage = "not-requested"
         if mode in ("semantic", "hybrid"):
+            semantic_coverage = "complete"
             try:
-                semantic_results = self.search_semantic(capture, query, top_k=top_k * 3)
+                # Hybrid has lexical results to fall back on, so it waits only
+                # up to the budget; semantic mode has nothing else to return
+                # and waits for the index.
+                if mode == "hybrid":
+                    index_state = self._await_semantic_index(capture, self.semantic_wait_seconds)
+                else:
+                    index_state = self._await_semantic_index(capture)
+                if index_state == "ready":
+                    semantic_results = self.search_semantic(capture, query, top_k=top_k * 3)
+                else:
+                    semantic_coverage = "pending"
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "hybrid_search_semantic_pending",
+                        capture_id=capture.capture_id,
+                        line_count=capture.line_count,
+                        wait_seconds=self.semantic_wait_seconds,
+                    )
             except Exception as exc:
                 if mode == "semantic":
                     raise
                 semantic_fallback = type(exc).__name__
+                semantic_coverage = "unavailable"
                 log_event(
                     LOGGER,
                     logging.WARNING,
@@ -1524,10 +1650,18 @@ class EphemeralEngine:
             "mode": mode,
             "query": query,
             "match_count": len(matches),
-            "matches": matches
+            "matches": matches,
+            "semantic_coverage": semantic_coverage,
         }
         if semantic_fallback:
             result["semantic_fallback"] = semantic_fallback
+        if semantic_coverage == "pending":
+            result["semantic_index_state"] = capture.semantic_index_state
+            result["semantic_wait_seconds"] = self.semantic_wait_seconds
+            result["message"] = (
+                "Semantic index still building for this capture; results are lexical "
+                "(BM25) only. Repeat the search for hybrid ranking."
+            )
         return result
 
     @synchronized
@@ -1841,6 +1975,8 @@ class EphemeralEngine:
             ),
             "semantic_prefetch_queued": len(self._prefetch_queue),
             "semantic_prefetch_running": len(self._prefetch_running),
+            "semantic_index_on_demand_running": len(self._on_demand_jobs),
+            "semantic_wait_seconds": self.semantic_wait_seconds,
             "semantic_prefetch_failed": sum(
                 1 for cap in self.captures.values() if cap.semantic_index_state == "failed"
             ),

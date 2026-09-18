@@ -27,6 +27,17 @@
 - Enable semantic prefetch by default so the first semantic or hybrid search
   after a capture usually finds the index ready; set
   `EPHEMERAL_SEMANTIC_PREFETCH=0` to restore lazy-only indexing.
+- Bound first hybrid-search latency on very large captures with
+  `EPHEMERAL_SEMANTIC_WAIT_SECONDS` (default 10): hybrid search waits at most
+  the budget for a capture's semantic index, then returns BM25 results marked
+  `semantic_coverage: pending` while a background job finishes indexing, so
+  repeating the search is fully hybrid. Responses always report
+  `semantic_coverage` (`complete`, `pending`, `unavailable`, or
+  `not-requested`); semantic mode still waits for the index. Searches on a
+  queued or unindexed capture now index it on a dedicated thread instead of
+  inline, `get_buffer_stats` reports the budget and on-demand job count, and
+  `benchmark_semantic_index.py` records the first search's coverage and needle
+  rank separately from complete-index quality.
 - Add durable phase-level executions with persisted outputs, metrics, status
   history, restart recovery, explicit retries, and unsafe-side-effect resume
   confirmation for long-running agent workflows, including recoverable compact

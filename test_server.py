@@ -917,6 +917,41 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Mode: hybrid; lexical fallback (RuntimeError)", result)
         self.assertIn("Semantic fallback active (RuntimeError)", result)
 
+    def test_search_capture_discloses_pending_semantic_coverage(self):
+        response = {
+            "status": "ok",
+            "capture_id": "cap-pending",
+            "label": "pending",
+            "total_lines": 9000,
+            "mode": "hybrid",
+            "match_count": 1,
+            "semantic_coverage": "pending",
+            "semantic_index_state": "pending",
+            "semantic_wait_seconds": 10.0,
+            "message": "Semantic index still building for this capture; results are lexical (BM25) only.",
+            "matches": [{
+                "score": 1.0,
+                "matched_range": "L1-L1",
+                "context_range": "L1-L1",
+                "snippet": ">     1 | lexical result",
+            }],
+        }
+        with patch.object(server.engine, "search", return_value=response):
+            result = server.search_capture("query", mode="hybrid")
+        self.assertIn("Mode: hybrid; semantic pending (lexical only)", result)
+        self.assertIn("Semantic index still building; results are lexical (BM25) only.", result)
+        self.assertIn("Repeat the search for hybrid ranking.", result)
+
+        empty = dict(response, matches=[], match_count=0)
+        with patch.object(server.engine, "search", return_value=empty):
+            result = server.search_capture("query", mode="hybrid")
+        self.assertTrue(result.startswith("No matches found for 'query'"))
+        self.assertIn("Semantic index still building", result)
+
+    def test_buffer_stats_reports_semantic_wait_budget(self):
+        result = server.get_buffer_stats()
+        self.assertRegex(result, r"Semantic wait budget: [0-9.]+s \(0 on-demand index jobs running\)")
+
     def test_context_responses_bound_long_labels(self):
         long_label = "label-" + ("x" * 10_000)
         summary = json.loads(server.capture_text("needle content", label=long_label))

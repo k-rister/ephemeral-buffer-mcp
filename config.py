@@ -23,6 +23,9 @@ CATALOGUE_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 FP32_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5-fp32"
 DEFAULT_EMBEDDING_MODEL = FP32_EMBEDDING_MODEL
 DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
+# Hybrid search waits at most this long for a capture's semantic index before
+# answering with lexical results and a pending marker; ``inf`` waits forever.
+DEFAULT_SEMANTIC_WAIT_SECONDS = 10.0
 DEFAULT_SEMANTIC_CHUNK_LINES = 8
 DEFAULT_SEMANTIC_CHUNK_BYTES = 1024
 DEFAULT_SEMANTIC_CHUNK_OVERLAP = 0
@@ -160,6 +163,29 @@ def semantic_prefetch_enabled() -> bool:
 def semantic_prefetch_workers() -> int:
     """Return the bounded number of semantic prefetch workers."""
     return positive_int_env("EPHEMERAL_SEMANTIC_PREFETCH_WORKERS", DEFAULT_SEMANTIC_PREFETCH_WORKERS)
+
+
+def semantic_wait_seconds() -> float:
+    """Return how long hybrid search waits for a semantic index before going lexical-first.
+
+    ``0`` never waits, ``inf`` waits until the index is ready; negative, NaN,
+    and unparsable values fall back to the default.
+    """
+    name = "EPHEMERAL_SEMANTIC_WAIT_SECONDS"
+    value = os.environ.get(name)
+    if value is None:
+        return DEFAULT_SEMANTIC_WAIT_SECONDS
+    try:
+        parsed = float(value)
+        if math.isnan(parsed) or parsed < 0:
+            raise ValueError
+        return parsed
+    except ValueError:
+        print(
+            f"Ignoring invalid {name}={value!r}; using {DEFAULT_SEMANTIC_WAIT_SECONDS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_SEMANTIC_WAIT_SECONDS
 
 
 def semantic_chunk_lines() -> int:

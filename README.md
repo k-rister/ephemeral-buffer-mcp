@@ -313,14 +313,41 @@ export EPHEMERAL_SEMANTIC_PREFETCH_WORKERS=1
 
 Every eligible capture is queued at ingestion and a bounded worker pool drains
 the queue newest-first, since the latest capture is the most likely search
-target; a burst of captures is never silently skipped. A semantic or hybrid search waits for a job that is already
-running, and pulls a still-queued capture out of the queue to index it inline
-so it does not wait behind older work. Failed jobs retry through the normal
-lazy path, and evicted or cleared captures drop their queued work. Embedding
-inference is serialized by one model lock, so extra workers only overlap
-bookkeeping; tune `EPHEMERAL_EMBEDDING_THREADS` instead of the worker count
-for throughput. `get_buffer_stats` and `get_runtime_diagnostics` expose only
-aggregate pending, queued, running, and failed counts.
+target; a burst of captures is never silently skipped. A semantic or hybrid
+search waits for a job that is already running, and pulls a still-queued
+capture out of the queue to index it on a dedicated thread so it does not wait
+behind older work. Failed jobs retry through the normal lazy path, and evicted
+or cleared captures drop their queued work. Embedding inference is serialized
+by one model lock, so extra workers only overlap bookkeeping; tune
+`EPHEMERAL_EMBEDDING_THREADS` instead of the worker count for throughput.
+`get_buffer_stats` and `get_runtime_diagnostics` expose only aggregate pending,
+queued, running, and failed counts.
+
+Indexing cost grows linearly with capture size, so a hybrid search that arrives
+before a large capture's index is ready waits at most a configurable budget:
+
+```bash
+export EPHEMERAL_SEMANTIC_WAIT_SECONDS=10
+```
+
+When the budget expires, hybrid search returns the BM25 results immediately
+with `semantic_coverage` set to `pending` (the tool response says
+`semantic pending (lexical only)`), and indexing continues in the background
+so repeating the search returns full hybrid ranking. Every other hybrid
+response reports `semantic_coverage` as `complete`, or `unavailable` when the
+semantic backend failed and `semantic_fallback` names the exception class;
+BM25 results and exact line ranges are identical either way. The default of
+10 seconds keeps a 2,048-line capture fully hybrid on a Linux x86_64 VM (about
+4 seconds to index) and bounds 8,192-line and larger captures, which otherwise
+take 15 seconds there and 45 to 80 seconds on an Apple M3 Pro; on the M3 Pro a
+2,048-line capture indexes in about 11 seconds, so it answers lexical-first
+just before the index is ready. Measured first-search p95 with the budget is
+10.006 seconds at 2,048 through 16,384 lines, and the lexical-first answer
+still ranked every needle in the benchmark fixture first.
+Set `0` to always answer lexical-first while the index builds, or `inf` to
+wait for the index unconditionally. Semantic mode has no lexical result to
+fall back on, so it always waits for the index. `get_buffer_stats` reports the
+budget and the number of on-demand index jobs running.
 
 The exact model and cache location can also be supplied in the MCP client's
 `env` configuration. Keep the model cache writable by the user running the
@@ -417,7 +444,7 @@ The agent has access to the following tools:
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded log/output file from disk and returns the same compact summary schema. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
-| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. |
+| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
@@ -833,13 +860,19 @@ Measure semantic indexing cost and first hybrid-search latency by capture size:
 The semantic-index harness ingests a fresh deterministic log-like capture per
 sample, then reports median and p95 timings for ingestion, lazy embedding
 materialization, the first hybrid (or `--mode semantic`) search that triggers
-it, and a subsequent search over the warm index, plus chunk count, indexing
-throughput, and the rank of a known needle line in the first result set.
-Default sizes are 16, 256, 2,048, and 8,192 lines. Run it without
-`EPHEMERAL_TEST_EMBEDDINGS=1` to measure the configured FastEmbed model; with
-deterministic test embeddings it only validates the harness. Prefetch and
-startup warm-up are disabled inside the harness so the lazy cost is visible.
-Results are host-specific diagnostic evidence, not a required CI gate.
+it, and a subsequent search over the complete index, plus chunk count and
+indexing throughput. The first search runs against the semantic wait budget
+(`--semantic-wait-seconds`, default `EPHEMERAL_SEMANTIC_WAIT_SECONDS` or 10),
+so the report shows how often it answered with pending semantic coverage
+(`first_search_pending_rate`) and the needle rank it achieved
+(`first_search_needle_mrr`) next to the rank over the complete index
+(`needle_mrr`); pass `--semantic-wait-seconds inf` to time the full lazy
+indexing cost inside the first search instead. Default sizes are 16, 256,
+2,048, and 8,192 lines. Run it without `EPHEMERAL_TEST_EMBEDDINGS=1` to measure
+the configured FastEmbed model; with deterministic test embeddings it only
+validates the harness. Prefetch and startup warm-up are disabled inside the
+harness so the lazy cost is visible. Results are host-specific diagnostic
+evidence, not a required CI gate.
 
 Compare lazy model loading with background startup warm-up:
 ```bash

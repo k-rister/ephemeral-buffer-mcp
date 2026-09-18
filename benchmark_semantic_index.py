@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Measure semantic indexing cost and first hybrid-search latency by capture size."""
+"""Measure semantic indexing cost and first hybrid-search latency by capture size.
+
+The first search on a fresh capture runs against the engine's semantic wait
+budget, so the harness records whether it answered with complete or pending
+semantic coverage and how the needle rank differs from a fully indexed search.
+"""
 
 import argparse
 import json
@@ -16,7 +21,7 @@ from typing import Any, Iterator
 from engine import EphemeralEngine
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 FIXTURE_VERSION = 2
 DEFAULT_LINE_COUNTS = (16, 256, 2048, 8192)
 SEARCH_MODES = ("semantic", "hybrid")
@@ -146,7 +151,13 @@ def measure_once(
     top_k: int = 5,
     seed: int = 1,
 ) -> dict[str, Any]:
-    """Ingest one fresh capture, time the first and subsequent searches, and rank needles."""
+    """Ingest one fresh capture, time the first and subsequent searches, and rank needles.
+
+    The first search triggers lazy indexing and may return before the index is
+    ready (``first_search_semantic_coverage`` is then ``"pending"``).  The
+    harness then waits for the index and searches every needle, including the
+    first one again, over the complete index.
+    """
     if mode not in SEARCH_MODES:
         raise ValueError(f"mode must be one of {', '.join(SEARCH_MODES)}")
     text = build_fixture(line_count, seed=seed)
@@ -156,7 +167,6 @@ def measure_once(
     capture = engine.ingest(text, label=f"semantic-index-{line_count}")
     ingest_seconds = time.perf_counter() - started
 
-    needle_ranks: dict[str, int | None] = {}
     timing = {"semantic_index_seconds": 0.0}
     first_index, first_line = positions[0]
     with _timed_semantic_index(engine, timing):
@@ -165,10 +175,13 @@ def measure_once(
             NEEDLES[first_index]["query"], mode=mode, capture_id=capture.capture_id, top_k=top_k
         )
         first_search_seconds = time.perf_counter() - started
-    needle_ranks[NEEDLES[first_index]["id"]] = _needle_rank(first, first_line)
+        index_state = engine.wait_for_semantic_index(capture)
+    if index_state != "ready":
+        raise RuntimeError(f"semantic index did not become ready: {index_state}")
 
+    needle_ranks: dict[str, int | None] = {}
     subsequent_times = []
-    for needle_index, line_number in positions[1:] or [(first_index, first_line)]:
+    for needle_index, line_number in positions:
         started = time.perf_counter()
         result = engine.search(
             NEEDLES[needle_index]["query"], mode=mode, capture_id=capture.capture_id, top_k=top_k
@@ -184,6 +197,8 @@ def measure_once(
         "ingest_seconds": ingest_seconds,
         "semantic_index_seconds": timing["semantic_index_seconds"],
         "first_search_seconds": first_search_seconds,
+        "first_search_semantic_coverage": first["semantic_coverage"],
+        "first_search_needle_rank": _needle_rank(first, first_line),
         "subsequent_search_seconds": statistics.median(subsequent_times),
         "needle_ranks": needle_ranks,
     }
@@ -201,11 +216,17 @@ def _nearest_rank(values: list[float], percentile: float = 0.95) -> float:
 
 
 def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return median and p95 timings, throughput, and needle retrieval quality."""
+    """Return median and p95 timings, throughput, and needle retrieval quality.
+
+    ``needle_*`` quality covers searches over the complete index;
+    ``first_search_*`` covers the first search, which may have answered with
+    pending semantic coverage inside the wait budget.
+    """
     if not samples:
         raise ValueError("samples must not be empty")
     first = samples[0]
     ranks = [rank for sample in samples for rank in sample["needle_ranks"].values()]
+    first_ranks = [sample["first_search_needle_rank"] for sample in samples]
     summary: dict[str, Any] = {
         "line_count": first["line_count"],
         "output_bytes": first["output_bytes"],
@@ -215,6 +236,17 @@ def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "needle_ranks": [sample["needle_ranks"] for sample in samples],
         "needle_hit_at_1": sum(1 for rank in ranks if rank == 1) / len(ranks),
         "needle_mrr": sum(1.0 / rank for rank in ranks if rank is not None) / len(ranks),
+        "first_search_semantic_coverage": [
+            sample["first_search_semantic_coverage"] for sample in samples
+        ],
+        "first_search_pending_rate": sum(
+            1 for sample in samples if sample["first_search_semantic_coverage"] == "pending"
+        ) / len(samples),
+        "first_search_needle_ranks": first_ranks,
+        "first_search_needle_hit_at_1": sum(1 for rank in first_ranks if rank == 1) / len(first_ranks),
+        "first_search_needle_mrr": sum(
+            1.0 / rank for rank in first_ranks if rank is not None
+        ) / len(first_ranks),
     }
     for phase in PHASES:
         values = [float(sample[phase]) for sample in samples]
@@ -280,6 +312,7 @@ def run_benchmark(
         "engine_options": {key: value for key, value in options.items() if key != "max_captures"},
         "mode": mode,
         "samples": samples,
+        "semantic_wait_seconds": engine.semantic_wait_seconds,
         "model_load_seconds": model_load_seconds,
         "measurements": by_size,
     }
@@ -298,6 +331,8 @@ def format_measurement(measurement: dict[str, Any]) -> str:
         f"first_search_p95={measurement['first_search_seconds_p95']:.6f}s "
         f"subsequent_search_median={measurement['subsequent_search_seconds_median']:.6f}s "
         f"semantic_chunks_per_second={throughput_text} "
+        f"first_search_pending_rate={measurement['first_search_pending_rate']:.2f} "
+        f"first_search_needle_mrr={measurement['first_search_needle_mrr']:.2f} "
         f"needle_hit_at_1={measurement['needle_hit_at_1']:.2f} "
         f"needle_mrr={measurement['needle_mrr']:.2f}"
     )
@@ -326,13 +361,27 @@ def main() -> None:
     parser.add_argument("--semantic-chunk-lines", type=int, help="Maximum lines per semantic window")
     parser.add_argument("--semantic-chunk-bytes", type=int, help="UTF-8 byte cap per semantic window")
     parser.add_argument("--semantic-chunk-overlap", type=int, help="Lines shared by consecutive windows")
+    parser.add_argument(
+        "--semantic-wait-seconds",
+        type=float,
+        help=(
+            "Hybrid wait budget for the semantic index before answering lexical-first "
+            "(default: EPHEMERAL_SEMANTIC_WAIT_SECONDS or the engine default; 'inf' waits for the index)"
+        ),
+    )
     parser.add_argument("--output", type=Path, help="Optional JSON output path")
     args = parser.parse_args()
 
     engine_options = {}
     if args.embedding_model:
         engine_options["embedding_model_name"] = args.embedding_model
-    for option in ("embedding_threads", "semantic_chunk_lines", "semantic_chunk_bytes", "semantic_chunk_overlap"):
+    for option in (
+        "embedding_threads",
+        "semantic_chunk_lines",
+        "semantic_chunk_bytes",
+        "semantic_chunk_overlap",
+        "semantic_wait_seconds",
+    ):
         value = getattr(args, option)
         if value is not None:
             engine_options[option] = value
@@ -348,7 +397,8 @@ def main() -> None:
         f"model={result['embedding_model']} threads={result['embedding_threads']} "
         f"semantic_chunking=lines:{chunking['lines']}/bytes:{chunking['bytes']}/overlap:{chunking['overlap']} "
         f"test_embeddings={result['test_embeddings']} "
-        f"mode={result['mode']} model_load={result['model_load_seconds']:.3f}s"
+        f"mode={result['mode']} semantic_wait={result['semantic_wait_seconds']:g}s "
+        f"model_load={result['model_load_seconds']:.3f}s"
     )
     for measurement in result["measurements"]:
         print(format_measurement(measurement))
