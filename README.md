@@ -1252,3 +1252,99 @@ CLI, as above) and the same contract is published as JSON Schema in
 consume these documents. The shared format is not a privacy exemption: apply
 the same review to a result file as to any other benchmark output before
 sharing it.
+
+### Comparing workload results
+
+`compare_workload_results.py` compares two or more result documents without
+rerunning anything. The first reference is the baseline and every later one is
+compared against it. For each run and measurement the documents share it
+prints the absolute delta, the percentage change, and an outcome; runs pair by
+`id`, measurements and phases by name, and every statistic is compared only
+with the same statistic (`median` against `median`, never against `mean`).
+The example below records a baseline, halves the semantic chunk size, and
+compares the two:
+
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
+  --samples 3 --line-counts 256 2048 --result before.result.json
+EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=2 .venv/bin/python benchmark_latency.py \
+  --samples 3 --line-counts 256 2048 --result after.result.json
+.venv/bin/python compare_workload_results.py before.result.json after.result.json \
+  --tolerance 5 --statistic median --metric wall_time_seconds --metric ingest --metric semantic_index
+```
+
+```text
+workload: capture-latency
+  baseline: before.result.json  producer=benchmark_latency.py  kind=benchmark  status=success  runs=3  recorded=2026-09-18T18:16:11+00:00  python=3.12.14  tool=ephemeral-buffer-mcp 0.4.0  revision=2b58f2490571
+  candidate: after.result.json  producer=benchmark_latency.py  kind=benchmark  status=success  runs=3  recorded=2026-09-18T18:16:28+00:00  python=3.12.14  tool=ephemeral-buffer-mcp 0.4.0  revision=2b58f2490571
+  statistics=median tolerance=5% metrics=ingest,semantic_index,wall_time_seconds
+
+before.result.json -> after.result.json
+  run         metric                stat    baseline     candidate    delta         change   outcome
+  lines-256   wall_time_seconds     median  0.009854 s   0.01054 s    +0.0006824 s  +6.9%    regressed
+  lines-256   phase:ingest          median  0.0007052 s  0.0007507 s  +4.546e-05 s  +6.4%    regressed
+  lines-256   phase:semantic_index  median  0.0008512 s  0.002113 s   +0.001262 s   +148.3%  regressed
+  lines-2048  wall_time_seconds     median  0.02084 s    0.02982 s    +0.008981 s   +43.1%   regressed
+  lines-2048  phase:ingest          median  0.002724 s   0.002792 s   +6.775e-05 s  +2.5%    unchanged
+  lines-2048  phase:semantic_index  median  0.006279 s   0.01706 s    +0.01078 s    +171.6%  regressed
+  summary: 0 improved, 5 regressed, 0 changed, 1 unchanged, 0 missing, 0 incompatible; runs compared=3 missing=0; status success -> success
+```
+
+The phase rows attribute the wall-time regression to semantic indexing rather
+than ingestion. Outcomes are:
+
+- `improved` or `regressed`: the value moved beyond `--tolerance PERCENT`
+  (default 0) in the metric's better or worse direction. Canonical
+  measurements know their direction (time, bytes, tokens, tool calls, and
+  memory are better lower; `success_rate` and throughput are better higher);
+  other `seconds`, `bytes`, `tokens`, and `per_second` metrics follow their
+  unit, and `--direction NAME=lower|higher` declares the rest.
+- `changed`: the value moved but the metric has no known direction, such as a
+  producer-specific `count`, `ratio`, or `score`. A change from a zero baseline
+  has no percentage and counts as beyond any tolerance.
+- `unchanged`: within the tolerance.
+- `missing`: the run, measurement, or statistic is absent, `null`, or has
+  `samples: 0` on at least one side. These are listed with the side that lacks
+  them, never silently skipped.
+- `incompatible`: both sides report the metric with different units.
+
+Documents must describe the same `workload.name` unless
+`--allow-workload-mismatch` is given, and each comparison lists the
+`workload.parameters` and `environment` fields that differ (CPU count, tool
+version, source revision) so a different setup is not mistaken for a
+regression. Non-success runs appear with their status and errors.
+
+`PATH#RUN_ID` selects one run from a document. When the baseline and a
+candidate each select a single run, those two runs pair even though their ids
+differ, which compares two configurations recorded in the same document:
+
+```bash
+# Agent configurations: control versus MCP in one A/B summary, or two
+# agent-run documents recorded under different models or policies.
+.venv/bin/python benchmark_agent_ab.py --records runs.json --result summary.result.json
+.venv/bin/python compare_workload_results.py summary.result.json#control summary.result.json#mcp --statistic mean
+.venv/bin/python compare_workload_results.py codex-gpt5.result.json codex-candidate.result.json \
+  --select mode=mcp --metric input_tokens --metric output_tokens --metric wall_time_seconds --metric tool_calls
+
+# Tool-output policies: the same latency workload under two server settings.
+EPHEMERAL_SEMANTIC_PREFETCH=0 .venv/bin/python benchmark_latency.py --result lazy.result.json
+.venv/bin/python benchmark_latency.py --result prefetch.result.json
+.venv/bin/python compare_workload_results.py lazy.result.json prefetch.result.json --metric wall_time_seconds
+
+# Summarization strategies: retained-summary size and prompt-token proxies per
+# task; the reduction ratios need an explicit direction.
+.venv/bin/python benchmark_effectiveness.py --summary --result summary-a.result.json
+.venv/bin/python compare_workload_results.py summary-a.result.json summary-b.result.json \
+  --metric retained_summary_tokens --metric estimated_tokens --metric summary_token_reduction \
+  --direction summary_token_reduction=higher
+```
+
+`--select KEY=VALUE` keeps only runs whose label matches (values parse as JSON
+when possible, so `line_count=256` compares a number), `--metric NAME` limits
+the report to named measurements or phases, and `--statistic NAME` chooses the
+statistics (default `value`, `median`, `mean`, and `p95`; `all` adds `sum`,
+`min`, `max`, and `stdev`). `--format json` prints, and `--output PATH`
+writes, a `coding-agent-workload-comparison` document (format version 1) with
+the same entries plus each document's workload and environment blocks.
+`--check` exits with status 2 when any metric regressed or any document has a
+non-success status, which `OPERATIONS.md` uses for regression checks.

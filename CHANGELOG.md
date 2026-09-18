@@ -10,6 +10,14 @@
   their existing reports, so latency, phase timings, output volume, token
   estimates, resource use, and success status can be compared across
   producers without reading producer-specific records.
+- Add `compare_workload_results.py`, which compares two or more workload
+  result documents (or single runs selected with `PATH#RUN_ID`) without
+  rerunning them: it reports absolute and percentage deltas per run,
+  measurement, phase, and statistic, classifies each as improved, regressed,
+  changed, unchanged, missing, or incompatible, shows the parameter and
+  environment differences that explain a delta, filters runs by label and
+  metrics by name, and offers JSON output plus a `--check` mode that fails on
+  regressions or non-success results for automated regression checks.
 - Add a semantic-index latency benchmark that reports ingestion, lazy embedding
   materialization, first and subsequent hybrid or semantic search timings,
   indexing throughput, and needle rank by capture size with the real model.
