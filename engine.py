@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import json
 import unicodedata
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, OrderedDict
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
@@ -678,8 +678,12 @@ class EphemeralEngine:
             if self.semantic_prefetch_enabled
             else None
         )
-        self._prefetch_futures: Dict[str, Future[None]] = {}
-        self._prefetch_slots = threading.BoundedSemaphore(self.semantic_prefetch_workers * 2)
+        # Eligible captures wait in an ordered queue that is drained newest-first,
+        # so a burst of ingestion never silently skips a capture; the queue is
+        # bounded by max_captures because eviction removes queued work.
+        self._prefetch_queue: "OrderedDict[str, Capture]" = OrderedDict()
+        self._prefetch_running: Dict[str, threading.Event] = {}
+        self._prefetch_workers_active = 0
         self._shutdown = False
 
     def start_embedding_warmup(self) -> bool:
@@ -1084,65 +1088,68 @@ class EphemeralEngine:
         return dict(result)
 
     def _schedule_semantic_prefetch(self, capture: Capture) -> None:
-        """Submit at most a bounded number of post-ingestion indexing jobs."""
-        if not self.semantic_prefetch_enabled or not capture.chunks:
+        """Queue post-ingestion indexing and make sure a bounded worker is draining."""
+        if not self.semantic_prefetch_enabled or not capture.semantic_chunks:
             return
         with self._lock:
             if self._shutdown or capture.capture_id not in self.captures:
                 return
-            if capture.capture_id in self._prefetch_futures or capture.embeddings is not None:
+            if (
+                capture.embeddings is not None
+                or capture.capture_id in self._prefetch_queue
+                or capture.capture_id in self._prefetch_running
+            ):
                 return
-            if not self._prefetch_slots.acquire(blocking=False):
-                return
+            self._prefetch_queue[capture.capture_id] = capture
             capture.semantic_index_state = "pending"
+            if self._prefetch_workers_active >= self.semantic_prefetch_workers:
+                return
             try:
-                future = self._prefetch_executor.submit(self._prefetch_capture, capture)
+                self._prefetch_executor.submit(self._prefetch_worker)
             except Exception:
-                self._prefetch_slots.release()
-                capture.semantic_index_state = "failed"
                 log_event(LOGGER, logging.ERROR, "semantic_prefetch_submit_failed", capture_id=capture.capture_id)
                 LOGGER.exception("semantic_prefetch_submit_exception")
+                if self._prefetch_workers_active == 0:
+                    # Nothing will drain the queue, so leave the capture to the lazy path.
+                    self._prefetch_queue.pop(capture.capture_id, None)
+                    capture.semantic_index_state = "failed"
                 return
-            self._prefetch_futures[capture.capture_id] = future
-            future.add_done_callback(
-                lambda completed, capture_id=capture.capture_id: self._prefetch_finished(capture_id, completed)
-            )
+            self._prefetch_workers_active += 1
 
-    def _prefetch_capture(self, capture: Capture) -> None:
-        """Build one capture's semantic index in a background worker."""
-        try:
-            self._ensure_embeddings(capture)
-            capture.semantic_index_state = "ready"
-        except Exception:
-            capture.semantic_index_state = "failed"
-            log_event(LOGGER, logging.ERROR, "semantic_prefetch_failed", capture_id=capture.capture_id)
-            LOGGER.exception("semantic_prefetch_exception")
-            raise
-
-    def _prefetch_finished(self, capture_id: str, future: Future[None]) -> None:
-        """Release bounded worker capacity and retain a content-free state."""
-        with self._lock:
-            self._prefetch_futures.pop(capture_id, None)
-            capture = self.captures.get(capture_id)
-            if capture and future.cancelled():
-                capture.semantic_index_state = "not-requested"
-            elif capture and future.exception() is not None:
+    def _prefetch_worker(self) -> None:
+        """Drain queued captures newest-first until the queue is empty or shutdown."""
+        while True:
+            with self._lock:
+                if self._shutdown or not self._prefetch_queue:
+                    self._prefetch_workers_active -= 1
+                    return
+                capture_id, capture = self._prefetch_queue.popitem(last=True)
+                done = threading.Event()
+                self._prefetch_running[capture_id] = done
+            try:
+                self._ensure_embeddings(capture)
+            except Exception:
                 capture.semantic_index_state = "failed"
-            elif capture and capture.embeddings is not None:
-                capture.semantic_index_state = "ready"
-            self._prefetch_slots.release()
+                log_event(LOGGER, logging.ERROR, "semantic_prefetch_failed", capture_id=capture_id)
+                LOGGER.exception("semantic_prefetch_exception")
+            finally:
+                with self._lock:
+                    self._prefetch_running.pop(capture_id, None)
+                    if capture.semantic_index_state == "pending":
+                        # The capture was evicted before its embeddings were published.
+                        capture.semantic_index_state = "not-requested"
+                    done.set()
 
     def _wait_for_prefetch(self, capture: Capture) -> None:
-        """Wait for a relevant prefetch, leaving lazy indexing as fallback."""
+        """Wait for running prefetch work; dequeue pending work so the caller indexes it now."""
         with self._lock:
-            future = self._prefetch_futures.get(capture.capture_id)
-        if future is not None:
-            try:
-                future.result()
-            except Exception:
-                # The synchronous path below retries failed work so search remains
-                # correct even when a background model operation fails.
-                pass
+            done = self._prefetch_running.get(capture.capture_id)
+            if done is None:
+                # A search is a stronger signal than queue position: index inline
+                # rather than waiting behind other captures.
+                self._prefetch_queue.pop(capture.capture_id, None)
+        if done is not None:
+            done.wait()
 
     def _close_capture_storage(self, capture: Capture) -> None:
         """Close per-capture search storage and report cleanup failures."""
@@ -1186,10 +1193,10 @@ class EphemeralEngine:
                 self._close_capture_storage(capture)
 
     def _cancel_prefetch(self, capture_id: str) -> None:
-        """Cancel queued work for a capture; running work is allowed to finish."""
-        future = self._prefetch_futures.get(capture_id)
-        if future is not None:
-            future.cancel()
+        """Drop queued work for a capture; running work is allowed to finish."""
+        capture = self._prefetch_queue.pop(capture_id, None)
+        if capture is not None:
+            capture.semantic_index_state = "not-requested"
 
     def shutdown(self) -> None:
         """Stop background embedding work without holding the engine lock while waiting."""
@@ -1199,10 +1206,8 @@ class EphemeralEngine:
             self._shutdown = True
             executor = self._prefetch_executor
             warmup_thread = self._embedding_warmup_thread
-            # Future cancellation can synchronously run _prefetch_finished,
-            # which removes the future from this mapping.
-            for future in list(self._prefetch_futures.values()):
-                future.cancel()
+            for capture_id in list(self._prefetch_queue):
+                self._cancel_prefetch(capture_id)
         if warmup_thread is not None and warmup_thread is not threading.current_thread():
             warmup_thread.join()
         if executor is not None:
@@ -1829,6 +1834,8 @@ class EphemeralEngine:
             "semantic_prefetch_pending": sum(
                 1 for cap in self.captures.values() if cap.semantic_index_state == "pending"
             ),
+            "semantic_prefetch_queued": len(self._prefetch_queue),
+            "semantic_prefetch_running": len(self._prefetch_running),
             "semantic_prefetch_failed": sum(
                 1 for cap in self.captures.values() if cap.semantic_index_state == "failed"
             ),

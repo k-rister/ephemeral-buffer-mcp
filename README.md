@@ -309,13 +309,17 @@ export EPHEMERAL_SEMANTIC_PREFETCH=1
 export EPHEMERAL_SEMANTIC_PREFETCH_WORKERS=1
 ```
 
-Prefetch is disabled by default. When enabled, the bounded worker pool indexes
-captures in the background while ingestion returns; semantic and hybrid search
-wait for a relevant in-progress job, and failed jobs retry through the normal
-lazy path. Evicted or cleared captures do not retain queued work. Keep the
-worker count small because embedding generation competes for host CPU and
-memory; `get_buffer_stats` and `get_runtime_diagnostics` expose only aggregate
-pending/failed counts.
+Prefetch is disabled by default. When enabled, every eligible capture is queued
+at ingestion and a bounded worker pool drains the queue newest-first, since the
+latest capture is the most likely search target; a burst of captures is never
+silently skipped. A semantic or hybrid search waits for a job that is already
+running, and pulls a still-queued capture out of the queue to index it inline
+so it does not wait behind older work. Failed jobs retry through the normal
+lazy path, and evicted or cleared captures drop their queued work. Embedding
+inference is serialized by one model lock, so extra workers only overlap
+bookkeeping; tune `EPHEMERAL_EMBEDDING_THREADS` instead of the worker count
+for throughput. `get_buffer_stats` and `get_runtime_diagnostics` expose only
+aggregate pending, queued, running, and failed counts.
 
 The exact model and cache location can also be supplied in the MCP client's
 `env` configuration. Keep the model cache writable by the user running the
