@@ -187,6 +187,11 @@ class TestDirectionsAndClassification(unittest.TestCase):
         self.assertEqual(cw.classify(0.001, None, "lower", 50.0), "regressed")
         self.assertEqual(cw.classify(0.001, None, None, 50.0), "changed")
 
+    def test_classify_rejects_non_finite_tolerances(self):
+        for tolerance in (math.nan, math.inf, -math.inf):
+            with self.assertRaisesRegex(ComparisonError, "tolerance must be a finite percentage"):
+                cw.classify(0, 0.0, "lower", tolerance)
+
 
 class TestCompareMeasurement(unittest.TestCase):
     def entries(self, baseline, candidate, **options):
