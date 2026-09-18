@@ -119,10 +119,13 @@ ONNX export of bge-small-en-v1.5 registered by the engine; it downloads about
 130 MB on first use. FastEmbed's catalogue file for the same model, selectable
 as `EPHEMERAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`, is 67 MB and produces
 identical vectors, but its reduced-precision matrix kernels do not parallelize
-on common CPU hosts: it indexed 3 chunks per second on a Linux x86_64 VM and
-19 on an Apple M3 Pro against 72 and 53 for the fp32 export with default
-threads. Prefer bounding threads over switching files when host impact is the
-concern. Warm-up failure does
+on common CPU hosts. A release-preparation comparison on a 16-vCPU Linux
+x86_64 host measured 3.1 chunks per second and 41.15 seconds median indexing
+for the catalogue file versus 69.1 chunks per second and 1.85 seconds for the
+fp32 export at 1,024 lines—about a 22x difference. Prefer bounding threads
+over switching files when host impact is the concern. These are host-specific
+diagnostic measurements; rerun `benchmark_semantic_index.py` on the deployment
+host before generalizing them. Warm-up failure does
 not block startup: BM25 remains available and hybrid search degrades to lexical
 results. `get_buffer_stats` and `get_runtime_diagnostics` report warm-up state
 and a content-free exception class on failure.

@@ -263,8 +263,12 @@ export of bge-small-en-v1.5 (about 130 MB), which the server registers with
 FastEmbed itself. FastEmbed's own catalogue entry, selectable as
 `BAAI/bge-small-en-v1.5`, is a smaller reduced-precision export that produces
 identical vectors but whose matrix kernels do not parallelize on common CPU
-hosts; measured first-search latency with it was 3x to 23x worse. Embedding
-inference uses ONNX Runtime's default thread count; bound it with
+hosts. In a release-preparation comparison on a 16-vCPU Linux x86_64 host,
+the fp32 export reached 69.1 semantic chunks per second with 1.85 seconds
+median indexing at 1,024 lines, versus 3.1 chunks per second and 41.15 seconds
+for the catalogue file. That roughly 22x difference is host-specific evidence,
+not a universal performance guarantee. Embedding inference uses ONNX Runtime's
+default thread count; bound it with
 `EPHEMERAL_EMBEDDING_THREADS` when the server shares a host with an
 interactive coding agent, and check both settings on the deployment host with
 `benchmark_semantic_index.py`. `get_buffer_stats` reports the active thread
@@ -339,15 +343,15 @@ so repeating the search returns full hybrid ranking. Every other hybrid
 response reports `semantic_coverage` as `complete`, or `unavailable` when the
 semantic backend failed and `semantic_fallback` names the exception class;
 BM25 results and exact line ranges are identical either way. The default of
-10 seconds keeps a 2,048-line capture fully hybrid on a Linux x86_64 VM (about
-4 seconds to index) and bounds 8,192-line and larger captures, which otherwise
-take 15 seconds there and 45 to 80 seconds on an Apple M3 Pro; on the M3 Pro a
-2,048-line capture indexes in about 11 seconds, so it answers lexical-first
-just before the index is ready. Measured first-search p95 with the budget on
-the VM is 4.1 seconds at 2,048 lines (complete) and 10.001 seconds at 8,192
-and 16,384 lines (pending); on the M3 Pro it is 10.006 seconds at all three
-sizes. The lexical-first answer ranked every needle in the benchmark fixture
-first on both hosts.
+`10` seconds kept a 2,048-line capture fully hybrid in the
+release-preparation Linux run (about 4.0 seconds to index), while 8,192- and
+16,384-line captures took about 17.0 and 32.9 seconds to index and therefore
+answered lexical-first within the budget. Measured first-search p95 was about
+4.0 seconds at 2,048 lines (complete) and 10.002 seconds at the larger sizes
+(pending); every needle in the benchmark fixture still ranked first. These
+figures are host-specific: Apple silicon and other Linux hosts can differ
+materially, so run `benchmark_semantic_index.py` on the deployment host before
+choosing a wait budget.
 Set `0` to always answer lexical-first while the index builds, or `inf` to
 wait for the index unconditionally. Semantic mode has no lexical result to
 fall back on, so it always waits for the index. An empty capture has nothing
@@ -854,9 +858,12 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_prefetch.py \
   --line-count 256 --samples 5 --output benchmark-prefetch.json
 ```
 The prefetch harness reports ingestion, first semantic search, and subsequent
-semantic search medians for both modes. Prefetch should reduce first-query
-latency when work completes during ingestion, while adding bounded background
-resource use; treat the output as deployment-specific diagnostic evidence.
+semantic search medians for both modes. Prefetch can reduce first-query latency
+when work completes during ingestion, while adding bounded background resource
+use. In the release-preparation 256-line Linux run, first-search median changed
+from 0.435 seconds without prefetch to 0.425 seconds with it, while ingestion
+changed from 1.19 ms to 1.63 ms; treat this as deployment-specific diagnostic
+evidence rather than a guaranteed improvement.
 
 Measure semantic indexing cost and first hybrid-search latency by capture size:
 ```bash
@@ -880,6 +887,28 @@ validates the harness. Prefetch and startup warm-up are disabled inside the
 harness so the lazy cost is visible. Results are host-specific diagnostic
 evidence, not a required CI gate.
 
+For a release comparison, record the same workload under each model and compare
+the selected run with the versioned result tool:
+
+```bash
+.venv/bin/python benchmark_semantic_index.py \
+  --embedding-model BAAI/bge-small-en-v1.5-fp32 --line-counts 1024 --samples 3 \
+  --result results/fp32.result.json --experiment embedding-model \
+  --metadata variant=fp32 --metadata host_class=linux-x86_64
+.venv/bin/python benchmark_semantic_index.py \
+  --embedding-model BAAI/bge-small-en-v1.5 --line-counts 1024 --samples 3 \
+  --result results/catalogue.result.json --experiment embedding-model \
+  --metadata variant=catalogue --metadata host_class=linux-x86_64
+.venv/bin/python compare_workload_results.py \
+  results/fp32.result.json#lines-1024 results/catalogue.result.json#lines-1024 \
+  --statistic median --metric semantic_index --metric throughput_per_second
+```
+
+Keep result documents together with the release benchmark artifacts. Compare
+results only within the same host class and record model, thread, chunking,
+prefetch, warm-up, and wait-budget settings; do not treat a different host as
+a regression.
+
 Compare lazy model loading with background startup warm-up:
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_warmup.py \
@@ -891,8 +920,10 @@ lazy policy, embedding readiness is measured through completion of the first
 semantic search rather than reported as instantaneous. Run it without
 deterministic test embeddings to measure the configured FastEmbed model and host
 cache; each policy is measured in a fresh worker process so model pages retained
-by the allocator do not contaminate the other policy. Results are deployment-
-specific and the benchmark is optional.
+by the allocator do not contaminate the other policy. In the release-preparation
+Linux run, first-search median was 0.335 seconds without warm-up versus 0.0122
+seconds with warm-up, with approximately 186 MB RSS increase in both modes.
+Results are deployment-specific and the benchmark is optional.
 
 Measure direct-versus-captured routing tradeoffs with synthetic output profiles:
 ```bash
