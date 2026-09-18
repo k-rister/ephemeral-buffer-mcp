@@ -114,12 +114,15 @@ to select a compatible model and `EPHEMERAL_FASTEMBED_CACHE_DIR` to place its
 downloaded model files in a controlled cache directory. Set
 `EPHEMERAL_EMBEDDING_THREADS` to a small positive integer to bound the ONNX
 Runtime threads used for embedding inference; leave it unset for the runtime
-default. The catalogue file for the default model is a reduced-precision ONNX
-export whose matrix kernels do not parallelize on every CPU platform. Setting
-`EPHEMERAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5-fp32` selects the upstream
-fp32 export instead; it produces identical vectors, downloads about 130 MB
-rather than 67 MB, and scales with the thread count. Measure both with
-`benchmark_semantic_index.py` on the deployment host before choosing. Warm-up failure does
+default. The default model, `BAAI/bge-small-en-v1.5-fp32`, is the upstream fp32
+ONNX export of bge-small-en-v1.5 registered by the engine; it downloads about
+130 MB on first use. FastEmbed's catalogue file for the same model, selectable
+as `EPHEMERAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`, is 67 MB and produces
+identical vectors, but its reduced-precision matrix kernels do not parallelize
+on common CPU hosts: it indexed 3 chunks per second on a Linux x86_64 VM and
+19 on an Apple M3 Pro against 72 and 53 for the fp32 export with default
+threads. Prefer bounding threads over switching files when host impact is the
+concern. Warm-up failure does
 not block startup: BM25 remains available and hybrid search degrades to lexical
 results. `get_buffer_stats` and `get_runtime_diagnostics` report warm-up state
 and a content-free exception class on failure.

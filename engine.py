@@ -25,6 +25,7 @@ from metrics import LocalMetrics
 from fastembed import TextEmbedding
 from fastembed.common.model_description import ModelSource, PoolingType
 from config import (
+    BGE_SMALL_HF_REPO,
     DEFAULT_EMBEDDING_MODEL,
     FP32_EMBEDDING_MODEL,
     DEFAULT_MAX_BUFFER_BYTES,
@@ -526,12 +527,12 @@ _BUNDLED_MODELS_REGISTERED = False
 
 
 def register_bundled_embedding_models() -> None:
-    """Register the fp32 alias of the default model with FastEmbed once per process.
+    """Register the fp32 bge-small-en-v1.5 alias with FastEmbed once per process.
 
-    FastEmbed's catalogue entry for the default model downloads a reduced-precision
-    ONNX export whose matrix kernels do not parallelize on some CPU platforms. The
-    upstream fp32 export produces identical vectors, so it is exposed under an
-    alias that ``EPHEMERAL_EMBEDDING_MODEL`` can select.
+    FastEmbed's catalogue entry for bge-small-en-v1.5 downloads a reduced-precision
+    ONNX export whose matrix kernels do not parallelize on common CPU hosts. The
+    upstream fp32 export produces identical vectors, so it is registered under an
+    alias that is the default and that ``EPHEMERAL_EMBEDDING_MODEL`` can select.
     """
     global _BUNDLED_MODELS_REGISTERED
     if _BUNDLED_MODELS_REGISTERED:
@@ -541,7 +542,7 @@ def register_bundled_embedding_models() -> None:
             model=FP32_EMBEDDING_MODEL,
             pooling=PoolingType.CLS,
             normalization=True,
-            sources=ModelSource(hf=DEFAULT_EMBEDDING_MODEL),
+            sources=ModelSource(hf=BGE_SMALL_HF_REPO),
             dim=384,
             model_file="onnx/model.onnx",
             description="fp32 ONNX export of BAAI/bge-small-en-v1.5",

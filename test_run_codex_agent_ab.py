@@ -354,7 +354,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(len(payload["runs"]), 8)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         self.assertEqual(payload["protocol"]["embedding_mode"], "fastembed")
-        self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5")
+        self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5-fp32")
         self.assertEqual(payload["protocol"]["embedding_cache"], "default")
 
 

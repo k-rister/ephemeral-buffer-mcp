@@ -14,8 +14,14 @@ DEFAULT_MAX_CAPTURES = 25
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_INDEXED_CHUNKS = 32768
 DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
-DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+# The FastEmbed catalogue entry for bge-small-en-v1.5 downloads a reduced-precision
+# ONNX file whose matrix kernels do not parallelize on common CPU hosts.  The
+# engine registers the upstream fp32 export under an alias and uses it by
+# default; the catalogue file stays selectable by its catalogue name.
+BGE_SMALL_HF_REPO = "BAAI/bge-small-en-v1.5"
+CATALOGUE_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 FP32_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5-fp32"
+DEFAULT_EMBEDDING_MODEL = FP32_EMBEDDING_MODEL
 DEFAULT_SEMANTIC_PREFETCH_WORKERS = 1
 DEFAULT_SEMANTIC_CHUNK_LINES = 8
 DEFAULT_SEMANTIC_CHUNK_BYTES = 1024
