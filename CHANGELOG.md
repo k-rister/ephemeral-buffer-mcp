@@ -32,6 +32,8 @@
   environment differences that explain a delta, filters runs by label and
   metrics by name, and offers JSON output plus a `--check` mode that fails on
   regressions or non-success results for automated regression checks.
+  Non-finite `--tolerance` values (`nan`, `inf`) are rejected as invalid
+  input instead of failing with a traceback while writing the comparison.
 - Add experiment groups and metadata to workload results: every benchmark,
   evaluation, and the Codex A/B runner accept `--experiment GROUP`,
   `--metadata KEY=VALUE`, and `--redact KEY`, recorded in an optional

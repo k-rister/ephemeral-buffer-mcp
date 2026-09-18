@@ -524,6 +524,8 @@ def compare(
     """
     if not references:
         raise ComparisonError("at least two documents are required")
+    if not math.isfinite(tolerance_percent):
+        raise ComparisonError(f"tolerance must be a finite percentage, not {tolerance_percent}")
     if tolerance_percent < 0:
         raise ComparisonError("tolerance must not be negative")
     statistics = tuple(statistics)
