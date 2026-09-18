@@ -341,9 +341,11 @@ BM25 results and exact line ranges are identical either way. The default of
 4 seconds to index) and bounds 8,192-line and larger captures, which otherwise
 take 15 seconds there and 45 to 80 seconds on an Apple M3 Pro; on the M3 Pro a
 2,048-line capture indexes in about 11 seconds, so it answers lexical-first
-just before the index is ready. Measured first-search p95 with the budget is
-10.006 seconds at 2,048 through 16,384 lines, and the lexical-first answer
-still ranked every needle in the benchmark fixture first.
+just before the index is ready. Measured first-search p95 with the budget on
+the VM is 4.1 seconds at 2,048 lines (complete) and 10.001 seconds at 8,192
+and 16,384 lines (pending); on the M3 Pro it is 10.006 seconds at all three
+sizes. The lexical-first answer ranked every needle in the benchmark fixture
+first on both hosts.
 Set `0` to always answer lexical-first while the index builds, or `inf` to
 wait for the index unconditionally. Semantic mode has no lexical result to
 fall back on, so it always waits for the index. `get_buffer_stats` reports the
