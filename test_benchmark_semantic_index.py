@@ -37,8 +37,9 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
 
     def test_benchmark_reports_phases_chunking_and_needle_quality(self):
         result = run_benchmark((8, 32), samples=2)
-        self.assertEqual(result["schema_version"], 2)
+        self.assertEqual(result["schema_version"], 3)
         self.assertTrue(result["test_embeddings"])
+        self.assertGreater(result["semantic_wait_seconds"], 0)
         self.assertEqual(result["mode"], "hybrid")
         self.assertEqual(result["engine_options"]["semantic_prefetch"], False)
         self.assertEqual(set(result["semantic_chunking"]), {"lines", "bytes", "overlap"})
@@ -55,7 +56,42 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             self.assertEqual(set(measurement["needle_ranks"][0]), {needle["id"] for needle in NEEDLES})
             self.assertTrue(0 <= measurement["needle_hit_at_1"] <= 1)
             self.assertTrue(0 <= measurement["needle_mrr"] <= 1)
+            # Deterministic embeddings finish inside the budget, so the first search is complete.
+            self.assertEqual(measurement["first_search_semantic_coverage"], ["complete", "complete"])
+            self.assertEqual(measurement["first_search_pending_rate"], 0.0)
+            self.assertEqual(len(measurement["first_search_needle_ranks"]), 2)
+            self.assertTrue(0 <= measurement["first_search_needle_mrr"] <= 1)
+            self.assertIn("first_search_pending_rate=0.00", format_measurement(measurement))
             self.assertIn("needle_mrr", format_measurement(measurement))
+
+    def test_first_search_reports_pending_coverage_under_a_zero_budget(self):
+        result = run_benchmark((32,), samples=2, engine_options={"semantic_wait_seconds": 0})
+        self.assertEqual(result["semantic_wait_seconds"], 0)
+        self.assertEqual(result["engine_options"]["semantic_wait_seconds"], 0)
+        measurement = result["measurements"][0]
+        self.assertEqual(measurement["first_search_semantic_coverage"], ["pending", "pending"])
+        self.assertEqual(measurement["first_search_pending_rate"], 1.0)
+        # The index is still timed to completion and subsequent searches use it.
+        self.assertGreater(measurement["semantic_index_seconds_median"], 0)
+        self.assertEqual(len(measurement["needle_ranks"][0]), len(NEEDLES))
+        self.assertIn("first_search_pending_rate=1.00", format_measurement(measurement))
+        self.assertIsNone(benchmark_semantic_index._needle_rank({"matches": []}, 1))
+
+    def test_measure_once_rejects_an_index_that_never_becomes_ready(self):
+        class BrokenEngine:
+            def ingest(self, text, label):
+                return type("Capture", (), {"capture_id": "cap", "chunks": [], "semantic_chunks": []})()
+
+            def search(self, *args, **kwargs):
+                return {"matches": [], "semantic_coverage": "unavailable"}
+
+            def wait_for_semantic_index(self, capture):
+                return "failed"
+
+            _ensure_embeddings = None
+
+        with self.assertRaisesRegex(RuntimeError, "did not become ready: failed"):
+            benchmark_semantic_index.measure_once(BrokenEngine(), 4)
 
     def test_semantic_mode_times_lazy_index_inside_first_search(self):
         result = run_benchmark((32,), samples=1, mode="semantic")
@@ -82,6 +118,8 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             "chunk_count": 1,
             "semantic_chunk_count": 1,
             "needle_ranks": {"a": None, "b": 2},
+            "first_search_semantic_coverage": "pending",
+            "first_search_needle_rank": None,
             "ingest_seconds": 0.0,
             "semantic_index_seconds": 0.0,
             "first_search_seconds": 0.0,
@@ -91,6 +129,9 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
         self.assertIsNone(summary["semantic_chunks_per_second_median"])
         self.assertEqual(summary["needle_hit_at_1"], 0.0)
         self.assertEqual(summary["needle_mrr"], 0.25)
+        self.assertEqual(summary["first_search_pending_rate"], 1.0)
+        self.assertEqual(summary["first_search_needle_hit_at_1"], 0.0)
+        self.assertEqual(summary["first_search_needle_mrr"], 0.0)
         self.assertIn("semantic_chunks_per_second=n/a", format_measurement(summary))
         with self.assertRaises(ValueError):
             summarize([])
@@ -116,6 +157,7 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
                 "semantic_chunking": {"lines": 6, "bytes": 512, "overlap": 1},
                 "test_embeddings": True,
                 "mode": mode,
+                "semantic_wait_seconds": 1.5,
                 "model_load_seconds": 0.0,
                 "measurements": [],
             }
@@ -124,6 +166,7 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             "benchmark_semantic_index.py", "--line-counts", "4", "--samples", "1", "--mode", "semantic",
             "--embedding-model", "m", "--embedding-threads", "3",
             "--semantic-chunk-lines", "6", "--semantic-chunk-bytes", "512", "--semantic-chunk-overlap", "1",
+            "--semantic-wait-seconds", "1.5",
         ]
         with patch.object(benchmark_semantic_index, "run_benchmark", fake_run_benchmark), \
                 patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout:
@@ -133,8 +176,10 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
         self.assertEqual(captured["engine_options"], {
             "embedding_model_name": "m", "embedding_threads": 3,
             "semantic_chunk_lines": 6, "semantic_chunk_bytes": 512, "semantic_chunk_overlap": 1,
+            "semantic_wait_seconds": 1.5,
         })
         self.assertIn("threads=3", stdout.getvalue())
+        self.assertIn("semantic_wait=1.5s", stdout.getvalue())
         self.assertIn("lines:6/bytes:512/overlap:1", stdout.getvalue())
 
     def test_benchmark_rejects_invalid_inputs(self):

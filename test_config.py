@@ -13,6 +13,7 @@ from config import (
     DEFAULT_EXECUTION_STATE_DIR,
     DEFAULT_SOCKET_PATH,
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
+    DEFAULT_SEMANTIC_WAIT_SECONDS,
     cleanup_default_execution_state_dir,
     embedding_cache_dir,
     embedding_model_name,
@@ -24,6 +25,7 @@ from config import (
     runtime_index_budget_adjustment_enabled,
     semantic_prefetch_enabled,
     semantic_prefetch_workers,
+    semantic_wait_seconds,
     socket_isolation_configured,
     socket_isolation_required,
     socket_path,
@@ -209,6 +211,19 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertEqual(semantic_prefetch_workers(), DEFAULT_SEMANTIC_PREFETCH_WORKERS)
         with patch.dict(os.environ, {"EPHEMERAL_SEMANTIC_PREFETCH": "0"}, clear=True):
             self.assertFalse(semantic_prefetch_enabled())
+
+    def test_semantic_wait_seconds_defaults_and_accepts_zero_and_inf(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(semantic_wait_seconds(), DEFAULT_SEMANTIC_WAIT_SECONDS)
+        for value, expected in (("0", 0.0), ("2.5", 2.5), ("inf", float("inf"))):
+            with patch.dict(os.environ, {"EPHEMERAL_SEMANTIC_WAIT_SECONDS": value}, clear=True):
+                self.assertEqual(semantic_wait_seconds(), expected)
+        for invalid in ("-1", "nan", "soon"):
+            with patch.dict(os.environ, {"EPHEMERAL_SEMANTIC_WAIT_SECONDS": invalid}, clear=True):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(semantic_wait_seconds(), DEFAULT_SEMANTIC_WAIT_SECONDS)
+                self.assertIn("Ignoring invalid EPHEMERAL_SEMANTIC_WAIT_SECONDS", stderr.getvalue())
 
     def test_embedding_warmup_defaults_enabled_and_can_be_disabled(self):
         with patch.dict(os.environ, {}, clear=True):

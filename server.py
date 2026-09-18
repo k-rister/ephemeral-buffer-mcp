@@ -1285,9 +1285,10 @@ def search_capture(
 ) -> str:
     """
     Searches the captured command output using BM25, Semantic embedding, or Hybrid (RRF) ranking.
-    Semantic prefetch is on by default: semantic and hybrid searches wait for a
-    running background index job, index a still-queued capture inline, and fall
-    back to synchronous lazy indexing when a job failed or prefetch is disabled.
+    Semantic prefetch is on by default. Hybrid search waits at most the configured
+    semantic wait budget for a capture's index; on a very large capture it then
+    returns BM25 results with 'semantic pending' noted, and repeating the search
+    once indexing finishes returns hybrid ranking. Semantic mode waits for the index.
     
     Args:
         query: Search keywords or natural language question (e.g. 'auth failure', 'ECONNREFUSED', 'why did the build fail?').
@@ -1323,6 +1324,12 @@ def search_capture(
         if res.get("semantic_fallback")
         else ""
     )
+    pending_note = (
+        " Semantic index still building; results are lexical (BM25) only. "
+        "Repeat the search for hybrid ranking."
+        if res.get("semantic_coverage") == "pending"
+        else ""
+    )
     display_query, _ = _bounded_summary_text(
         query,
         SEARCH_QUERY_MAX_BYTES,
@@ -1334,11 +1341,16 @@ def search_capture(
             SUMMARY_LABEL_MAX_BYTES,
             SUMMARY_LABEL_TRUNCATION_MARKER,
         )
-        return f"No matches found for '{display_query}' in capture '{res.get('capture_id')}' ({label}).{fallback_note}"
+        return (
+            f"No matches found for '{display_query}' in capture '{res.get('capture_id')}' ({label})."
+            f"{fallback_note}{pending_note}"
+        )
         
     mode_label = res["mode"]
     if res.get("semantic_fallback"):
         mode_label += f"; lexical fallback ({res['semantic_fallback']})"
+    elif res.get("semantic_coverage") == "pending":
+        mode_label += "; semantic pending (lexical only)"
     label, _ = _bounded_summary_text(
         res["label"],
         SUMMARY_LABEL_MAX_BYTES,
@@ -1351,6 +1363,8 @@ def search_capture(
     ]
     if res.get("semantic_fallback"):
         out.insert(1, fallback_note.strip())
+    elif pending_note:
+        out.insert(1, pending_note.strip())
     
     for i, m in enumerate(matches, 1):
         match_output = [
@@ -1477,6 +1491,8 @@ def get_buffer_stats() -> str:
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"
         f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
         f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed)\n"
+        f"Semantic wait budget: {stats.get('semantic_wait_seconds', 0.0):g}s "
+        f"({stats.get('semantic_index_on_demand_running', 0)} on-demand index jobs running)\n"
         f"Accounted bytes: {stats['accounted_bytes']:,}\n"
         f"{rss_line}\n"
         f"{unaccounted_line}"

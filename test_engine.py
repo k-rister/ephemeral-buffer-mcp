@@ -1123,10 +1123,16 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             while capture.semantic_index_state == "pending" and time.time() < deadline:
                 time.sleep(0.01)
             self.assertEqual(capture.semantic_index_state, "failed")
-            engine._wait_for_prefetch(capture)
+            self.assertEqual(engine.wait_for_semantic_index(capture), "failed")
             self.assertEqual(capture.semantic_index_state, "failed")
             with self.assertRaisesRegex(RuntimeError, "prefetch unavailable"):
                 engine.search_semantic(capture, "failure")
+            # A failed on-demand retry surfaces as a lexical fallback in hybrid mode.
+            result = engine.search("failure", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(result["semantic_coverage"], "unavailable")
+            self.assertEqual(result["semantic_fallback"], "RuntimeError")
+            with self.assertRaisesRegex(RuntimeError, "prefetch unavailable"):
+                engine.search("failure", mode="semantic", capture_id=capture.capture_id)
         finally:
             engine.shutdown()
 
@@ -1175,7 +1181,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             release.set()
             engine.shutdown()
 
-    def test_search_on_queued_capture_dequeues_it_and_indexes_inline(self):
+    def test_search_on_queued_capture_dequeues_it_and_indexes_on_demand(self):
         started = threading.Event()
         release = threading.Event()
 
@@ -1194,15 +1200,215 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             queued = engine.ingest("queued payload", label="queued")
             self.assertIn(queued.capture_id, engine._prefetch_queue)
 
-            engine._wait_for_prefetch(queued)
+            # The on-demand job is blocked behind the running prefetch job's
+            # model lock, so a bounded wait reports pending without dequeuing twice.
+            self.assertEqual(engine._await_semantic_index(queued, 0.05), "pending")
             self.assertNotIn(queued.capture_id, engine._prefetch_queue)
+            self.assertIn(queued.capture_id, engine._on_demand_jobs)
             self.assertEqual(queued.semantic_index_state, "pending")
+            engine._schedule_semantic_prefetch(queued)
+            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
+            self.assertEqual(engine.get_buffer_stats()["semantic_index_on_demand_running"], 1)
             release.set()
             self.assertTrue(engine.search_semantic(queued, "payload"))
             self.assertEqual(queued.semantic_index_state, "ready")
+            self.assertEqual(engine._on_demand_jobs, {})
+            self.assertEqual(engine._on_demand_threads, {})
         finally:
             release.set()
             engine.shutdown()
+
+    def test_hybrid_search_answers_lexical_first_within_wait_budget(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=5)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(
+            max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0.05
+        )
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            capture = engine.ingest("alpha needle\nbeta line", label="budget")
+            self.assertEqual(capture.semantic_index_state, "not-requested")
+
+            started_at = time.monotonic()
+            result = engine.search("needle", mode="hybrid", capture_id=capture.capture_id)
+            self.assertLess(time.monotonic() - started_at, 1.0)
+            self.assertTrue(started.wait(timeout=2))
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["semantic_coverage"], "pending")
+            self.assertEqual(result["semantic_index_state"], "pending")
+            self.assertEqual(result["semantic_wait_seconds"], 0.05)
+            self.assertIn("lexical (BM25) only", result["message"])
+            self.assertNotIn("semantic_fallback", result)
+            self.assertEqual([m["chunk_index"] for m in result["matches"]], ["lexical"])
+            self.assertEqual(result["matches"][0]["matched_range"], "L1-L2")
+            self.assertEqual(engine.get_buffer_stats()["semantic_index_on_demand_running"], 1)
+
+            # BM25-only mode never touches the semantic index.
+            lexical = engine.search("needle", mode="bm25", capture_id=capture.capture_id)
+            self.assertEqual(lexical["semantic_coverage"], "not-requested")
+            self.assertNotIn("message", lexical)
+
+            # Once indexing finishes, the same query is fully hybrid and stable.
+            release.set()
+            self.assertEqual(engine.wait_for_semantic_index(capture, timeout=2), "ready")
+            self.assertEqual(engine.wait_for_semantic_index(capture), "ready")
+            complete = engine.search("needle", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(complete["semantic_coverage"], "complete")
+            self.assertNotIn("message", complete)
+            self.assertNotIn("semantic_wait_seconds", complete)
+            self.assertEqual(
+                complete["matches"][0]["matched_range"], result["matches"][0]["matched_range"]
+            )
+            self.assertGreater(complete["matches"][0]["score"], result["matches"][0]["score"])
+        finally:
+            release.set()
+            engine.shutdown()
+
+    def test_semantic_mode_waits_for_index_beyond_hybrid_budget(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=5)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0)
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            capture = engine.ingest("semantic payload", label="semantic-wait")
+            outcome = {}
+
+            def run_semantic():
+                outcome["result"] = engine.search("payload", mode="semantic", capture_id=capture.capture_id)
+
+            worker = threading.Thread(target=run_semantic)
+            worker.start()
+            self.assertTrue(started.wait(timeout=2))
+            worker.join(timeout=0.2)
+            self.assertTrue(worker.is_alive())
+            # A hybrid search issued meanwhile shares the job and answers immediately.
+            hybrid = engine.search("payload", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(hybrid["semantic_coverage"], "pending")
+            self.assertEqual(len(engine._on_demand_jobs), 1)
+            release.set()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(outcome["result"]["semantic_coverage"], "complete")
+            self.assertEqual(outcome["result"]["match_count"], 1)
+        finally:
+            release.set()
+            engine.shutdown()
+
+    def test_wait_budget_validation_and_unbounded_wait(self):
+        for invalid in (-1, float("nan")):
+            with self.assertRaisesRegex(ValueError, "semantic_wait_seconds"):
+                EphemeralEngine(semantic_prefetch=False, semantic_wait_seconds=invalid)
+        with patch.dict("os.environ", {"EPHEMERAL_SEMANTIC_WAIT_SECONDS": "2.5"}, clear=False):
+            configured = EphemeralEngine(semantic_prefetch=False)
+        try:
+            self.assertEqual(configured.semantic_wait_seconds, 2.5)
+            self.assertEqual(configured.get_buffer_stats()["semantic_wait_seconds"], 2.5)
+        finally:
+            configured.shutdown()
+
+        unbounded = EphemeralEngine(
+            max_captures=2, semantic_prefetch=False, semantic_wait_seconds=float("inf")
+        )
+        try:
+            capture = unbounded.ingest("unbounded payload", label="unbounded")
+            result = unbounded.search("payload", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(result["semantic_coverage"], "complete")
+            self.assertEqual(capture.semantic_index_state, "ready")
+            # Empty captures have no semantic windows and report complete coverage.
+            empty = unbounded.ingest("", label="empty")
+            self.assertEqual(unbounded.search("x", mode="hybrid", capture_id=empty.capture_id)["matches"], [])
+        finally:
+            unbounded.shutdown()
+
+    def test_await_semantic_index_recovers_from_unpublished_job_and_eviction(self):
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False, semantic_wait_seconds=0)
+        try:
+            capture = engine.ingest("recover payload", label="recover")
+            # A finished prefetch job that could not publish leaves the capture
+            # to inline indexing so the waiter still gets a ready index.
+            finished = threading.Event()
+            finished.set()
+            engine._prefetch_running[capture.capture_id] = finished
+            self.assertEqual(engine._await_semantic_index(capture, 1.0), "ready")
+            self.assertIsNotNone(capture.embeddings)
+            engine._prefetch_running.clear()
+
+            # An on-demand job whose capture was evicted mid-flight leaves it lazily indexable.
+            started = threading.Event()
+            release = threading.Event()
+
+            class BlockingEmbedding:
+                def embed(self, texts):
+                    started.set()
+                    release.wait(timeout=2)
+                    return [[1.0] + [0.0] * 383 for _ in texts]
+
+            engine.embedding_model = BlockingEmbedding()
+            stale = engine.ingest("stale payload", label="stale")
+            self.assertEqual(engine._await_semantic_index(stale, 0), "pending")
+            self.assertTrue(started.wait(timeout=2))
+            engine.clear(stale.capture_id)
+            self.assertEqual(stale.semantic_index_state, "evicted")
+            stale.semantic_index_state = "pending"
+            release.set()
+            deadline = time.time() + 2
+            while stale.capture_id in engine._on_demand_jobs and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(stale.semantic_index_state, "not-requested")
+            self.assertIsNone(stale.embeddings)
+            # Without a reader lease nothing indexes an evicted capture, and
+            # semantic search over it is simply empty.
+            self.assertEqual(engine.wait_for_semantic_index(stale, timeout=2), "ready")
+            self.assertIsNone(stale.embeddings)
+            self.assertEqual(engine.search_semantic(stale, "stale"), [])
+        finally:
+            engine.shutdown()
+
+    def test_shutdown_joins_on_demand_index_threads(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0)
+        engine.embedding_model = BlockingEmbedding()
+        capture = engine.ingest("shutdown payload", label="on-demand-shutdown")
+        self.assertEqual(engine.search("payload", mode="hybrid", capture_id=capture.capture_id)["semantic_coverage"], "pending")
+        self.assertTrue(started.wait(timeout=2))
+        shutdown_thread = threading.Thread(target=engine.shutdown)
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=0.2)
+        self.assertTrue(shutdown_thread.is_alive())
+        release.set()
+        shutdown_thread.join(timeout=2)
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(engine._on_demand_threads, {})
+        self.assertEqual(capture.semantic_index_state, "ready")
+        # After shutdown no thread may start, so an unindexed capture is indexed inline.
+        late = engine.ingest("late payload", label="after-shutdown")
+        self.assertEqual(late.semantic_index_state, "not-requested")
+        result = engine.search("payload", mode="hybrid", capture_id=late.capture_id)
+        self.assertEqual(result["semantic_coverage"], "complete")
+        self.assertEqual(late.semantic_index_state, "ready")
+        self.assertEqual(engine._on_demand_threads, {})
 
     def test_async_prefetch_lifecycle_error_and_shutdown_paths(self):
         with self.assertRaisesRegex(ValueError, "semantic_prefetch_workers"):

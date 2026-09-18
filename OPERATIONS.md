@@ -155,13 +155,30 @@ ingestion, on the same host as the coding agent; bound it with
 impact is the concern. Ingestion queues every eligible capture and the bounded worker pool drains the
 queue newest-first, so bursts are never silently dropped; the queue is bounded
 by the capture limit because eviction removes queued work. Semantic and hybrid
-search wait for an active job, index a still-queued capture inline instead of
-waiting behind older work, and retry failed jobs synchronously, preserving the
-lazy path as the correctness fallback. Explicit cleanup and process shutdown
-drop queued work and let running jobs finish. Embedding inference is serialized
-by one model lock, so raise `EPHEMERAL_EMBEDDING_THREADS` rather than the
-worker count for throughput. Use the content-free pending, queued, running,
-and failed counts in runtime diagnostics when checking host impact.
+search wait for an active job, index a still-queued capture on a dedicated
+thread instead of waiting behind older work, and retry failed jobs the same
+way, preserving the lazy path as the correctness fallback. Explicit cleanup and
+process shutdown drop queued work and let running jobs finish. Embedding
+inference is serialized by one model lock, so raise
+`EPHEMERAL_EMBEDDING_THREADS` rather than the worker count for throughput. Use
+the content-free pending, queued, running, and failed counts in runtime
+diagnostics when checking host impact.
+
+Hybrid search blocks on a capture's semantic index for at most
+`EPHEMERAL_SEMANTIC_WAIT_SECONDS` (default `10`). Past the budget it returns
+BM25 results with `semantic_coverage` set to `pending` and a message telling
+the caller to repeat the search; indexing continues in the background, so the
+repeated search is fully hybrid. `complete` and `unavailable` (semantic backend
+failure, with `semantic_fallback`) are the other values. The tradeoff is that
+identical searches issued before and after indexing finishes can rank
+differently on a very large capture; the marker is the contract for that.
+Lower the budget on interactive hosts where a fast lexical answer beats a
+delayed hybrid one, set it to `0` to never wait, or `inf` to restore the
+previous wait-for-index behavior. Semantic mode always waits because an empty
+result would only cost the caller a retry. `get_buffer_stats` reports the
+budget and the number of on-demand index jobs; a persistently nonzero count
+means searches keep arriving before prefetch finishes, so consider
+`EPHEMERAL_EMBEDDING_THREADS` or a smaller capture size.
 
 Override the limits before starting the server:
 
