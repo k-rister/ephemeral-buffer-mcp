@@ -622,9 +622,38 @@ records:
 - Ignore `details` unless you are the producer. It is the native record and
   may change shape with `workload.producer_schema_version`.
 
+`compare_workload_results.py` applies these rules (see the README section
+"Comparing workload results"). It refuses invalid documents and mismatched
+workload names, pairs runs by `id`, compares each statistic only with the same
+statistic, lists missing and incompatible metrics instead of skipping them,
+and prints the parameter and environment differences next to the deltas.
+
+### Regression checks
+
+Keep a baseline result per workload and host class (results from different
+hosts are different setups, not regressions), regenerate it deliberately when
+the workload or its parameters change, and gate on the headline metrics with a
+tolerance wide enough for run-to-run noise on that host:
+
+```bash
+.venv/bin/python compare_workload_results.py baseline.result.json candidate.result.json \
+  --metric wall_time_seconds --statistic median --tolerance 25 --check \
+  --output comparison.json
+```
+
+`--check` exits with status 2 when any compared metric regressed by more than
+the tolerance or when either document has a non-success `status`; invalid or
+incomparable input exits with status 1. The JSON written by `--output` is a
+`coding-agent-workload-comparison` document that records the options, every
+document's workload block and environment, and each entry's outcome, so a
+failed check can be reviewed without rerunning the workload. Missing metrics
+and missing runs never fail the check on their own; inspect the `missing`
+count in the summary when a producer stops reporting something.
+
 Result documents contain workload parameters and host details but never
 captured content, prompts, or user data; review any wrapper or attached
-`details` block before sharing, as with every other benchmark output.
+`details` block before sharing, as with every other benchmark output. A
+comparison document embeds the same metadata and follows the same rule.
 
 ## Operational logging
 
