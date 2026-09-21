@@ -477,6 +477,7 @@ The agent has access to the following tools:
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
+| `get_usage_metrics()` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and process-lifetime measurement timestamps. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
@@ -709,16 +710,17 @@ The isolated coding-agent launchers enable this setting by default; direct
 server launches remain opt-in.
 The metrics include per-tool call counts, success/failure counts, duration
 totals, aggregate capture/search/retrieval, empty-search, eviction, and
-cleanup events, plus interface coverage showing how many of the 18 exposed MCP
+cleanup events, plus interface coverage showing how many of the 19 exposed MCP
 tools were called and the complete list of unused tools. They also include
 session-scoped data-path byte counters. The byte counters
 cover input, retained, and original capture bytes; tool/search/retrieval
 response bytes; and framed socket request/response bytes. They are disabled by
 default, are never sent anywhere, and do
 not retain captured content, labels, commands, or query text. When enabled,
-both `get_runtime_diagnostics()` and `get_buffer_stats()` include the same
-aggregate metrics snapshot. The event keys are stable and zero-filled when no
-event has occurred, as are the byte-counter keys. Wire counts include framing
+`get_usage_metrics()` returns the versioned JSON form directly; both
+`get_runtime_diagnostics()` and `get_buffer_stats()` continue to include the
+same aggregate metrics snapshot for compatibility. The event keys are stable
+and zero-filled when no event has occurred, as are the byte-counter keys. Wire counts include framing
 headers and payload bytes actually consumed, including partial malformed
 requests; payload bytes rejected from an oversized frame before reading are
 not counted. MCP tool-response counts measure UTF-8 response content and
