@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add bounded per-tool latency distributions and content-free failure
+  categories for validation, timeout, socket, embedding, eviction, and other
+  operational failures, including coherent task-window deltas.
 - Add content-free derived workflow-effectiveness signals with documented
   denominators, zero-denominator handling, response-byte ratios, and
   search/retrieval reduction metrics.

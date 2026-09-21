@@ -414,6 +414,30 @@ value. Repeated searches or
 retrievals are operation counts rather than unique transitions, so these are
 descriptive operational signals, not task success or answer-quality scores.
 
+Per-tool records also include bounded `latency_ms` distributions. Latencies
+are measured around the MCP tool invocation in milliseconds, including server
+work performed by that tool. The histogram has fixed upper-bound buckets at
+1, 5, 10, 25, 50, 100, 250, 500, 1,000, 2,500, 5,000, 10,000, 30,000, and
+60,000 ms, followed by an overflow bucket. `p50`, `p95`, and `p99` use the
+nearest-rank definition and report the upper bound of the selected bucket;
+they are estimates rather than raw-sample percentiles. A percentile in the
+overflow bucket is `null`; inspect `overflow_count` to distinguish that case
+from no calls. Histogram bucket counts are additive, so the same semantics
+apply to task-window deltas.
+
+Failed calls are counted in the zero-filled `failure_categories` map under
+`validation`, `timeout`, `socket`, `embedding`, `eviction`, or `other`.
+Classification uses only bounded operational type/status signals and never
+includes exception messages, commands, paths, queries, capture identifiers,
+or captured content. `validation` represents caller or request misuse;
+`timeout`, `socket`, `embedding`, and `eviction` identify the corresponding
+operational failure family; `other` is the fallback for failures that cannot
+be classified safely. A valid non-error response that reports a timed-out
+bounded command is counted as a timeout failure.
+Schema-invalid MCP arguments are measured before the tool function executes,
+so they contribute to the tool's validation failures, latency, and completed
+call rate without exposing validation details.
+
 Record the following before changing configuration:
 
 - ephbuf version or commit, Python version, operating system, and installation
