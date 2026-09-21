@@ -1141,6 +1141,309 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         finally:
             engine.shutdown()
 
+    def test_semantic_index_metrics_distinguish_on_demand_completion(self):
+        from metrics import LocalMetrics
+
+        metrics = LocalMetrics(enabled=True)
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            embedding_model_name="test",
+            metrics=metrics,
+        )
+        engine.embedding_model = type(
+            "TestEmbedding",
+            (),
+            {"embed": lambda _self, texts: [[1.0] + [0.0] * 383 for _ in texts]},
+        )()
+        try:
+            capture = engine.ingest("on demand payload", label="private")
+            result = engine.search("payload", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(result["semantic_coverage"], "complete")
+
+            source = metrics.snapshot()["semantic_index"]["on_demand"]
+            self.assertEqual(source["queued"], 1)
+            self.assertEqual(source["completed"], 1)
+            self.assertEqual(source["failed"], 0)
+            self.assertEqual(source["indexed_chunks"], len(capture.semantic_chunks))
+            self.assertEqual(source["queue_wait_ms"]["count"], 1)
+            self.assertEqual(source["indexing_duration_ms"]["count"], 1)
+        finally:
+            engine.shutdown()
+
+        submit_metrics = LocalMetrics(enabled=True)
+        submit_engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            metrics=submit_metrics,
+        )
+        try:
+            capture = submit_engine.ingest("submit failure", label="private")
+            with patch.object(
+                submit_engine._on_demand_executor,
+                "submit",
+                side_effect=RuntimeError("executor closed"),
+            ):
+                result = submit_engine.search(
+                    "failure",
+                    mode="hybrid",
+                    capture_id=capture.capture_id,
+                )
+            self.assertEqual(result["semantic_coverage"], "unavailable")
+            self.assertEqual(
+                submit_metrics.snapshot()["semantic_index"]["on_demand"]["failed"],
+                1,
+            )
+        finally:
+            submit_engine.shutdown()
+
+    def test_async_semantic_jobs_stay_in_initiating_task_window(self):
+        from metrics import LocalMetrics
+
+        metrics = LocalMetrics(enabled=True)
+        baseline = metrics.snapshot(include_snapshot_token=True)
+        started = threading.Event()
+        release = threading.Event()
+        parent_ready = threading.Event()
+        capture_holder = []
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=True,
+            semantic_prefetch_workers=1,
+            metrics=metrics,
+        )
+        engine.embedding_model = BlockingEmbedding()
+
+        def capture_task():
+            with metrics.measure("capture_text"):
+                capture_holder.append(engine.ingest("prefetch payload", label="private"))
+                parent_ready.set()
+                started.wait(timeout=2)
+                release.wait(timeout=2)
+
+        capture_thread = threading.Thread(target=capture_task)
+        capture_thread.start()
+        try:
+            self.assertTrue(parent_ready.wait(timeout=2))
+            self.assertTrue(started.wait(timeout=2))
+            prefetch_delta = metrics.snapshot(
+                since_snapshot=baseline["snapshot_token"],
+                include_snapshot_token=True,
+            )
+            self.assertEqual(prefetch_delta["semantic_index"]["prefetch"]["queued"], 0)
+            self.assertEqual(prefetch_delta["semantic_index"]["prefetch"]["completed"], 0)
+
+            with engine._lock:
+                prefetch_done = engine._prefetch_running[capture_holder[0].capture_id]
+            release.set()
+            self.assertTrue(prefetch_done.wait(timeout=2))
+            capture_thread.join(timeout=2)
+            self.assertFalse(capture_thread.is_alive())
+            prefetch_following = metrics.snapshot(
+                since_snapshot=prefetch_delta["snapshot_token"],
+            )
+            self.assertEqual(prefetch_following["semantic_index"]["prefetch"]["queued"], 1)
+            self.assertEqual(prefetch_following["semantic_index"]["prefetch"]["completed"], 1)
+        finally:
+            release.set()
+            capture_thread.join(timeout=2)
+            engine.shutdown()
+
+        on_demand_metrics = LocalMetrics(enabled=True)
+        on_demand_baseline = on_demand_metrics.snapshot(include_snapshot_token=True)
+        on_demand_started = threading.Event()
+        on_demand_release = threading.Event()
+        on_demand_parent_ready = threading.Event()
+
+        class BlockingOnDemandEmbedding:
+            def embed(self, texts):
+                on_demand_started.set()
+                on_demand_release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        on_demand_engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            metrics=on_demand_metrics,
+        )
+        on_demand_engine.embedding_model = BlockingOnDemandEmbedding()
+        capture = on_demand_engine.ingest("on demand payload", label="private")
+
+        def search_task():
+            with on_demand_metrics.measure("search_capture"):
+                on_demand_parent_ready.set()
+                on_demand_engine.search(
+                    "payload",
+                    mode="semantic",
+                    capture_id=capture.capture_id,
+                )
+
+        search_thread = threading.Thread(target=search_task)
+        search_thread.start()
+        try:
+            self.assertTrue(on_demand_parent_ready.wait(timeout=2))
+            self.assertTrue(on_demand_started.wait(timeout=2))
+            on_demand_delta = on_demand_metrics.snapshot(
+                since_snapshot=on_demand_baseline["snapshot_token"],
+                include_snapshot_token=True,
+            )
+            self.assertEqual(on_demand_delta["semantic_index"]["on_demand"]["queued"], 0)
+            self.assertEqual(on_demand_delta["semantic_index"]["on_demand"]["completed"], 0)
+
+            on_demand_release.set()
+            search_thread.join(timeout=2)
+            self.assertFalse(search_thread.is_alive())
+            on_demand_following = on_demand_metrics.snapshot(
+                since_snapshot=on_demand_delta["snapshot_token"],
+            )
+            self.assertEqual(on_demand_following["semantic_index"]["on_demand"]["queued"], 1)
+            self.assertEqual(on_demand_following["semantic_index"]["on_demand"]["completed"], 1)
+        finally:
+            on_demand_release.set()
+            search_thread.join(timeout=2)
+            on_demand_engine.shutdown()
+
+    def test_semantic_metrics_snapshot_callback_failure_does_not_break_metrics(self):
+        from metrics import LocalMetrics
+
+        metrics = LocalMetrics(enabled=True)
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            metrics=metrics,
+        )
+
+        callback_lock_owned = []
+
+        def failing_callback():
+            callback_lock_owned.append(engine._lock._is_owned())
+            raise RuntimeError("snapshot unavailable")
+
+        engine.set_metrics_snapshot_callback(failing_callback)
+        try:
+            with self.assertLogs("ephemeral_buffer.engine", level="WARNING") as logs:
+                with engine._lock:
+                    engine._record_semantic_job_metrics_locked("on_demand", "failed")
+                engine._flush_metrics_snapshot()
+            self.assertIn("metrics_snapshot_callback_failed", "\n".join(logs.output))
+            self.assertEqual(callback_lock_owned, [False])
+            self.assertEqual(metrics.snapshot()["semantic_index"]["on_demand"]["failed"], 1)
+        finally:
+            engine.shutdown()
+
+    def test_semantic_index_metrics_count_pending_and_fallback_searches(self):
+        from metrics import LocalMetrics
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        metrics = LocalMetrics(enabled=True)
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            semantic_wait_seconds=0.01,
+            metrics=metrics,
+        )
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            capture = engine.ingest("pending payload", label="private")
+            result = engine.search("payload", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(result["semantic_coverage"], "pending")
+            self.assertTrue(started.wait(timeout=2))
+            self.assertEqual(
+                metrics.snapshot()["semantic_index"]["search"]["pending_hybrid_responses"],
+                1,
+            )
+        finally:
+            release.set()
+            engine.shutdown()
+
+        fallback_metrics = LocalMetrics(enabled=True)
+        fallback_engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            metrics=fallback_metrics,
+        )
+
+        class FailingEmbedding:
+            def embed(self, _texts):
+                raise RuntimeError("private embedding failure")
+
+        fallback_engine.embedding_model = FailingEmbedding()
+        try:
+            capture = fallback_engine.ingest("fallback payload", label="private")
+            result = fallback_engine.search(
+                "payload",
+                mode="hybrid",
+                capture_id=capture.capture_id,
+            )
+            self.assertEqual(result["semantic_coverage"], "unavailable")
+            self.assertEqual(
+                fallback_metrics.snapshot()["semantic_index"]["search"]["semantic_fallbacks"],
+                1,
+            )
+            self.assertEqual(
+                fallback_metrics.snapshot()["semantic_index"]["on_demand"]["failed"],
+                1,
+            )
+        finally:
+            fallback_engine.shutdown()
+
+    def test_semantic_index_metrics_count_evicted_and_cleared_jobs(self):
+        from metrics import LocalMetrics
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        metrics = LocalMetrics(enabled=True)
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=True,
+            semantic_prefetch_workers=1,
+            metrics=metrics,
+        )
+        engine.embedding_model = BlockingEmbedding()
+        try:
+            first = engine.ingest("first payload", label="first")
+            self.assertTrue(started.wait(timeout=2))
+            second = engine.ingest("second payload", label="second")
+            self.assertIn(second.capture_id, engine._prefetch_queue)
+            self.assertEqual(engine.clear(second.capture_id), f"Cleared capture '{second.capture_id}'.")
+
+            release.set()
+            deadline = time.time() + 2
+            while engine._prefetch_running and time.time() < deadline:
+                time.sleep(0.01)
+
+            source = metrics.snapshot()["semantic_index"]["prefetch"]
+            self.assertEqual(source["queued"], 2)
+            self.assertEqual(source["evicted"], 1)
+            self.assertEqual(source["cleared"], 1)
+            self.assertEqual(source["completed"], 0)
+            self.assertEqual(first.semantic_index_state, "evicted")
+        finally:
+            release.set()
+            engine.shutdown()
+
     def test_async_prefetch_burst_is_queued_newest_first_and_clear_drops_queued_work(self):
         started = threading.Event()
         release = threading.Event()

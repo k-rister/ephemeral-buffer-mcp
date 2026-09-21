@@ -438,6 +438,18 @@ Schema-invalid MCP arguments are measured before the tool function executes,
 so they contribute to the tool's validation failures, latency, and completed
 call rate without exposing validation details.
 
+The `semantic_index` metrics section separates background `prefetch` work from
+search-triggered `on_demand` work. Each source reports queued, completed,
+failed, cancelled, evicted, and cleared jobs, indexed chunk totals, and bounded
+queue-wait and indexing-duration distributions. Queue wait ends when embedding
+starts; indexing duration ends when the job publishes or fails. The `search`
+subsection counts hybrid responses returned while indexing was pending and
+semantic searches that used lexical fallback. These counters are content-free,
+and `throughput` derives indexed chunks per indexing second. Additive task-window
+deltas and explicit unavailable statuses for zero denominators make these useful
+for distinguishing host indexing cost from repeated searches arriving before
+prefetch completes.
+
 Record the following before changing configuration:
 
 - ephbuf version or commit, Python version, operating system, and installation

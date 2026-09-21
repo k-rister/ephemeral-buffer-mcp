@@ -336,6 +336,82 @@ class TestMetrics(unittest.TestCase):
             "zero_operation_count",
         )
 
+    def test_semantic_index_metrics_are_delta_additive_and_content_free(self):
+        metrics = LocalMetrics(enabled=True)
+        baseline = metrics.snapshot(include_snapshot_token=True)
+
+        metrics.record_semantic_index("prefetch", "queued")
+        metrics.record_semantic_index(
+            "prefetch",
+            "completed",
+            queue_wait_ms=2.0,
+            indexing_duration_ms=10.0,
+            indexed_chunks=3,
+        )
+        metrics.record_semantic_index("on_demand", "queued")
+        metrics.record_semantic_index(
+            "on_demand",
+            "failed",
+            queue_wait_ms=5.0,
+            indexing_duration_ms=20.0,
+        )
+        metrics.record_semantic_search("pending_hybrid_responses")
+        metrics.record_semantic_search("semantic_fallbacks")
+
+        delta = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+        prefetch = delta["semantic_index"]["prefetch"]
+        self.assertEqual(prefetch["queued"], 1)
+        self.assertEqual(prefetch["completed"], 1)
+        self.assertEqual(prefetch["indexed_chunks"], 3)
+        self.assertEqual(prefetch["queue_wait_ms"]["count"], 1)
+        self.assertEqual(prefetch["queue_wait_ms"]["total_ms"], 2.0)
+        self.assertEqual(prefetch["indexing_duration_ms"]["count"], 1)
+        self.assertEqual(prefetch["indexing_duration_ms"]["total_ms"], 10.0)
+        self.assertEqual(prefetch["throughput"]["chunks_per_second"], 300.0)
+
+        on_demand = delta["semantic_index"]["on_demand"]
+        self.assertEqual(on_demand["queued"], 1)
+        self.assertEqual(on_demand["failed"], 1)
+        self.assertEqual(on_demand["queue_wait_ms"]["total_ms"], 5.0)
+        self.assertEqual(on_demand["indexing_duration_ms"]["total_ms"], 20.0)
+        self.assertEqual(
+            delta["semantic_index"]["search"],
+            {"pending_hybrid_responses": 1, "semantic_fallbacks": 1},
+        )
+        self.assertNotIn("capture", repr(delta["semantic_index"]))
+
+        with self.assertRaisesRegex(ValueError, "unknown semantic index source"):
+            metrics.record_semantic_index("unknown", "queued")
+        with self.assertRaisesRegex(ValueError, "unknown semantic index outcome"):
+            metrics.record_semantic_index("prefetch", "unknown")
+        with self.assertRaisesRegex(ValueError, "unknown semantic search outcome"):
+            metrics.record_semantic_search("unknown")
+        self.assertEqual(
+            LocalMetrics._throughput_metric(1, 0)["reason"],
+            "zero_indexing_duration",
+        )
+
+    def test_semantic_metrics_from_in_flight_search_are_window_scoped(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.measure("search_capture"):
+            metrics.record_semantic_search("pending_hybrid_responses")
+            baseline = metrics.snapshot(include_snapshot_token=True)
+            delta = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+            self.assertEqual(
+                delta["semantic_index"]["search"]["pending_hybrid_responses"],
+                0,
+            )
+
+        following = metrics.snapshot(since_snapshot=delta["snapshot_token"])
+        self.assertEqual(
+            following["semantic_index"]["search"]["pending_hybrid_responses"],
+            1,
+        )
+
+        with metrics.measure("capture_text"):
+            metrics.record_semantic_index("prefetch", "queued")
+        self.assertEqual(metrics.snapshot()["semantic_index"]["prefetch"]["queued"], 1)
+
     def test_invalid_original_size_does_not_partially_record_capture(self):
         metrics = LocalMetrics(enabled=True)
         engine = EphemeralEngine(max_captures=1, metrics=metrics)

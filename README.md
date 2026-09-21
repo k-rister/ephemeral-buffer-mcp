@@ -763,6 +763,17 @@ messages, commands, paths, queries, or capture identifiers.
 Schema-invalid MCP arguments are measured at the FastMCP validation boundary
 as failed calls in the `validation` category, even when the tool function does
 not run.
+The `semantic_index` section reports content-free indexing operations separately
+for `prefetch` and `on_demand`. Each source includes queued, completed, failed,
+cancelled, evicted, and cleared job counts; indexed chunk totals; and bounded
+`queue_wait_ms` and `indexing_duration_ms` distributions. The `search` subsection
+counts hybrid responses that were pending and semantic searches that fell back
+to lexical results. Queue wait ends when embedding begins, while indexing
+duration ends when the job publishes or fails, so host waiting and embedding
+work remain distinguishable. `throughput` derives indexed chunks per indexing
+second and reports an explicit unavailable status when its denominator is zero.
+These counters are additive in task-window deltas and contain no capture
+identifiers or content.
 The event keys are stable
 and zero-filled when no event has occurred, as are the byte-counter keys. Wire counts include framing
 headers and payload bytes actually consumed, including partial malformed

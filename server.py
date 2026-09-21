@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import tempfile
 import uuid
 from contextlib import contextmanager
 from functools import wraps
@@ -103,6 +104,7 @@ MCP_TOOL_CATEGORY_NAMES = (
     "search",
 )
 _TOOL_CALL_IDS = itertools.count(1)
+_METRICS_SNAPSHOT_LOCK = threading.Lock()
 _TIMEOUT_RESULT_TOOLS = {
     "execute_and_capture",
     "start_execution",
@@ -534,7 +536,6 @@ engine = EphemeralEngine(
     max_buffer_bytes=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
     metrics=METRICS,
 )
-atexit.register(engine.shutdown)
 execution_manager = PhaseExecutionManager(
     execution_state_dir(),
     max_output_bytes=max(512, engine.max_buffer_bytes),
@@ -702,15 +703,38 @@ def _write_metrics_snapshot() -> None:
     path = os.environ.get("EPHEMERAL_METRICS_FILE")
     if not path or not METRICS.enabled:
         return
-    try:
-        destination = Path(path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(_metrics_snapshot(), sort_keys=True), encoding="utf-8")
-    except OSError as exc:
-        log_event(LOGGER, logging.WARNING, "metrics_snapshot_write_failed", error_type=type(exc).__name__)
+    with _METRICS_SNAPSHOT_LOCK:
+        temporary_path = None
+        try:
+            destination = Path(path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(json.dumps(_metrics_snapshot(), sort_keys=True))
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, destination)
+            temporary_path = None
+        except OSError as exc:
+            log_event(LOGGER, logging.WARNING, "metrics_snapshot_write_failed", error_type=type(exc).__name__)
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink()
+                except OSError:
+                    pass
 
 
+engine.set_metrics_snapshot_callback(_write_metrics_snapshot)
 atexit.register(_write_metrics_snapshot)
+atexit.register(engine.shutdown)
 
 
 # --- MCP Tools ---
