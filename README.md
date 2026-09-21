@@ -719,7 +719,9 @@ default, are never sent anywhere, and do
 not retain captured content, labels, commands, or query text. When enabled,
 `get_usage_metrics()` returns the versioned JSON form directly; both
 `get_runtime_diagnostics()` and `get_buffer_stats()` continue to include the
-same aggregate metrics snapshot for compatibility. The event keys are stable
+same aggregate metrics snapshot for compatibility. Coverage uses the live MCP
+registration inventory, so its available-tool count tracks the exposed API.
+The event keys are stable
 and zero-filled when no event has occurred, as are the byte-counter keys. Wire counts include framing
 headers and payload bytes actually consumed, including partial malformed
 requests; payload bytes rejected from an oversized frame before reading are

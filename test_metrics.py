@@ -5,7 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from engine import EphemeralEngine
-from metrics import MCP_TOOL_NAMES, LocalMetrics, metrics_enabled
+from metrics import LocalMetrics, metrics_enabled
+
+
+TEST_TOOL_NAMES = ("capture_file", "start_execution", "get_runtime_diagnostics")
 
 
 class TestMetrics(unittest.TestCase):
@@ -42,7 +45,7 @@ class TestMetrics(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
 
         with metrics.measure("get_runtime_diagnostics"):
-            snapshot = metrics.snapshot()
+            snapshot = metrics.snapshot(available_tools=TEST_TOOL_NAMES)
             self.assertEqual(snapshot["interface_coverage"]["used"], 1)
             self.assertNotIn("get_runtime_diagnostics", snapshot["interface_coverage"]["unused_tools"])
             self.assertEqual(snapshot["tools"]["get_runtime_diagnostics"]["calls"], 1)
@@ -60,26 +63,26 @@ class TestMetrics(unittest.TestCase):
         with metrics.measure("start_execution"):
             pass
 
-        coverage = metrics.snapshot()["interface_coverage"]
+        coverage = metrics.snapshot(available_tools=TEST_TOOL_NAMES)["interface_coverage"]
         self.assertEqual(coverage["used"], 2)
-        self.assertEqual(coverage["available"], len(MCP_TOOL_NAMES))
-        self.assertEqual(coverage["percentage"], 10.5)
+        self.assertEqual(coverage["available"], len(TEST_TOOL_NAMES))
+        self.assertEqual(coverage["percentage"], 66.7)
         self.assertEqual(
             coverage["unused_tools"],
-            [name for name in MCP_TOOL_NAMES if name not in {"capture_file", "start_execution"}],
+            ["get_runtime_diagnostics"],
         )
 
     def test_interface_coverage_reaches_full_coverage(self):
         metrics = LocalMetrics(enabled=True)
-        for tool_name in MCP_TOOL_NAMES:
+        for tool_name in TEST_TOOL_NAMES:
             with metrics.measure(tool_name):
                 pass
 
         self.assertEqual(
-            metrics.snapshot()["interface_coverage"],
+            metrics.snapshot(available_tools=TEST_TOOL_NAMES)["interface_coverage"],
             {
-                "used": len(MCP_TOOL_NAMES),
-                "available": len(MCP_TOOL_NAMES),
+                "used": len(TEST_TOOL_NAMES),
+                "available": len(TEST_TOOL_NAMES),
                 "percentage": 100.0,
                 "unused_tools": [],
             },
@@ -151,7 +154,7 @@ class TestMetrics(unittest.TestCase):
     def test_snapshot_has_stable_zero_filled_event_schema(self):
         metrics = LocalMetrics(enabled=True)
 
-        snapshot = metrics.snapshot()
+        snapshot = metrics.snapshot(available_tools=TEST_TOOL_NAMES)
         self.assertEqual(snapshot["scope"], "process")
         self.assertRegex(snapshot["started_at"], r"Z$")
         self.assertRegex(snapshot["snapshot_at"], r"Z$")
@@ -159,9 +162,9 @@ class TestMetrics(unittest.TestCase):
             snapshot["interface_coverage"],
             {
                 "used": 0,
-                "available": len(MCP_TOOL_NAMES),
+                "available": len(TEST_TOOL_NAMES),
                 "percentage": 0.0,
-                "unused_tools": list(MCP_TOOL_NAMES),
+                "unused_tools": list(TEST_TOOL_NAMES),
             },
         )
         self.assertEqual(

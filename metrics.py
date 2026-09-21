@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 
 EVENT_NAMES = (
@@ -32,29 +32,6 @@ BYTE_COUNTER_NAMES = (
     "socket_request_bytes",
     "socket_response_bytes",
 )
-
-MCP_TOOL_NAMES = (
-    "preflight_command",
-    "start_execution",
-    "resume_execution",
-    "get_execution",
-    "get_execution_output",
-    "list_executions",
-    "capture_text",
-    "capture_file",
-    "execute_and_capture",
-    "consolidate_captures",
-    "search_capture",
-    "get_capture_slice",
-    "get_capture_summary",
-    "list_captures",
-    "clear_captures",
-    "get_buffer_stats",
-    "get_runtime_diagnostics",
-    "get_usage_metrics",
-    "set_semantic_index_budget",
-)
-
 
 def metrics_enabled() -> bool:
     """Return whether local metrics were explicitly enabled."""
@@ -161,15 +138,21 @@ class LocalMetrics:
                 self._captured.discard(capture_id)
                 self._searched.discard(capture_id)
 
-    def snapshot(self) -> dict[str, Any]:
-        """Return aggregate metrics suitable for a content-free diagnostic."""
+    def snapshot(self, available_tools: Iterable[str] = ()) -> dict[str, Any]:
+        """Return aggregate metrics suitable for a content-free diagnostic.
+
+        ``available_tools`` should be the live interface inventory when the
+        metrics are used by an MCP server. Standalone metric users can omit it
+        when interface coverage is not applicable.
+        """
         if not self.enabled:
             return {"enabled": False}
         with self._lock:
             snapshot_at = time.time()
-            used_tools = [name for name in MCP_TOOL_NAMES if name in self._tools]
-            unused_tools = [name for name in MCP_TOOL_NAMES if name not in self._tools]
-            available_tools = len(MCP_TOOL_NAMES)
+            available_tool_names = tuple(dict.fromkeys(available_tools))
+            used_tools = [name for name in available_tool_names if name in self._tools]
+            unused_tools = [name for name in available_tool_names if name not in self._tools]
+            available_tool_count = len(available_tool_names)
             return {
                 "enabled": True,
                 "scope": "process",
@@ -181,9 +164,9 @@ class LocalMetrics:
                 ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                 "interface_coverage": {
                     "used": len(used_tools),
-                    "available": available_tools,
-                    "percentage": round(len(used_tools) / available_tools * 100, 1)
-                    if available_tools
+                    "available": available_tool_count,
+                    "percentage": round(len(used_tools) / available_tool_count * 100, 1)
+                    if available_tool_count
                     else 0.0,
                     "unused_tools": unused_tools,
                 },

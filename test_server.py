@@ -129,13 +129,17 @@ class TestServerTools(unittest.TestCase):
             def blocking_probe():
                 return "worker result"
 
-            tool = server.mcp._tool_manager._tools["blocking_probe"].fn
-            offload = AsyncMock(return_value="worker result")
-            with patch.object(server, "to_thread", offload):
-                result = await tool()
+            try:
+                tool = server.mcp._tool_manager._tools["blocking_probe"].fn
+                offload = AsyncMock(return_value="worker result")
+                with patch.object(server, "to_thread", offload):
+                    result = await tool()
 
-            self.assertEqual(result, "worker result")
-            offload.assert_awaited_once_with(blocking_probe)
+                self.assertEqual(result, "worker result")
+                offload.assert_awaited_once_with(blocking_probe)
+            finally:
+                server.mcp.remove_tool("blocking_probe")
+                server._REGISTERED_MCP_TOOL_NAMES.remove("blocking_probe")
 
         asyncio.run(exercise())
 
@@ -559,6 +563,13 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(payload["interface_coverage"]["available"], 19)
         self.assertNotIn("get_usage_metrics", payload["interface_coverage"]["unused_tools"])
         self.assertEqual(payload["tools"]["get_usage_metrics"]["calls"], 1)
+
+    def test_registered_tools_match_fastmcp_inventory(self):
+        fastmcp_tools = asyncio.run(server.mcp.list_tools())
+        fastmcp_names = tuple(tool.name for tool in fastmcp_tools)
+
+        self.assertEqual(fastmcp_names, tuple(server._REGISTERED_MCP_TOOL_NAMES))
+        self.assertEqual(len(fastmcp_names), 19)
 
     def test_usage_metrics_reports_disabled_state_as_versioned_json(self):
         original_metrics = server.METRICS

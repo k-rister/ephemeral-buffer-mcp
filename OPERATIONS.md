@@ -376,7 +376,8 @@ When enabled, the aggregate snapshot also includes `interface_coverage`: the
 number and percentage of the 19 exposed MCP tools called during the process
 lifetime and the complete list of tools not called. This is process-level
 coverage; it does not identify which client made a call when multiple clients
-share one server.
+share one server. The available-tool inventory comes from the same registration
+path used to expose the MCP tools.
 
 Use `get_usage_metrics()` when a client needs the same content-free metrics as
 versioned JSON rather than embedded JSON inside diagnostic text. Its timestamps
