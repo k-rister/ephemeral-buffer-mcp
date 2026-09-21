@@ -372,6 +372,12 @@ durations, sizes, IDs, limits, and error classes, but must not include captured
 content, command arguments, labels, query text, credentials, or session ID
 values. Keep this boundary when adding integrations or preparing a report.
 
+When enabled, the aggregate snapshot also includes `interface_coverage`: the
+number and percentage of the 18 exposed MCP tools called during the process
+lifetime and the complete list of tools not called. This is process-level
+coverage; it does not identify which client made a call when multiple clients
+share one server.
+
 Record the following before changing configuration:
 
 - ephbuf version or commit, Python version, operating system, and installation

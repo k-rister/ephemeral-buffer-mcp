@@ -709,7 +709,9 @@ The isolated coding-agent launchers enable this setting by default; direct
 server launches remain opt-in.
 The metrics include per-tool call counts, success/failure counts, duration
 totals, aggregate capture/search/retrieval, empty-search, eviction, and
-cleanup events, plus session-scoped data-path byte counters. The byte counters
+cleanup events, plus interface coverage showing how many of the 18 exposed MCP
+tools were called and the complete list of unused tools. They also include
+session-scoped data-path byte counters. The byte counters
 cover input, retained, and original capture bytes; tool/search/retrieval
 response bytes; and framed socket request/response bytes. They are disabled by
 default, are never sent anywhere, and do

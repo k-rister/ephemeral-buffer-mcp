@@ -514,6 +514,8 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Local metrics: enabled", result)
         self.assertIn('"enabled": true', result)
+        self.assertIn('"get_runtime_diagnostics": {', result)
+        self.assertIn('"used": 1', result)
 
     def test_buffer_stats_includes_enabled_local_metrics_without_content(self):
         original_metrics = server.METRICS
@@ -531,6 +533,9 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Local metrics: {", result)
         self.assertIn("Data-path bytes: {", result)
         self.assertIn('"captures": 1', result)
+        self.assertIn('"interface_coverage": {', result)
+        self.assertIn('"available": 18', result)
+        self.assertIn('"get_buffer_stats": {', result)
         self.assertNotIn("secret metrics payload", result)
         self.assertNotIn("private metrics label", result)
 
