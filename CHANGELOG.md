@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `get_usage_metrics()`, a versioned JSON MCP interface for content-free
+  usage metrics, including process-lifetime measurement timestamps.
 - Add content-free `interface_coverage` metrics to report the number and
   percentage of exposed MCP tools used during the server process lifetime and
   the complete unused-tool list.

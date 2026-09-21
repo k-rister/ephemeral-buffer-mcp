@@ -1556,6 +1556,16 @@ def get_runtime_diagnostics() -> str:
     return "\n".join(lines)
 
 
+@_mcp_tool("get_usage_metrics")
+@_instrument_tool("get_usage_metrics")
+def get_usage_metrics() -> str:
+    """Returns a versioned JSON snapshot of content-free local usage metrics."""
+    return json.dumps(
+        {"schema_version": 1, **METRICS.snapshot()},
+        sort_keys=True,
+    )
+
+
 @_mcp_tool("set_semantic_index_budget")
 @_instrument_tool("set_semantic_index_budget")
 def set_semantic_index_budget(max_indexed_chunks: int) -> str:

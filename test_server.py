@@ -534,10 +534,41 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Data-path bytes: {", result)
         self.assertIn('"captures": 1', result)
         self.assertIn('"interface_coverage": {', result)
-        self.assertIn('"available": 18', result)
+        self.assertIn('"available": 19', result)
         self.assertIn('"get_buffer_stats": {', result)
         self.assertNotIn("secret metrics payload", result)
         self.assertNotIn("private metrics label", result)
+
+    def test_usage_metrics_returns_versioned_json_snapshot(self):
+        original_metrics = server.METRICS
+        original_engine_metrics = server.engine.metrics
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        server.engine.metrics = metrics
+        try:
+            payload = json.loads(server.get_usage_metrics())
+        finally:
+            server.METRICS = original_metrics
+            server.engine.metrics = original_engine_metrics
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["scope"], "process")
+        self.assertIn("started_at", payload)
+        self.assertIn("snapshot_at", payload)
+        self.assertEqual(payload["interface_coverage"]["available"], 19)
+        self.assertNotIn("get_usage_metrics", payload["interface_coverage"]["unused_tools"])
+        self.assertEqual(payload["tools"]["get_usage_metrics"]["calls"], 1)
+
+    def test_usage_metrics_reports_disabled_state_as_versioned_json(self):
+        original_metrics = server.METRICS
+        server.METRICS = LocalMetrics(enabled=False)
+        try:
+            payload = json.loads(server.get_usage_metrics())
+        finally:
+            server.METRICS = original_metrics
+
+        self.assertEqual(payload, {"enabled": False, "schema_version": 1})
 
     def test_metrics_snapshot_file_is_opt_in_and_content_free(self):
         original_metrics = server.METRICS

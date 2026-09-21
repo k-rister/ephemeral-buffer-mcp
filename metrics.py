@@ -7,6 +7,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 
@@ -50,6 +51,7 @@ MCP_TOOL_NAMES = (
     "clear_captures",
     "get_buffer_stats",
     "get_runtime_diagnostics",
+    "get_usage_metrics",
     "set_semantic_index_budget",
 )
 
@@ -66,6 +68,7 @@ class LocalMetrics:
 
     def __init__(self, enabled: bool | None = None):
         self.enabled = metrics_enabled() if enabled is None else enabled
+        self._started_at = time.time()
         self._lock = threading.Lock()
         self._tools: dict[str, dict[str, Any]] = defaultdict(self._new_tool)
         self._events: dict[str, int] = defaultdict(int)
@@ -163,11 +166,19 @@ class LocalMetrics:
         if not self.enabled:
             return {"enabled": False}
         with self._lock:
+            snapshot_at = time.time()
             used_tools = [name for name in MCP_TOOL_NAMES if name in self._tools]
             unused_tools = [name for name in MCP_TOOL_NAMES if name not in self._tools]
             available_tools = len(MCP_TOOL_NAMES)
             return {
                 "enabled": True,
+                "scope": "process",
+                "started_at": datetime.fromtimestamp(
+                    self._started_at, tz=timezone.utc
+                ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "snapshot_at": datetime.fromtimestamp(
+                    snapshot_at, tz=timezone.utc
+                ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                 "interface_coverage": {
                     "used": len(used_tools),
                     "available": available_tools,

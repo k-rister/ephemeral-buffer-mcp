@@ -63,7 +63,7 @@ class TestMetrics(unittest.TestCase):
         coverage = metrics.snapshot()["interface_coverage"]
         self.assertEqual(coverage["used"], 2)
         self.assertEqual(coverage["available"], len(MCP_TOOL_NAMES))
-        self.assertEqual(coverage["percentage"], 11.1)
+        self.assertEqual(coverage["percentage"], 10.5)
         self.assertEqual(
             coverage["unused_tools"],
             [name for name in MCP_TOOL_NAMES if name not in {"capture_file", "start_execution"}],
@@ -151,8 +151,12 @@ class TestMetrics(unittest.TestCase):
     def test_snapshot_has_stable_zero_filled_event_schema(self):
         metrics = LocalMetrics(enabled=True)
 
+        snapshot = metrics.snapshot()
+        self.assertEqual(snapshot["scope"], "process")
+        self.assertRegex(snapshot["started_at"], r"Z$")
+        self.assertRegex(snapshot["snapshot_at"], r"Z$")
         self.assertEqual(
-            metrics.snapshot()["interface_coverage"],
+            snapshot["interface_coverage"],
             {
                 "used": 0,
                 "available": len(MCP_TOOL_NAMES),

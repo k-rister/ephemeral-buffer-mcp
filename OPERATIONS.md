@@ -373,10 +373,15 @@ content, command arguments, labels, query text, credentials, or session ID
 values. Keep this boundary when adding integrations or preparing a report.
 
 When enabled, the aggregate snapshot also includes `interface_coverage`: the
-number and percentage of the 18 exposed MCP tools called during the process
+number and percentage of the 19 exposed MCP tools called during the process
 lifetime and the complete list of tools not called. This is process-level
 coverage; it does not identify which client made a call when multiple clients
 share one server.
+
+Use `get_usage_metrics()` when a client needs the same content-free metrics as
+versioned JSON rather than embedded JSON inside diagnostic text. Its timestamps
+describe the current process-lifetime measurement scope; task-specific windows
+and deltas are a separate capability.
 
 Record the following before changing configuration:
 
