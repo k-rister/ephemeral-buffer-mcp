@@ -10,6 +10,7 @@ import socket
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -791,6 +792,55 @@ class TestServerTools(unittest.TestCase):
         self.assertNotIn("private snapshot content", json.dumps(snapshot))
         self.assertNotIn("private snapshot label", json.dumps(snapshot))
 
+    def test_metrics_snapshot_file_refreshes_after_async_index_completion(self):
+        from engine import EphemeralEngine
+
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        started = threading.Event()
+        release = threading.Event()
+        snapshot_written = threading.Event()
+
+        class BlockingEmbedding:
+            def embed(self, texts):
+                started.set()
+                release.wait(timeout=2)
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=True,
+            semantic_prefetch_workers=1,
+            metrics=metrics,
+        )
+        engine.embedding_model = BlockingEmbedding()
+
+        def write_snapshot():
+            server._write_metrics_snapshot()
+            snapshot_written.set()
+
+        engine.set_metrics_snapshot_callback(write_snapshot)
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
+                clear=False,
+            ):
+                capture = engine.ingest("async snapshot content", label="private")
+                self.assertTrue(started.wait(timeout=2))
+                with engine._lock:
+                    prefetch_done = engine._prefetch_running[capture.capture_id]
+                release.set()
+                self.assertTrue(prefetch_done.wait(timeout=2))
+                self.assertTrue(snapshot_written.wait(timeout=2))
+                snapshot = json.loads(Path(directory, "metrics.json").read_text(encoding="utf-8"))
+                self.assertEqual(snapshot["semantic_index"]["prefetch"]["completed"], 1)
+        finally:
+            release.set()
+            engine.shutdown()
+            server.METRICS = original_metrics
+
     def test_metrics_snapshot_file_skips_disabled_metrics(self):
         original_metrics = server.METRICS
         server.METRICS = LocalMetrics(enabled=False)
@@ -810,7 +860,7 @@ class TestServerTools(unittest.TestCase):
         server.METRICS = LocalMetrics(enabled=True)
         try:
             with patch.dict(os.environ, {"EPHEMERAL_METRICS_FILE": "/tmp/metrics.json"}, clear=False), \
-                    patch.object(Path, "write_text", side_effect=OSError("read-only")), \
+                    patch.object(server.os, "replace", side_effect=OSError("read-only")), \
                     self.assertLogs("ephemeral_buffer.server", level="WARNING") as logs:
                 server._write_metrics_snapshot()
         finally:

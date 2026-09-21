@@ -63,6 +63,17 @@ FAILURE_CATEGORIES = (
     "other",
 )
 
+SEMANTIC_INDEX_SOURCES = ("prefetch", "on_demand")
+SEMANTIC_INDEX_OUTCOMES = (
+    "queued",
+    "completed",
+    "failed",
+    "cancelled",
+    "evicted",
+    "cleared",
+)
+SEMANTIC_SEARCH_OUTCOMES = ("pending_hybrid_responses", "semantic_fallbacks")
+
 MAX_SNAPSHOT_TOKENS = 128
 
 def metrics_enabled() -> bool:
@@ -82,6 +93,7 @@ class LocalMetrics:
         self._tools: dict[str, dict[str, Any]] = defaultdict(self._new_tool)
         self._events: dict[str, int] = defaultdict(int)
         self._bytes: dict[str, int] = defaultdict(int)
+        self._semantic_index = self._new_semantic_state()
         self._captured: set[str] = set()
         self._searched: set[str] = set()
         self._active_measurement: ContextVar[dict[str, Any] | None] = ContextVar(
@@ -102,6 +114,125 @@ class LocalMetrics:
             "latency_buckets": [0] * (len(LATENCY_BUCKET_UPPER_BOUNDS_MS) + 1),
             "failure_categories": {category: 0 for category in FAILURE_CATEGORIES},
         }
+
+    @staticmethod
+    def _new_duration_state() -> dict[str, Any]:
+        return {
+            "total_ms": 0.0,
+            "max_ms": 0.0,
+            "buckets": [0] * (len(LATENCY_BUCKET_UPPER_BOUNDS_MS) + 1),
+        }
+
+    @classmethod
+    def _new_semantic_state(cls) -> dict[str, Any]:
+        return {
+            source: {
+                **{outcome: 0 for outcome in SEMANTIC_INDEX_OUTCOMES},
+                "indexed_chunks": 0,
+                "queue_wait_ms": cls._new_duration_state(),
+                "indexing_duration_ms": cls._new_duration_state(),
+            }
+            for source in SEMANTIC_INDEX_SOURCES
+        } | {
+            "search": {outcome: 0 for outcome in SEMANTIC_SEARCH_OUTCOMES},
+        }
+
+    @classmethod
+    def _copy_semantic_state(cls, state: Mapping[str, Any]) -> dict[str, Any]:
+        copied = {}
+        for source in SEMANTIC_INDEX_SOURCES:
+            source_state = state.get(source, {})
+            copied[source] = {
+                outcome: int(source_state.get(outcome, 0))
+                for outcome in SEMANTIC_INDEX_OUTCOMES
+            }
+            copied[source]["indexed_chunks"] = int(source_state.get("indexed_chunks", 0))
+            for duration_name in ("queue_wait_ms", "indexing_duration_ms"):
+                duration = source_state.get(duration_name, {})
+                copied[source][duration_name] = {
+                    "total_ms": float(duration.get("total_ms", 0.0)),
+                    "max_ms": float(duration.get("max_ms", 0.0)),
+                    "buckets": list(duration.get("buckets", [])),
+                }
+        search = state.get("search", {})
+        copied["search"] = {
+            outcome: int(search.get(outcome, 0))
+            for outcome in SEMANTIC_SEARCH_OUTCOMES
+        }
+        return copied
+
+    @classmethod
+    def _record_semantic_index_in(
+        cls,
+        target: dict[str, Any],
+        source: str,
+        outcome: str,
+        *,
+        queue_wait_ms: float | None = None,
+        indexing_duration_ms: float | None = None,
+        indexed_chunks: int = 0,
+    ) -> None:
+        if source not in SEMANTIC_INDEX_SOURCES:
+            raise ValueError(f"unknown semantic index source: {source}")
+        if outcome not in SEMANTIC_INDEX_OUTCOMES:
+            raise ValueError(f"unknown semantic index outcome: {outcome}")
+        source_state = target[source]
+        source_state[outcome] += 1
+        source_state["indexed_chunks"] += max(0, int(indexed_chunks))
+        for duration_name, duration_ms in (
+            ("queue_wait_ms", queue_wait_ms),
+            ("indexing_duration_ms", indexing_duration_ms),
+        ):
+            if duration_ms is None:
+                continue
+            duration = max(0.0, float(duration_ms))
+            duration_state = source_state[duration_name]
+            duration_state["total_ms"] += duration
+            duration_state["max_ms"] = max(duration_state["max_ms"], duration)
+            duration_state["buckets"][cls._latency_bucket_index(duration)] += 1
+
+    @classmethod
+    def _subtract_semantic_state(
+        cls,
+        target: dict[str, Any],
+        subtract: Mapping[str, Any],
+    ) -> None:
+        for source in SEMANTIC_INDEX_SOURCES:
+            target_source = target[source]
+            subtract_source = subtract.get(source, {})
+            for outcome in SEMANTIC_INDEX_OUTCOMES:
+                target_source[outcome] = max(
+                    0,
+                    target_source[outcome] - int(subtract_source.get(outcome, 0)),
+                )
+            target_source["indexed_chunks"] = max(
+                0,
+                target_source["indexed_chunks"]
+                - int(subtract_source.get("indexed_chunks", 0)),
+            )
+            for duration_name in ("queue_wait_ms", "indexing_duration_ms"):
+                target_duration = target_source[duration_name]
+                subtract_duration = subtract_source.get(duration_name, {})
+                target_duration["total_ms"] = max(
+                    0.0,
+                    target_duration["total_ms"]
+                    - float(subtract_duration.get("total_ms", 0.0)),
+                )
+                target_duration["buckets"] = [
+                    max(0, current - int(previous))
+                    for current, previous in zip(
+                        target_duration["buckets"],
+                        list(subtract_duration.get("buckets", []))
+                        + [0] * len(target_duration["buckets"]),
+                    )
+                ]
+        target_search = target["search"]
+        subtract_search = subtract.get("search", {})
+        for outcome in SEMANTIC_SEARCH_OUTCOMES:
+            target_search[outcome] = max(
+                0,
+                target_search[outcome] - int(subtract_search.get(outcome, 0)),
+            )
 
     @staticmethod
     def _latency_bucket_index(duration_ms: float) -> int:
@@ -171,6 +302,7 @@ class LocalMetrics:
             "tool": tool,
             "events": defaultdict(int),
             "bytes": defaultdict(int),
+            "semantic_index": self._new_semantic_state(),
             "result_count": 0,
         }
         measurement_token = None
@@ -243,6 +375,56 @@ class LocalMetrics:
                 if measurement is not None and measurement["tool"] == tool:
                     measurement["result_count"] += count
 
+    def measurement_handle(self) -> dict[str, Any] | None:
+        """Return the current tool measurement for asynchronous attribution."""
+        if not self.enabled:
+            return None
+        return self._active_measurement.get()
+
+    def record_semantic_index(
+        self,
+        source: str,
+        outcome: str,
+        *,
+        queue_wait_ms: float | None = None,
+        indexing_duration_ms: float | None = None,
+        indexed_chunks: int = 0,
+        measurement: dict[str, Any] | None = None,
+    ) -> None:
+        """Record content-free semantic indexing lifecycle work."""
+        if self.enabled:
+            with self._lock:
+                self._record_semantic_index_in(
+                    self._semantic_index,
+                    source,
+                    outcome,
+                    queue_wait_ms=queue_wait_ms,
+                    indexing_duration_ms=indexing_duration_ms,
+                    indexed_chunks=indexed_chunks,
+                )
+                if measurement is None:
+                    measurement = self._active_measurement.get()
+                if measurement is not None:
+                    self._record_semantic_index_in(
+                        measurement["semantic_index"],
+                        source,
+                        outcome,
+                        queue_wait_ms=queue_wait_ms,
+                        indexing_duration_ms=indexing_duration_ms,
+                        indexed_chunks=indexed_chunks,
+                    )
+
+    def record_semantic_search(self, outcome: str) -> None:
+        """Record a content-free semantic search outcome."""
+        if self.enabled:
+            if outcome not in SEMANTIC_SEARCH_OUTCOMES:
+                raise ValueError(f"unknown semantic search outcome: {outcome}")
+            with self._lock:
+                self._semantic_index["search"][outcome] += 1
+                measurement = self._active_measurement.get()
+                if measurement is not None:
+                    measurement["semantic_index"]["search"][outcome] += 1
+
     def record_capture(self, capture_id: str) -> None:
         if self.enabled:
             with self._lock:
@@ -314,6 +496,7 @@ class LocalMetrics:
             name: self._bytes[name]
             for name in BYTE_COUNTER_NAMES
         }
+        semantic_index = self._copy_semantic_state(self._semantic_index)
         if exclude_in_flight:
             for measurement in self._in_flight_measurements.values():
                 tool_stats = tools.get(measurement["tool"])
@@ -329,11 +512,16 @@ class LocalMetrics:
                 for name, amount in measurement["bytes"].items():
                     if name in bytes_snapshot:
                         bytes_snapshot[name] = max(0, bytes_snapshot[name] - amount)
+                self._subtract_semantic_state(
+                    semantic_index,
+                    measurement["semantic_index"],
+                )
         return {
             "snapshot_at": snapshot_at,
             "tools": tools,
             "events": events,
             "bytes": bytes_snapshot,
+            "semantic_index": semantic_index,
         }
 
     def _store_snapshot_token(self, state: dict[str, Any]) -> str:
@@ -408,6 +596,113 @@ class LocalMetrics:
             "latency_ms": cls._latency_distribution(stats["latency_buckets"]),
             "failure_categories": dict(stats["failure_categories"]),
         }
+
+    @classmethod
+    def _delta_semantic_state(
+        cls,
+        current: Mapping[str, Any],
+        baseline: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        delta = cls._new_semantic_state()
+        for source in SEMANTIC_INDEX_SOURCES:
+            current_source = current.get(source, {})
+            baseline_source = baseline.get(source, {})
+            delta_source = delta[source]
+            for outcome in SEMANTIC_INDEX_OUTCOMES:
+                delta_source[outcome] = cls._delta_value(
+                    int(current_source.get(outcome, 0)),
+                    int(baseline_source.get(outcome, 0)),
+                )
+            delta_source["indexed_chunks"] = cls._delta_value(
+                int(current_source.get("indexed_chunks", 0)),
+                int(baseline_source.get("indexed_chunks", 0)),
+            )
+            for duration_name in ("queue_wait_ms", "indexing_duration_ms"):
+                current_duration = current_source.get(duration_name, {})
+                baseline_duration = baseline_source.get(duration_name, {})
+                delta_duration = delta_source[duration_name]
+                delta_duration["total_ms"] = max(
+                    0.0,
+                    float(current_duration.get("total_ms", 0.0))
+                    - float(baseline_duration.get("total_ms", 0.0)),
+                )
+                delta_duration["max_ms"] = float(current_duration.get("max_ms", 0.0))
+                delta_duration["buckets"] = [
+                    cls._delta_value(current_bucket, baseline_bucket)
+                    for current_bucket, baseline_bucket in zip(
+                        list(current_duration.get("buckets", []))
+                        + [0] * (len(LATENCY_BUCKET_UPPER_BOUNDS_MS) + 1),
+                        list(baseline_duration.get("buckets", []))
+                        + [0] * (len(LATENCY_BUCKET_UPPER_BOUNDS_MS) + 1),
+                    )
+                ][: len(LATENCY_BUCKET_UPPER_BOUNDS_MS) + 1]
+        current_search = current.get("search", {})
+        baseline_search = baseline.get("search", {})
+        for outcome in SEMANTIC_SEARCH_OUTCOMES:
+            delta["search"][outcome] = cls._delta_value(
+                int(current_search.get(outcome, 0)),
+                int(baseline_search.get(outcome, 0)),
+            )
+        return delta
+
+    @classmethod
+    def _public_duration_stats(cls, duration: Mapping[str, Any]) -> dict[str, Any]:
+        distribution = cls._latency_distribution(duration.get("buckets", []))
+        return {
+            "count": distribution["count"],
+            "total_ms": round(float(duration.get("total_ms", 0.0)), 3),
+            "max_ms": round(float(duration.get("max_ms", 0.0)), 3),
+            "p50": distribution["p50"],
+            "p95": distribution["p95"],
+            "p99": distribution["p99"],
+            "overflow_count": distribution["overflow_count"],
+        }
+
+    @staticmethod
+    def _throughput_metric(indexed_chunks: int, indexing_duration_ms: float) -> dict[str, Any]:
+        metric = {
+            "status": "ok" if indexed_chunks and indexing_duration_ms else "unavailable",
+            "indexed_chunks": indexed_chunks,
+            "indexing_duration_ms": round(indexing_duration_ms, 3),
+            "chunks_per_second": round(
+                indexed_chunks / (indexing_duration_ms / 1000), 3
+            ) if indexed_chunks and indexing_duration_ms else None,
+        }
+        if not indexed_chunks:
+            metric["reason"] = "zero_indexed_chunks"
+        elif not indexing_duration_ms:
+            metric["reason"] = "zero_indexing_duration"
+        return metric
+
+    @classmethod
+    def _public_semantic_index(cls, state: Mapping[str, Any]) -> dict[str, Any]:
+        result = {}
+        for source in SEMANTIC_INDEX_SOURCES:
+            source_state = state.get(source, {})
+            result[source] = {
+                outcome: int(source_state.get(outcome, 0))
+                for outcome in SEMANTIC_INDEX_OUTCOMES
+            }
+            result[source]["indexed_chunks"] = int(source_state.get("indexed_chunks", 0))
+            result[source]["queue_wait_ms"] = cls._public_duration_stats(
+                source_state.get("queue_wait_ms", {})
+            )
+            result[source]["indexing_duration_ms"] = cls._public_duration_stats(
+                source_state.get("indexing_duration_ms", {})
+            )
+            result[source]["throughput"] = cls._throughput_metric(
+                int(source_state.get("indexed_chunks", 0)),
+                float(
+                    source_state.get("indexing_duration_ms", {}).get(
+                        "total_ms", 0.0
+                    )
+                ),
+            )
+        result["search"] = {
+            outcome: int(state.get("search", {}).get(outcome, 0))
+            for outcome in SEMANTIC_SEARCH_OUTCOMES
+        }
+        return result
 
     @staticmethod
     def _percentage_metric(
@@ -595,6 +890,10 @@ class LocalMetrics:
                         )
                         for name in BYTE_COUNTER_NAMES
                     },
+                    "semantic_index": self._delta_semantic_state(
+                        current_state["semantic_index"],
+                        baseline.get("semantic_index", self._new_semantic_state()),
+                    ),
                 }
             )
             available_tool_names = tuple(dict.fromkeys(available_tools))
@@ -649,6 +948,7 @@ class LocalMetrics:
                 },
                 "events": state["events"],
                 "bytes": state["bytes"],
+                "semantic_index": self._public_semantic_index(state["semantic_index"]),
                 "workflow_effectiveness": self._workflow_effectiveness(
                     state["tools"],
                     state["events"],
