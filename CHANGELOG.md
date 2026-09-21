@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Session-aware coding-agent launchers now default `EPHEMERAL_METRICS=1` for
+  their private server sessions, while preserving `EPHEMERAL_METRICS=0` as an
+  explicit opt-out. Direct and shared server launches remain opt-in.
+
 ## 0.5.0 - 2026-09-18
 
 - Reject duplicate `--line-counts` values in `benchmark_latency.py`,

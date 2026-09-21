@@ -10,6 +10,7 @@ source "$DIR/ephemeral-session-env"
 # used to launch MCP child processes. JSON string escaping is compatible with
 # TOML basic-string escaping for quotes, backslashes, and newlines.
 SESSION_ID_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$EPHEMERAL_SESSION_ID")"
-MCP_ENV_CONFIG="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_SESSION_ID=${SESSION_ID_TOML}}"
+METRICS_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$EPHEMERAL_METRICS")"
+MCP_ENV_CONFIG="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_METRICS=${METRICS_TOML}, EPHEMERAL_SESSION_ID=${SESSION_ID_TOML}}"
 
 exec codex --config "$MCP_ENV_CONFIG" "$@"
