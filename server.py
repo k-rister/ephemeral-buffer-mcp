@@ -27,7 +27,15 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from asyncio import to_thread
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from config import (
     execution_state_dir,
     positive_int_env,
@@ -37,6 +45,7 @@ from config import (
     socket_path,
 )
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
@@ -94,6 +103,11 @@ MCP_TOOL_CATEGORY_NAMES = (
     "search",
 )
 _TOOL_CALL_IDS = itertools.count(1)
+_TIMEOUT_RESULT_TOOLS = {
+    "execute_and_capture",
+    "start_execution",
+    "resume_execution",
+}
 _SOCKET_STATE_LOCK = threading.Lock()
 _SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "not-started"
 _SOCKET_FAILURE = None
@@ -103,6 +117,149 @@ _SOCKET_PATH_LOCKS_GUARD = threading.Lock()
 _SOCKET_PATH_LOCK_DEPTH = threading.local()
 if _SOCKET_STATE == "disabled":
     _SOCKET_STARTUP_EVENT.set()
+
+
+class _MetricsFuncMetadata(FuncMetadata):
+    """FastMCP argument metadata that records rejected input schemas."""
+
+    _metrics_tool_name: str = PrivateAttr()
+
+    @classmethod
+    def for_tool(cls, metadata: FuncMetadata, tool_name: str) -> "_MetricsFuncMetadata":
+        instrumented = cls.model_validate(metadata.model_dump())
+        instrumented._metrics_tool_name = tool_name
+        return instrumented
+
+    async def call_fn_with_arg_validation(
+        self,
+        fn,
+        fn_is_async,
+        arguments_to_validate,
+        arguments_to_pass_directly,
+    ):
+        try:
+            with METRICS.measure(self._metrics_tool_name) as state:
+                try:
+                    arguments_pre_parsed = self.pre_parse_json(arguments_to_validate)
+                    arguments_parsed_model = self.arg_model.model_validate(arguments_pre_parsed)
+                    arguments_parsed_dict = arguments_parsed_model.model_dump_one_level()
+                except ValidationError:
+                    state["success"] = False
+                    state["failure_category"] = "validation"
+                    raise
+                state["record"] = False
+        except ValidationError:
+            _write_metrics_snapshot()
+            raise
+
+        arguments_parsed_dict |= arguments_to_pass_directly or {}
+        if fn_is_async:
+            return await fn(**arguments_parsed_dict)
+        return fn(**arguments_parsed_dict)
+
+
+def _classify_failure_text(text: str) -> str:
+    """Map an internal error description to a content-free failure category."""
+    normalized = text.lower()
+    if any(marker in normalized for marker in ("timeout", "timed out", "deadline")):
+        return "timeout"
+    if any(marker in normalized for marker in (
+        "socket",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "econn",
+    )):
+        return "socket"
+    if any(marker in normalized for marker in (
+        "embedding",
+        "semantic index",
+        "fastembed",
+        "onnx",
+    )):
+        return "embedding"
+    if any(marker in normalized for marker in ("evict", "eviction")):
+        return "eviction"
+    if any(marker in normalized for marker in (
+        "invalid",
+        "must ",
+        "unsupported",
+        "not found",
+        "does not exist",
+        "exceeds",
+        "at least",
+        "disabled",
+        "cannot ",
+        "no capture",
+    )):
+        return "validation"
+    return "other"
+
+
+def _classify_tool_exception(tool: str, exc: Exception, kwargs: dict[str, Any]) -> str:
+    """Classify exceptions without exposing their messages in metrics."""
+    if type(exc).__name__.lower().find("evict") >= 0:
+        return "eviction"
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+        return "timeout"
+    if isinstance(exc, (
+        ConnectionError,
+        BrokenPipeError,
+        ConnectionAbortedError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+    )):
+        return "socket"
+    if (
+        tool == "search_capture"
+        and kwargs.get("mode", "hybrid") in {"hybrid", "semantic"}
+    ):
+        return "embedding"
+    if isinstance(exc, (ValueError, TypeError)):
+        return "validation"
+    return "other"
+
+
+def _classify_tool_result(tool: str, result: Any) -> str | None:
+    """Classify structured or textual tool errors without retaining payloads."""
+    if isinstance(result, str):
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            phases = payload.get("phases", ())
+            if not isinstance(phases, list):
+                phases = ()
+            if (
+                tool in _TIMEOUT_RESULT_TOOLS
+                and (
+                    payload.get("timed_out") is True
+                    or payload.get("execution_status") in {"timed_out", "timeout"}
+                    or any(
+                        isinstance(phase, dict)
+                        and (
+                            phase.get("timed_out") is True
+                            or phase.get("status") in {"timed_out", "timeout"}
+                            or (
+                                isinstance(phase.get("result"), dict)
+                                and (
+                                    phase["result"].get("timed_out") is True
+                                    or phase["result"].get("status") in {"timed_out", "timeout"}
+                                )
+                            )
+                        )
+                        for phase in phases
+                    )
+                )
+            ):
+                return "timeout"
+            if payload.get("status") == "error":
+                return _classify_failure_text(str(payload.get("message", "")))
+        if result.startswith(("Error", "Search Error")):
+            return _classify_failure_text(result)
+    return None
 
 
 def _set_socket_state(state, failure=None):
@@ -253,7 +410,13 @@ def _instrument_tool(name):
             log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
             try:
                 with METRICS.measure(name) as state:
-                    result = function(*args, **kwargs)
+                    try:
+                        result = function(*args, **kwargs)
+                    except Exception as exc:
+                        state["failure_category"] = _classify_tool_exception(
+                            name, exc, kwargs
+                        )
+                        raise
                     if isinstance(result, str):
                         response_bytes = len(result.encode("utf-8"))
                         METRICS.record_bytes("tool_response_bytes", response_bytes)
@@ -261,8 +424,10 @@ def _instrument_tool(name):
                             METRICS.record_bytes("search_response_bytes", response_bytes)
                         elif name in {"get_capture_slice", "get_capture_summary"}:
                             METRICS.record_bytes("retrieval_response_bytes", response_bytes)
-                    if isinstance(result, str) and result.startswith(("Error", "Search Error")):
+                    failure_category = _classify_tool_result(name, result)
+                    if failure_category is not None:
                         state["success"] = False
+                        state["failure_category"] = failure_category
                 duration_ms = round((time.perf_counter() - started) * 1000, 3)
                 log_event(
                     LOGGER, logging.INFO, "mcp_tool_completed",
@@ -305,6 +470,12 @@ def _mcp_tool(name, category):
             return await to_thread(function, *args, **kwargs)
 
         mcp.add_tool(adapter, name=name)
+        registered_tool = mcp._tool_manager._tools.get(name)
+        if registered_tool is not None:
+            registered_tool.fn_metadata = _MetricsFuncMetadata.for_tool(
+                registered_tool.fn_metadata,
+                name,
+            )
         if name not in _REGISTERED_MCP_TOOL_NAMES:
             _REGISTERED_MCP_TOOL_NAMES.append(name)
         _REGISTERED_MCP_TOOL_CATEGORIES[name] = category

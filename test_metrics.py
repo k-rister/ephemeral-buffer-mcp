@@ -1,6 +1,7 @@
 """Tests for opt-in, content-free local metrics."""
 
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -45,6 +46,88 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(stats["failures"], 1)
         self.assertEqual(stats["result_count"], 5)
         self.assertGreaterEqual(stats["total_duration_ms"], 0)
+        self.assertEqual(stats["latency_ms"]["count"], 3)
+        self.assertEqual(sum(stats["failure_categories"].values()), 1)
+        self.assertEqual(stats["failure_categories"]["other"], 1)
+
+    def test_tool_measurement_reports_bounded_latency_and_failure_categories(self):
+        metrics = LocalMetrics(enabled=True)
+        with patch(
+            "metrics.time.perf_counter",
+            side_effect=[0.0, 0.002, 1.0, 1.010, 2.0, 2.100],
+        ):
+            with metrics.measure("sample"):
+                pass
+            with metrics.measure("sample"):
+                pass
+            with self.assertRaisesRegex(RuntimeError, "private failure"):
+                with metrics.measure("sample") as state:
+                    state["failure_category"] = "timeout"
+                    raise RuntimeError("private failure")
+
+        stats = metrics.snapshot()["tools"]["sample"]
+        self.assertEqual(stats["latency_ms"]["count"], 3)
+        self.assertEqual(stats["latency_ms"]["p50"], 10.0)
+        self.assertEqual(stats["latency_ms"]["p95"], 100.0)
+        self.assertEqual(stats["latency_ms"]["p99"], 100.0)
+        self.assertEqual(stats["latency_ms"]["overflow_count"], 0)
+        self.assertEqual(stats["failure_categories"]["timeout"], 1)
+        self.assertEqual(sum(stats["failure_categories"].values()), 1)
+        self.assertNotIn("private failure", repr(stats))
+
+        overflow = LocalMetrics._latency_distribution([0] * 14 + [1])
+        self.assertIsNone(overflow["p50"])
+        self.assertEqual(overflow["overflow_count"], 1)
+        self.assertEqual(LocalMetrics._latency_distribution([1])["count"], 1)
+        self.assertEqual(LocalMetrics._latency_bucket_index(60_000.1), 14)
+
+    def test_latency_and_failure_categories_are_delta_additive(self):
+        metrics = LocalMetrics(enabled=True)
+        baseline = metrics.snapshot(include_snapshot_token=True)
+
+        with metrics.measure("sample") as state:
+            state["failure_category"] = "validation"
+            state["success"] = False
+
+        delta = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+        stats = delta["tools"]["sample"]
+        self.assertEqual(stats["calls"], 1)
+        self.assertEqual(stats["failures"], 1)
+        self.assertEqual(stats["latency_ms"]["count"], 1)
+        self.assertEqual(stats["failure_categories"]["validation"], 1)
+        self.assertEqual(sum(stats["failure_categories"].values()), 1)
+
+    def test_discarded_measurement_does_not_count_as_a_tool_call(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.measure("validation_probe") as state:
+            state["record"] = False
+
+        self.assertNotIn("validation_probe", metrics.snapshot()["tools"])
+
+    def test_discarded_measurement_does_not_remove_concurrent_tool_record(self):
+        metrics = LocalMetrics(enabled=True)
+        validation_entered = threading.Event()
+        release_validation = threading.Event()
+
+        def discarded_validation():
+            with metrics.measure("race_probe") as state:
+                state["record"] = False
+                validation_entered.set()
+                self.assertTrue(release_validation.wait(timeout=2))
+
+        validation_thread = threading.Thread(target=discarded_validation)
+        validation_thread.start()
+        self.assertTrue(validation_entered.wait(timeout=2))
+
+        with metrics.measure("race_probe"):
+            pass
+
+        release_validation.set()
+        validation_thread.join(timeout=2)
+        self.assertFalse(validation_thread.is_alive())
+        stats = metrics.snapshot()["tools"]["race_probe"]
+        self.assertEqual(stats["calls"], 1)
+        self.assertEqual(stats["successes"], 1)
 
     def test_in_flight_tool_is_included_in_coverage_snapshot(self):
         metrics = LocalMetrics(enabled=True)

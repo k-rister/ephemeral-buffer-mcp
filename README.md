@@ -751,6 +751,18 @@ corresponding search or retrieval operation. A zero denominator or absent
 operation is reported as `status: "unavailable"` with a null value. These
 signals describe workflow behavior and response volume; they do not measure
 answer quality or require clients to use every tool.
+Each per-tool record also includes a bounded `latency_ms` distribution with
+the call count and nearest-rank `p50`, `p95`, and `p99` estimates. The fixed
+histogram uses millisecond upper-bound buckets from 1 ms through 60 seconds
+plus an overflow bucket; a percentile whose rank lands in the overflow bucket
+is reported as `null`, alongside `overflow_count`. Latency distributions are
+additive in task-window deltas. Failed calls include zero-filled,
+content-free `failure_categories` for `validation`, `timeout`, `socket`,
+`embedding`, `eviction`, and `other`. These categories contain no exception
+messages, commands, paths, queries, or capture identifiers.
+Schema-invalid MCP arguments are measured at the FastMCP validation boundary
+as failed calls in the `validation` category, even when the tool function does
+not run.
 The event keys are stable
 and zero-filled when no event has occurred, as are the byte-counter keys. Wire counts include framing
 headers and payload bytes actually consumed, including partial malformed

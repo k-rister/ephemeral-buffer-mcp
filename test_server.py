@@ -122,6 +122,119 @@ class TestServerTools(unittest.TestCase):
             self.assertEqual(failed["error_type"], "RuntimeError")
             self.assertNotIn("private failure", str(log.call_args_list))
 
+    def test_tool_instrumentation_records_content_free_failure_categories(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        try:
+            @server._instrument_tool("validation_probe")
+            def validation_probe():
+                return "Error: invalid private request"
+
+            @server._instrument_tool("execute_and_capture")
+            def timeout_probe():
+                return json.dumps({"status": "failed", "timed_out": True})
+
+            @server._instrument_tool("exception_probe")
+            def exception_probe():
+                raise TimeoutError("private timeout detail")
+
+            @server._instrument_tool("search_capture")
+            def semantic_probe(mode="semantic"):
+                raise ValueError("private embedding failure")
+
+            @server._instrument_tool("get_capture_summary")
+            def retrieval_probe():
+                return json.dumps({"status": "ok", "timed_out": True})
+
+            @server._instrument_tool("start_execution")
+            def partial_execution_probe():
+                return json.dumps({
+                    "status": "ok",
+                    "execution_status": "partial",
+                    "phases": [{
+                        "status": "failed",
+                        "result": {"timed_out": True},
+                    }],
+                })
+
+            self.assertTrue(validation_probe().startswith("Error:"))
+            self.assertIn('"timed_out": true', timeout_probe())
+            with self.assertRaisesRegex(TimeoutError, "private timeout detail"):
+                exception_probe()
+            with self.assertRaisesRegex(ValueError, "private embedding failure"):
+                semantic_probe()
+            self.assertIn('"timed_out": true', retrieval_probe())
+            self.assertIn('"execution_status": "partial"', partial_execution_probe())
+        finally:
+            server.METRICS = original_metrics
+
+        snapshot = metrics.snapshot()
+        self.assertEqual(
+            snapshot["tools"]["validation_probe"]["failure_categories"]["validation"],
+            1,
+        )
+        self.assertEqual(
+            snapshot["tools"]["execute_and_capture"]["failure_categories"]["timeout"],
+            1,
+        )
+        self.assertEqual(
+            snapshot["tools"]["exception_probe"]["failure_categories"]["timeout"],
+            1,
+        )
+        self.assertEqual(
+            snapshot["tools"]["search_capture"]["failure_categories"]["embedding"],
+            1,
+        )
+        self.assertEqual(
+            snapshot["tools"]["search_capture"]["failure_categories"]["validation"],
+            0,
+        )
+        self.assertEqual(
+            snapshot["tools"]["get_capture_summary"]["successes"],
+            1,
+        )
+        self.assertEqual(
+            snapshot["tools"]["get_capture_summary"]["failure_categories"]["timeout"],
+            0,
+        )
+        self.assertEqual(
+            snapshot["tools"]["start_execution"]["successes"],
+            0,
+        )
+        self.assertEqual(
+            snapshot["tools"]["start_execution"]["failure_categories"]["timeout"],
+            1,
+        )
+        self.assertNotIn("private request", repr(snapshot))
+        self.assertNotIn("private timeout detail", repr(snapshot))
+
+    def test_mcp_validation_failures_are_measured_at_the_boundary(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        try:
+            async def call_with_missing_required_argument():
+                await server.mcp._tool_manager.call_tool("capture_text", {})
+
+            async def call_with_valid_argument():
+                await server.mcp._tool_manager.call_tool(
+                    "capture_text",
+                    {"content": "valid validation-boundary probe"},
+                )
+
+            with self.assertRaises(Exception):
+                asyncio.run(call_with_missing_required_argument())
+            asyncio.run(call_with_valid_argument())
+        finally:
+            server.METRICS = original_metrics
+
+        stats = metrics.snapshot()["tools"]["capture_text"]
+        self.assertEqual(stats["calls"], 2)
+        self.assertEqual(stats["successes"], 1)
+        self.assertEqual(stats["failures"], 1)
+        self.assertEqual(stats["failure_categories"]["validation"], 1)
+
     def test_registered_mcp_tools_use_async_worker_adapter(self):
         async def exercise():
             @server._mcp_tool("blocking_probe", "diagnostics")
