@@ -560,7 +560,7 @@ class TestServerTools(unittest.TestCase):
             server.METRICS = original_metrics
             server.engine.metrics = original_engine_metrics
 
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["scope"], "process")
         self.assertIn("started_at", payload)
@@ -572,6 +572,42 @@ class TestServerTools(unittest.TestCase):
             1,
         )
         self.assertEqual(payload["tools"]["get_usage_metrics"]["calls"], 1)
+        self.assertIn("snapshot_token", payload)
+
+    def test_usage_metrics_returns_task_window_delta(self):
+        original_metrics = server.METRICS
+        original_engine_metrics = server.engine.metrics
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        server.engine.metrics = metrics
+        try:
+            baseline = json.loads(server.get_usage_metrics())
+            server.capture_text("window payload")
+            delta_raw = server.get_usage_metrics(since=baseline["snapshot_token"])
+            delta = json.loads(delta_raw)
+            next_delta = json.loads(
+                server.get_usage_metrics(since=delta["snapshot_token"])
+            )
+        finally:
+            server.METRICS = original_metrics
+            server.engine.metrics = original_engine_metrics
+
+        self.assertEqual(delta["schema_version"], 2)
+        self.assertEqual(delta["window"]["status"], "ok")
+        self.assertEqual(delta["window"]["kind"], "delta")
+        self.assertEqual(delta["window"]["started_at"], baseline["snapshot_at"])
+        self.assertEqual(delta["tools"]["capture_text"]["calls"], 1)
+        self.assertEqual(delta["tools"]["get_usage_metrics"]["calls"], 1)
+        self.assertEqual(delta["events"]["captures"], 1)
+        self.assertEqual(delta["interface_coverage"]["used"], 2)
+        self.assertIn("snapshot_token", delta)
+
+        self.assertEqual(next_delta["tools"]["get_usage_metrics"]["calls"], 1)
+        self.assertEqual(next_delta["tools"]["get_usage_metrics"]["successes"], 1)
+        self.assertEqual(
+            next_delta["bytes"]["tool_response_bytes"],
+            len(delta_raw.encode("utf-8")),
+        )
 
     def test_registered_tools_match_fastmcp_inventory(self):
         fastmcp_tools = asyncio.run(server.mcp.list_tools())
@@ -616,7 +652,7 @@ class TestServerTools(unittest.TestCase):
         finally:
             server.METRICS = original_metrics
 
-        self.assertEqual(payload, {"enabled": False, "schema_version": 1})
+        self.assertEqual(payload, {"enabled": False, "schema_version": 2})
 
     def test_metrics_snapshot_file_is_opt_in_and_content_free(self):
         original_metrics = server.METRICS

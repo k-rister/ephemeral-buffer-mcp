@@ -512,11 +512,17 @@ def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str,
     return execution_manager.public(execution_id, include_output=True)
 
 
-def _metrics_snapshot() -> Dict[str, Any]:
+def _metrics_snapshot(
+    *,
+    since_snapshot: Optional[str] = None,
+    include_snapshot_token: bool = False,
+) -> Dict[str, Any]:
     """Return metrics using the live EB MCP registration inventory."""
     return METRICS.snapshot(
         available_tools=_REGISTERED_MCP_TOOL_NAMES,
         tool_categories=_REGISTERED_MCP_TOOL_CATEGORIES,
+        since_snapshot=since_snapshot,
+        include_snapshot_token=include_snapshot_token,
     )
 
 
@@ -1583,10 +1589,16 @@ def get_runtime_diagnostics() -> str:
 
 @_mcp_tool("get_usage_metrics", "diagnostics")
 @_instrument_tool("get_usage_metrics")
-def get_usage_metrics() -> str:
-    """Returns a versioned JSON snapshot of content-free local usage metrics."""
+def get_usage_metrics(since: Optional[str] = None) -> str:
+    """Return content-free usage metrics, optionally since a snapshot token."""
     return json.dumps(
-        {"schema_version": 1, **_metrics_snapshot()},
+        {
+            "schema_version": 2,
+            **_metrics_snapshot(
+                since_snapshot=since,
+                include_snapshot_token=True,
+            ),
+        },
         sort_keys=True,
     )
 
