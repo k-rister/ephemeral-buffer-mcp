@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Derive interface coverage from the live MCP registration inventory so the
+  available and unused tool lists cannot silently drift from the exposed API.
 - Add `get_usage_metrics()`, a versioned JSON MCP interface for content-free
   usage metrics, including process-lifetime measurement timestamps.
 - Add content-free `interface_coverage` metrics to report the number and

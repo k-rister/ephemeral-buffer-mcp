@@ -82,6 +82,7 @@ SOCKET_STARTUP_TIMEOUT_SECONDS = positive_int_env("EPHEMERAL_SOCKET_STARTUP_TIME
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
 METRICS = LocalMetrics()
+_REGISTERED_MCP_TOOL_NAMES: list[str] = []
 _TOOL_CALL_IDS = itertools.count(1)
 _SOCKET_STATE_LOCK = threading.Lock()
 _SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "not-started"
@@ -291,6 +292,8 @@ def _mcp_tool(name):
             return await to_thread(function, *args, **kwargs)
 
         mcp.add_tool(adapter, name=name)
+        if name not in _REGISTERED_MCP_TOOL_NAMES:
+            _REGISTERED_MCP_TOOL_NAMES.append(name)
         return function
 
     return decorator
@@ -495,6 +498,11 @@ def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str,
     return execution_manager.public(execution_id, include_output=True)
 
 
+def _metrics_snapshot() -> Dict[str, Any]:
+    """Return metrics using the live EB MCP registration inventory."""
+    return METRICS.snapshot(available_tools=_REGISTERED_MCP_TOOL_NAMES)
+
+
 def _write_metrics_snapshot() -> None:
     """Persist an opt-in, content-free metrics snapshot for benchmark runners."""
     path = os.environ.get("EPHEMERAL_METRICS_FILE")
@@ -503,7 +511,7 @@ def _write_metrics_snapshot() -> None:
     try:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(METRICS.snapshot(), sort_keys=True), encoding="utf-8")
+        destination.write_text(json.dumps(_metrics_snapshot(), sort_keys=True), encoding="utf-8")
     except OSError as exc:
         log_event(LOGGER, logging.WARNING, "metrics_snapshot_write_failed", error_type=type(exc).__name__)
 
@@ -1499,7 +1507,7 @@ def get_buffer_stats() -> str:
         f"{unaccounted_line}"
     )
     if METRICS.enabled:
-        snapshot = METRICS.snapshot()
+        snapshot = _metrics_snapshot()
         result += f"\nData-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}"
         result += f"\nLocal metrics: {json.dumps(snapshot, sort_keys=True)}"
     return result
@@ -1550,7 +1558,7 @@ def get_runtime_diagnostics() -> str:
         "Captured content, labels, and command arguments are not included.",
     ]
     if METRICS.enabled:
-        snapshot = METRICS.snapshot()
+        snapshot = _metrics_snapshot()
         lines.append(f"Data-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}")
         lines.append(f"Metrics summary: {json.dumps(snapshot, sort_keys=True)}")
     return "\n".join(lines)
@@ -1561,7 +1569,7 @@ def get_runtime_diagnostics() -> str:
 def get_usage_metrics() -> str:
     """Returns a versioned JSON snapshot of content-free local usage metrics."""
     return json.dumps(
-        {"schema_version": 1, **METRICS.snapshot()},
+        {"schema_version": 1, **_metrics_snapshot()},
         sort_keys=True,
     )
 
