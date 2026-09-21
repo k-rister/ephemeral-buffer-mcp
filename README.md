@@ -741,6 +741,16 @@ isolated coding-agent session always starts a new measurement scope. Both
 `get_runtime_diagnostics()` and `get_buffer_stats()` continue to include the
 same aggregate metrics snapshot for compatibility. Coverage uses the live MCP
 registration inventory, so its available-tool count tracks the exposed API.
+The `workflow_effectiveness` section derives operational signals from the
+same process or task-window state. Funnel rates use explicit operation
+denominators: capture-to-search uses `searches`, search-to-retrieval uses
+`retrievals`, empty-search uses `searches`, and successful-call uses completed
+calls (`successes + failures`). Response-byte ratios and reductions use
+`capture_input_bytes` as the captured-byte baseline and require at least one
+corresponding search or retrieval operation. A zero denominator or absent
+operation is reported as `status: "unavailable"` with a null value. These
+signals describe workflow behavior and response volume; they do not measure
+answer quality or require clients to use every tool.
 The event keys are stable
 and zero-filled when no event has occurred, as are the byte-counter keys. Wire counts include framing
 headers and payload bytes actually consumed, including partial malformed

@@ -274,6 +274,113 @@ class LocalMetrics:
                 delta_tools[name] = stats
         return delta_tools
 
+    @staticmethod
+    def _percentage_metric(
+        numerator: int,
+        denominator: int,
+        denominator_name: str,
+    ) -> dict[str, Any]:
+        metric = {
+            "status": "ok" if denominator else "unavailable",
+            "numerator": numerator,
+            "denominator": denominator,
+            "denominator_name": denominator_name,
+            "percentage": round(numerator / denominator * 100, 1)
+            if denominator
+            else None,
+        }
+        if not denominator:
+            metric["reason"] = "zero_denominator"
+        return metric
+
+    @staticmethod
+    def _ratio_metric(
+        numerator: int,
+        denominator: int,
+        denominator_name: str,
+    ) -> dict[str, Any]:
+        metric = {
+            "status": "ok" if denominator else "unavailable",
+            "numerator": numerator,
+            "denominator": denominator,
+            "denominator_name": denominator_name,
+            "ratio": round(numerator / denominator, 4) if denominator else None,
+        }
+        if not denominator:
+            metric["reason"] = "zero_denominator"
+        return metric
+
+    @staticmethod
+    def _reduction_metric(
+        response_bytes: int,
+        baseline_bytes: int,
+        operation_count: int,
+    ) -> dict[str, Any]:
+        metric = {
+            "status": "ok" if baseline_bytes and operation_count else "unavailable",
+            "numerator": baseline_bytes - response_bytes,
+            "denominator": baseline_bytes,
+            "denominator_name": "capture_input_bytes",
+            "operation_count": operation_count,
+            "percentage": round(
+                (baseline_bytes - response_bytes) / baseline_bytes * 100, 1
+            ) if baseline_bytes and operation_count else None,
+        }
+        if not baseline_bytes:
+            metric["reason"] = "zero_denominator"
+        elif not operation_count:
+            metric["reason"] = "zero_operation_count"
+        return metric
+
+    @classmethod
+    def _workflow_effectiveness(
+        cls,
+        tools: Mapping[str, Mapping[str, Any]],
+        events: Mapping[str, int],
+        bytes_snapshot: Mapping[str, int],
+    ) -> dict[str, dict[str, Any]]:
+        """Derive operational funnel and response-size signals."""
+        successful_calls = sum(stats["successes"] for stats in tools.values())
+        failed_calls = sum(stats["failures"] for stats in tools.values())
+        captured_bytes = bytes_snapshot["capture_input_bytes"]
+        return {
+            "capture_to_search_rate": cls._percentage_metric(
+                events["capture_to_search"],
+                events["searches"],
+                "searches",
+            ),
+            "search_to_retrieval_rate": cls._percentage_metric(
+                events["search_to_retrieval"],
+                events["retrievals"],
+                "retrievals",
+            ),
+            "empty_search_rate": cls._percentage_metric(
+                events["empty_searches"],
+                events["searches"],
+                "searches",
+            ),
+            "successful_call_rate": cls._percentage_metric(
+                successful_calls,
+                successful_calls + failed_calls,
+                "completed_calls",
+            ),
+            "response_bytes_per_captured_byte": cls._ratio_metric(
+                bytes_snapshot["tool_response_bytes"],
+                captured_bytes,
+                "capture_input_bytes",
+            ),
+            "search_response_reduction": cls._reduction_metric(
+                bytes_snapshot["search_response_bytes"],
+                captured_bytes,
+                events["searches"],
+            ),
+            "retrieval_response_reduction": cls._reduction_metric(
+                bytes_snapshot["retrieval_response_bytes"],
+                captured_bytes,
+                events["retrievals"],
+            ),
+        }
+
     def snapshot(
         self,
         available_tools: Iterable[str] = (),
@@ -411,6 +518,11 @@ class LocalMetrics:
                 },
                 "events": state["events"],
                 "bytes": state["bytes"],
+                "workflow_effectiveness": self._workflow_effectiveness(
+                    state["tools"],
+                    state["events"],
+                    state["bytes"],
+                ),
             }
             if snapshot_token is not None:
                 response["snapshot_token"] = snapshot_token

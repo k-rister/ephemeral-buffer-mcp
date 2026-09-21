@@ -191,6 +191,68 @@ class TestMetrics(unittest.TestCase):
         })
         self.assertNotIn("private", repr(metrics.snapshot()))
 
+    def test_workflow_effectiveness_reports_rates_and_reductions(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.measure("capture_text"):
+            pass
+        with metrics.measure("search_capture"):
+            pass
+        with metrics.measure("get_capture_slice"):
+            pass
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            with metrics.measure("failed_tool"):
+                raise RuntimeError("failed")
+
+        metrics.record_event("searches")
+        metrics.record_event("capture_to_search")
+        metrics.record_event("retrievals")
+        metrics.record_event("search_to_retrieval")
+        metrics.record_bytes("capture_input_bytes", 100)
+        metrics.record_bytes("tool_response_bytes", 20)
+        metrics.record_bytes("search_response_bytes", 10)
+        metrics.record_bytes("retrieval_response_bytes", 5)
+
+        effectiveness = metrics.snapshot()["workflow_effectiveness"]
+        self.assertEqual(
+            effectiveness["capture_to_search_rate"],
+            {
+                "status": "ok",
+                "numerator": 1,
+                "denominator": 1,
+                "denominator_name": "searches",
+                "percentage": 100.0,
+            },
+        )
+        self.assertEqual(effectiveness["search_to_retrieval_rate"]["percentage"], 100.0)
+        self.assertEqual(effectiveness["empty_search_rate"]["percentage"], 0.0)
+        self.assertEqual(effectiveness["successful_call_rate"]["percentage"], 75.0)
+        self.assertEqual(
+            effectiveness["response_bytes_per_captured_byte"]["ratio"],
+            0.2,
+        )
+        self.assertEqual(effectiveness["search_response_reduction"]["percentage"], 90.0)
+        self.assertEqual(effectiveness["retrieval_response_reduction"]["percentage"], 95.0)
+
+    def test_workflow_effectiveness_marks_zero_denominators_unavailable(self):
+        metrics = LocalMetrics(enabled=True)
+        effectiveness = metrics.snapshot()["workflow_effectiveness"]
+
+        for metric in effectiveness.values():
+            self.assertEqual(metric["status"], "unavailable")
+            self.assertIsNone(metric.get("percentage", metric.get("ratio")))
+            self.assertEqual(metric["reason"], "zero_denominator")
+
+        metrics.record_bytes("capture_input_bytes", 100)
+        effectiveness = metrics.snapshot()["workflow_effectiveness"]
+        self.assertEqual(
+            effectiveness["search_response_reduction"]["reason"],
+            "zero_operation_count",
+        )
+        self.assertEqual(
+            effectiveness["retrieval_response_reduction"]["reason"],
+            "zero_operation_count",
+        )
+
     def test_invalid_original_size_does_not_partially_record_capture(self):
         metrics = LocalMetrics(enabled=True)
         engine = EphemeralEngine(max_captures=1, metrics=metrics)

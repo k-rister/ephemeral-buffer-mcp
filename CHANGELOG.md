@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add content-free derived workflow-effectiveness signals with documented
+  denominators, zero-denominator handling, response-byte ratios, and
+  search/retrieval reduction metrics.
 - Add process-local snapshot tokens and non-resetting task-window deltas to
   `get_usage_metrics()`, distinguishing valid zero-activity windows from
   unavailable tokens across bounded history and server restarts.
