@@ -124,7 +124,7 @@ class TestServerTools(unittest.TestCase):
 
     def test_registered_mcp_tools_use_async_worker_adapter(self):
         async def exercise():
-            @server._mcp_tool("blocking_probe")
+            @server._mcp_tool("blocking_probe", "diagnostics")
             @server._instrument_tool("blocking_probe")
             def blocking_probe():
                 return "worker result"
@@ -140,8 +140,13 @@ class TestServerTools(unittest.TestCase):
             finally:
                 server.mcp.remove_tool("blocking_probe")
                 server._REGISTERED_MCP_TOOL_NAMES.remove("blocking_probe")
+                server._REGISTERED_MCP_TOOL_CATEGORIES.pop("blocking_probe")
 
         asyncio.run(exercise())
+
+    def test_mcp_tool_requires_known_category(self):
+        with self.assertRaisesRegex(ValueError, "unknown MCP tool category"):
+            server._mcp_tool("invalid_category_probe", "unknown")
 
     def test_tool_descriptions_include_agent_routing_and_path_guidance(self):
         capture_text_doc = server.capture_text.__doc__
@@ -562,6 +567,10 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("snapshot_at", payload)
         self.assertEqual(payload["interface_coverage"]["available"], 19)
         self.assertNotIn("get_usage_metrics", payload["interface_coverage"]["unused_tools"])
+        self.assertEqual(
+            payload["interface_coverage"]["by_category"]["diagnostics"]["used"],
+            1,
+        )
         self.assertEqual(payload["tools"]["get_usage_metrics"]["calls"], 1)
 
     def test_registered_tools_match_fastmcp_inventory(self):
@@ -569,6 +578,34 @@ class TestServerTools(unittest.TestCase):
         fastmcp_names = tuple(tool.name for tool in fastmcp_tools)
 
         self.assertEqual(fastmcp_names, tuple(server._REGISTERED_MCP_TOOL_NAMES))
+        self.assertEqual(
+            set(fastmcp_names),
+            set(server._REGISTERED_MCP_TOOL_CATEGORIES),
+        )
+        self.assertEqual(
+            server._REGISTERED_MCP_TOOL_CATEGORIES,
+            {
+                "preflight_command": "diagnostics",
+                "start_execution": "execution",
+                "resume_execution": "execution",
+                "get_execution": "execution",
+                "get_execution_output": "execution",
+                "list_executions": "execution",
+                "capture_text": "capture",
+                "capture_file": "capture",
+                "execute_and_capture": "capture",
+                "consolidate_captures": "capture",
+                "search_capture": "search",
+                "get_capture_slice": "retrieval",
+                "get_capture_summary": "retrieval",
+                "list_captures": "retrieval",
+                "clear_captures": "lifecycle",
+                "get_buffer_stats": "diagnostics",
+                "get_runtime_diagnostics": "diagnostics",
+                "get_usage_metrics": "diagnostics",
+                "set_semantic_index_budget": "configuration",
+            },
+        )
         self.assertEqual(len(fastmcp_names), 19)
 
     def test_usage_metrics_reports_disabled_state_as_versioned_json(self):

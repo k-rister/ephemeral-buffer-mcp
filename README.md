@@ -711,8 +711,21 @@ server launches remain opt-in.
 The metrics include per-tool call counts, success/failure counts, duration
 totals, aggregate capture/search/retrieval, empty-search, eviction, and
 cleanup events, plus interface coverage showing how many of the 19 exposed MCP
-tools were called and the complete list of unused tools. They also include
-session-scoped data-path byte counters. The byte counters
+tools were called and the complete list of unused tools. Interface coverage
+also reports descriptive coverage by primary capability category; it is not a
+mandate for a client to use every category or tool. The categories are:
+
+| Category | Exposed tools |
+| :--- | :--- |
+| `capture` | `capture_text`, `capture_file`, `execute_and_capture`, `consolidate_captures` |
+| `configuration` | `set_semantic_index_budget` |
+| `diagnostics` | `preflight_command`, `get_buffer_stats`, `get_runtime_diagnostics`, `get_usage_metrics` |
+| `execution` | `start_execution`, `resume_execution`, `get_execution`, `get_execution_output`, `list_executions` |
+| `lifecycle` | `clear_captures` |
+| `retrieval` | `get_capture_slice`, `get_capture_summary`, `list_captures` |
+| `search` | `search_capture` |
+
+They also include session-scoped data-path byte counters. The byte counters
 cover input, retained, and original capture bytes; tool/search/retrieval
 response bytes; and framed socket request/response bytes. They are disabled by
 default, are never sent anywhere, and do

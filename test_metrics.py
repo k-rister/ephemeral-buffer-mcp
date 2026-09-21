@@ -9,6 +9,11 @@ from metrics import LocalMetrics, metrics_enabled
 
 
 TEST_TOOL_NAMES = ("capture_file", "start_execution", "get_runtime_diagnostics")
+TEST_TOOL_CATEGORIES = {
+    "capture_file": "capture",
+    "start_execution": "execution",
+    "get_runtime_diagnostics": "diagnostics",
+}
 
 
 class TestMetrics(unittest.TestCase):
@@ -45,7 +50,10 @@ class TestMetrics(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
 
         with metrics.measure("get_runtime_diagnostics"):
-            snapshot = metrics.snapshot(available_tools=TEST_TOOL_NAMES)
+            snapshot = metrics.snapshot(
+                available_tools=TEST_TOOL_NAMES,
+                tool_categories=TEST_TOOL_CATEGORIES,
+            )
             self.assertEqual(snapshot["interface_coverage"]["used"], 1)
             self.assertNotIn("get_runtime_diagnostics", snapshot["interface_coverage"]["unused_tools"])
             self.assertEqual(snapshot["tools"]["get_runtime_diagnostics"]["calls"], 1)
@@ -63,13 +71,39 @@ class TestMetrics(unittest.TestCase):
         with metrics.measure("start_execution"):
             pass
 
-        coverage = metrics.snapshot(available_tools=TEST_TOOL_NAMES)["interface_coverage"]
+        coverage = metrics.snapshot(
+            available_tools=TEST_TOOL_NAMES,
+            tool_categories=TEST_TOOL_CATEGORIES,
+        )["interface_coverage"]
         self.assertEqual(coverage["used"], 2)
         self.assertEqual(coverage["available"], len(TEST_TOOL_NAMES))
         self.assertEqual(coverage["percentage"], 66.7)
         self.assertEqual(
             coverage["unused_tools"],
             ["get_runtime_diagnostics"],
+        )
+        self.assertEqual(
+            coverage["by_category"],
+            {
+                "capture": {
+                    "used": 1,
+                    "available": 1,
+                    "percentage": 100.0,
+                    "unused_tools": [],
+                },
+                "diagnostics": {
+                    "used": 0,
+                    "available": 1,
+                    "percentage": 0.0,
+                    "unused_tools": ["get_runtime_diagnostics"],
+                },
+                "execution": {
+                    "used": 1,
+                    "available": 1,
+                    "percentage": 100.0,
+                    "unused_tools": [],
+                },
+            },
         )
 
     def test_interface_coverage_reaches_full_coverage(self):
@@ -79,12 +113,35 @@ class TestMetrics(unittest.TestCase):
                 pass
 
         self.assertEqual(
-            metrics.snapshot(available_tools=TEST_TOOL_NAMES)["interface_coverage"],
+            metrics.snapshot(
+                available_tools=TEST_TOOL_NAMES,
+                tool_categories=TEST_TOOL_CATEGORIES,
+            )["interface_coverage"],
             {
                 "used": len(TEST_TOOL_NAMES),
                 "available": len(TEST_TOOL_NAMES),
                 "percentage": 100.0,
                 "unused_tools": [],
+                "by_category": {
+                    "capture": {
+                        "used": 1,
+                        "available": 1,
+                        "percentage": 100.0,
+                        "unused_tools": [],
+                    },
+                    "diagnostics": {
+                        "used": 1,
+                        "available": 1,
+                        "percentage": 100.0,
+                        "unused_tools": [],
+                    },
+                    "execution": {
+                        "used": 1,
+                        "available": 1,
+                        "percentage": 100.0,
+                        "unused_tools": [],
+                    },
+                },
             },
         )
 
@@ -154,7 +211,10 @@ class TestMetrics(unittest.TestCase):
     def test_snapshot_has_stable_zero_filled_event_schema(self):
         metrics = LocalMetrics(enabled=True)
 
-        snapshot = metrics.snapshot(available_tools=TEST_TOOL_NAMES)
+        snapshot = metrics.snapshot(
+            available_tools=TEST_TOOL_NAMES,
+            tool_categories=TEST_TOOL_CATEGORIES,
+        )
         self.assertEqual(snapshot["scope"], "process")
         self.assertRegex(snapshot["started_at"], r"Z$")
         self.assertRegex(snapshot["snapshot_at"], r"Z$")
@@ -165,6 +225,26 @@ class TestMetrics(unittest.TestCase):
                 "available": len(TEST_TOOL_NAMES),
                 "percentage": 0.0,
                 "unused_tools": list(TEST_TOOL_NAMES),
+                "by_category": {
+                    "capture": {
+                        "used": 0,
+                        "available": 1,
+                        "percentage": 0.0,
+                        "unused_tools": ["capture_file"],
+                    },
+                    "diagnostics": {
+                        "used": 0,
+                        "available": 1,
+                        "percentage": 0.0,
+                        "unused_tools": ["get_runtime_diagnostics"],
+                    },
+                    "execution": {
+                        "used": 0,
+                        "available": 1,
+                        "percentage": 0.0,
+                        "unused_tools": ["start_execution"],
+                    },
+                },
             },
         )
         self.assertEqual(

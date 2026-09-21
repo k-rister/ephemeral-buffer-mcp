@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 
 EVENT_NAMES = (
@@ -138,12 +138,18 @@ class LocalMetrics:
                 self._captured.discard(capture_id)
                 self._searched.discard(capture_id)
 
-    def snapshot(self, available_tools: Iterable[str] = ()) -> dict[str, Any]:
+    def snapshot(
+        self,
+        available_tools: Iterable[str] = (),
+        tool_categories: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Return aggregate metrics suitable for a content-free diagnostic.
 
         ``available_tools`` should be the live interface inventory when the
         metrics are used by an MCP server. Standalone metric users can omit it
-        when interface coverage is not applicable.
+        when interface coverage is not applicable. When supplied,
+        ``tool_categories`` maps each available tool to its primary capability
+        category for descriptive per-category coverage.
         """
         if not self.enabled:
             return {"enabled": False}
@@ -153,6 +159,25 @@ class LocalMetrics:
             used_tools = [name for name in available_tool_names if name in self._tools]
             unused_tools = [name for name in available_tool_names if name not in self._tools]
             available_tool_count = len(available_tool_names)
+            category_coverage: dict[str, dict[str, Any]] = {}
+            if tool_categories is not None:
+                tools_by_category: dict[str, list[str]] = defaultdict(list)
+                for name in available_tool_names:
+                    category = tool_categories.get(name, "uncategorized")
+                    tools_by_category[category].append(name)
+                for category in sorted(tools_by_category):
+                    category_tools = tools_by_category[category]
+                    category_used = [name for name in category_tools if name in self._tools]
+                    category_unused = [name for name in category_tools if name not in self._tools]
+                    category_available = len(category_tools)
+                    category_coverage[category] = {
+                        "used": len(category_used),
+                        "available": category_available,
+                        "percentage": round(
+                            len(category_used) / category_available * 100, 1
+                        ) if category_available else 0.0,
+                        "unused_tools": category_unused,
+                    }
             return {
                 "enabled": True,
                 "scope": "process",
@@ -169,6 +194,7 @@ class LocalMetrics:
                     if available_tool_count
                     else 0.0,
                     "unused_tools": unused_tools,
+                    "by_category": category_coverage,
                 },
                 "tools": {
                     name: {
