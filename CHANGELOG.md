@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add descriptive interface coverage by primary capability category, while
+  retaining the complete tool-level coverage and unused-tool list.
 - Derive interface coverage from the live MCP registration inventory so the
   available and unused tool lists cannot silently drift from the exposed API.
 - Add `get_usage_metrics()`, a versioned JSON MCP interface for content-free

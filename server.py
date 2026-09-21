@@ -83,6 +83,16 @@ SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
 METRICS = LocalMetrics()
 _REGISTERED_MCP_TOOL_NAMES: list[str] = []
+_REGISTERED_MCP_TOOL_CATEGORIES: dict[str, str] = {}
+MCP_TOOL_CATEGORY_NAMES = (
+    "capture",
+    "configuration",
+    "diagnostics",
+    "execution",
+    "lifecycle",
+    "retrieval",
+    "search",
+)
 _TOOL_CALL_IDS = itertools.count(1)
 _SOCKET_STATE_LOCK = threading.Lock()
 _SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "not-started"
@@ -277,15 +287,18 @@ def _instrument_tool(name):
     return decorator
 
 
-def _mcp_tool(name):
+def _mcp_tool(name, category):
     """Register a synchronous tool implementation behind an async MCP adapter.
 
     The synchronous function remains the public Python API, while FastMCP sees
     an async callable and therefore does not execute blocking work on its event
     loop.  The complete instrumented call runs in a worker thread so command
     execution, model loading, and searches all share the same non-blocking
-    boundary.
+    boundary. ``category`` is the tool's primary descriptive capability group.
     """
+    if category not in MCP_TOOL_CATEGORY_NAMES:
+        raise ValueError(f"unknown MCP tool category: {category}")
+
     def decorator(function):
         @wraps(function)
         async def adapter(*args, **kwargs):
@@ -294,6 +307,7 @@ def _mcp_tool(name):
         mcp.add_tool(adapter, name=name)
         if name not in _REGISTERED_MCP_TOOL_NAMES:
             _REGISTERED_MCP_TOOL_NAMES.append(name)
+        _REGISTERED_MCP_TOOL_CATEGORIES[name] = category
         return function
 
     return decorator
@@ -500,7 +514,10 @@ def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str,
 
 def _metrics_snapshot() -> Dict[str, Any]:
     """Return metrics using the live EB MCP registration inventory."""
-    return METRICS.snapshot(available_tools=_REGISTERED_MCP_TOOL_NAMES)
+    return METRICS.snapshot(
+        available_tools=_REGISTERED_MCP_TOOL_NAMES,
+        tool_categories=_REGISTERED_MCP_TOOL_CATEGORIES,
+    )
 
 
 def _write_metrics_snapshot() -> None:
@@ -643,7 +660,7 @@ def _resolve_preflight_executable(tokens: list[str], resolved_cwd: str) -> dict[
     return {"status": "unavailable", "requested": token, "reason": "executable was not found on PATH"}
 
 
-@_mcp_tool("preflight_command")
+@_mcp_tool("preflight_command", "diagnostics")
 @_instrument_tool("preflight_command")
 def preflight_command(command: str, cwd: Optional[str] = None) -> str:
     """Return content-free path and executable diagnostics without running ``command``.
@@ -707,7 +724,7 @@ def preflight_command(command: str, cwd: Optional[str] = None) -> str:
         return json.dumps({"status": "error", "reason": type(exc).__name__})
 
 
-@_mcp_tool("start_execution")
+@_mcp_tool("start_execution", "execution")
 @_instrument_tool("start_execution")
 def start_execution(
     phases: Annotated[List[ExecutionPhaseInput], Field(min_length=1, max_length=MAX_EXECUTION_PHASES)],
@@ -753,7 +770,7 @@ def start_execution(
     )
 
 
-@_mcp_tool("resume_execution")
+@_mcp_tool("resume_execution", "execution")
 @_instrument_tool("resume_execution")
 def resume_execution(
     execution_id: Annotated[str, Field(
@@ -783,7 +800,7 @@ def resume_execution(
     )
 
 
-@_mcp_tool("get_execution")
+@_mcp_tool("get_execution", "execution")
 @_instrument_tool("get_execution")
 def get_execution(
     execution_id: Annotated[str, Field(
@@ -800,7 +817,7 @@ def get_execution(
     )
 
 
-@_mcp_tool("get_execution_output")
+@_mcp_tool("get_execution_output", "execution")
 @_instrument_tool("get_execution_output")
 def get_execution_output(
     execution_id: Annotated[str, Field(
@@ -826,7 +843,7 @@ def get_execution_output(
     )
 
 
-@_mcp_tool("list_executions")
+@_mcp_tool("list_executions", "execution")
 @_instrument_tool("list_executions")
 def list_executions(
     limit: Annotated[int, Field(ge=1, le=100)] = 20,
@@ -1033,7 +1050,7 @@ def _capture_text(
     return _summary_json(cap.capture_id, capture=cap)
 
 
-@_mcp_tool("capture_text")
+@_mcp_tool("capture_text", "capture")
 @_instrument_tool("capture_text")
 def capture_text(
     content: str,
@@ -1057,7 +1074,7 @@ def capture_text(
     )
 
 
-@_mcp_tool("capture_file")
+@_mcp_tool("capture_file", "capture")
 @_instrument_tool("capture_file")
 def capture_file(
     file_path: str,
@@ -1113,7 +1130,7 @@ def capture_file(
         return f"Error reading file '{file_path}': {str(e)}"
 
 
-@_mcp_tool("execute_and_capture")
+@_mcp_tool("execute_and_capture", "capture")
 @_instrument_tool("execute_and_capture")
 def execute_and_capture(
     command: str,
@@ -1211,7 +1228,7 @@ def _consolidated_jsonl(
     return _active_engine().consolidate(capture_ids, max_captures, max_bytes)
 
 
-@_mcp_tool("consolidate_captures")
+@_mcp_tool("consolidate_captures", "capture")
 @_instrument_tool("consolidate_captures")
 def consolidate_captures(
     capture_ids: Optional[List[str]] = None,
@@ -1282,7 +1299,7 @@ def consolidate_captures(
         return f"Error consolidating captures: {message}"
 
 
-@_mcp_tool("search_capture")
+@_mcp_tool("search_capture", "search")
 @_instrument_tool("search_capture")
 def search_capture(
     query: str,
@@ -1392,7 +1409,7 @@ def search_capture(
     return "\n".join(out)
 
 
-@_mcp_tool("get_capture_slice")
+@_mcp_tool("get_capture_slice", "retrieval")
 @_instrument_tool("get_capture_slice")
 def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest") -> str:
     """
@@ -1418,7 +1435,7 @@ def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest"
     )
 
 
-@_mcp_tool("get_capture_summary")
+@_mcp_tool("get_capture_summary", "retrieval")
 @_instrument_tool("get_capture_summary")
 def get_capture_summary(capture_id: str = "latest", include_previews: bool = False) -> str:
     """
@@ -1429,7 +1446,7 @@ def get_capture_summary(capture_id: str = "latest", include_previews: bool = Fal
     return _summary_json(capture_id, include_previews=include_previews)
 
 
-@_mcp_tool("list_captures")
+@_mcp_tool("list_captures", "retrieval")
 @_instrument_tool("list_captures")
 def list_captures() -> str:
     """
@@ -1450,7 +1467,7 @@ def list_captures() -> str:
     return "\n".join(out)
 
 
-@_mcp_tool("clear_captures")
+@_mcp_tool("clear_captures", "lifecycle")
 @_instrument_tool("clear_captures")
 def clear_captures(capture_id: str = "all") -> str:
     """
@@ -1459,7 +1476,7 @@ def clear_captures(capture_id: str = "all") -> str:
     return engine.clear(capture_id)
 
 
-@_mcp_tool("get_buffer_stats")
+@_mcp_tool("get_buffer_stats", "diagnostics")
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
     """Returns aggregate capture, accounting, prefetch, and process RSS metrics."""
@@ -1513,7 +1530,7 @@ def get_buffer_stats() -> str:
     return result
 
 
-@_mcp_tool("get_runtime_diagnostics")
+@_mcp_tool("get_runtime_diagnostics", "diagnostics")
 @_instrument_tool("get_runtime_diagnostics")
 def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""
@@ -1564,7 +1581,7 @@ def get_runtime_diagnostics() -> str:
     return "\n".join(lines)
 
 
-@_mcp_tool("get_usage_metrics")
+@_mcp_tool("get_usage_metrics", "diagnostics")
 @_instrument_tool("get_usage_metrics")
 def get_usage_metrics() -> str:
     """Returns a versioned JSON snapshot of content-free local usage metrics."""
@@ -1574,7 +1591,7 @@ def get_usage_metrics() -> str:
     )
 
 
-@_mcp_tool("set_semantic_index_budget")
+@_mcp_tool("set_semantic_index_budget", "configuration")
 @_instrument_tool("set_semantic_index_budget")
 def set_semantic_index_budget(max_indexed_chunks: int) -> str:
     """Adjust this session's semantic-index chunk budget when explicitly enabled."""
