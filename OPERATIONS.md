@@ -70,6 +70,11 @@ ephemeral-agent gemini
 source ephemeral-session-env
 ```
 
+These private, session-aware launchers default `EPHEMERAL_METRICS=1` so the
+session's content-free usage data is available for diagnostics. Preserve the
+normal opt-in behavior for direct or shared server launches, or disable metrics
+for a launcher-created session with `EPHEMERAL_METRICS=0` before starting it.
+
 CLI socket operations use a 10-second timeout by default. Override it with a
 positive value when needed:
 

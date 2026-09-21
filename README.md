@@ -126,7 +126,10 @@ The launcher also enables `EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1` because some
 Codex execution environments deny Unix-socket creation. In that case MCP over
 stdio remains available and runtime diagnostics report the socket failure;
 `ephbuf` CLI support remains available when the environment permits socket
-creation.
+creation. Because the session is private, the launcher also defaults
+`EPHEMERAL_METRICS=1` and passes that setting explicitly to the MCP server. Set
+`EPHEMERAL_METRICS=0` before invoking the launcher to disable local metrics for
+that session.
 
 ### Configure other coding agents
 
@@ -181,6 +184,10 @@ Or source the environment into an existing shell before launching the agent:
 source ephemeral-session-env
 claude   # or another coding-agent command
 ```
+
+The session environment helper defaults `EPHEMERAL_METRICS=1` for the private
+agent session; set `EPHEMERAL_METRICS=0` before sourcing it when metrics are not
+wanted.
 
 GUI-launched agents still need their MCP configuration to provide a unique
 session ID per conversation; these scripts cannot modify an already-running
@@ -698,6 +705,8 @@ repository. The files contain lifecycle metadata only.
 ### Optional local usage metrics
 
 Set `EPHEMERAL_METRICS=1` to collect content-free, in-process usage metrics.
+The isolated coding-agent launchers enable this setting by default; direct
+server launches remain opt-in.
 The metrics include per-tool call counts, success/failure counts, duration
 totals, aggregate capture/search/retrieval, empty-search, eviction, and
 cleanup events, plus session-scoped data-path byte counters. The byte counters
@@ -717,9 +726,9 @@ state is released when a capture is evicted or explicitly cleared.
 
 ### Effectiveness metrics and privacy
 
-The built-in metrics are local, opt-in operational telemetry. Set
-`EPHEMERAL_METRICS=1` only when you want measurements for the current server
-process; nothing is uploaded or shared by the server. The metrics contain
+The built-in metrics are local operational telemetry. Direct server launches
+are opt-in, while isolated coding-agent launchers enable them by default.
+Nothing is uploaded or shared by the server. The metrics contain
 counts, durations, byte sizes, and bounded lifecycle outcomes, but do not
 retain captured content, labels, command arguments, or query text. Runtime
 logs follow the same privacy model. Treat any captured output or diagnostic
