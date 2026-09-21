@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add process-local snapshot tokens and non-resetting task-window deltas to
+  `get_usage_metrics()`, distinguishing valid zero-activity windows from
+  unavailable tokens across bounded history and server restarts.
 - Add descriptive interface coverage by primary capability category, while
   retaining the complete tool-level coverage and unused-tool list.
 - Derive interface coverage from the live MCP registration inventory so the

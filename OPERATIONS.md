@@ -383,9 +383,22 @@ fields by each tool's primary capability category. Category coverage is
 descriptive and is not a requirement that clients use every category.
 
 Use `get_usage_metrics()` when a client needs the same content-free metrics as
-versioned JSON rather than embedded JSON inside diagnostic text. Its timestamps
-describe the current process-lifetime measurement scope; task-specific windows
-and deltas are a separate capability.
+versioned JSON rather than embedded JSON inside diagnostic text. The endpoint
+returns schema version 2 and a `snapshot_token`. Pass that token as the
+optional `since` argument to request a non-resetting task-window delta. The
+response's `window.status` is `ok` for valid data, including a valid window
+with zero activity, and `unavailable` for an invalid, expired, or pre-restart
+token. The token history is bounded in memory, so callers should retain the
+most recent token they intend to use. A new server process or isolated coding-
+agent session starts a new measurement scope and cannot resolve tokens from a
+previous process. Non-additive `max_duration_ms` remains the process-lifetime
+maximum in delta tool records; additive counters, durations, events, bytes,
+and interface coverage are window-scoped.
+Calls that are still in flight at a task-window boundary are attributed
+wholly to the following window. Therefore the `get_usage_metrics()` request
+that produces a delta is excluded from that returned delta and appears in the
+next one. This keeps tool counters, response bytes, and coverage coherent
+without changing cumulative diagnostic snapshots.
 
 Record the following before changing configuration:
 

@@ -477,7 +477,7 @@ The agent has access to the following tools:
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
-| `get_usage_metrics()` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and process-lifetime measurement timestamps. |
+| `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and process- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
@@ -730,7 +730,14 @@ cover input, retained, and original capture bytes; tool/search/retrieval
 response bytes; and framed socket request/response bytes. They are disabled by
 default, are never sent anywhere, and do
 not retain captured content, labels, commands, or query text. When enabled,
-`get_usage_metrics()` returns the versioned JSON form directly; both
+`get_usage_metrics()` returns the versioned JSON form directly. Each enabled
+response includes a `snapshot_token`; pass that token as `since` on a later
+call to obtain a non-resetting task-window delta. A valid window reports
+`window.status` as `ok`, including when all activity counters are zero. An
+invalid, expired, or pre-restart token reports `window.status` as
+`unavailable` instead of being interpreted as zero activity. Tokens are local
+to the current server process and the bounded in-memory token history; a new
+isolated coding-agent session always starts a new measurement scope. Both
 `get_runtime_diagnostics()` and `get_buffer_stats()` continue to include the
 same aggregate metrics snapshot for compatibility. Coverage uses the live MCP
 registration inventory, so its available-tool count tracks the exposed API.

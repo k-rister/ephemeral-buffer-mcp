@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from engine import EphemeralEngine
-from metrics import LocalMetrics, metrics_enabled
+from metrics import MAX_SNAPSHOT_TOKENS, LocalMetrics, metrics_enabled
 
 
 TEST_TOOL_NAMES = ("capture_file", "start_execution", "get_runtime_diagnostics")
@@ -273,6 +273,106 @@ class TestMetrics(unittest.TestCase):
                 "socket_response_bytes": 0,
             },
         )
+
+    def test_snapshot_tokens_provide_independent_deltas_and_zero_windows(self):
+        metrics = LocalMetrics(enabled=True)
+        baseline = metrics.snapshot(
+            available_tools=TEST_TOOL_NAMES,
+            tool_categories=TEST_TOOL_CATEGORIES,
+            include_snapshot_token=True,
+        )
+
+        with metrics.measure("capture_file") as state:
+            state["result_count"] = 2
+        metrics.record_event("captures")
+        metrics.record_bytes("capture_input_bytes", 12)
+
+        delta = metrics.snapshot(
+            available_tools=TEST_TOOL_NAMES,
+            tool_categories=TEST_TOOL_CATEGORIES,
+            since_snapshot=baseline["snapshot_token"],
+            include_snapshot_token=True,
+        )
+        self.assertEqual(delta["window"]["status"], "ok")
+        self.assertEqual(delta["window"]["kind"], "delta")
+        self.assertEqual(delta["window"]["started_at"], baseline["snapshot_at"])
+        self.assertEqual(delta["tools"]["capture_file"]["calls"], 1)
+        self.assertEqual(delta["tools"]["capture_file"]["result_count"], 2)
+        self.assertEqual(delta["events"]["captures"], 1)
+        self.assertEqual(delta["bytes"]["capture_input_bytes"], 12)
+        self.assertEqual(delta["interface_coverage"]["used"], 1)
+        self.assertEqual(
+            delta["interface_coverage"]["unused_tools"],
+            ["start_execution", "get_runtime_diagnostics"],
+        )
+
+        empty = metrics.snapshot(
+            available_tools=TEST_TOOL_NAMES,
+            tool_categories=TEST_TOOL_CATEGORIES,
+            since_snapshot=delta["snapshot_token"],
+        )
+        self.assertEqual(empty["window"]["status"], "ok")
+        self.assertEqual(empty["window"]["kind"], "delta")
+        self.assertEqual(empty["tools"], {})
+        self.assertEqual(empty["interface_coverage"]["used"], 0)
+        self.assertEqual(empty["interface_coverage"]["percentage"], 0.0)
+        self.assertEqual(empty["events"]["captures"], 0)
+        self.assertEqual(empty["bytes"]["capture_input_bytes"], 0)
+        self.assertNotEqual(empty["snapshot_token"], delta["snapshot_token"])
+        self.assertEqual(metrics.snapshot()["events"]["captures"], 1)
+
+    def test_unavailable_snapshot_tokens_are_distinct_from_zero_activity(self):
+        metrics = LocalMetrics(enabled=True)
+        unavailable = metrics.snapshot(
+            available_tools=TEST_TOOL_NAMES,
+            tool_categories=TEST_TOOL_CATEGORIES,
+            since_snapshot="not-a-current-process-token",
+        )
+        self.assertEqual(unavailable["window"]["status"], "unavailable")
+        self.assertEqual(unavailable["window"]["reason"], "snapshot_token_unavailable")
+        self.assertNotIn("tools", unavailable)
+        self.assertIn("snapshot_token", unavailable)
+
+    def test_snapshot_token_history_is_bounded(self):
+        metrics = LocalMetrics(enabled=True)
+        tokens = [
+            metrics.snapshot(include_snapshot_token=True)["snapshot_token"]
+            for _ in range(MAX_SNAPSHOT_TOKENS + 1)
+        ]
+
+        unavailable = metrics.snapshot(since_snapshot=tokens[0])
+        self.assertEqual(unavailable["window"]["status"], "unavailable")
+
+    def test_snapshot_tokens_attribute_in_flight_calls_to_following_window(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.measure("sample") as state:
+            state["result_count"] = 4
+            metrics.record_result_count("sample", 3)
+            metrics.record_capture("capture-1")
+            metrics.record_search("capture-1", 0)
+            metrics.record_retrieval("capture-1")
+            metrics.record_event("cleanups")
+            metrics.record_bytes("capture_input_bytes", 9)
+            baseline = metrics.snapshot(include_snapshot_token=True)
+            delta = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+
+            self.assertEqual(delta["tools"], {})
+            self.assertEqual(delta["interface_coverage"]["used"], 0)
+            self.assertEqual(delta["events"]["captures"], 0)
+            self.assertEqual(delta["bytes"]["capture_input_bytes"], 0)
+
+        following = metrics.snapshot(since_snapshot=delta["snapshot_token"])
+        self.assertEqual(following["tools"]["sample"]["calls"], 1)
+        self.assertEqual(following["tools"]["sample"]["successes"], 1)
+        self.assertEqual(following["tools"]["sample"]["result_count"], 7)
+        self.assertEqual(following["events"]["captures"], 1)
+        self.assertEqual(following["events"]["searches"], 1)
+        self.assertEqual(following["events"]["empty_searches"], 1)
+        self.assertEqual(following["events"]["capture_to_search"], 1)
+        self.assertEqual(following["events"]["retrievals"], 1)
+        self.assertEqual(following["events"]["search_to_retrieval"], 1)
+        self.assertEqual(following["events"]["cleanups"], 1)
+        self.assertEqual(following["bytes"]["capture_input_bytes"], 9)
 
     def test_search_correlation_state_only_tracks_active_captures(self):
         metrics = LocalMetrics(enabled=True)

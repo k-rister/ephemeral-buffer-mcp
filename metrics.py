@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import secrets
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -33,6 +35,8 @@ BYTE_COUNTER_NAMES = (
     "socket_response_bytes",
 )
 
+MAX_SNAPSHOT_TOKENS = 128
+
 def metrics_enabled() -> bool:
     """Return whether local metrics were explicitly enabled."""
     return os.environ.get("EPHEMERAL_METRICS", "").strip().lower() in {
@@ -52,6 +56,11 @@ class LocalMetrics:
         self._bytes: dict[str, int] = defaultdict(int)
         self._captured: set[str] = set()
         self._searched: set[str] = set()
+        self._active_measurement: ContextVar[dict[str, Any] | None] = ContextVar(
+            "active_measurement", default=None
+        )
+        self._in_flight_measurements: dict[int, dict[str, Any]] = {}
+        self._snapshot_tokens: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     @staticmethod
     def _new_tool() -> dict[str, Any]:
@@ -73,9 +82,18 @@ class LocalMetrics:
         """
         state = {"success": True, "result_count": None}
         started = time.perf_counter()
+        measurement = {
+            "tool": tool,
+            "events": defaultdict(int),
+            "bytes": defaultdict(int),
+            "result_count": 0,
+        }
+        measurement_token = None
         if self.enabled:
+            measurement_token = self._active_measurement.set(measurement)
             with self._lock:
                 self._tools[tool]["calls"] += 1
+                self._in_flight_measurements[id(measurement)] = measurement
         try:
             yield state
         except Exception:
@@ -91,11 +109,16 @@ class LocalMetrics:
                     stats["max_duration_ms"] = max(stats["max_duration_ms"], duration_ms)
                     if state["result_count"] is not None:
                         stats["result_count"] += int(state["result_count"])
+                    self._in_flight_measurements.pop(id(measurement), None)
+                self._active_measurement.reset(measurement_token)
 
     def record_event(self, event: str) -> None:
         if self.enabled:
             with self._lock:
                 self._events[event] += 1
+                measurement = self._active_measurement.get()
+                if measurement is not None:
+                    measurement["events"][event] += 1
 
     def record_bytes(self, counter: str, amount: int) -> None:
         """Record a non-content byte count for the current server session."""
@@ -103,18 +126,29 @@ class LocalMetrics:
             if counter not in BYTE_COUNTER_NAMES:
                 raise ValueError(f"unknown byte counter: {counter}")
             with self._lock:
-                self._bytes[counter] += max(0, int(amount))
+                amount = max(0, int(amount))
+                self._bytes[counter] += amount
+                measurement = self._active_measurement.get()
+                if measurement is not None:
+                    measurement["bytes"][counter] += amount
 
     def record_result_count(self, tool: str, count: int) -> None:
         if self.enabled:
             with self._lock:
-                self._tools[tool]["result_count"] += max(0, int(count))
+                count = max(0, int(count))
+                self._tools[tool]["result_count"] += count
+                measurement = self._active_measurement.get()
+                if measurement is not None and measurement["tool"] == tool:
+                    measurement["result_count"] += count
 
     def record_capture(self, capture_id: str) -> None:
         if self.enabled:
             with self._lock:
                 self._captured.add(capture_id)
                 self._events["captures"] += 1
+                measurement = self._active_measurement.get()
+                if measurement is not None:
+                    measurement["events"]["captures"] += 1
 
     def record_search(self, capture_id: str, match_count: int) -> None:
         if self.enabled:
@@ -122,15 +156,28 @@ class LocalMetrics:
                 if capture_id in self._captured:
                     self._events["capture_to_search"] += 1
                     self._searched.add(capture_id)
+                    measurement = self._active_measurement.get()
+                    if measurement is not None:
+                        measurement["events"]["capture_to_search"] += 1
                 self._events["searches"] += 1
                 self._events["empty_searches"] += int(match_count == 0)
+                measurement = self._active_measurement.get()
+                if measurement is not None:
+                    measurement["events"]["searches"] += 1
+                    measurement["events"]["empty_searches"] += int(match_count == 0)
 
     def record_retrieval(self, capture_id: str) -> None:
         if self.enabled:
             with self._lock:
                 if capture_id in self._searched:
                     self._events["search_to_retrieval"] += 1
+                    measurement = self._active_measurement.get()
+                    if measurement is not None:
+                        measurement["events"]["search_to_retrieval"] += 1
                 self._events["retrievals"] += 1
+                measurement = self._active_measurement.get()
+                if measurement is not None:
+                    measurement["events"]["retrievals"] += 1
 
     def forget_capture(self, capture_id: str) -> None:
         if self.enabled:
@@ -138,10 +185,101 @@ class LocalMetrics:
                 self._captured.discard(capture_id)
                 self._searched.discard(capture_id)
 
+    @staticmethod
+    def _format_timestamp(timestamp: float) -> str:
+        return datetime.fromtimestamp(
+            timestamp, tz=timezone.utc
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    def _current_state(
+        self,
+        snapshot_at: float,
+        *,
+        exclude_in_flight: bool = False,
+    ) -> dict[str, Any]:
+        """Copy additive counters and tool state for a snapshot boundary."""
+        tools = {}
+        for name, stats in self._tools.items():
+            copied_stats = dict(stats)
+            tools[name] = copied_stats
+        events = {
+            name: self._events[name]
+            for name in EVENT_NAMES
+        }
+        bytes_snapshot = {
+            name: self._bytes[name]
+            for name in BYTE_COUNTER_NAMES
+        }
+        if exclude_in_flight:
+            for measurement in self._in_flight_measurements.values():
+                tool_stats = tools.get(measurement["tool"])
+                if tool_stats is not None:
+                    tool_stats["calls"] = max(0, tool_stats["calls"] - 1)
+                    tool_stats["result_count"] = max(
+                        0,
+                        tool_stats["result_count"] - measurement["result_count"],
+                    )
+                for name, amount in measurement["events"].items():
+                    if name in events:
+                        events[name] = max(0, events[name] - amount)
+                for name, amount in measurement["bytes"].items():
+                    if name in bytes_snapshot:
+                        bytes_snapshot[name] = max(0, bytes_snapshot[name] - amount)
+        return {
+            "snapshot_at": snapshot_at,
+            "tools": tools,
+            "events": events,
+            "bytes": bytes_snapshot,
+        }
+
+    def _store_snapshot_token(self, state: dict[str, Any]) -> str:
+        token = secrets.token_urlsafe(18)
+        self._snapshot_tokens[token] = state
+        self._snapshot_tokens.move_to_end(token)
+        while len(self._snapshot_tokens) > MAX_SNAPSHOT_TOKENS:
+            self._snapshot_tokens.popitem(last=False)
+        return token
+
+    @staticmethod
+    def _delta_value(current: Any, baseline: Any) -> Any:
+        return max(0, current - baseline)
+
+    def _delta_tools(
+        self,
+        current_tools: Mapping[str, Mapping[str, Any]],
+        baseline_tools: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Return tools with activity since the requested baseline.
+
+        ``max_duration_ms`` is a non-additive process gauge, so delta windows
+        retain the current process maximum while additive fields are reduced.
+        """
+        delta_tools: dict[str, dict[str, Any]] = {}
+        additive_fields = (
+            "calls",
+            "successes",
+            "failures",
+            "total_duration_ms",
+            "result_count",
+        )
+        for name in sorted(set(current_tools) | set(baseline_tools)):
+            current = current_tools.get(name, self._new_tool())
+            baseline = baseline_tools.get(name, self._new_tool())
+            stats = {
+                field: self._delta_value(current[field], baseline[field])
+                for field in additive_fields
+            }
+            stats["max_duration_ms"] = current["max_duration_ms"]
+            if any(stats[field] for field in additive_fields):
+                delta_tools[name] = stats
+        return delta_tools
+
     def snapshot(
         self,
         available_tools: Iterable[str] = (),
         tool_categories: Mapping[str, str] | None = None,
+        since_snapshot: str | None = None,
+        include_snapshot_token: bool = False,
     ) -> dict[str, Any]:
         """Return aggregate metrics suitable for a content-free diagnostic.
 
@@ -149,15 +287,78 @@ class LocalMetrics:
         metrics are used by an MCP server. Standalone metric users can omit it
         when interface coverage is not applicable. When supplied,
         ``tool_categories`` maps each available tool to its primary capability
-        category for descriptive per-category coverage.
+        category for descriptive per-category coverage. ``since_snapshot``
+        requests a process-local delta from a token previously returned by a
+        token-enabled snapshot. Delta baselines are independent and do not
+        reset cumulative metrics. Calls still in flight at the boundary are
+        excluded from delta state and attributed to the following window.
         """
         if not self.enabled:
             return {"enabled": False}
         with self._lock:
             snapshot_at = time.time()
+            current_state = self._current_state(
+                snapshot_at,
+                exclude_in_flight=since_snapshot is not None,
+            )
+            baseline = (
+                self._snapshot_tokens.get(since_snapshot)
+                if since_snapshot is not None
+                else None
+            )
+            return_token = include_snapshot_token or since_snapshot is not None
+            snapshot_token = (
+                self._store_snapshot_token(
+                    self._current_state(snapshot_at, exclude_in_flight=True)
+                )
+                if return_token
+                else None
+            )
+            if since_snapshot is not None and baseline is None:
+                response = {
+                    "enabled": True,
+                    "scope": "process",
+                    "started_at": self._format_timestamp(self._started_at),
+                    "snapshot_at": self._format_timestamp(snapshot_at),
+                    "window": {
+                        "status": "unavailable",
+                        "kind": "delta",
+                        "started_at": None,
+                        "ended_at": self._format_timestamp(snapshot_at),
+                        "reason": "snapshot_token_unavailable",
+                    },
+                }
+                if snapshot_token is not None:
+                    response["snapshot_token"] = snapshot_token
+                return response
+
+            state = (
+                current_state
+                if baseline is None
+                else {
+                    "tools": self._delta_tools(
+                        current_state["tools"], baseline["tools"]
+                    ),
+                    "events": {
+                        name: self._delta_value(
+                            current_state["events"].get(name, 0),
+                            baseline["events"].get(name, 0),
+                        )
+                        for name in EVENT_NAMES
+                    },
+                    "bytes": {
+                        name: self._delta_value(
+                            current_state["bytes"].get(name, 0),
+                            baseline["bytes"].get(name, 0),
+                        )
+                        for name in BYTE_COUNTER_NAMES
+                    },
+                }
+            )
             available_tool_names = tuple(dict.fromkeys(available_tools))
-            used_tools = [name for name in available_tool_names if name in self._tools]
-            unused_tools = [name for name in available_tool_names if name not in self._tools]
+            used_tool_names = set(state["tools"])
+            used_tools = [name for name in available_tool_names if name in used_tool_names]
+            unused_tools = [name for name in available_tool_names if name not in used_tool_names]
             available_tool_count = len(available_tool_names)
             category_coverage: dict[str, dict[str, Any]] = {}
             if tool_categories is not None:
@@ -167,8 +368,8 @@ class LocalMetrics:
                     tools_by_category[category].append(name)
                 for category in sorted(tools_by_category):
                     category_tools = tools_by_category[category]
-                    category_used = [name for name in category_tools if name in self._tools]
-                    category_unused = [name for name in category_tools if name not in self._tools]
+                    category_used = [name for name in category_tools if name in used_tool_names]
+                    category_unused = [name for name in category_tools if name not in used_tool_names]
                     category_available = len(category_tools)
                     category_coverage[category] = {
                         "used": len(category_used),
@@ -178,15 +379,19 @@ class LocalMetrics:
                         ) if category_available else 0.0,
                         "unused_tools": category_unused,
                     }
-            return {
+            response = {
                 "enabled": True,
                 "scope": "process",
-                "started_at": datetime.fromtimestamp(
-                    self._started_at, tz=timezone.utc
-                ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-                "snapshot_at": datetime.fromtimestamp(
-                    snapshot_at, tz=timezone.utc
-                ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "started_at": self._format_timestamp(self._started_at),
+                "snapshot_at": self._format_timestamp(snapshot_at),
+                "window": {
+                    "status": "ok",
+                    "kind": "delta" if baseline is not None else "process",
+                    "started_at": self._format_timestamp(
+                        baseline["snapshot_at"] if baseline is not None else self._started_at
+                    ),
+                    "ended_at": self._format_timestamp(snapshot_at),
+                },
                 "interface_coverage": {
                     "used": len(used_tools),
                     "available": available_tool_count,
@@ -202,8 +407,11 @@ class LocalMetrics:
                         "total_duration_ms": round(stats["total_duration_ms"], 3),
                         "max_duration_ms": round(stats["max_duration_ms"], 3),
                     }
-                    for name, stats in self._tools.items()
+                    for name, stats in state["tools"].items()
                 },
-                "events": {name: self._events[name] for name in EVENT_NAMES},
-                "bytes": {name: self._bytes[name] for name in BYTE_COUNTER_NAMES},
+                "events": state["events"],
+                "bytes": state["bytes"],
             }
+            if snapshot_token is not None:
+                response["snapshot_token"] = snapshot_token
+            return response
