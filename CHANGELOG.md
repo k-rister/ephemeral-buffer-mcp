@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add content-free `interface_coverage` metrics to report the number and
+  percentage of exposed MCP tools used during the server process lifetime and
+  the complete unused-tool list.
 - Session-aware coding-agent launchers now default `EPHEMERAL_METRICS=1` for
   their private server sessions, while preserving `EPHEMERAL_METRICS=0` as an
   explicit opt-out. Direct and shared server launches remain opt-in.
