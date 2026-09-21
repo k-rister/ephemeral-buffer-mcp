@@ -400,6 +400,20 @@ that produces a delta is excluded from that returned delta and appears in the
 next one. This keeps tool counters, response bytes, and coverage coherent
 without changing cumulative diagnostic snapshots.
 
+The `workflow_effectiveness` fields are derived from the same raw counters
+and preserve those raw counters in the response. `capture_to_search_rate` is
+`capture_to_search / searches`, `search_to_retrieval_rate` is
+`search_to_retrieval / retrievals`, `empty_search_rate` is
+`empty_searches / searches`, and `successful_call_rate` is
+`successes / (successes + failures)`. `response_bytes_per_captured_byte`,
+`search_response_reduction`, and `retrieval_response_reduction` use
+`capture_input_bytes` as their denominator or baseline; the reduction metrics
+also require at least one corresponding search or retrieval operation. A zero
+denominator or absent operation produces `status: "unavailable"` and a null
+value. Repeated searches or
+retrievals are operation counts rather than unique transitions, so these are
+descriptive operational signals, not task success or answer-quality scores.
+
 Record the following before changing configuration:
 
 - ephbuf version or commit, Python version, operating system, and installation

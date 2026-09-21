@@ -571,6 +571,7 @@ class TestServerTools(unittest.TestCase):
             payload["interface_coverage"]["by_category"]["diagnostics"]["used"],
             1,
         )
+        self.assertIn("workflow_effectiveness", payload)
         self.assertEqual(payload["tools"]["get_usage_metrics"]["calls"], 1)
         self.assertIn("snapshot_token", payload)
 
