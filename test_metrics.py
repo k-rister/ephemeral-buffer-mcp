@@ -29,6 +29,50 @@ class TestMetrics(unittest.TestCase):
         metrics.record_event("secret-event")
         self.assertEqual(metrics.snapshot(), {"enabled": False})
 
+    def test_scoped_compatibility_views_and_measurement_handle(self):
+        disabled = LocalMetrics(enabled=False)
+        with disabled.bind_scope("disabled-client"):
+            pass
+        self.assertIsNone(disabled.measurement_handle())
+
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope("process"):
+            pass
+        self.assertEqual(metrics._started_at, metrics._scopes["process"]["started_at"])
+        self.assertIs(metrics._tools, metrics._scopes["process"]["tools"])
+        self.assertIs(metrics._events, metrics._scopes["process"]["events"])
+        self.assertIs(metrics._bytes, metrics._scopes["process"]["bytes"])
+        self.assertIs(
+            metrics._semantic_index,
+            metrics._scopes["process"]["semantic_index"],
+        )
+        self.assertIs(metrics._captured, metrics._scopes["process"]["captured"])
+        self.assertIs(metrics._searched, metrics._scopes["process"]["searched"])
+        self.assertIs(
+            metrics._in_flight_measurements,
+            metrics._scopes["process"]["in_flight_measurements"],
+        )
+        with metrics.measure("compatibility_probe"):
+            self.assertIsNotNone(metrics.measurement_handle())
+        self.assertIsNone(metrics.measurement_handle())
+
+    def test_measurement_scope_lookup_failure_releases_pin(self):
+        metrics = LocalMetrics(enabled=True)
+        original_scopes = metrics._scopes.copy()
+        broken_state = metrics._new_runtime_state(
+            "broken", {"kind": "mcp_session", "mode": "private", "id": "broken"}
+        )
+        broken_state["pins"] = 1
+        metrics._scopes.clear()
+        try:
+            with patch.object(metrics, "_scope_state", return_value=broken_state):
+                with self.assertRaises(KeyError):
+                    with metrics.measure("broken"):
+                        pass
+        finally:
+            metrics._scopes.update(original_scopes)
+        self.assertEqual(broken_state["pins"], 0)
+
     def test_tool_measurement_tracks_success_failure_and_duration(self):
         metrics = LocalMetrics(enabled=True)
         with metrics.measure("sample"):

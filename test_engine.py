@@ -2128,6 +2128,14 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         )
         self.assertEqual(engine.clear(capture.capture_id), f"Capture '{capture.capture_id}' not found.")
 
+    def test_empty_capture_reader_returns_none(self):
+        engine = EphemeralEngine(max_captures=1, embedding_model_name="test")
+        try:
+            self.assertIsNone(engine._acquire_capture_reader("latest"))
+            self.assertIsNone(engine.get_capture())
+        finally:
+            engine.shutdown()
+
     def test_embedding_load_success_and_failure_diagnostics(self):
         class FakeEmbedding:
             pass
