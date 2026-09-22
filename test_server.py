@@ -123,6 +123,30 @@ class TestServerTools(unittest.TestCase):
             self.assertEqual(failed["error_type"], "RuntimeError")
             self.assertNotIn("private failure", str(log.call_args_list))
 
+    def test_failure_classifiers_cover_content_free_categories(self):
+        self.assertEqual(server._classify_failure_text("deadline exceeded"), "timeout")
+        self.assertEqual(server._classify_failure_text("socket reset"), "socket")
+        self.assertEqual(server._classify_failure_text("embedding unavailable"), "embedding")
+        self.assertEqual(server._classify_failure_text("capture evicted"), "eviction")
+        self.assertEqual(server._classify_failure_text("invalid request"), "validation")
+        self.assertEqual(server._classify_failure_text("unexpected detail"), "other")
+
+        class EvictedError(RuntimeError):
+            pass
+
+        self.assertEqual(
+            server._classify_tool_exception("probe", EvictedError(), {}),
+            "eviction",
+        )
+        self.assertEqual(
+            server._classify_tool_exception("probe", ConnectionError(), {}),
+            "socket",
+        )
+        self.assertEqual(
+            server._classify_tool_exception("probe", ValueError(), {}),
+            "validation",
+        )
+
     def test_tool_instrumentation_records_content_free_failure_categories(self):
         original_metrics = server.METRICS
         metrics = LocalMetrics(enabled=True)
