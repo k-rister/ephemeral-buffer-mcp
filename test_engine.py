@@ -1338,6 +1338,16 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         finally:
             engine.shutdown()
 
+    def test_semantic_metrics_snapshot_flush_without_callback_is_safe(self):
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        try:
+            with engine._lock:
+                engine._metrics_snapshot_pending = True
+            engine._flush_metrics_snapshot()
+            self.assertFalse(engine._metrics_snapshot_pending)
+        finally:
+            engine.shutdown()
+
     def test_semantic_index_metrics_count_pending_and_fallback_searches(self):
         from metrics import LocalMetrics
 
