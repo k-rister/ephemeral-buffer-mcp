@@ -2,24 +2,30 @@
 
 ## Unreleased
 
+- Add privacy-safe MCP transport-session attribution to usage metrics. MCP
+  snapshots now report an opaque session scope and isolate coverage, funnel,
+  byte, and per-tool counters between clients sharing one process, while
+  persisted snapshots retain the aggregate process view. Per-session state is
+  bounded and evicted capture IDs are removed from every scope.
 - Add bounded per-tool latency distributions and content-free failure
   categories for validation, timeout, socket, embedding, eviction, and other
   operational failures, including coherent task-window deltas.
 - Add content-free derived workflow-effectiveness signals with documented
   denominators, zero-denominator handling, response-byte ratios, and
   search/retrieval reduction metrics.
-- Add process-local snapshot tokens and non-resetting task-window deltas to
+- Add scope-local snapshot tokens and non-resetting task-window deltas to
   `get_usage_metrics()`, distinguishing valid zero-activity windows from
-  unavailable tokens across bounded history and server restarts.
+  unavailable tokens across bounded history, MCP sessions, and server
+  restarts.
 - Add descriptive interface coverage by primary capability category, while
   retaining the complete tool-level coverage and unused-tool list.
 - Derive interface coverage from the live MCP registration inventory so the
   available and unused tool lists cannot silently drift from the exposed API.
 - Add `get_usage_metrics()`, a versioned JSON MCP interface for content-free
-  usage metrics, including process-lifetime measurement timestamps.
+  usage metrics, including scope-lifetime measurement timestamps.
 - Add content-free `interface_coverage` metrics to report the number and
-  percentage of exposed MCP tools used during the server process lifetime and
-  the complete unused-tool list.
+  percentage of exposed MCP tools used during the active metrics scope and the
+  complete unused-tool list.
 - Session-aware coding-agent launchers now default `EPHEMERAL_METRICS=1` for
   their private server sessions, while preserving `EPHEMERAL_METRICS=0` as an
   explicit opt-out. Direct and shared server launches remain opt-in.

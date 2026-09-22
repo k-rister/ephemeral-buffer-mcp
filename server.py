@@ -22,6 +22,8 @@ import subprocess
 import time
 import tempfile
 import uuid
+import weakref
+from collections import OrderedDict
 from contextlib import contextmanager
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -117,8 +119,57 @@ _SOCKET_STARTUP_EVENT = threading.Event()
 _SOCKET_PATH_LOCKS = {}
 _SOCKET_PATH_LOCKS_GUARD = threading.Lock()
 _SOCKET_PATH_LOCK_DEPTH = threading.local()
+_MCP_SESSION_SCOPE_LOCK = threading.Lock()
+_MCP_SESSION_SCOPES: weakref.WeakKeyDictionary[Any, tuple[str, dict[str, str]]] = (
+    weakref.WeakKeyDictionary()
+)
+MAX_MCP_SESSION_SCOPE_FALLBACK = 128
+_MCP_SESSION_SCOPE_FALLBACK: OrderedDict[
+    int, tuple[Any, tuple[str, dict[str, str]]]
+] = OrderedDict()
 if _SOCKET_STATE == "disabled":
     _SOCKET_STARTUP_EVENT.set()
+
+
+@contextmanager
+def _bind_mcp_metrics_scope() -> Any:
+    """Bind metrics to the current MCP transport session without exposing it."""
+    try:
+        request_context = mcp.get_context().request_context
+        session = request_context.session
+    except (AttributeError, LookupError, ValueError):
+        yield
+        return
+
+    with _MCP_SESSION_SCOPE_LOCK:
+        try:
+            scope = _MCP_SESSION_SCOPES.get(session)
+            if scope is None:
+                scope_id = f"mcp_{uuid.uuid4().hex[:16]}"
+                attribution = {"kind": "mcp_session", "mode": "private", "id": scope_id}
+                scope = (scope_id, attribution)
+                _MCP_SESSION_SCOPES[session] = scope
+        except TypeError:
+            # Keep compatibility with transports whose session object is not
+            # weak-referenceable or hashable. Retain the actual session object
+            # so a reused id cannot inherit a prior client's scope; bound this
+            # fallback because such objects cannot provide a cleanup callback.
+            session_key = id(session)
+            entry = _MCP_SESSION_SCOPE_FALLBACK.get(session_key)
+            if entry is not None and entry[0] is session:
+                _MCP_SESSION_SCOPE_FALLBACK.move_to_end(session_key)
+                scope = entry[1]
+            else:
+                scope_id = f"mcp_{uuid.uuid4().hex[:16]}"
+                attribution = {"kind": "mcp_session", "mode": "private", "id": scope_id}
+                scope = (scope_id, attribution)
+                _MCP_SESSION_SCOPE_FALLBACK[session_key] = (session, scope)
+                _MCP_SESSION_SCOPE_FALLBACK.move_to_end(session_key)
+                while len(_MCP_SESSION_SCOPE_FALLBACK) > MAX_MCP_SESSION_SCOPE_FALLBACK:
+                    _MCP_SESSION_SCOPE_FALLBACK.popitem(last=False)
+
+    with METRICS.bind_scope(scope[0], attribution=scope[1]):
+        yield
 
 
 class _MetricsFuncMetadata(FuncMetadata):
@@ -139,25 +190,26 @@ class _MetricsFuncMetadata(FuncMetadata):
         arguments_to_validate,
         arguments_to_pass_directly,
     ):
-        try:
-            with METRICS.measure(self._metrics_tool_name) as state:
-                try:
-                    arguments_pre_parsed = self.pre_parse_json(arguments_to_validate)
-                    arguments_parsed_model = self.arg_model.model_validate(arguments_pre_parsed)
-                    arguments_parsed_dict = arguments_parsed_model.model_dump_one_level()
-                except ValidationError:
-                    state["success"] = False
-                    state["failure_category"] = "validation"
-                    raise
-                state["record"] = False
-        except ValidationError:
-            _write_metrics_snapshot()
-            raise
+        with _bind_mcp_metrics_scope():
+            try:
+                with METRICS.measure(self._metrics_tool_name) as state:
+                    try:
+                        arguments_pre_parsed = self.pre_parse_json(arguments_to_validate)
+                        arguments_parsed_model = self.arg_model.model_validate(arguments_pre_parsed)
+                        arguments_parsed_dict = arguments_parsed_model.model_dump_one_level()
+                    except ValidationError:
+                        state["success"] = False
+                        state["failure_category"] = "validation"
+                        raise
+                    state["record"] = False
+            except ValidationError:
+                _write_metrics_snapshot()
+                raise
 
-        arguments_parsed_dict |= arguments_to_pass_directly or {}
-        if fn_is_async:
-            return await fn(**arguments_parsed_dict)
-        return fn(**arguments_parsed_dict)
+            arguments_parsed_dict |= arguments_to_pass_directly or {}
+            if fn_is_async:
+                return await fn(**arguments_parsed_dict)
+            return fn(**arguments_parsed_dict)
 
 
 def _classify_failure_text(text: str) -> str:
@@ -469,7 +521,8 @@ def _mcp_tool(name, category):
     def decorator(function):
         @wraps(function)
         async def adapter(*args, **kwargs):
-            return await to_thread(function, *args, **kwargs)
+            with _bind_mcp_metrics_scope():
+                return await to_thread(function, *args, **kwargs)
 
         mcp.add_tool(adapter, name=name)
         registered_tool = mcp._tool_manager._tools.get(name)
@@ -688,6 +741,7 @@ def _metrics_snapshot(
     *,
     since_snapshot: Optional[str] = None,
     include_snapshot_token: bool = False,
+    scope_key: str | None = None,
 ) -> Dict[str, Any]:
     """Return metrics using the live EB MCP registration inventory."""
     return METRICS.snapshot(
@@ -695,6 +749,7 @@ def _metrics_snapshot(
         tool_categories=_REGISTERED_MCP_TOOL_CATEGORIES,
         since_snapshot=since_snapshot,
         include_snapshot_token=include_snapshot_token,
+        scope_key=scope_key,
     )
 
 
@@ -717,7 +772,7 @@ def _write_metrics_snapshot() -> None:
                 delete=False,
             ) as temporary:
                 temporary_path = Path(temporary.name)
-                temporary.write(json.dumps(_metrics_snapshot(), sort_keys=True))
+                temporary.write(json.dumps(_metrics_snapshot(scope_key="process"), sort_keys=True))
                 temporary.flush()
                 os.fsync(temporary.fileno())
             os.replace(temporary_path, destination)

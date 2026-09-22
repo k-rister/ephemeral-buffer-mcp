@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from engine import EphemeralEngine
-from metrics import MAX_SNAPSHOT_TOKENS, LocalMetrics, metrics_enabled
+from metrics import MAX_SCOPE_STATES, MAX_SNAPSHOT_TOKENS, LocalMetrics, metrics_enabled
 
 
 TEST_TOOL_NAMES = ("capture_file", "start_execution", "get_runtime_diagnostics")
@@ -602,6 +602,162 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(metrics.snapshot()["events"]["searches"], 1)
         self.assertEqual(metrics.snapshot()["events"]["capture_to_search"], 0)
         self.assertEqual(metrics._searched, set())
+
+    def test_client_scopes_isolate_usage_and_snapshot_tokens(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope(
+            "client-a",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-a"},
+        ):
+            with metrics.measure("capture_text"):
+                pass
+            client_a = metrics.snapshot(
+                available_tools=("capture_text",),
+                include_snapshot_token=True,
+            )
+
+        with metrics.bind_scope(
+            "client-b",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-b"},
+        ):
+            client_b = metrics.snapshot(
+                available_tools=("capture_text",),
+                since_snapshot=client_a["snapshot_token"],
+                include_snapshot_token=True,
+            )
+
+        self.assertEqual(client_a["scope"], "mcp_session")
+        self.assertEqual(client_a["interface_coverage"]["used"], 1)
+        self.assertEqual(client_b["window"]["status"], "unavailable")
+        self.assertNotEqual(client_a["attribution"]["id"], client_b["attribution"]["id"])
+        self.assertEqual(
+            metrics.snapshot(scope_key="process")["tools"]["capture_text"]["calls"],
+            1,
+        )
+
+    def test_client_scope_cache_is_bounded(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope(
+            "client-0",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-0"},
+        ):
+            baseline = metrics.snapshot(include_snapshot_token=True)
+
+        for index in range(MAX_SCOPE_STATES + 8):
+            with metrics.bind_scope(
+                f"client-{index}",
+                attribution={
+                    "kind": "mcp_session",
+                    "mode": "private",
+                    "id": f"opaque-{index}",
+                },
+            ):
+                with metrics.measure("capture_text"):
+                    pass
+
+        self.assertLessEqual(len(metrics._scopes), MAX_SCOPE_STATES)
+        self.assertIn("process", metrics._scopes)
+        with metrics.bind_scope("client-0"):
+            unavailable = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+        self.assertEqual(unavailable["window"]["status"], "unavailable")
+
+    def test_forget_capture_clears_correlation_state_in_every_scope(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope(
+            "client-a",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-a"},
+        ):
+            metrics.record_capture("capture-1")
+            metrics.record_search("capture-1", 1)
+
+        with metrics.bind_scope(
+            "client-b",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-b"},
+        ):
+            metrics.forget_capture("capture-1")
+
+        with metrics.bind_scope("client-a"):
+            before = metrics.snapshot()
+            metrics.record_search("capture-1", 1)
+            snapshot = metrics.snapshot()
+
+        self.assertEqual(
+            snapshot["events"]["capture_to_search"],
+            before["events"]["capture_to_search"],
+        )
+        self.assertEqual(metrics._scopes["client-a"]["captured"], set())
+        self.assertEqual(metrics._scopes["client-a"]["searched"], set())
+
+    def test_active_measurement_scope_is_pinned_during_cache_pressure(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope(
+            "active-client",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "active"},
+        ):
+            with metrics.measure("capture_text"):
+                for index in range(MAX_SCOPE_STATES + 8):
+                    with metrics.bind_scope(f"new-client-{index}"):
+                        pass
+                snapshot = metrics.snapshot(available_tools=("capture_text",))
+
+        self.assertEqual(snapshot["scope"], "mcp_session")
+        self.assertEqual(snapshot["tools"]["capture_text"]["calls"], 1)
+
+    def test_scope_cache_falls_back_to_process_when_all_states_are_active(self):
+        metrics = LocalMetrics(enabled=True)
+        pinned_states = [
+            metrics._scope_state(f"pinned-{index}", pin=True)
+            for index in range(MAX_SCOPE_STATES - 1)
+        ]
+        try:
+            overflow_state = metrics._scope_state("overflow", pin=True)
+
+            self.assertIs(overflow_state, metrics._scopes["process"])
+            self.assertLessEqual(len(metrics._scopes), MAX_SCOPE_STATES)
+        finally:
+            with metrics._lock:
+                for state in pinned_states:
+                    state["pins"] = max(0, state["pins"] - 1)
+                metrics._scopes["process"]["pins"] = max(
+                    0, metrics._scopes["process"]["pins"] - 1
+                )
+
+    def test_cross_scope_funnel_events_stay_in_the_following_process_window(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope("client-a"):
+            metrics.record_capture("capture-1")
+
+        baseline = metrics.snapshot(scope_key="process", include_snapshot_token=True)
+        with metrics.bind_scope("client-b"):
+            with metrics.measure("search_capture"):
+                metrics.record_search("capture-1", 1)
+                search_delta = metrics.snapshot(
+                    scope_key="process",
+                    since_snapshot=baseline["snapshot_token"],
+                )
+
+        self.assertEqual(search_delta["events"]["capture_to_search"], 0)
+        search_following = metrics.snapshot(
+            scope_key="process",
+            since_snapshot=search_delta["snapshot_token"],
+        )
+        self.assertEqual(search_following["events"]["capture_to_search"], 1)
+
+        baseline = metrics.snapshot(scope_key="process", include_snapshot_token=True)
+        with metrics.bind_scope("client-b"):
+            with metrics.measure("get_capture_slice"):
+                metrics.record_retrieval("capture-1")
+                retrieval_delta = metrics.snapshot(
+                    scope_key="process",
+                    since_snapshot=baseline["snapshot_token"],
+                )
+
+        self.assertEqual(retrieval_delta["events"]["search_to_retrieval"], 0)
+        retrieval_following = metrics.snapshot(
+            scope_key="process",
+            since_snapshot=retrieval_delta["snapshot_token"],
+        )
+        self.assertEqual(retrieval_following["events"]["search_to_retrieval"], 1)
 
 
 if __name__ == "__main__":

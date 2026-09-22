@@ -75,6 +75,7 @@ SEMANTIC_INDEX_OUTCOMES = (
 SEMANTIC_SEARCH_OUTCOMES = ("pending_hybrid_responses", "semantic_fallbacks")
 
 MAX_SNAPSHOT_TOKENS = 128
+MAX_SCOPE_STATES = 128
 
 def metrics_enabled() -> bool:
     """Return whether local metrics were explicitly enabled."""
@@ -88,19 +89,168 @@ class LocalMetrics:
 
     def __init__(self, enabled: bool | None = None):
         self.enabled = metrics_enabled() if enabled is None else enabled
-        self._started_at = time.time()
-        self._lock = threading.Lock()
-        self._tools: dict[str, dict[str, Any]] = defaultdict(self._new_tool)
-        self._events: dict[str, int] = defaultdict(int)
-        self._bytes: dict[str, int] = defaultdict(int)
-        self._semantic_index = self._new_semantic_state()
-        self._captured: set[str] = set()
-        self._searched: set[str] = set()
+        self._lock = threading.RLock()
+        self._scope_context: ContextVar[str] = ContextVar(
+            "metrics_scope", default="process"
+        )
+        self._scopes: OrderedDict[str, dict[str, Any]] = OrderedDict(
+            {
+                "process": self._new_runtime_state(
+                    "process",
+                    {
+                        "kind": "process",
+                        "mode": "aggregate",
+                        "id": f"proc_{secrets.token_urlsafe(12)}",
+                    },
+                )
+            }
+        )
         self._active_measurement: ContextVar[dict[str, Any] | None] = ContextVar(
             "active_measurement", default=None
         )
-        self._in_flight_measurements: dict[int, dict[str, Any]] = {}
         self._snapshot_tokens: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    @classmethod
+    def _new_runtime_state(
+        cls,
+        scope_key: str,
+        attribution: Mapping[str, str],
+    ) -> dict[str, Any]:
+        return {
+            "scope_key": scope_key,
+            "started_at": time.time(),
+            "attribution": dict(attribution),
+            "tools": defaultdict(cls._new_tool),
+            "events": defaultdict(int),
+            "bytes": defaultdict(int),
+            "semantic_index": cls._new_semantic_state(),
+            "captured": set(),
+            "searched": set(),
+            "in_flight_measurements": {},
+            "pins": 0,
+        }
+
+    def _scope_state(
+        self,
+        scope_key: str | None = None,
+        *,
+        attribution: Mapping[str, str] | None = None,
+        pin: bool = False,
+    ) -> dict[str, Any]:
+        key = scope_key or self._scope_context.get()
+        with self._lock:
+            state = self._scopes.get(key)
+            if state is not None:
+                self._scopes.move_to_end(key)
+                if pin:
+                    state["pins"] += 1
+            else:
+                while len(self._scopes) >= MAX_SCOPE_STATES:
+                    evictable_key = next(
+                        (
+                            candidate
+                            for candidate, candidate_state in self._scopes.items()
+                            if candidate != "process"
+                            and not candidate_state["pins"]
+                            and not candidate_state["in_flight_measurements"]
+                        ),
+                        None,
+                    )
+                    if evictable_key is None:
+                        # Active calls keep their state alive until their
+                        # measurements finalize. Attribute overflow activity
+                        # to the aggregate rather than exceeding the hard
+                        # cache bound while all client states are active.
+                        state = self._scopes["process"]
+                        if pin:
+                            state["pins"] += 1
+                        return state
+                    self._scopes.pop(evictable_key, None)
+                    self._discard_scope_tokens(evictable_key)
+                state = self._new_runtime_state(
+                    key,
+                    attribution
+                    or {
+                        "kind": "mcp_session",
+                        "mode": "private",
+                        "id": f"scope_{secrets.token_urlsafe(12)}",
+                    },
+                )
+                self._scopes[key] = state
+                if pin:
+                    state["pins"] += 1
+            return state
+
+    def _discard_scope_tokens(self, scope_key: str) -> None:
+        """Drop task-window baselines when their scope leaves the cache."""
+        for token, state in tuple(self._snapshot_tokens.items()):
+            if state.get("scope_key") == scope_key:
+                self._snapshot_tokens.pop(token, None)
+
+    def _current_scope_states(
+        self,
+        measurement: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return the aggregate state and the active client state."""
+        if measurement is not None:
+            states = measurement["states"]
+        else:
+            scoped = self._scope_state()
+            aggregate = self._scopes["process"]
+            states = (aggregate,) if scoped is aggregate else (aggregate, scoped)
+        return states
+
+    @contextmanager
+    def bind_scope(
+        self,
+        scope_key: str,
+        *,
+        attribution: Mapping[str, str] | None = None,
+    ) -> Iterator[None]:
+        """Bind subsequent metric writes and snapshots to one MCP session."""
+        if not self.enabled or scope_key == "process":
+            yield
+            return
+        self._scope_state(scope_key, attribution=attribution)
+        token = self._scope_context.set(scope_key)
+        try:
+            yield
+        finally:
+            self._scope_context.reset(token)
+
+    # These compatibility views keep the internal state inspection used by
+    # existing embedders/tests scoped to the current context.
+    @property
+    def _started_at(self) -> float:
+        return self._scope_state()["started_at"]
+
+    @property
+    def _tools(self) -> dict[str, dict[str, Any]]:
+        return self._scope_state()["tools"]
+
+    @property
+    def _events(self) -> dict[str, int]:
+        return self._scope_state()["events"]
+
+    @property
+    def _bytes(self) -> dict[str, int]:
+        return self._scope_state()["bytes"]
+
+    @property
+    def _semantic_index(self) -> dict[str, Any]:
+        return self._scope_state()["semantic_index"]
+
+    @property
+    def _captured(self) -> set[str]:
+        return self._scope_state()["captured"]
+
+    @property
+    def _searched(self) -> set[str]:
+        return self._scope_state()["searched"]
+
+    @property
+    def _in_flight_measurements(self) -> dict[int, dict[str, Any]]:
+        return self._scope_state()["in_flight_measurements"]
 
     @staticmethod
     def _new_tool() -> dict[str, Any]:
@@ -290,27 +440,47 @@ class LocalMetrics:
         Count the call at entry so snapshots generated by a diagnostic tool
         include that in-flight tool in interface coverage.
         """
+        scoped_state = self._scope_state(pin=self.enabled)
+        try:
+            aggregate_state = self._scopes["process"]
+            target_states = (
+                (aggregate_state,)
+                if scoped_state is aggregate_state
+                else (aggregate_state, scoped_state)
+            )
+        except Exception:
+            if self.enabled:
+                with self._lock:
+                    scoped_state["pins"] = max(0, scoped_state["pins"] - 1)
+            raise
         state = {
             "success": True,
             "result_count": None,
             "failure_category": None,
             "record": True,
-            "tool_existed": tool in self._tools,
+            "tool_existed": tool in scoped_state["tools"],
         }
         started = time.perf_counter()
         measurement = {
             "tool": tool,
-            "events": defaultdict(int),
+            "events_by_scope": {
+                target["scope_key"]: defaultdict(int)
+                for target in target_states
+            },
             "bytes": defaultdict(int),
             "semantic_index": self._new_semantic_state(),
             "result_count": 0,
+            "states": target_states,
+            "scope_state": scoped_state,
         }
         measurement_token = None
         if self.enabled:
             measurement_token = self._active_measurement.set(measurement)
             with self._lock:
-                self._tools[tool]["calls"] += 1
-                self._in_flight_measurements[id(measurement)] = measurement
+                for target in target_states:
+                    target["tools"][tool]["calls"] += 1
+                    target["in_flight_measurements"][id(measurement)] = measurement
+                scoped_state["pins"] = max(0, scoped_state["pins"] - 1)
         try:
             yield state
         except Exception:
@@ -320,39 +490,43 @@ class LocalMetrics:
             if self.enabled:
                 duration_ms = (time.perf_counter() - started) * 1000
                 with self._lock:
-                    stats = self._tools[tool]
-                    if state["record"]:
-                        if state["success"]:
-                            stats["successes"] += 1
+                    for target in target_states:
+                        stats = target["tools"][tool]
+                        if state["record"]:
+                            if state["success"]:
+                                stats["successes"] += 1
+                            else:
+                                stats["failures"] += 1
+                                category = state.get("failure_category")
+                                if category not in FAILURE_CATEGORIES:
+                                    category = "other"
+                                stats["failure_categories"][category] += 1
+                            stats["total_duration_ms"] += duration_ms
+                            stats["max_duration_ms"] = max(stats["max_duration_ms"], duration_ms)
+                            stats["latency_buckets"][self._latency_bucket_index(duration_ms)] += 1
+                            if state["result_count"] is not None:
+                                stats["result_count"] += int(state["result_count"])
                         else:
-                            stats["failures"] += 1
-                            category = state.get("failure_category")
-                            if category not in FAILURE_CATEGORIES:
-                                category = "other"
-                            stats["failure_categories"][category] += 1
-                        stats["total_duration_ms"] += duration_ms
-                        stats["max_duration_ms"] = max(stats["max_duration_ms"], duration_ms)
-                        stats["latency_buckets"][self._latency_bucket_index(duration_ms)] += 1
-                        if state["result_count"] is not None:
-                            stats["result_count"] += int(state["result_count"])
-                    else:
-                        stats["calls"] = max(0, stats["calls"] - 1)
-                        if (
-                            not state["tool_existed"]
-                            and stats["calls"] == 0
-                            and self._tools.get(tool) is stats
-                        ):
-                            self._tools.pop(tool, None)
-                    self._in_flight_measurements.pop(id(measurement), None)
+                            stats["calls"] = max(0, stats["calls"] - 1)
+                            if (
+                                not state["tool_existed"]
+                                and stats["calls"] == 0
+                                and target["tools"].get(tool) is stats
+                            ):
+                                target["tools"].pop(tool, None)
+                        target["in_flight_measurements"].pop(id(measurement), None)
                 self._active_measurement.reset(measurement_token)
 
     def record_event(self, event: str) -> None:
         if self.enabled:
             with self._lock:
-                self._events[event] += 1
                 measurement = self._active_measurement.get()
+                targets = self._current_scope_states(measurement)
+                for target in targets:
+                    target["events"][event] += 1
                 if measurement is not None:
-                    measurement["events"][event] += 1
+                    for target in targets:
+                        measurement["events_by_scope"][target["scope_key"]][event] += 1
 
     def record_bytes(self, counter: str, amount: int) -> None:
         """Record a non-content byte count for the current server session."""
@@ -361,8 +535,9 @@ class LocalMetrics:
                 raise ValueError(f"unknown byte counter: {counter}")
             with self._lock:
                 amount = max(0, int(amount))
-                self._bytes[counter] += amount
                 measurement = self._active_measurement.get()
+                for target in self._current_scope_states(measurement):
+                    target["bytes"][counter] += amount
                 if measurement is not None:
                     measurement["bytes"][counter] += amount
 
@@ -370,8 +545,9 @@ class LocalMetrics:
         if self.enabled:
             with self._lock:
                 count = max(0, int(count))
-                self._tools[tool]["result_count"] += count
                 measurement = self._active_measurement.get()
+                for target in self._current_scope_states(measurement):
+                    target["tools"][tool]["result_count"] += count
                 if measurement is not None and measurement["tool"] == tool:
                     measurement["result_count"] += count
 
@@ -394,16 +570,17 @@ class LocalMetrics:
         """Record content-free semantic indexing lifecycle work."""
         if self.enabled:
             with self._lock:
-                self._record_semantic_index_in(
-                    self._semantic_index,
-                    source,
-                    outcome,
-                    queue_wait_ms=queue_wait_ms,
-                    indexing_duration_ms=indexing_duration_ms,
-                    indexed_chunks=indexed_chunks,
-                )
                 if measurement is None:
                     measurement = self._active_measurement.get()
+                for target in self._current_scope_states(measurement):
+                    self._record_semantic_index_in(
+                        target["semantic_index"],
+                        source,
+                        outcome,
+                        queue_wait_ms=queue_wait_ms,
+                        indexing_duration_ms=indexing_duration_ms,
+                        indexed_chunks=indexed_chunks,
+                    )
                 if measurement is not None:
                     self._record_semantic_index_in(
                         measurement["semantic_index"],
@@ -420,54 +597,68 @@ class LocalMetrics:
             if outcome not in SEMANTIC_SEARCH_OUTCOMES:
                 raise ValueError(f"unknown semantic search outcome: {outcome}")
             with self._lock:
-                self._semantic_index["search"][outcome] += 1
                 measurement = self._active_measurement.get()
+                for target in self._current_scope_states(measurement):
+                    target["semantic_index"]["search"][outcome] += 1
                 if measurement is not None:
                     measurement["semantic_index"]["search"][outcome] += 1
 
     def record_capture(self, capture_id: str) -> None:
         if self.enabled:
             with self._lock:
-                self._captured.add(capture_id)
-                self._events["captures"] += 1
                 measurement = self._active_measurement.get()
+                targets = self._current_scope_states(measurement)
+                for target in targets:
+                    target["captured"].add(capture_id)
+                    target["events"]["captures"] += 1
                 if measurement is not None:
-                    measurement["events"]["captures"] += 1
+                    for target in targets:
+                        measurement["events_by_scope"][target["scope_key"]]["captures"] += 1
 
     def record_search(self, capture_id: str, match_count: int) -> None:
         if self.enabled:
             with self._lock:
-                if capture_id in self._captured:
-                    self._events["capture_to_search"] += 1
-                    self._searched.add(capture_id)
-                    measurement = self._active_measurement.get()
-                    if measurement is not None:
-                        measurement["events"]["capture_to_search"] += 1
-                self._events["searches"] += 1
-                self._events["empty_searches"] += int(match_count == 0)
                 measurement = self._active_measurement.get()
+                targets = self._current_scope_states(measurement)
+                for target in targets:
+                    if capture_id in target["captured"]:
+                        target["events"]["capture_to_search"] += 1
+                        target["searched"].add(capture_id)
+                        if measurement is not None:
+                            measurement["events_by_scope"][target["scope_key"]][
+                                "capture_to_search"
+                            ] += 1
+                    target["events"]["searches"] += 1
+                    target["events"]["empty_searches"] += int(match_count == 0)
                 if measurement is not None:
-                    measurement["events"]["searches"] += 1
-                    measurement["events"]["empty_searches"] += int(match_count == 0)
+                    for target in targets:
+                        target_events = measurement["events_by_scope"][target["scope_key"]]
+                        target_events["searches"] += 1
+                        target_events["empty_searches"] += int(match_count == 0)
 
     def record_retrieval(self, capture_id: str) -> None:
         if self.enabled:
             with self._lock:
-                if capture_id in self._searched:
-                    self._events["search_to_retrieval"] += 1
-                    measurement = self._active_measurement.get()
-                    if measurement is not None:
-                        measurement["events"]["search_to_retrieval"] += 1
-                self._events["retrievals"] += 1
                 measurement = self._active_measurement.get()
+                targets = self._current_scope_states(measurement)
+                for target in targets:
+                    if capture_id in target["searched"]:
+                        target["events"]["search_to_retrieval"] += 1
+                        if measurement is not None:
+                            measurement["events_by_scope"][target["scope_key"]][
+                                "search_to_retrieval"
+                            ] += 1
+                    target["events"]["retrievals"] += 1
                 if measurement is not None:
-                    measurement["events"]["retrievals"] += 1
+                    for target in targets:
+                        measurement["events_by_scope"][target["scope_key"]]["retrievals"] += 1
 
     def forget_capture(self, capture_id: str) -> None:
         if self.enabled:
             with self._lock:
-                self._captured.discard(capture_id)
-                self._searched.discard(capture_id)
+                for target in self._scopes.values():
+                    target["captured"].discard(capture_id)
+                    target["searched"].discard(capture_id)
 
     @staticmethod
     def _format_timestamp(timestamp: float) -> str:
@@ -479,26 +670,28 @@ class LocalMetrics:
         self,
         snapshot_at: float,
         *,
+        runtime_state: dict[str, Any] | None = None,
         exclude_in_flight: bool = False,
     ) -> dict[str, Any]:
         """Copy additive counters and tool state for a snapshot boundary."""
+        runtime_state = runtime_state or self._scope_state()
         tools = {}
-        for name, stats in self._tools.items():
+        for name, stats in runtime_state["tools"].items():
             copied_stats = dict(stats)
             copied_stats["latency_buckets"] = list(stats["latency_buckets"])
             copied_stats["failure_categories"] = dict(stats["failure_categories"])
             tools[name] = copied_stats
         events = {
-            name: self._events[name]
+            name: runtime_state["events"][name]
             for name in EVENT_NAMES
         }
         bytes_snapshot = {
-            name: self._bytes[name]
+            name: runtime_state["bytes"][name]
             for name in BYTE_COUNTER_NAMES
         }
-        semantic_index = self._copy_semantic_state(self._semantic_index)
+        semantic_index = self._copy_semantic_state(runtime_state["semantic_index"])
         if exclude_in_flight:
-            for measurement in self._in_flight_measurements.values():
+            for measurement in runtime_state["in_flight_measurements"].values():
                 tool_stats = tools.get(measurement["tool"])
                 if tool_stats is not None:
                     tool_stats["calls"] = max(0, tool_stats["calls"] - 1)
@@ -506,7 +699,9 @@ class LocalMetrics:
                         0,
                         tool_stats["result_count"] - measurement["result_count"],
                     )
-                for name, amount in measurement["events"].items():
+                for name, amount in measurement["events_by_scope"].get(
+                    runtime_state["scope_key"], {}
+                ).items():
                     if name in events:
                         events[name] = max(0, events[name] - amount)
                 for name, amount in measurement["bytes"].items():
@@ -531,6 +726,10 @@ class LocalMetrics:
         while len(self._snapshot_tokens) > MAX_SNAPSHOT_TOKENS:
             self._snapshot_tokens.popitem(last=False)
         return token
+
+    @staticmethod
+    def _public_scope_name(runtime_state: Mapping[str, Any]) -> str:
+        return "process" if runtime_state.get("scope_key") == "process" else "mcp_session"
 
     @staticmethod
     def _delta_value(current: Any, baseline: Any) -> Any:
@@ -817,25 +1016,30 @@ class LocalMetrics:
         tool_categories: Mapping[str, str] | None = None,
         since_snapshot: str | None = None,
         include_snapshot_token: bool = False,
+        scope_key: str | None = None,
     ) -> dict[str, Any]:
-        """Return aggregate metrics suitable for a content-free diagnostic.
+        """Return scoped metrics suitable for a content-free diagnostic.
 
         ``available_tools`` should be the live interface inventory when the
         metrics are used by an MCP server. Standalone metric users can omit it
         when interface coverage is not applicable. When supplied,
         ``tool_categories`` maps each available tool to its primary capability
         category for descriptive per-category coverage. ``since_snapshot``
-        requests a process-local delta from a token previously returned by a
-        token-enabled snapshot. Delta baselines are independent and do not
-        reset cumulative metrics. Calls still in flight at the boundary are
-        excluded from delta state and attributed to the following window.
+        requests a scope-local delta from a token previously returned by a
+        token-enabled snapshot. Tokens cannot be used across MCP sessions.
+        Delta baselines are independent and do not reset cumulative metrics.
+        Calls still in flight at the boundary are excluded from delta state
+        and attributed to the following window. ``scope_key="process"``
+        explicitly selects the aggregate process view.
         """
         if not self.enabled:
             return {"enabled": False}
         with self._lock:
             snapshot_at = time.time()
+            runtime_state = self._scope_state(scope_key)
             current_state = self._current_state(
                 snapshot_at,
+                runtime_state=runtime_state,
                 exclude_in_flight=since_snapshot is not None,
             )
             baseline = (
@@ -843,10 +1047,19 @@ class LocalMetrics:
                 if since_snapshot is not None
                 else None
             )
+            if baseline is not None and baseline.get("scope_key") != runtime_state["scope_key"]:
+                baseline = None
             return_token = include_snapshot_token or since_snapshot is not None
             snapshot_token = (
                 self._store_snapshot_token(
-                    self._current_state(snapshot_at, exclude_in_flight=True)
+                    {
+                        **self._current_state(
+                            snapshot_at,
+                            runtime_state=runtime_state,
+                            exclude_in_flight=True,
+                        ),
+                        "scope_key": runtime_state["scope_key"],
+                    }
                 )
                 if return_token
                 else None
@@ -854,8 +1067,9 @@ class LocalMetrics:
             if since_snapshot is not None and baseline is None:
                 response = {
                     "enabled": True,
-                    "scope": "process",
-                    "started_at": self._format_timestamp(self._started_at),
+                    "scope": self._public_scope_name(runtime_state),
+                    "attribution": dict(runtime_state["attribution"]),
+                    "started_at": self._format_timestamp(runtime_state["started_at"]),
                     "snapshot_at": self._format_timestamp(snapshot_at),
                     "window": {
                         "status": "unavailable",
@@ -922,14 +1136,17 @@ class LocalMetrics:
                     }
             response = {
                 "enabled": True,
-                "scope": "process",
-                "started_at": self._format_timestamp(self._started_at),
+                "scope": self._public_scope_name(runtime_state),
+                "attribution": dict(runtime_state["attribution"]),
+                "started_at": self._format_timestamp(runtime_state["started_at"]),
                 "snapshot_at": self._format_timestamp(snapshot_at),
                 "window": {
                     "status": "ok",
                     "kind": "delta" if baseline is not None else "process",
                     "started_at": self._format_timestamp(
-                        baseline["snapshot_at"] if baseline is not None else self._started_at
+                        baseline["snapshot_at"]
+                        if baseline is not None
+                        else runtime_state["started_at"]
                     ),
                     "ended_at": self._format_timestamp(snapshot_at),
                 },

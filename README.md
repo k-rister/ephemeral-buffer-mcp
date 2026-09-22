@@ -475,9 +475,9 @@ The agent has access to the following tools:
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
-| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free aggregate metrics snapshot. |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
-| `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and process- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
+| `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and scope- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
@@ -709,11 +709,14 @@ Set `EPHEMERAL_METRICS=1` to collect content-free, in-process usage metrics.
 The isolated coding-agent launchers enable this setting by default; direct
 server launches remain opt-in.
 The metrics include per-tool call counts, success/failure counts, duration
-totals, aggregate capture/search/retrieval, empty-search, eviction, and
-cleanup events, plus interface coverage showing how many of the 19 exposed MCP
-tools were called and the complete list of unused tools. Interface coverage
-also reports descriptive coverage by primary capability category; it is not a
-mandate for a client to use every category or tool. The categories are:
+totals, capture/search/retrieval, empty-search, eviction, and cleanup events,
+plus interface coverage showing how many of the 19 exposed MCP tools were
+called and the complete list of unused tools. MCP snapshots are scoped to the
+active transport session and include a server-generated opaque
+`attribution.id`; the persisted metrics file remains an aggregate process
+snapshot. Interface coverage also reports descriptive coverage by primary
+capability category; it is not a mandate for a client to use every category or
+tool. The categories are:
 
 | Category | Exposed tools |
 | :--- | :--- |
@@ -736,11 +739,20 @@ call to obtain a non-resetting task-window delta. A valid window reports
 `window.status` as `ok`, including when all activity counters are zero. An
 invalid, expired, or pre-restart token reports `window.status` as
 `unavailable` instead of being interpreted as zero activity. Tokens are local
-to the current server process and the bounded in-memory token history; a new
-isolated coding-agent session always starts a new measurement scope. Both
-`get_runtime_diagnostics()` and `get_buffer_stats()` continue to include the
-same aggregate metrics snapshot for compatibility. Coverage uses the live MCP
+to the active metrics scope and bounded in-memory token history; a new
+isolated coding-agent session always starts a new measurement scope. MCP
+requests are additionally scoped to their transport session: the response
+reports `scope: "mcp_session"` and an opaque `attribution.id`, and coverage,
+funnel, byte, and per-tool counters are isolated between clients sharing one
+server process. The ID is generated by the server and never contains the
+configured session ID or socket path. Direct, unbound calls and the persisted
+`EPHEMERAL_METRICS_FILE` snapshot use `scope: "process"` as the aggregate
+fallback. Both `get_runtime_diagnostics()` and `get_buffer_stats()` include
+the metrics snapshot for their active scope. Coverage uses the live MCP
 registration inventory, so its available-tool count tracks the exposed API.
+To keep long-running shared servers bounded, at most 128 process/client scope
+states are retained; an inactive session whose state is evicted starts a fresh
+metrics window if it later returns.
 The `workflow_effectiveness` section derives operational signals from the
 same process or task-window state. Funnel rates use explicit operation
 denominators: capture-to-search uses `searches`, search-to-retrieval uses
@@ -779,9 +791,10 @@ and zero-filled when no event has occurred, as are the byte-counter keys. Wire c
 headers and payload bytes actually consumed, including partial malformed
 requests; payload bytes rejected from an oversized frame before reading are
 not counted. MCP tool-response counts measure UTF-8 response content and
-exclude transport-envelope overhead. Metrics are process-lifetime
-state: restarting the server clears them, while capture-associated correlation
-state is released when a capture is evicted or explicitly cleared.
+exclude transport-envelope overhead. Metrics are scope-lifetime state:
+restarting the server clears them, while capture-associated correlation state
+is released when a capture is evicted or explicitly cleared. The process scope
+is aggregate; MCP transport sessions use separate scopes.
 
 ### Effectiveness metrics and privacy
 
