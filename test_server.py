@@ -236,6 +236,27 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(stats["failures"], 1)
         self.assertEqual(stats["failure_categories"]["validation"], 1)
 
+    def test_mcp_validation_boundary_calls_sync_functions(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        try:
+            metadata = server.mcp._tool_manager._tools["capture_text"].fn_metadata
+
+            async def invoke_sync_metadata():
+                return await metadata.call_fn_with_arg_validation(
+                    lambda **kwargs: f"sync:{kwargs['content']}",
+                    False,
+                    {"content": "sync validation probe"},
+                    {},
+                )
+
+            result = asyncio.run(invoke_sync_metadata())
+        finally:
+            server.METRICS = original_metrics
+
+        self.assertEqual(result, "sync:sync validation probe")
+
     def test_registered_mcp_tools_use_async_worker_adapter(self):
         async def exercise():
             @server._mcp_tool("blocking_probe", "diagnostics")
@@ -724,6 +745,25 @@ class TestServerTools(unittest.TestCase):
             len(delta_raw.encode("utf-8")),
         )
 
+    def test_mcp_session_scope_binding_without_request_context_is_a_noop(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+        try:
+            with patch.object(
+                server.mcp,
+                "get_context",
+                side_effect=AttributeError("no context"),
+            ):
+                with server._bind_mcp_metrics_scope():
+                    with metrics.measure("no_context_probe"):
+                        pass
+        finally:
+            server.METRICS = original_metrics
+
+        self.assertEqual(metrics.snapshot()["scope"], "process")
+        self.assertEqual(metrics.snapshot()["tools"]["no_context_probe"]["calls"], 1)
+
     def test_mcp_session_attribution_is_opaque_and_isolated(self):
         original_metrics = server.METRICS
         metrics = LocalMetrics(enabled=True)
@@ -788,6 +828,7 @@ class TestServerTools(unittest.TestCase):
             )
 
         try:
+            server._MCP_SESSION_SCOPE_FALLBACK.clear()
             with patch.object(server.mcp, "get_context", return_value=context_for(session_a)):
                 with server._bind_mcp_metrics_scope():
                     with metrics.measure("capture_text"):
@@ -799,6 +840,19 @@ class TestServerTools(unittest.TestCase):
             with patch.object(server.mcp, "get_context", return_value=context_for(session_b)):
                 with server._bind_mcp_metrics_scope():
                     second = metrics.snapshot(available_tools=("capture_text",))
+            for index in range(server.MAX_MCP_SESSION_SCOPE_FALLBACK + 1):
+                session = NonWeakSession()
+                with patch.object(
+                    server.mcp,
+                    "get_context",
+                    return_value=context_for(session),
+                ):
+                    with server._bind_mcp_metrics_scope():
+                        pass
+            self.assertEqual(
+                len(server._MCP_SESSION_SCOPE_FALLBACK),
+                server.MAX_MCP_SESSION_SCOPE_FALLBACK,
+            )
         finally:
             server._MCP_SESSION_SCOPE_FALLBACK.clear()
             server._MCP_SESSION_SCOPE_FALLBACK.update(original_fallback)
