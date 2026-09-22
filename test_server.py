@@ -724,6 +724,93 @@ class TestServerTools(unittest.TestCase):
             len(delta_raw.encode("utf-8")),
         )
 
+    def test_mcp_session_attribution_is_opaque_and_isolated(self):
+        original_metrics = server.METRICS
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+
+        class FakeSession:
+            pass
+
+        session_a = FakeSession()
+        session_b = FakeSession()
+
+        def context_for(session):
+            return SimpleNamespace(
+                request_context=SimpleNamespace(session=session),
+            )
+
+        try:
+            with patch.object(server.mcp, "get_context", return_value=context_for(session_a)):
+                with server._bind_mcp_metrics_scope():
+                    with metrics.measure("capture_text"):
+                        pass
+                    first = metrics.snapshot(
+                        available_tools=("capture_text",),
+                        include_snapshot_token=True,
+                    )
+                with server._bind_mcp_metrics_scope():
+                    repeat = metrics.snapshot(available_tools=("capture_text",))
+
+            with patch.object(server.mcp, "get_context", return_value=context_for(session_b)):
+                with server._bind_mcp_metrics_scope():
+                    second = metrics.snapshot(available_tools=("capture_text",))
+        finally:
+            server.METRICS = original_metrics
+
+        self.assertEqual(first["scope"], "mcp_session")
+        self.assertEqual(first["interface_coverage"]["used"], 1)
+        self.assertEqual(repeat["attribution"]["id"], first["attribution"]["id"])
+        self.assertNotEqual(second["attribution"]["id"], first["attribution"]["id"])
+        self.assertEqual(second["interface_coverage"]["used"], 0)
+        self.assertEqual(
+            metrics.snapshot(scope_key="process")["tools"]["capture_text"]["calls"],
+            1,
+        )
+        self.assertNotIn("FakeSession", json.dumps(first))
+
+    def test_nonweak_mcp_session_fallback_is_bounded_and_identity_safe(self):
+        original_metrics = server.METRICS
+        original_fallback = server._MCP_SESSION_SCOPE_FALLBACK.copy()
+        metrics = LocalMetrics(enabled=True)
+        server.METRICS = metrics
+
+        class NonWeakSession:
+            __slots__ = ()
+            __hash__ = None
+
+        session_a = NonWeakSession()
+        session_b = NonWeakSession()
+
+        def context_for(session):
+            return SimpleNamespace(
+                request_context=SimpleNamespace(session=session),
+            )
+
+        try:
+            with patch.object(server.mcp, "get_context", return_value=context_for(session_a)):
+                with server._bind_mcp_metrics_scope():
+                    with metrics.measure("capture_text"):
+                        pass
+                    first = metrics.snapshot(available_tools=("capture_text",))
+                with server._bind_mcp_metrics_scope():
+                    repeat = metrics.snapshot(available_tools=("capture_text",))
+
+            with patch.object(server.mcp, "get_context", return_value=context_for(session_b)):
+                with server._bind_mcp_metrics_scope():
+                    second = metrics.snapshot(available_tools=("capture_text",))
+        finally:
+            server._MCP_SESSION_SCOPE_FALLBACK.clear()
+            server._MCP_SESSION_SCOPE_FALLBACK.update(original_fallback)
+            server.METRICS = original_metrics
+
+        self.assertEqual(repeat["attribution"]["id"], first["attribution"]["id"])
+        self.assertNotEqual(second["attribution"]["id"], first["attribution"]["id"])
+        self.assertLessEqual(
+            len(server._MCP_SESSION_SCOPE_FALLBACK),
+            server.MAX_MCP_SESSION_SCOPE_FALLBACK,
+        )
+
     def test_registered_tools_match_fastmcp_inventory(self):
         fastmcp_tools = asyncio.run(server.mcp.list_tools())
         fastmcp_names = tuple(tool.name for tool in fastmcp_tools)

@@ -365,22 +365,29 @@ metadata rather than captured command content. This keeps reports useful while
 avoiding accidental disclosure of source code, logs, credentials, or other
 sensitive data.
 
-The privacy model is local and opt-in: `EPHEMERAL_METRICS=1` enables aggregate
+The privacy model is local and opt-in: `EPHEMERAL_METRICS=1` enables
 measurements in the current process, but the server does not transmit them.
-Metrics and runtime logs are metadata-only by default. They may include counts,
-durations, sizes, IDs, limits, and error classes, but must not include captured
-content, command arguments, labels, query text, credentials, or session ID
-values. Keep this boundary when adding integrations or preparing a report.
+MCP requests are attributed to their transport session using a server-generated
+opaque ID; each session gets separate coverage, funnel, byte, and per-tool
+counters. The process scope remains an aggregate fallback for direct calls and
+persisted snapshots. Metrics and runtime logs are metadata-only by default.
+They may include counts, durations, sizes, IDs, limits, and error classes, but
+must not include captured content, command arguments, labels, query text,
+credentials, or session ID values. Keep this boundary when adding integrations
+or preparing a report. Scope state is bounded to the most recent 128 process or
+client scopes; an inactive client scope can be evicted and starts a fresh
+measurement window if that client later returns.
 
-When enabled, the aggregate snapshot also includes `interface_coverage`: the
-number and percentage of the 19 exposed MCP tools called during the process
-lifetime and the complete list of tools not called. This is process-level
-coverage; it does not identify which client made a call when multiple clients
-share one server. The available-tool inventory comes from the same registration
-path used to expose the MCP tools. The snapshot also includes `by_category`,
-which groups the same `used`, `available`, `percentage`, and `unused_tools`
-fields by each tool's primary capability category. Category coverage is
-descriptive and is not a requirement that clients use every category.
+When enabled, each snapshot includes `interface_coverage`: the number and
+percentage of the 19 exposed MCP tools called during the process lifetime or
+active MCP session, depending on the `scope` field, and the complete list of
+tools not called. MCP session snapshots report an opaque `attribution.id`; the
+process scope is aggregate and does not identify which client made a call. The
+available-tool inventory comes from the same registration path used to expose
+the MCP tools. The snapshot also includes `by_category`, which groups the same
+`used`, `available`, `percentage`, and `unused_tools` fields by each tool's
+primary capability category. Category coverage is descriptive and is not a
+requirement that clients use every category.
 
 Use `get_usage_metrics()` when a client needs the same content-free metrics as
 versioned JSON rather than embedded JSON inside diagnostic text. The endpoint
@@ -389,11 +396,11 @@ optional `since` argument to request a non-resetting task-window delta. The
 response's `window.status` is `ok` for valid data, including a valid window
 with zero activity, and `unavailable` for an invalid, expired, or pre-restart
 token. The token history is bounded in memory, so callers should retain the
-most recent token they intend to use. A new server process or isolated coding-
-agent session starts a new measurement scope and cannot resolve tokens from a
-previous process. Non-additive `max_duration_ms` remains the process-lifetime
-maximum in delta tool records; additive counters, durations, events, bytes,
-and interface coverage are window-scoped.
+most recent token they intend to use. Tokens are bound to the active metrics
+scope: a different MCP session or a new server process cannot resolve them.
+Non-additive `max_duration_ms` remains the scope-lifetime maximum in delta tool
+records; additive counters, durations, events, bytes, and interface coverage
+are window-scoped.
 Calls that are still in flight at a task-window boundary are attributed
 wholly to the following window. Therefore the `get_usage_metrics()` request
 that produces a delta is excluded from that returned delta and appears in the
