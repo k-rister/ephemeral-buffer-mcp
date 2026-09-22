@@ -16,6 +16,17 @@ MCP client, or operating environment.
   local checkout is clean and synchronized with `origin/main`.
 - Keep commits focused and explain behavior changes in the commit message.
 
+## Project-local skills
+
+- Keep reusable EB-specific Codex skills in the tracked
+  `skills/<skill-name>/SKILL.md` structure. The canonical activity report
+  skill is `skills/eb-activity-summary/SKILL.md`.
+- Generated reports such as `/tmp/activity-summary.html` are local output and
+  must not be committed.
+- Install project-local skills into a Codex skill root separately when
+  automatic discovery outside this repository is needed; do not commit
+  machine-specific symlinks or caches.
+
 ## Local validation
 
 Create the supported development environment with the committed Python 3.12
