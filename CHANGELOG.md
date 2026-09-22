@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-09-22
 
 - Add privacy-safe MCP transport-session attribution to usage metrics. MCP
   snapshots now report an opaque session scope and isolate coverage, funnel,
