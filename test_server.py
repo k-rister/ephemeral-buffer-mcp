@@ -1032,6 +1032,21 @@ class TestServerTools(unittest.TestCase):
             server.METRICS = original_metrics
         self.assertTrue(any("metrics_snapshot_write_failed" in entry for entry in logs.output))
 
+    def test_metrics_snapshot_cleanup_failure_is_ignored(self):
+        original_metrics = server.METRICS
+        server.METRICS = LocalMetrics(enabled=True)
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
+                clear=False,
+            ), patch.object(server.os, "replace", side_effect=OSError("read-only")), \
+                    patch.object(Path, "unlink", side_effect=OSError("cleanup failed")), \
+                    self.assertLogs("ephemeral_buffer.server", level="WARNING"):
+                server._write_metrics_snapshot()
+        finally:
+            server.METRICS = original_metrics
+
     def test_runtime_package_version_falls_back_to_source_checkout(self):
         with patch.object(server.Path, "read_text", side_effect=OSError("missing metadata")), \
                 patch.object(server, "package_version", side_effect=server.PackageNotFoundError()):
