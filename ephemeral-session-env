@@ -14,3 +14,26 @@ export EPHEMERAL_SESSION_ID
 export EPHEMERAL_METRICS="${EPHEMERAL_METRICS:-1}"
 export EPHEMERAL_REQUIRE_ISOLATION=1
 export EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1
+
+# Keep each launcher's diagnostic log beside the socket used by this session.
+# Resolve the session socket with the same tempfile and SHA-256 rules as
+# config.py so Codex and other MCP clients receive the exact matching path.
+if [[ -z "${EPHEMERAL_LOG_FILE:-}" ]]; then
+    if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" ]]; then
+        ephemeral_socket_path="$EPHEMERAL_SOCKET_PATH"
+    else
+        ephemeral_socket_path="$(python3 -c '
+import hashlib
+import os
+import tempfile
+
+session_id = os.environ["EPHEMERAL_SESSION_ID"]
+digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+print(os.path.join(tempfile.gettempdir(), f"ephemeral_buffer-{digest}.sock"))
+')"
+    fi
+    EPHEMERAL_LOG_FILE="${ephemeral_socket_path%.sock}.jsonl"
+    unset ephemeral_socket_path
+fi
+export EPHEMERAL_LOG_FILE
+export EPHEMERAL_LOG_LEVEL="${EPHEMERAL_LOG_LEVEL:-INFO}"

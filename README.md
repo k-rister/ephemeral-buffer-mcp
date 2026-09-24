@@ -129,7 +129,18 @@ stdio remains available and runtime diagnostics report the socket failure;
 creation. Because the session is private, the launcher also defaults
 `EPHEMERAL_METRICS=1` and passes that setting explicitly to the MCP server. Set
 `EPHEMERAL_METRICS=0` before invoking the launcher to disable local metrics for
-that session.
+that session. The launcher also sets `EPHEMERAL_LOG_FILE` to a JSONL file
+beside the session socket and defaults `EPHEMERAL_LOG_LEVEL` to `INFO`, so MCP
+tool start and completion events are recorded. Set `EPHEMERAL_LOG_LEVEL` before
+launching to choose another level, such as `WARNING` or `DEBUG`, or pass
+`--log-level LEVEL` directly to either launcher:
+
+```bash
+./codex-ephemeral --log-level INFO
+./ephemeral-agent --log-level INFO agy
+```
+
+Set `EPHEMERAL_LOG_FILE` to override the log path.
 
 ### Configure other coding agents
 
@@ -476,7 +487,7 @@ The agent has access to the following tools:
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
-| `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode, buffer limits, embedding readiness, and process memory. |
+| `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode and path, active log file and level, buffer limits, embedding readiness, and process memory. |
 | `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and scope- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
@@ -692,13 +703,16 @@ explicitly opt-in and returns operational metadata only; captured content,
 labels, command arguments, and session ID values are excluded. Sanitize any
 additional output before sharing it.
 
-Operational events are written as privacy-safe JSON lines to stderr. Warnings
-and errors are enabled by default; set `EPHEMERAL_LOG_LEVEL=INFO` to include
-normal readiness, eviction, process lifecycle, and MCP tool start/completion
-events. Tool lifecycle events contain only a local call ID, tool name, duration,
-success state, and error class. Logs never include captured content, labels,
-query text, or command text. A start event without a matching completion or
-failure event identifies a stalled tool/session boundary.
+Operational events are written as privacy-safe JSON lines to stderr and, when
+`EPHEMERAL_LOG_FILE` is set, to that file. Direct server launches default to
+warnings and errors; the session launchers default to `INFO` and put the log
+beside the session socket. Log files use owner-only `0600` permissions, and
+symlink paths are rejected. If file logging cannot be opened safely, events
+remain available on stderr and runtime diagnostics report the file as
+unavailable. Tool lifecycle events contain only a local call ID, tool name,
+duration, success state, and error class. Logs never include captured content,
+labels, query text, or command text. A start event without a matching
+completion or failure event identifies a stalled tool/session boundary.
 The Codex A/B adapter can persist these events per MCP run with
 `--diagnostic-log-dir /path/to/logs`; keep that directory outside the
 repository. The files contain lifecycle metadata only.
