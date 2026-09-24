@@ -217,18 +217,20 @@ class TestReleaseChecks(unittest.TestCase):
             run([])
 
     def test_script_entrypoint_runs_successfully(self):
+        tag = f"v{package_version(Path(__file__).with_name('pyproject.toml'))}"
+
         def fake_git(command, *args, **kwargs):
             if command[:2] == ["git", "merge-base"]:
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
             outputs = {
-                ("git", "rev-parse", "--verify", "v0.6.0^{commit}"): "tag",
+                ("git", "rev-parse", "--verify", f"{tag}^{{commit}}"): "tag",
                 ("git", "rev-parse", "--verify", "main"): "main",
                 ("git", "status", "--porcelain=v1", "--untracked-files=all"): "",
             }
             return SimpleNamespace(returncode=0, stdout=outputs[tuple(command)].strip() + "\n", stderr="")
 
         stdout = io.StringIO()
-        with patch.object(sys, "argv", ["release_checks.py", "--tag", "v0.6.0", "--main-ref", "main"]), \
+        with patch.object(sys, "argv", ["release_checks.py", "--tag", tag, "--main-ref", "main"]), \
                 patch.object(sys, "stdout", stdout), \
                 patch.object(subprocess, "run", side_effect=fake_git):
             with self.assertRaisesRegex(SystemExit, "0"):

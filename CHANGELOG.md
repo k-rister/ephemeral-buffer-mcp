@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 - 2026-09-23
+
+- Add automatic private JSONL session logs to the agent launchers, with a
+  configurable `--log-level` and the active log path and effective level in
+  runtime diagnostics. Log files are created with owner-only permissions and
+  symlink redirection is rejected.
+- Preserve valid TOML configuration when Codex launcher paths contain
+  supplementary Unicode characters.
+
 ## 0.6.0 - 2026-09-22
 
 - Add privacy-safe MCP transport-session attribution to usage metrics. MCP
