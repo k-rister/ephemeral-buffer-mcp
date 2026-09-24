@@ -615,6 +615,40 @@ class TestServerTools(unittest.TestCase):
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
 
+    def test_runtime_diagnostics_reports_active_log_file_and_level(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "events.jsonl"
+            logger = server.logging.Logger("diagnostics-test", level=server.logging.INFO)
+            handler = server.logging.FileHandler(log_path, encoding="utf-8")
+            logger.addHandler(handler)
+            try:
+                with patch.object(server, "LOGGER", logger):
+                    result = server.get_runtime_diagnostics()
+            finally:
+                handler.close()
+
+        self.assertIn(f"Log file: {log_path}", result)
+        self.assertIn("Log level: INFO", result)
+
+    def test_runtime_diagnostics_distinguishes_unavailable_and_unconfigured_log_file(self):
+        logger = server.logging.Logger("diagnostics-test", level=server.logging.WARNING)
+        configured_path = "/tmp/unavailable-diagnostics-test.jsonl"
+        with patch.object(server, "LOGGER", logger), patch.dict(
+            os.environ, {"EPHEMERAL_LOG_FILE": configured_path}, clear=False
+        ):
+            unavailable = server.get_runtime_diagnostics()
+        with patch.object(server, "LOGGER", logger), patch.dict(
+            os.environ, {"EPHEMERAL_LOG_FILE": ""}, clear=False
+        ):
+            unconfigured = server.get_runtime_diagnostics()
+
+        self.assertIn(
+            f"Log file: unavailable (configured path: {configured_path})",
+            unavailable,
+        )
+        self.assertIn("Log file: not configured", unconfigured)
+        self.assertIn("Log level: WARNING", unconfigured)
+
     def test_runtime_index_budget_adjustment_requires_opt_in_and_reports_result(self):
         with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "0"}, clear=False):
             self.assertIn("disabled", server.set_semantic_index_budget(4))

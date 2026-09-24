@@ -74,6 +74,12 @@ These private, session-aware launchers default `EPHEMERAL_METRICS=1` so the
 session's content-free usage data is available for diagnostics. Preserve the
 normal opt-in behavior for direct or shared server launches, or disable metrics
 for a launcher-created session with `EPHEMERAL_METRICS=0` before starting it.
+They also set `EPHEMERAL_LOG_FILE` to a JSONL file beside the session socket
+and default `EPHEMERAL_LOG_LEVEL=INFO`. Set the level before starting the
+launcher, for example `EPHEMERAL_LOG_LEVEL=WARNING ephemeral-agent claude`, or
+pass `--log-level WARNING` to either launcher. Set `EPHEMERAL_LOG_FILE` to keep
+the log elsewhere. Supported levels follow Python logging names: `NOTSET`,
+`DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`.
 
 CLI socket operations use a 10-second timeout by default. Override it with a
 positive value when needed:
@@ -480,8 +486,10 @@ For the behavior being investigated, record:
 - timeout, readiness, socket, embedding, cleanup, or eviction symptoms
 
 Use `get_runtime_diagnostics()` for a content-free report of the running
-version, Python/platform details, uptime, socket mode, effective socket path,
-buffer limits, embedding readiness, and process memory. Use
+version, Python/platform details, uptime, socket mode and path, active log file
+and level, buffer limits, embedding readiness, and process memory. It reports
+when file logging is not configured or when its configured path could not be
+opened. Use
 `get_buffer_stats` and `get_capture_summary` for more focused aggregate
 diagnostics. The runtime report is opt-in and does not include captured text,
 labels, command arguments, or the session ID value.
@@ -782,13 +790,18 @@ comparison document embeds the same metadata and follows the same rule.
 
 ## Operational logging
 
-Runtime events are emitted as one privacy-safe JSON object per stderr line.
-Warnings and errors are enabled by default. Set `EPHEMERAL_LOG_LEVEL=INFO` to
-include normal embedding readiness, capture eviction, and process lifecycle
-events. MCP tool lifecycle events include only a local call ID, tool name,
-duration, success state, and error class; captured content, labels, query text,
-command text, and secrets are not logged. A start event without a matching
-completion or failure event identifies a stalled tool/session boundary.
+Runtime events are emitted as one privacy-safe JSON object per stderr line and,
+when `EPHEMERAL_LOG_FILE` is set, to that file. Direct server launches default
+to warnings and errors; the session launchers default to `INFO`, which includes
+normal embedding readiness, capture eviction, and process lifecycle events.
+Log files are opened without following symlinks and use owner-only `0600`
+permissions. If the configured path is unsafe or cannot be opened, file logging
+is skipped and events remain available on stderr; runtime diagnostics report
+the file as unavailable.
+MCP tool lifecycle events include only a local call ID, tool name, duration,
+success state, and error class; captured content, labels, query text, command
+text, and secrets are not logged. A start event without a matching completion
+or failure event identifies a stalled tool/session boundary.
 For the Codex A/B adapter, pass `--diagnostic-log-dir /path/to/logs` to write
 one content-free lifecycle log per MCP run. Keep this directory outside the
 repository and review it as diagnostic data.

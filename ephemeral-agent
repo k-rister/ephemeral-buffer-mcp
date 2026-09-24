@@ -1,8 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+launcher_log_level=""
+launcher_log_level_set=0
+while (( $# > 0 )); do
+    case "$1" in
+        --log-level)
+            if (( $# < 2 )); then
+                echo "Usage: $0 [--log-level LEVEL] <agent-command> [args...]" >&2
+                exit 2
+            fi
+            launcher_log_level="$2"
+            launcher_log_level_set=1
+            shift 2
+            ;;
+        --log-level=*)
+            launcher_log_level="${1#*=}"
+            launcher_log_level_set=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if (( launcher_log_level_set )); then
+    launcher_log_level="$(printf '%s' "$launcher_log_level" | tr '[:lower:]' '[:upper:]')"
+    case "$launcher_log_level" in
+        NOTSET|DEBUG|INFO|WARNING|ERROR|CRITICAL) ;;
+        *)
+            echo "Invalid log level '$launcher_log_level'; choose NOTSET, DEBUG, INFO, WARNING, ERROR, or CRITICAL." >&2
+            exit 2
+            ;;
+    esac
+    export EPHEMERAL_LOG_LEVEL="$launcher_log_level"
+fi
+
 if (( $# == 0 )); then
-    echo "Usage: $0 <agent-command> [args...]" >&2
+    echo "Usage: $0 [--log-level LEVEL] <agent-command> [args...]" >&2
     exit 2
 fi
 

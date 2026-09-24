@@ -1802,6 +1802,18 @@ def get_runtime_diagnostics() -> str:
 
     uptime_seconds = max(0, int(time.time() - SERVER_STARTED_AT))
     socket_state, socket_failure = _socket_lifecycle()
+    file_handler = next(
+        (handler for handler in LOGGER.handlers if isinstance(handler, logging.FileHandler)),
+        None,
+    )
+    configured_log_file = os.environ.get("EPHEMERAL_LOG_FILE", "").strip()
+    if file_handler is not None:
+        log_file = file_handler.baseFilename
+    elif configured_log_file:
+        log_file = f"unavailable (configured path: {configured_log_file})"
+    else:
+        log_file = "not configured"
+    log_level = logging.getLevelName(LOGGER.getEffectiveLevel())
     rss = stats["process_rss_bytes"]
     unaccounted = stats["unaccounted_rss_bytes"]
     lines = [
@@ -1814,6 +1826,8 @@ def get_runtime_diagnostics() -> str:
         f"Socket path: {SOCKET_PATH}",
         f"Socket lifecycle: {socket_state}",
         *( [f"Socket failure: {socket_failure}"] if socket_failure else [] ),
+        f"Log file: {log_file}",
+        f"Log level: {log_level}",
         f"Session ID configured: {'yes' if os.environ.get('EPHEMERAL_SESSION_ID') else 'no'}",
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",

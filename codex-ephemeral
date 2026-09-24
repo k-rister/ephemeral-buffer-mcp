@@ -2,15 +2,55 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+launcher_log_level=""
+launcher_log_level_set=0
+while (( $# > 0 )); do
+    case "$1" in
+        --log-level)
+            if (( $# < 2 )); then
+                echo "Usage: $0 [--log-level LEVEL] [codex-args...]" >&2
+                exit 2
+            fi
+            launcher_log_level="$2"
+            launcher_log_level_set=1
+            shift 2
+            ;;
+        --log-level=*)
+            launcher_log_level="${1#*=}"
+            launcher_log_level_set=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if (( launcher_log_level_set )); then
+    launcher_log_level="$(printf '%s' "$launcher_log_level" | tr '[:lower:]' '[:upper:]')"
+    case "$launcher_log_level" in
+        NOTSET|DEBUG|INFO|WARNING|ERROR|CRITICAL) ;;
+        *)
+            echo "Invalid log level '$launcher_log_level'; choose NOTSET, DEBUG, INFO, WARNING, ERROR, or CRITICAL." >&2
+            exit 2
+            ;;
+    esac
+    export EPHEMERAL_LOG_LEVEL="$launcher_log_level"
+fi
+
 # shellcheck source=/dev/null
 source "$DIR/ephemeral-session-env"
 
 # Pass the identity explicitly through Codex's MCP configuration as well as
 # the parent environment. This matters when Codex sanitizes the environment
-# used to launch MCP child processes. JSON string escaping is compatible with
-# TOML basic-string escaping for quotes, backslashes, and newlines.
-SESSION_ID_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$EPHEMERAL_SESSION_ID")"
-METRICS_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$EPHEMERAL_METRICS")"
-MCP_ENV_CONFIG="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_METRICS=${METRICS_TOML}, EPHEMERAL_SESSION_ID=${SESSION_ID_TOML}}"
+# used to launch MCP child processes. JSON escaping is compatible with TOML
+# basic strings here; keep Unicode scalars as UTF-8 instead of JSON's non-BMP
+# surrogate-pair escapes, which TOML does not accept.
+SESSION_ID_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_SESSION_ID")"
+METRICS_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_METRICS")"
+LOG_LEVEL_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_LEVEL")"
+LOG_FILE_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_FILE")"
+MCP_ENV_CONFIG="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_METRICS=${METRICS_TOML}, EPHEMERAL_SESSION_ID=${SESSION_ID_TOML}, EPHEMERAL_LOG_LEVEL=${LOG_LEVEL_TOML}, EPHEMERAL_LOG_FILE=${LOG_FILE_TOML}}"
 
 exec codex --config "$MCP_ENV_CONFIG" "$@"
