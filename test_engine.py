@@ -16,6 +16,7 @@ from config import CATALOGUE_EMBEDDING_MODEL, FP32_EMBEDDING_MODEL
 from engine import (
     Chunk,
     HYBRID_LEXICAL_WEIGHT,
+    SemanticIndexBudgetExceeded,
     register_bundled_embedding_models,
     Capture,
     EphemeralEngine,
@@ -2412,6 +2413,94 @@ class TestEmbeddingStartup(unittest.TestCase):
             self.assertEqual(embedding.calls, [["b", "c"], ["a"], ["d"]])
             for index, text in enumerate(("a", "b", "c", "d")):
                 self.assertEqual(capture.embeddings[index, ord(text) - ord("a")], 1.0)
+        finally:
+            engine.shutdown()
+
+    def test_semantic_embedding_budget_and_backend_result_guards(self):
+        class StaticEmbedding:
+            def __init__(self, result):
+                self.result = result
+
+            def embed(self, texts):
+                return self.result(texts) if callable(self.result) else self.result
+
+        def make_capture(engine, texts=("alpha", "beta")):
+            capture = engine.ingest("\n".join(texts), label="embedding-guards")
+            capture.semantic_chunks = [
+                Chunk(index, index + 1, index + 1, text)
+                for index, text in enumerate(texts)
+            ]
+            return capture
+
+        invalid_options = (
+            ({"embedding_batch_size": 0}, "embedding_batch_size"),
+            ({"embedding_max_batch_tokens": 0}, "embedding_max_batch_tokens"),
+            ({"semantic_max_index_input_bytes": 0}, "semantic_max_index_input_bytes"),
+        )
+        for options, message in invalid_options:
+            with self.subTest(option=message), self.assertRaisesRegex(ValueError, message):
+                EphemeralEngine(max_captures=1, **options)
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            semantic_max_index_input_bytes=1,
+        )
+        try:
+            capture = make_capture(engine, ("too large",))
+            # Ingest marks over-budget captures immediately; reset the state to
+            # exercise the defensive byte-count check in the lazy path too.
+            capture.semantic_index_state = "not-requested"
+            with self.assertRaises(SemanticIndexBudgetExceeded):
+                engine._ensure_embeddings(capture)
+            self.assertEqual(capture.semantic_index_state, "budget-exceeded")
+            with self.assertRaises(SemanticIndexBudgetExceeded):
+                engine._ensure_embeddings(capture)
+
+            capture.semantic_index_state = "not-requested"
+
+            class MarkBudgetLock:
+                def __enter__(self):
+                    capture.semantic_index_state = "budget-exceeded"
+
+                def __exit__(self, *_args):
+                    return False
+
+            engine._embedding_lock = MarkBudgetLock()
+            with self.assertRaises(SemanticIndexBudgetExceeded):
+                engine._ensure_embeddings(capture)
+        finally:
+            engine.shutdown()
+
+        invalid_results = (
+            (lambda _texts: [], "unexpected batch size"),
+            (lambda texts: [np.zeros((1, 384), dtype=np.float32) for _ in texts], "invalid vector shape"),
+            (
+                lambda texts: [np.zeros(384 if index == 0 else 383, dtype=np.float32)
+                               for index, _text in enumerate(texts)],
+                "inconsistent vector dimensions",
+            ),
+        )
+        for result, message in invalid_results:
+            with self.subTest(result=message):
+                engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+                engine.embedding_model = StaticEmbedding(result)
+                try:
+                    capture = make_capture(engine)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        engine._ensure_embeddings(capture)
+                finally:
+                    engine.shutdown()
+
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine.embedding_model = StaticEmbedding(
+            lambda _texts: self.fail("empty semantic chunks must not call embed")
+        )
+        try:
+            capture = make_capture(engine, ("only chunk",))
+            capture.semantic_chunks = []
+            engine._ensure_embeddings(capture)
+            self.assertIsNone(capture.embeddings)
         finally:
             engine.shutdown()
 

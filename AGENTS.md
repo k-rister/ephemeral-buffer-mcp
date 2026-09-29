@@ -42,7 +42,7 @@ embeddings:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m coverage run \
-  --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
   -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py \
   test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_warmup.py test_benchmark_relevance.py \
   test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
@@ -51,7 +51,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m coverage run \
   test_compare_workload_results.py test_list_workload_results.py \
   test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py \
   test_metrics.py test_logging_utils.py
-.venv/bin/python -m coverage report --fail-under=100
+.venv/bin/python -m coverage report -m --fail-under=100
 .venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
