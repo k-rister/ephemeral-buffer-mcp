@@ -2537,6 +2537,35 @@ class TestEmbeddingStartup(unittest.TestCase):
         finally:
             engine.shutdown()
 
+    def test_on_demand_token_budget_failure_is_recorded_and_falls_back(self):
+        class Tokenizer:
+            def encode(self, _text):
+                return SimpleNamespace(ids=[0] * 5)
+
+        class UnexpectedEmbedding:
+            model = SimpleNamespace(tokenizer=Tokenizer())
+
+            def embed(self, _texts):
+                raise AssertionError("over-budget tokens must not reach embedding inference")
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            semantic_wait_seconds=1,
+            embedding_max_batch_tokens=4,
+        )
+        engine.embedding_model = UnexpectedEmbedding()
+        try:
+            capture = engine.ingest("alpha beta", label="on-demand-token-budget")
+            result = engine.search("alpha", mode="semantic", capture_id=capture.capture_id)
+
+            self.assertEqual(result["semantic_coverage"], "unavailable")
+            self.assertEqual(result["semantic_fallback"], "SemanticIndexBudgetExceeded")
+            self.assertEqual(result["matches"][0]["chunk_index"], "lexical")
+            self.assertEqual(capture.semantic_index_state, "budget-exceeded")
+        finally:
+            engine.shutdown()
+
     def test_fp32_model_alias_is_registered_once_per_process(self):
         import engine as engine_module
 
