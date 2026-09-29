@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-09-29
+
 - Bound semantic-index memory work with token-length bucketed embedding batches,
   incremental embedding-matrix assembly, a per-capture semantic-input budget,
   and configurable ONNX CPU memory-arena use. Captures above the default 4 MiB
