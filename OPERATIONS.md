@@ -141,6 +141,28 @@ not block startup: BM25 remains available and hybrid search degrades to lexical
 results. `get_buffer_stats` and `get_runtime_diagnostics` report warm-up state
 and a content-free exception class on failure.
 
+Semantic inference has bounded defaults: `EPHEMERAL_EMBEDDING_BATCH_SIZE=16`
+limits chunks per inference call, and `EPHEMERAL_EMBEDDING_MAX_BATCH_TOKENS=4096`
+limits padded token slots across that call. Chunks are grouped by tokenizer
+length so a long chunk does not pad every other item, and the retained embedding
+matrix is assembled incrementally. ONNX Runtime's CPU memory arena is disabled
+by default (`EPHEMERAL_EMBEDDING_CPU_MEM_ARENA=0`) to limit memory retained by
+its allocator; set it to `1` to opt back in after measuring on the deployment
+host.
+
+Each capture has a 4 MiB semantic-input budget by default
+(`EPHEMERAL_SEMANTIC_MAX_INDEX_INPUT_BYTES`). It counts UTF-8 bytes across its
+semantic windows, including configured overlap. Above the budget, embedding
+inference is skipped and semantic coverage is `unavailable`; hybrid and
+semantic searches return BM25 results with
+`semantic_fallback: SemanticIndexBudgetExceeded`. The captured content remains
+available to BM25 and slice tools. This limits semantic inference work; it is
+not a hard process RSS cap. Buffer stats and runtime diagnostics report the
+effective limits and the number of over-budget captures.
+
+Use `benchmark_semantic_memory.py` to measure RSS before and after model load,
+semantic indexing, and capture cleanup on the deployment host.
+
 Lexical search uses SQLite FTS5 when the host SQLite library provides it. If
 FTS5 is unavailable, captures remain searchable through a complete token-based
 Python fallback with case- and diacritic-insensitive terms; this preserves
@@ -183,7 +205,8 @@ Hybrid search blocks on a capture's semantic index for at most
 BM25 results with `semantic_coverage` set to `pending` and a message telling
 the caller to repeat the search; indexing continues in the background, so the
 repeated search is fully hybrid. `complete` and `unavailable` (semantic backend
-failure, with `semantic_fallback`) are the other values. The tradeoff is that
+failure or an exceeded semantic-input budget, with `semantic_fallback`) are the
+other values. The tradeoff is that
 identical searches issued before and after indexing finishes can rank
 differently on a very large capture; the marker is the contract for that.
 Lower the budget on interactive hosts where a fast lexical answer beats a

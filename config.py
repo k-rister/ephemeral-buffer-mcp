@@ -14,6 +14,9 @@ DEFAULT_MAX_CAPTURES = 25
 DEFAULT_MAX_BUFFER_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_INDEXED_CHUNKS = 32768
 DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
+DEFAULT_EMBEDDING_BATCH_SIZE = 16
+DEFAULT_EMBEDDING_MAX_BATCH_TOKENS = 4096
+DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES = 4 * 1024 * 1024
 # The FastEmbed catalogue entry for bge-small-en-v1.5 downloads a reduced-precision
 # ONNX file whose matrix kernels do not parallelize on common CPU hosts.  The
 # engine registers the upstream fp32 export under an alias and uses it by
@@ -144,6 +147,34 @@ def embedding_threads() -> int | None:
     ``None`` leaves ONNX Runtime's own default in place.
     """
     return optional_positive_int_env("EPHEMERAL_EMBEDDING_THREADS")
+
+
+def embedding_batch_size() -> int:
+    """Return the maximum number of semantic chunks sent to one embed call."""
+    return positive_int_env("EPHEMERAL_EMBEDDING_BATCH_SIZE", DEFAULT_EMBEDDING_BATCH_SIZE)
+
+
+def embedding_max_batch_tokens() -> int:
+    """Return the maximum padded token slots allowed in one embedding batch."""
+    return positive_int_env(
+        "EPHEMERAL_EMBEDDING_MAX_BATCH_TOKENS",
+        DEFAULT_EMBEDDING_MAX_BATCH_TOKENS,
+    )
+
+
+def embedding_cpu_mem_arena_enabled() -> bool:
+    """Return whether ONNX Runtime's CPU memory arena is enabled for embeddings."""
+    return os.environ.get("EPHEMERAL_EMBEDDING_CPU_MEM_ARENA", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def semantic_max_index_input_bytes() -> int:
+    """Return the UTF-8 input-byte budget for one capture's semantic index."""
+    return positive_int_env(
+        "EPHEMERAL_SEMANTIC_MAX_INDEX_INPUT_BYTES",
+        DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES,
+    )
 
 
 def embedding_warmup_enabled() -> bool:
