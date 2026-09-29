@@ -409,6 +409,7 @@ class TestBoundedCommandCapture(unittest.TestCase):
         with patch.object(capture_utils, "_supervisor_process_identity", side_effect=[("start", "boot"), ("start", "boot")]), \
                 patch.object(capture_utils.os, "pidfd_open", return_value=9), \
                 patch.object(capture_utils.signal, "pidfd_send_signal", side_effect=OSError("send failed")), \
+                patch.object(capture_utils, "_supervisor_pidfd_terminated", return_value=False), \
                 patch.object(capture_utils.os, "close"):
             self.assertFalse(capture_utils._supervisor_signal_descendants({123}, signal.SIGTERM))
         with patch.object(capture_utils, "_supervisor_process_identity", side_effect=[("start", "boot"), ("start", "boot")]), \

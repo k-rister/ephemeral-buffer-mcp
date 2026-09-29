@@ -35,7 +35,7 @@ from benchmark_agent_ab import (
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_TIMEOUT = 900
-EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
+EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 
 
 def _load_manifest(path: Path) -> dict[str, dict[str, str]]:
