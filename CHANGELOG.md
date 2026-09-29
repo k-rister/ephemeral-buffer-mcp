@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Bound semantic-index memory work with token-length bucketed embedding batches,
+  incremental embedding-matrix assembly, a per-capture semantic-input budget,
+  and configurable ONNX CPU memory-arena use. Captures above the default 4 MiB
+  semantic-input budget retain BM25 and slice access while semantic and hybrid
+  search report unavailable semantic coverage and return lexical results.
+- Add `benchmark_semantic_memory.py` to report RSS across model loading,
+  semantic indexing, and capture cleanup.
+
 ## 0.6.1 - 2026-09-23
 
 - Add automatic private JSONL session logs to the agent launchers, with a

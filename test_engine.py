@@ -2153,11 +2153,19 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                 patch("engine.TextEmbedding", return_value=FakeEmbedding()) as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            engine = EphemeralEngine(max_captures=1, embedding_cache_path="/cache")
+            engine = EphemeralEngine(
+                max_captures=1,
+                embedding_cache_path="/cache",
+                embedding_cpu_mem_arena_enabled=False,
+            )
             loaded = engine._get_embedding_model()
 
         self.assertIsInstance(loaded, FakeEmbedding)
-        embedding.assert_called_once_with(model_name=engine.embedding_model_name, cache_dir="/cache")
+        embedding.assert_called_once_with(
+            model_name=engine.embedding_model_name,
+            cache_dir="/cache",
+            enable_cpu_mem_arena=False,
+        )
         self.assertIn("Loading embedding model", stderr.getvalue())
         self.assertIn("Embedding model ready", stderr.getvalue())
 
@@ -2364,7 +2372,81 @@ class TestEmbeddingStartup(unittest.TestCase):
         self.assertEqual(embedding.call_count, 1)
         self.assertEqual(embedding.call_args.kwargs["model_name"], explicit.embedding_model_name)
         self.assertEqual(embedding.call_args.kwargs["threads"], 2)
+        self.assertFalse(embedding.call_args.kwargs["enable_cpu_mem_arena"])
         embedding.add_custom_model.assert_not_called()
+
+    def test_semantic_embeddings_use_length_bounded_batches_and_restore_order(self):
+        token_lengths = {"a": 60, "b": 10, "c": 12, "d": 60}
+
+        class Tokenizer:
+            def encode(self, text):
+                return SimpleNamespace(ids=[0] * token_lengths[text])
+
+        class FakeEmbedding:
+            def __init__(self):
+                self.model = SimpleNamespace(tokenizer=Tokenizer())
+                self.calls = []
+
+            def embed(self, texts):
+                texts = list(texts)
+                self.calls.append(texts)
+                return [np.eye(384, dtype=np.float32)[ord(text) - ord("a")] for text in texts]
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=False,
+            embedding_batch_size=4,
+            embedding_max_batch_tokens=64,
+        )
+        embedding = FakeEmbedding()
+        engine.embedding_model = embedding
+        try:
+            capture = engine.ingest("a\nb\nc\nd", label="bounded-batches")
+            capture.semantic_chunks = [
+                Chunk(index, index + 1, index + 1, text)
+                for index, text in enumerate(("a", "b", "c", "d"))
+            ]
+
+            engine._ensure_embeddings(capture)
+
+            self.assertEqual(embedding.calls, [["b", "c"], ["a"], ["d"]])
+            for index, text in enumerate(("a", "b", "c", "d")):
+                self.assertEqual(capture.embeddings[index, ord(text) - ord("a")], 1.0)
+        finally:
+            engine.shutdown()
+
+    def test_semantic_input_budget_falls_back_to_bm25_and_is_cached(self):
+        class UnexpectedEmbedding:
+            def __init__(self):
+                self.calls = 0
+
+            def embed(self, _texts):
+                self.calls += 1
+                raise AssertionError("over-budget content must not reach embedding inference")
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_prefetch=True,
+            semantic_max_index_input_bytes=8,
+        )
+        embedding = UnexpectedEmbedding()
+        engine.embedding_model = embedding
+        try:
+            capture = engine.ingest("alpha\nbeta", label="semantic-budget")
+            hybrid = engine.search("alpha", mode="hybrid", capture_id=capture.capture_id)
+            self.assertEqual(hybrid["semantic_coverage"], "unavailable")
+            self.assertEqual(hybrid["semantic_fallback"], "SemanticIndexBudgetExceeded")
+            self.assertEqual(hybrid["matches"][0]["chunk_index"], "lexical")
+            self.assertEqual(capture.semantic_index_state, "budget-exceeded")
+            self.assertNotIn(capture.capture_id, engine._prefetch_queue)
+
+            semantic = engine.search("alpha", mode="semantic", capture_id=capture.capture_id)
+            self.assertEqual(semantic["semantic_fallback"], "SemanticIndexBudgetExceeded")
+            self.assertEqual(semantic["matches"][0]["chunk_index"], "lexical")
+            self.assertEqual(embedding.calls, 0)
+            self.assertEqual(engine.get_buffer_stats()["semantic_index_budget_exceeded"], 1)
+        finally:
+            engine.shutdown()
 
     def test_fp32_model_alias_is_registered_once_per_process(self):
         import engine as engine_module

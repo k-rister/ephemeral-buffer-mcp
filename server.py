@@ -1567,9 +1567,11 @@ def search_capture(
     """
     Searches the captured command output using BM25, Semantic embedding, or Hybrid (RRF) ranking.
     Semantic prefetch is on by default. Hybrid search waits at most the configured
-    semantic wait budget for a capture's index; on a very large capture it then
-    returns BM25 results with 'semantic pending' noted, and repeating the search
-    once indexing finishes returns hybrid ranking. Semantic mode waits for the index.
+    semantic wait budget for an active index job and may return BM25 results marked
+    pending while that job continues. Semantic indexing is bounded by a per-capture
+    input-byte budget and token-budgeted inference batches. Captures over the input
+    budget use immediate BM25 fallback for semantic and hybrid searches; semantic
+    mode waits for indexing unless the capture exceeds that budget.
     
     Args:
         query: Search keywords or natural language question (e.g. 'auth failure', 'ECONNREFUSED', 'why did the build fail?').
@@ -1771,7 +1773,11 @@ def get_buffer_stats() -> str:
         f"{cache_line}\n"
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"
         f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
-        f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed)\n"
+        f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed, "
+        f"{stats.get('semantic_index_budget_exceeded', 0)} over budget)\n"
+        f"Semantic memory limits: {stats['semantic_max_index_input_bytes']:,} input bytes/capture, "
+        f"batch {stats['embedding_batch_size']}, {stats['embedding_max_batch_tokens']:,} padded token slots, "
+        f"CPU arena {'enabled' if stats['embedding_cpu_mem_arena_enabled'] else 'disabled'}\n"
         f"Semantic wait budget: {stats.get('semantic_wait_seconds', 0.0):g}s "
         f"({stats.get('semantic_index_on_demand_running', 0)} on-demand index jobs running, "
         f"{stats.get('semantic_index_on_demand_queued', 0)} queued)\n"
@@ -1838,7 +1844,11 @@ def get_runtime_diagnostics() -> str:
         f"Embedding cache: {stats['embedding_cache_dir'] or 'default'}",
         f"Semantic index budget adjustment: {json.dumps(stats.get('last_index_budget_adjustment', {}), sort_keys=True)}",
         f"Semantic prefetch: {'enabled' if stats.get('semantic_prefetch_enabled', False) else 'disabled'} "
-        f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed)",
+        f"({stats.get('semantic_prefetch_pending', 0)} pending, {stats.get('semantic_prefetch_failed', 0)} failed, "
+        f"{stats.get('semantic_index_budget_exceeded', 0)} over budget)",
+        f"Semantic memory limits: {stats['semantic_max_index_input_bytes']:,} input bytes/capture, "
+        f"batch {stats['embedding_batch_size']}, {stats['embedding_max_batch_tokens']:,} padded token slots, "
+        f"CPU arena {'enabled' if stats['embedding_cpu_mem_arena_enabled'] else 'disabled'}",
         f"Process RSS: {'unavailable' if rss is None else f'{rss:,} bytes'}",
         f"Unaccounted RSS: {'unavailable' if unaccounted is None else f'{unaccounted:,} bytes'}",
         f"Local metrics: {'enabled' if METRICS.enabled else 'disabled'}",

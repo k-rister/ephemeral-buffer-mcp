@@ -302,6 +302,24 @@ when semantic initialization fails. `get_buffer_stats` and
 `get_runtime_diagnostics` report warm-up as `not-started`, `loading`, `ready`,
 `failed`, or `disabled`; failures expose only the exception class.
 
+Semantic indexing uses bounded inference by default: at most 16 chunks and
+4,096 padded token slots per model call. Chunks are grouped by tokenizer length,
+and the retained embedding matrix is assembled incrementally. Tune these with
+`EPHEMERAL_EMBEDDING_BATCH_SIZE` and
+`EPHEMERAL_EMBEDDING_MAX_BATCH_TOKENS`. ONNX Runtime's CPU memory arena is
+disabled by default; set `EPHEMERAL_EMBEDDING_CPU_MEM_ARENA=1` to enable it
+after measuring its retained memory on your host.
+
+Dense indexing also has a 4 MiB per-capture semantic-input budget, configurable
+with `EPHEMERAL_SEMANTIC_MAX_INDEX_INPUT_BYTES`. It counts UTF-8 bytes across
+semantic windows, including overlap. Above the limit, EB skips embedding
+inference for that capture and returns BM25 results for semantic and hybrid
+requests with `semantic_coverage: unavailable` and
+`semantic_fallback: SemanticIndexBudgetExceeded`. The capture remains fully
+available to lexical search and exact slices. These are inference-work bounds,
+not a process RSS limit; effective values and over-budget capture counts appear
+in buffer stats and runtime diagnostics.
+
 Lexical and semantic search index different chunk grids. BM25 keeps four-line
 sliding windows with two-line overlap so exact line ranges stay tight. Semantic
 embeddings use separate windows packed from consecutive lines, closed at eight
@@ -359,7 +377,8 @@ with `semantic_coverage` set to `pending` (the tool response says
 `semantic pending (lexical only)`), and indexing continues in the background
 so repeating the search returns full hybrid ranking. Every other hybrid
 response reports `semantic_coverage` as `complete`, or `unavailable` when the
-semantic backend failed and `semantic_fallback` names the exception class;
+semantic backend failed or the semantic-input budget was exceeded and
+`semantic_fallback` names the exception class;
 BM25 results and exact line ranges are identical either way. The default of
 `10` seconds kept a 2,048-line capture fully hybrid in the
 release-preparation Linux run (about 4.0 seconds to index), while 8,192- and
@@ -483,10 +502,10 @@ The agent has access to the following tools:
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded log/output file from disk and returns the same compact summary schema. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
-| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. |
+| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
-| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, semantic memory limits, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode and path, active log file and level, buffer limits, embedding readiness, and process memory. |
 | `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and scope- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
@@ -992,6 +1011,19 @@ the configured FastEmbed model; with deterministic test embeddings it only
 validates the harness. Prefetch and startup warm-up are disabled inside the
 harness so the lazy cost is visible. Results are host-specific diagnostic
 evidence, not a required CI gate.
+
+Measure process RSS for model loading and bounded semantic indexing with the
+memory harness:
+
+```bash
+.venv/bin/python benchmark_semantic_memory.py --threads 1
+```
+
+It reports the model-load and indexing sampled peaks, retained embedding bytes,
+and RSS after clearing the capture and collecting Python objects. The defaults
+reproduce a 256 KiB synthetic capture using the configured model. Run it on the
+deployment host with the same model, thread, arena, and batch settings; it is a
+diagnostic measurement, not a CI gate.
 
 For a release comparison, record the same workload under each model and compare
 the selected run with the versioned result tool:

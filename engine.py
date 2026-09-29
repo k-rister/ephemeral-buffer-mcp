@@ -31,6 +31,9 @@ from config import (
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
     embedding_cache_dir,
+    embedding_batch_size as configured_embedding_batch_size,
+    embedding_cpu_mem_arena_enabled as configured_embedding_cpu_mem_arena_enabled,
+    embedding_max_batch_tokens as configured_embedding_max_batch_tokens,
     embedding_model_name as configured_embedding_model_name,
     embedding_threads as configured_embedding_threads,
     embedding_warmup_enabled as configured_embedding_warmup_enabled,
@@ -41,6 +44,7 @@ from config import (
     semantic_chunk_lines as configured_semantic_chunk_lines,
     semantic_chunk_bytes as configured_semantic_chunk_bytes,
     semantic_chunk_overlap as configured_semantic_chunk_overlap,
+    semantic_max_index_input_bytes as configured_semantic_max_index_input_bytes,
 )
 
 
@@ -53,6 +57,11 @@ SEARCH_SNIPPET_MAX_BYTES = 8 * 1024
 SEARCH_SNIPPET_TRUNCATION_MARKER = "... [search line truncated; use get_capture_slice for full content] ..."
 SUMMARY_SCHEMA_VERSION = 1
 TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
+
+
+class SemanticIndexBudgetExceeded(RuntimeError):
+    """Raised when semantic indexing would exceed its configured work envelope."""
+
 MAX_STRUCTURED_METRICS_BYTES = 16 * 1024
 
 
@@ -627,6 +636,10 @@ class EphemeralEngine:
         embedding_cache_path: Optional[str] = None,
         embedding_warmup: Optional[bool] = None,
         embedding_threads: Optional[int] = None,
+        embedding_batch_size: Optional[int] = None,
+        embedding_max_batch_tokens: Optional[int] = None,
+        embedding_cpu_mem_arena_enabled: Optional[bool] = None,
+        semantic_max_index_input_bytes: Optional[int] = None,
         metrics: Optional[LocalMetrics] = None,
         semantic_prefetch: Optional[bool] = None,
         semantic_prefetch_workers: Optional[int] = None,
@@ -667,6 +680,32 @@ class EphemeralEngine:
         )
         if self.embedding_threads is not None and self.embedding_threads < 1:
             raise ValueError("embedding_threads must be at least 1")
+        self.embedding_batch_size = (
+            configured_embedding_batch_size()
+            if embedding_batch_size is None
+            else embedding_batch_size
+        )
+        if self.embedding_batch_size < 1:
+            raise ValueError("embedding_batch_size must be at least 1")
+        self.embedding_max_batch_tokens = (
+            configured_embedding_max_batch_tokens()
+            if embedding_max_batch_tokens is None
+            else embedding_max_batch_tokens
+        )
+        if self.embedding_max_batch_tokens < 1:
+            raise ValueError("embedding_max_batch_tokens must be at least 1")
+        self.embedding_cpu_mem_arena_enabled = (
+            configured_embedding_cpu_mem_arena_enabled()
+            if embedding_cpu_mem_arena_enabled is None
+            else embedding_cpu_mem_arena_enabled
+        )
+        self.semantic_max_index_input_bytes = (
+            configured_semantic_max_index_input_bytes()
+            if semantic_max_index_input_bytes is None
+            else semantic_max_index_input_bytes
+        )
+        if self.semantic_max_index_input_bytes < 1:
+            raise ValueError("semantic_max_index_input_bytes must be at least 1")
         self.semantic_chunk_lines = (
             configured_semantic_chunk_lines() if semantic_chunk_lines is None else semantic_chunk_lines
         )
@@ -847,6 +886,7 @@ class EphemeralEngine:
                 kwargs["cache_dir"] = self.embedding_cache_path
             if self.embedding_threads is not None:
                 kwargs["threads"] = self.embedding_threads
+            kwargs["enable_cpu_mem_arena"] = self.embedding_cpu_mem_arena_enabled
             if self.embedding_model_name == FP32_EMBEDDING_MODEL:
                 register_bundled_embedding_models()
             try:
@@ -1234,9 +1274,34 @@ class EphemeralEngine:
             measurement=metadata.get("measurement"),
         )
 
+    @staticmethod
+    def _semantic_input_byte_count(capture: Capture) -> int:
+        """Return the UTF-8 bytes the semantic windows would send to inference."""
+        return sum(
+            len(chunk.text.encode("utf-8", errors="replace"))
+            for chunk in capture.semantic_chunks
+        )
+
     def _schedule_semantic_prefetch(self, capture: Capture) -> None:
         """Queue post-ingestion indexing and make sure a bounded worker is draining."""
-        if not self.semantic_prefetch_enabled or not capture.semantic_chunks:
+        if not capture.semantic_chunks:
+            self._flush_metrics_snapshot()
+            return
+        if self._semantic_input_byte_count(capture) > self.semantic_max_index_input_bytes:
+            with self._lock:
+                if capture.embeddings is None:
+                    capture.semantic_index_state = "budget-exceeded"
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "semantic_index_budget_exceeded",
+                capture_id=capture.capture_id,
+                max_input_bytes=self.semantic_max_index_input_bytes,
+                max_batch_tokens=self.embedding_max_batch_tokens,
+            )
+            self._flush_metrics_snapshot()
+            return
+        if not self.semantic_prefetch_enabled:
             self._flush_metrics_snapshot()
             return
         try:
@@ -1305,6 +1370,16 @@ class EphemeralEngine:
                 metadata["started_at"] = time.perf_counter()
             try:
                 self._ensure_embeddings(capture)
+            except SemanticIndexBudgetExceeded:
+                capture.semantic_index_state = "budget-exceeded"
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "semantic_prefetch_budget_exceeded",
+                    capture_id=capture_id,
+                    max_input_bytes=self.semantic_max_index_input_bytes,
+                    max_batch_tokens=self.embedding_max_batch_tokens,
+                )
             except Exception:
                 capture.semantic_index_state = "failed"
                 log_event(LOGGER, logging.ERROR, "semantic_prefetch_failed", capture_id=capture_id)
@@ -1330,6 +1405,10 @@ class EphemeralEngine:
         """
         try:
             with self._lock:
+                if getattr(capture, "semantic_index_state", None) == "budget-exceeded":
+                    raise SemanticIndexBudgetExceeded(
+                        "Semantic indexing previously exceeded its configured work budget."
+                    )
                 if capture.embeddings is not None:
                     return None
                 running = self._prefetch_running.get(capture.capture_id)
@@ -1379,9 +1458,20 @@ class EphemeralEngine:
             self._ensure_embeddings(capture)
         except Exception as exc:
             job.error = exc
-            capture.semantic_index_state = "failed"
-            log_event(LOGGER, logging.ERROR, "semantic_index_failed", capture_id=capture.capture_id)
-            LOGGER.exception("semantic_index_exception")
+            if isinstance(exc, SemanticIndexBudgetExceeded):
+                capture.semantic_index_state = "budget-exceeded"
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "semantic_index_budget_exceeded",
+                    capture_id=capture.capture_id,
+                    max_input_bytes=self.semantic_max_index_input_bytes,
+                    max_batch_tokens=self.embedding_max_batch_tokens,
+                )
+            else:
+                capture.semantic_index_state = "failed"
+                log_event(LOGGER, logging.ERROR, "semantic_index_failed", capture_id=capture.capture_id)
+                LOGGER.exception("semantic_index_exception")
         finally:
             with self._lock:
                 disposition = self._semantic_job_dispositions.pop(capture.capture_id, None)
@@ -1643,11 +1733,59 @@ class EphemeralEngine:
         top_indices = np.argsort(similarities)[::-1][:top_k]
         return [(int(idx), float(similarities[idx])) for idx in top_indices if similarities[idx] > 0.0]
 
+    def _semantic_embedding_batches(self, model: Any, texts: List[str]) -> List[List[Tuple[int, str]]]:
+        """Group similar token lengths into batches within both configured limits."""
+        backend = getattr(model, "model", None)
+        tokenizer = getattr(backend, "tokenizer", None)
+        encode = getattr(tokenizer, "encode", None)
+        indexed_texts = []
+        for index, text in enumerate(texts):
+            if callable(encode):
+                encoded = encode(text)
+                token_ids = getattr(encoded, "ids", None)
+                token_length = len(token_ids) if token_ids is not None else 0
+            else:
+                # Test doubles and compatible non-FastEmbed adapters may not
+                # expose a tokenizer. UTF-8 bytes are a conservative proxy.
+                token_length = len(text.encode("utf-8", errors="replace"))
+            token_length = max(1, token_length)
+            if token_length > self.embedding_max_batch_tokens:
+                raise SemanticIndexBudgetExceeded(
+                    "A semantic chunk exceeds the configured padded-token batch limit."
+                )
+            indexed_texts.append((token_length, index, text))
+
+        indexed_texts.sort(key=lambda entry: (entry[0], entry[1]))
+        batches: List[List[Tuple[int, str]]] = []
+        batch: List[Tuple[int, str]] = []
+        batch_max_tokens = 0
+        for token_length, index, text in indexed_texts:
+            candidate_count = len(batch) + 1
+            candidate_max_tokens = max(batch_max_tokens, token_length)
+            if batch and (
+                candidate_count > self.embedding_batch_size
+                or candidate_count * candidate_max_tokens > self.embedding_max_batch_tokens
+            ):
+                batches.append(batch)
+                batch = []
+                batch_max_tokens = 0
+                candidate_count = 1
+                candidate_max_tokens = token_length
+            batch.append((index, text))
+            batch_max_tokens = candidate_max_tokens
+        if batch:
+            batches.append(batch)
+        return batches
+
     def _ensure_embeddings(self, capture: Capture) -> None:
         """Materialize and cache dense embeddings for a captured chunk set."""
         with self._lock:
             if capture.embeddings is not None:
                 return
+            if getattr(capture, "semantic_index_state", None) == "budget-exceeded":
+                raise SemanticIndexBudgetExceeded(
+                    "Semantic indexing previously exceeded its configured work budget."
+                )
             # A search reader may outlive LRU admission.  Its lease keeps the
             # capture's chunks and storage alive long enough to finish lazy
             # indexing even after the capture is removed from ``self.captures``.
@@ -1666,11 +1804,44 @@ class EphemeralEngine:
                     and not getattr(capture, "active_readers", 0)
                 ):
                     return
-            embed_list = list(self._get_embedding_model().embed(chunk_texts))
-            embeddings = np.array(embed_list, dtype=np.float32)
+                if getattr(capture, "semantic_index_state", None) == "budget-exceeded":
+                    raise SemanticIndexBudgetExceeded(
+                        "Semantic indexing previously exceeded its configured work budget."
+                    )
+            input_bytes = self._semantic_input_byte_count(capture)
+            if input_bytes > self.semantic_max_index_input_bytes:
+                with self._lock:
+                    capture.semantic_index_state = "budget-exceeded"
+                raise SemanticIndexBudgetExceeded(
+                    "Semantic indexing input exceeds the configured per-capture byte budget."
+                )
+
+            model = self._get_embedding_model()
+            batches = self._semantic_embedding_batches(model, chunk_texts)
+            embeddings: Optional[np.ndarray] = None
+            for batch in batches:
+                batch_embeddings = list(model.embed([text for _, text in batch]))
+                if len(batch_embeddings) != len(batch):
+                    raise RuntimeError("Embedding model returned an unexpected batch size.")
+                if embeddings is None:
+                    first_embedding = np.asarray(batch_embeddings[0], dtype=np.float32)
+                    if first_embedding.ndim != 1 or first_embedding.size == 0:
+                        raise RuntimeError("Embedding model returned an invalid vector shape.")
+                    embeddings = np.empty(
+                        (len(chunk_texts), first_embedding.size),
+                        dtype=np.float32,
+                    )
+                for (index, _), embedding in zip(batch, batch_embeddings):
+                    vector = np.asarray(embedding, dtype=np.float32)
+                    if vector.ndim != 1 or vector.size != embeddings.shape[1]:
+                        raise RuntimeError("Embedding model returned inconsistent vector dimensions.")
+                    embeddings[index] = vector
+                del batch_embeddings
+            if embeddings is None:
+                return
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
-            normalized = embeddings / norms
+            np.divide(embeddings, norms, out=embeddings)
             with self._lock:
                 if (
                     (
@@ -1679,7 +1850,7 @@ class EphemeralEngine:
                     )
                     and capture.embeddings is None
                 ):
-                    capture.embeddings = normalized
+                    capture.embeddings = embeddings
                     capture.semantic_index_state = "ready"
 
     def search(
@@ -1769,6 +1940,19 @@ class EphemeralEngine:
                         line_count=capture.line_count,
                         wait_seconds=self.semantic_wait_seconds,
                     )
+            except SemanticIndexBudgetExceeded as exc:
+                semantic_fallback = type(exc).__name__
+                semantic_coverage = "unavailable"
+                self.metrics.record_semantic_search("semantic_fallbacks")
+                if mode == "semantic":
+                    bm25_results = self.search_bm25(capture, query, top_k=top_k * 3)
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "semantic_search_budget_fallback",
+                    capture_id=capture.capture_id,
+                    error_type=semantic_fallback,
+                )
             except Exception as exc:
                 if mode == "semantic":
                     raise
@@ -1803,8 +1987,12 @@ class EphemeralEngine:
             for cid, score in bm25_results:
                 add_candidate("lexical", capture.chunks[cid], score)
         elif mode == "semantic":
-            for sid, score in semantic_results:
-                add_candidate("semantic", capture.semantic_chunks[sid], score)
+            if semantic_fallback:
+                for cid, score in bm25_results:
+                    add_candidate("lexical", capture.chunks[cid], score)
+            else:
+                for sid, score in semantic_results:
+                    add_candidate("semantic", capture.semantic_chunks[sid], score)
         else:  # hybrid
             for rank, (cid, _) in enumerate(bm25_results):
                 add_candidate("lexical", capture.chunks[cid], HYBRID_LEXICAL_WEIGHT / (k_const + rank + 1))
@@ -1889,6 +2077,8 @@ class EphemeralEngine:
         }
         if semantic_fallback:
             result["semantic_fallback"] = semantic_fallback
+            if mode == "semantic":
+                result["message"] = "Semantic indexing exceeded its work budget; returning BM25 results."
         if semantic_coverage == "pending":
             result["semantic_index_state"] = capture.semantic_index_state
             result["semantic_wait_seconds"] = self.semantic_wait_seconds
@@ -2197,6 +2387,10 @@ class EphemeralEngine:
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
             "embedding_threads": self.embedding_threads,
+            "embedding_batch_size": self.embedding_batch_size,
+            "embedding_max_batch_tokens": self.embedding_max_batch_tokens,
+            "embedding_cpu_mem_arena_enabled": self.embedding_cpu_mem_arena_enabled,
+            "semantic_max_index_input_bytes": self.semantic_max_index_input_bytes,
             "embedding_warmup_enabled": self.embedding_warmup_enabled,
             "embedding_warmup_state": self.embedding_warmup_state,
             "embedding_warmup_failure": self.embedding_warmup_failure,
@@ -2219,6 +2413,11 @@ class EphemeralEngine:
             "semantic_wait_seconds": self.semantic_wait_seconds,
             "semantic_prefetch_failed": sum(
                 1 for cap in self.captures.values() if cap.semantic_index_state == "failed"
+            ),
+            "semantic_index_budget_exceeded": sum(
+                1
+                for cap in self.captures.values()
+                if cap.semantic_index_state == "budget-exceeded"
             ),
             "accounted_bytes": accounted_bytes,
             "process_rss_bytes": rss_bytes,

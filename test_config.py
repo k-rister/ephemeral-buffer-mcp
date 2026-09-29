@@ -15,7 +15,10 @@ from config import (
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     DEFAULT_SEMANTIC_WAIT_SECONDS,
     cleanup_default_execution_state_dir,
+    embedding_batch_size,
     embedding_cache_dir,
+    embedding_cpu_mem_arena_enabled,
+    embedding_max_batch_tokens,
     embedding_model_name,
     embedding_threads,
     embedding_warmup_enabled,
@@ -35,6 +38,7 @@ from config import (
     semantic_chunk_bytes,
     semantic_chunk_lines,
     semantic_chunk_overlap,
+    semantic_max_index_input_bytes,
 )
 
 
@@ -192,6 +196,30 @@ class TestPositiveIntEnv(unittest.TestCase):
                 with redirect_stderr(stderr):
                     self.assertIsNone(optional_positive_int_env("EPHEMERAL_EMBEDDING_THREADS"))
                 self.assertIn("Ignoring invalid EPHEMERAL_EMBEDDING_THREADS", stderr.getvalue())
+
+    def test_embedding_memory_settings_defaults_and_overrides(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(embedding_batch_size(), config.DEFAULT_EMBEDDING_BATCH_SIZE)
+            self.assertEqual(embedding_max_batch_tokens(), config.DEFAULT_EMBEDDING_MAX_BATCH_TOKENS)
+            self.assertFalse(embedding_cpu_mem_arena_enabled())
+            self.assertEqual(
+                semantic_max_index_input_bytes(),
+                config.DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES,
+            )
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_EMBEDDING_BATCH_SIZE": "8",
+                "EPHEMERAL_EMBEDDING_MAX_BATCH_TOKENS": "2048",
+                "EPHEMERAL_EMBEDDING_CPU_MEM_ARENA": "yes",
+                "EPHEMERAL_SEMANTIC_MAX_INDEX_INPUT_BYTES": "1024",
+            },
+            clear=True,
+        ):
+            self.assertEqual(embedding_batch_size(), 8)
+            self.assertEqual(embedding_max_batch_tokens(), 2048)
+            self.assertTrue(embedding_cpu_mem_arena_enabled())
+            self.assertEqual(semantic_max_index_input_bytes(), 1024)
 
     def test_embedding_settings_can_be_overridden(self):
         with patch.dict(
