@@ -1538,6 +1538,10 @@ class TestServerTools(unittest.TestCase):
                 "max_buffer_bytes": 50, "total_lines": 0, "total_chunks": 0,
                 "embedding_model": "model", "embedding_model_loaded": False,
                 "embedding_cache_dir": None, "embedding_bytes": 0,
+                "semantic_max_index_input_bytes": 4 * 1024 * 1024,
+                "embedding_batch_size": 16,
+                "embedding_max_batch_tokens": 4096,
+                "embedding_cpu_mem_arena_enabled": False,
                 "accounted_bytes": 0, "process_rss_bytes": None,
                 "unaccounted_rss_bytes": None,
             },
@@ -1545,6 +1549,8 @@ class TestServerTools(unittest.TestCase):
             result = server.get_buffer_stats()
         self.assertIn("Process RSS: unavailable", result)
         self.assertIn("Unaccounted RSS bytes: unavailable", result)
+        self.assertIn("Semantic memory limits: 4,194,304 input bytes/capture", result)
+        self.assertIn("batch 16, 4,096 padded token slots, CPU arena disabled", result)
 
 
 class TestServerSocket(unittest.IsolatedAsyncioTestCase):
