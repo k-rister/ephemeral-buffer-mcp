@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-$PROJECT_DIR/.venv/bin/python}"
-MODEL="${AGENT_AB_MODEL:-gpt-5.6-luna}"
-REPETITIONS="${AGENT_AB_REPETITIONS:-5}"
-SEED="${AGENT_AB_SEED:-20260909}"
-TIMEOUT_SECONDS="${AGENT_AB_TIMEOUT_SECONDS:-900}"
-FIXTURE_PROFILE="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
-TEST_EMBEDDINGS="${AGENT_AB_TEST_EMBEDDINGS:-1}"
-RUN_DIR="${AGENT_AB_RUN_DIR:-/tmp/agent-ab-run-$(date +%Y%m%d-%H%M%S)}"
-EXPERIMENT="${AGENT_AB_EXPERIMENT:-}"
-VARIANT="${AGENT_AB_VARIANT:-}"
-STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python_bin="${PYTHON_BIN:-$project_dir/.venv/bin/python}"
+model="${AGENT_AB_MODEL:-gpt-5.6-luna}"
+repetitions="${AGENT_AB_REPETITIONS:-5}"
+seed="${AGENT_AB_SEED:-20260909}"
+timeout_seconds="${AGENT_AB_TIMEOUT_SECONDS:-900}"
+fixture_profile="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
+test_embeddings="${AGENT_AB_TEST_EMBEDDINGS:-1}"
+run_dir="${AGENT_AB_RUN_DIR:-/tmp/agent-ab-run-$(date +%Y%m%d-%H%M%S)}"
+experiment="${AGENT_AB_EXPERIMENT:-}"
+variant="${AGENT_AB_VARIANT:-}"
+started_at="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 if [[ -z "${CODEX_HOME:-}" ]]; then
     echo "CODEX_HOME must point to a writable, authenticated Codex home" >&2
@@ -22,79 +23,79 @@ if [[ ! -d "$CODEX_HOME" || ! -w "$CODEX_HOME" ]]; then
     echo "CODEX_HOME is missing or not writable: $CODEX_HOME" >&2
     exit 2
 fi
-if [[ ! -x "$PYTHON_BIN" ]]; then
-    echo "Python executable not found: $PYTHON_BIN" >&2
+if [[ ! -x "$python_bin" ]]; then
+    echo "Python executable not found: $python_bin" >&2
     exit 2
 fi
 if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI is not on PATH" >&2
     exit 2
 fi
-if [[ "$TEST_EMBEDDINGS" != "0" && "$TEST_EMBEDDINGS" != "1" ]]; then
+if [[ "$test_embeddings" != "0" && "$test_embeddings" != "1" ]]; then
     echo "AGENT_AB_TEST_EMBEDDINGS must be 0 or 1" >&2
     exit 2
 fi
 
 CODEX_HOME="$CODEX_HOME" codex login status >/dev/null
-mkdir -p "$RUN_DIR"
+mkdir -p "$run_dir"
 
 # Experiment group and metadata recorded in both workload result documents so
 # list_workload_results.py and compare_workload_results.py can organise runs.
-EXPERIMENT_ARGS=(
-    --metadata "model=$MODEL"
-    --metadata "task_type=$FIXTURE_PROFILE"
-    --metadata "workload_size=$REPETITIONS"
-    --metadata "environment=$([[ "$TEST_EMBEDDINGS" == "1" ]] && echo test-embeddings || echo fastembed)"
-    --metadata "started_at=$STARTED_AT"
+experiment_args=(
+    --metadata "model=$model"
+    --metadata "task_type=$fixture_profile"
+    --metadata "workload_size=$repetitions"
+    --metadata "environment=$([[ "$test_embeddings" == "1" ]] && echo test-embeddings || echo fastembed)"
+    --metadata "started_at=$started_at"
 )
-if [[ -n "$EXPERIMENT" ]]; then
-    EXPERIMENT_ARGS+=(--experiment "$EXPERIMENT")
+if [[ -n "$experiment" ]]; then
+    experiment_args+=(--experiment "$experiment")
 fi
-if [[ -n "$VARIANT" ]]; then
-    EXPERIMENT_ARGS+=(--metadata "variant=$VARIANT")
+if [[ -n "$variant" ]]; then
+    experiment_args+=(--metadata "variant=$variant")
 fi
 
-if [[ "$FIXTURE_PROFILE" == "repository-shaped-v1" ]]; then
-    "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab_repository_fixture.py" \
-        --fixture-output "$RUN_DIR/fixture" \
-        --manifest-output "$RUN_DIR/tasks.json"
+if [[ "$fixture_profile" == "repository-shaped-v1" ]]; then
+    "$python_bin" "$project_dir/benchmark_agent_ab_repository_fixture.py" \
+        --fixture-output "$run_dir/fixture" \
+        --manifest-output "$run_dir/tasks.json"
 else
-    "$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab_fixtures.py" \
-        --fixture-output "$RUN_DIR/fixture" \
-        --manifest-output "$RUN_DIR/tasks.json"
+    "$python_bin" "$project_dir/benchmark_agent_ab_fixtures.py" \
+        --fixture-output "$run_dir/fixture" \
+        --manifest-output "$run_dir/tasks.json"
 fi
 
-"$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab.py" \
-    --schedule-output "$RUN_DIR/schedule.json" \
-    --repetitions "$REPETITIONS" \
-    --seed "$SEED"
+"$python_bin" "$project_dir/benchmark_agent_ab.py" \
+    --schedule-output "$run_dir/schedule.json" \
+    --repetitions "$repetitions" \
+    --seed "$seed"
 
-EPHEMERAL_TEST_EMBEDDINGS="$TEST_EMBEDDINGS" CODEX_HOME="$CODEX_HOME" \
-"$PYTHON_BIN" "$PROJECT_DIR/run_codex_agent_ab.py" \
-    --schedule "$RUN_DIR/schedule.json" \
-    --tasks "$RUN_DIR/tasks.json" \
-    --repository "$RUN_DIR/fixture" \
-    --repository-fixture "$FIXTURE_PROFILE" \
-    --model "$MODEL" \
-    --mcp-server-script "$PROJECT_DIR/server.py" \
-    --mcp-python "$PYTHON_BIN" \
+EPHEMERAL_TEST_EMBEDDINGS="$test_embeddings" CODEX_HOME="$CODEX_HOME" \
+"$python_bin" "$project_dir/run_codex_agent_ab.py" \
+    --schedule "$run_dir/schedule.json" \
+    --tasks "$run_dir/tasks.json" \
+    --repository "$run_dir/fixture" \
+    --repository-fixture "$fixture_profile" \
+    --model "$model" \
+    --mcp-server-script "$project_dir/server.py" \
+    --mcp-python "$python_bin" \
     --allow-mcp-approvals \
     --require-mcp-calls \
     --sandbox read-only \
-    --timeout "$TIMEOUT_SECONDS" \
-    --diagnostic-log-dir "$RUN_DIR/lifecycle" \
-    --output "$RUN_DIR/records.json" \
-    --result "$RUN_DIR/records.result.json" \
-    "${EXPERIMENT_ARGS[@]}"
+    --timeout "$timeout_seconds" \
+    --diagnostic-log-dir "$run_dir/lifecycle" \
+    --output "$run_dir/records.json" \
+    --result "$run_dir/records.result.json" \
+    "${experiment_args[@]}"
 
-"$PYTHON_BIN" "$PROJECT_DIR/benchmark_agent_ab.py" \
-    --records "$RUN_DIR/records.json" \
-    --output "$RUN_DIR/summary.json" \
-    --result "$RUN_DIR/summary.result.json" \
-    "${EXPERIMENT_ARGS[@]}"
+"$python_bin" "$project_dir/benchmark_agent_ab.py" \
+    --records "$run_dir/records.json" \
+    --output "$run_dir/summary.json" \
+    --result "$run_dir/summary.result.json" \
+    "${experiment_args[@]}"
 
 echo "Run complete:"
-echo "  records: $RUN_DIR/records.json"
-echo "  summary: $RUN_DIR/summary.json"
-echo "  workload results: $RUN_DIR/records.result.json $RUN_DIR/summary.result.json"
-echo "  lifecycle: $RUN_DIR/lifecycle/"
+echo "  records: $run_dir/records.json"
+echo "  summary: $run_dir/summary.json"
+echo "  workload results: $run_dir/records.result.json $run_dir/summary.result.json"
+echo "  lifecycle: $run_dir/lifecycle/"

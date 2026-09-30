@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 
 # Source this file before starting an agent and its shell tools. The same
 # environment is inherited by the MCP server and the ephbuf CLI.
