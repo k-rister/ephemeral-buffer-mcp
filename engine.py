@@ -1967,11 +1967,10 @@ class EphemeralEngine:
                 )
 
         # Lexical and semantic hits come from different chunk grids, so fusion
-        # happens in line space: each lexical window belongs to the semantic
-        # window that contains its first line, a semantic hit boosts the lexical
-        # hits that belong to it, and it stands on its own only when none do.
-        # Exact BM25 line ranges are therefore preserved, and a lexical window
-        # straddling two semantic windows cannot collect both boosts.
+        # happens in line space: a semantic hit boosts lexical windows whose
+        # first line it contains. With overlapping semantic windows, the first
+        # ranked matching window owns each lexical boost. A semantic hit stands
+        # on its own only when no lexical windows belong to it.
         k_const = 60.0
         candidates: Dict[Tuple[str, int], Dict[str, Any]] = {}
 
@@ -1996,6 +1995,7 @@ class EphemeralEngine:
         else:  # hybrid
             for rank, (cid, _) in enumerate(bm25_results):
                 add_candidate("lexical", capture.chunks[cid], HYBRID_LEXICAL_WEIGHT / (k_const + rank + 1))
+            boosted_lexical_ids: set[int] = set()
             for rank, (sid, _) in enumerate(semantic_results):
                 semantic_chunk = capture.semantic_chunks[sid]
                 contribution = 1.0 / (k_const + rank + 1)
@@ -2006,7 +2006,10 @@ class EphemeralEngine:
                 ]
                 if members:
                     for entry in members:
-                        entry["score"] += contribution
+                        chunk_id = entry["chunk"].chunk_id
+                        if chunk_id not in boosted_lexical_ids:
+                            entry["score"] += contribution
+                            boosted_lexical_ids.add(chunk_id)
                 else:
                     add_candidate("semantic", semantic_chunk, contribution)
 
