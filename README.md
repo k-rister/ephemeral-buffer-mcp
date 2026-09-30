@@ -1012,6 +1012,22 @@ validates the harness. Prefetch and startup warm-up are disabled inside the
 harness so the lazy cost is visible. Results are host-specific diagnostic
 evidence, not a required CI gate.
 
+A five-sample release comparison on Linux with Python 3.12.12, the
+`BAAI/bge-small-en-v1.5-fp32` model, one embedding thread, hybrid mode, an
+unbounded semantic wait, and the CPU memory arena disabled measured:
+
+| Release | Median semantic indexing | Throughput | Process peak RSS |
+| --- | ---: | ---: | ---: |
+| 0.6.1 | 154.03 s | 6.65 chunks/s | 4,320,944 KiB |
+| 0.6.2 | 108.34 s | 9.45 chunks/s | 508,476 KiB |
+
+Needle MRR and hit-at-1 were 1.00 for both releases, and subsequent search
+remained about 12.85 ms. Peak RSS came from `/usr/bin/time -v` over the whole
+five-sample benchmark process. The 8,192-line fixture was 566,736 bytes, below
+the default 4 MiB semantic-input budget, so this comparison measures normal
+indexing rather than the over-budget fallback. Treat these results as
+single-host diagnostic evidence, not a general performance guarantee.
+
 Measure process RSS for model loading and bounded semantic indexing with the
 memory harness:
 
