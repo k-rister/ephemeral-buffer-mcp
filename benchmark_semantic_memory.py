@@ -13,12 +13,14 @@ import time
 from typing import Any, Callable
 
 from config import DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES
-from engine import EphemeralEngine, process_rss_bytes
+from engine import EphemeralEngine, SemanticIndexBudgetExceeded, process_rss_bytes
 
 
 DEFAULT_LINE_COUNT = 4096
 DEFAULT_LINE_BYTES = 63
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 0.005
+BUDGET_SENTINEL_TEXT = "budget sentinel target"
+BUDGET_SENTINEL_QUERY = BUDGET_SENTINEL_TEXT
 
 
 def synthetic_capture(line_count: int, line_bytes: int) -> str:
@@ -26,8 +28,20 @@ def synthetic_capture(line_count: int, line_bytes: int) -> str:
     lines = []
     for index in range(line_count):
         body = f"line={index:05d} command=build status=success file=src/module_{index % 97:02d}.py"
-        lines.append((body[:line_bytes]).ljust(line_bytes, "x"))
+        is_sentinel = index == line_count // 2 and line_bytes >= len(BUDGET_SENTINEL_TEXT)
+        if is_sentinel:
+            body = BUDGET_SENTINEL_TEXT
+        lines.append((body[:line_bytes]).ljust(line_bytes, " " if is_sentinel else "x"))
     return "\n".join(lines) + "\n"
+
+
+def matched_target_rank(search_result: dict[str, Any], target_line: int) -> int | None:
+    """Return the one-based rank of the result range containing a target line."""
+    for rank, match in enumerate(search_result.get("matches", []), start=1):
+        start, end = match["matched_range"].split("-")
+        if int(start[1:]) <= target_line <= int(end[1:]):
+            return rank
+    return None
 
 
 def measure_rss_stage(
@@ -111,8 +125,15 @@ def main() -> int:
         )
         bytes_after_model = process_rss_bytes()
         bytes_before_index = process_rss_bytes()
-        _, index_seconds, index_peak = measure_rss_stage(
-            lambda: engine._ensure_embeddings(capture),
+        def ensure_embeddings() -> str:
+            try:
+                engine._ensure_embeddings(capture)
+            except SemanticIndexBudgetExceeded:
+                return "budget_exceeded"
+            return "ready"
+
+        index_status, index_seconds, index_peak = measure_rss_stage(
+            ensure_embeddings,
             args.sample_interval,
         )
         bytes_after_index = process_rss_bytes()
@@ -122,6 +143,43 @@ def main() -> int:
             len(chunk.text.encode("utf-8", errors="replace"))
             for chunk in capture.semantic_chunks
         )
+        if index_status == "budget_exceeded":
+            target_line = args.line_count // 2 + 1
+            if args.line_bytes < len(BUDGET_SENTINEL_TEXT):
+                fallback_validation = {
+                    "status": "skipped",
+                    "reason": "line-bytes is too small for the fallback sentinel",
+                }
+            else:
+                searches = {}
+                for mode in ("hybrid", "semantic"):
+                    started_at = time.perf_counter()
+                    search_result = engine.search(
+                        BUDGET_SENTINEL_QUERY,
+                        mode=mode,
+                        top_k=5,
+                    )
+                    searches[mode] = {
+                        "seconds": time.perf_counter() - started_at,
+                        "semantic_coverage": search_result.get("semantic_coverage"),
+                        "semantic_fallback": search_result.get("semantic_fallback"),
+                        "target_rank": matched_target_rank(search_result, target_line),
+                    }
+                checks_passed = all(
+                    search["semantic_coverage"] == "unavailable"
+                    and search["semantic_fallback"] == "SemanticIndexBudgetExceeded"
+                    and search["target_rank"] is not None
+                    for search in searches.values()
+                )
+                fallback_validation = {
+                    "status": "passed" if checks_passed else "failed",
+                    "query": BUDGET_SENTINEL_QUERY,
+                    "target_line": target_line,
+                    "searches": searches,
+                }
+        else:
+            fallback_validation = {"status": "not_needed"}
+
         capture_id = capture.capture_id
         engine.clear(capture_id)
         del capture
@@ -158,6 +216,8 @@ def main() -> int:
                 "model_load": model_load_seconds,
                 "semantic_index": index_seconds,
             },
+            "semantic_index_status": index_status,
+            "budget_fallback_validation": fallback_validation,
             "rss_bytes": {
                 "before_model_load": bytes_before_model,
                 "model_load_sampled_peak": model_load_peak,

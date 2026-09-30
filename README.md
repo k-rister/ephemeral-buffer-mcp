@@ -1028,6 +1028,18 @@ the default 4 MiB semantic-input budget, so this comparison measures normal
 indexing rather than the over-budget fallback. Treat these results as
 single-host diagnostic evidence, not a general performance guarantee.
 
+A separate three-run boundary probe with deterministic test embeddings checked
+the fallback behavior:
+
+| Fixture | 0.6.1 | 0.6.2 |
+| --- | --- | --- |
+| 56,000 lines; 3,914,474 semantic-input bytes | Complete coverage; 10,752,000 embedding bytes; target rank 1 in both modes | Same |
+| 64,000 lines; 4,474,505 semantic-input bytes | Complete coverage; 12,288,000 embedding bytes; hybrid rank 1, semantic rank 2 | Budget fallback; zero embedding bytes; BM25 target rank 1 in both modes |
+
+This is a deterministic behavior comparison, not a real-model latency or RSS
+comparison. A separate real-model 0.6.2 memory run above the limit also reported
+zero retained embeddings and passed both BM25 fallback searches.
+
 Measure process RSS for model loading and bounded semantic indexing with the
 memory harness:
 
@@ -1035,11 +1047,13 @@ memory harness:
 .venv/bin/python benchmark_semantic_memory.py --threads 1
 ```
 
-It reports the model-load and indexing sampled peaks, retained embedding bytes,
-and RSS after clearing the capture and collecting Python objects. The defaults
-reproduce a 256 KiB synthetic capture using the configured model. Run it on the
-deployment host with the same model, thread, arena, and batch settings; it is a
-diagnostic measurement, not a CI gate.
+It reports the model-load and indexing sampled peaks, whether semantic indexing
+completed or exceeded its work budget, retained embedding bytes, and RSS after
+clearing the capture and collecting Python objects. When the budget is exceeded,
+it also checks that semantic and hybrid searches report the fallback and retrieve
+a fixed BM25 sentinel. The defaults reproduce a 256 KiB synthetic capture using
+the configured model. Run it on the deployment host with the same model, thread,
+arena, and batch settings; it is a diagnostic measurement, not a CI gate.
 
 For a release comparison, record the same workload under each model and compare
 the selected run with the versioned result tool:
