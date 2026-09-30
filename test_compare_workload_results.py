@@ -709,6 +709,17 @@ class TestMain(ResultFiles):
             self.assertEqual((code, stdout), (cw.EXIT_INVALID, ""), tolerance)
             self.assertEqual(stderr, f"error: tolerance must be a finite percentage, not {tolerance}\n")
 
+    def test_check_rejects_filters_with_empty_selections(self):
+        path = self.write("ab.json", agent_result())
+        filters = (
+            (("--select", "mode=missing"), "label filters selected no runs"),
+            (("--metric", "missing_metric"), "requested metrics selected no measurements"),
+        )
+        for arguments, reason in filters:
+            code, _, stderr = self.run_main(path, path, *arguments, "--check")
+            self.assertEqual(code, cw.EXIT_CHECK_FAILED, arguments)
+            self.assertEqual(stderr, f"check failed: {reason}\n")
+
     def test_module_runs_as_a_script(self):
         path = self.write("a.json", latency_result())
         with patch("sys.argv", ["compare_workload_results.py", path, path]), patch("sys.stdout", new_callable=io.StringIO) as stdout, self.assertRaises(SystemExit) as raised:
