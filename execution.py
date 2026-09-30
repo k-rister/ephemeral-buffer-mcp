@@ -422,11 +422,20 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
         # Legacy records have no pinned supervisor.  Never signal a numeric
         # group whose membership can have changed since the checkpoint.
         return _process_group_is_absent(process_group_id)
-    return _terminate_pidfd(
+    terminated = _terminate_pidfd(
         process_id,
         expected_identity=(expected_start, expected_boot),
         expected_group=process_group_id,
     )
+    if not terminated:
+        return False
+    if isinstance(marker, str) and marker:
+        # A prompt supervisor exit does not prove that its detached descendants
+        # are gone.  Recover the durable marker tree before releasing the fence.
+        return _terminate_marker_processes_or_confirm_group_absent(
+            marker, process_group_id
+        )
+    return True
 
 
 class ExecutionStore:
