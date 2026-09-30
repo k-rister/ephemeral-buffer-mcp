@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import platform
 from pathlib import Path
@@ -17,6 +18,21 @@ FIXTURE_VERSION = 1
 MODES = ("bm25", "semantic", "hybrid")
 METRICS = ("hit_at_1", "hit_at_k", "mrr")
 DEFAULT_TOLERANCES = {metric: 0.05 for metric in METRICS}
+
+
+def _validate_tolerances(tolerances: dict[str, Any]) -> None:
+    """Reject unknown, negative, or non-finite relevance tolerances."""
+    for metric, value in tolerances.items():
+        if metric not in METRICS:
+            raise ValueError(f"relevance baseline has unknown tolerance metric {metric!r}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"relevance baseline tolerance {metric} must be finite and nonnegative")
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError):
+            numeric = math.inf
+        if not math.isfinite(numeric) or numeric < 0:
+            raise ValueError(f"relevance baseline tolerance {metric} must be finite and nonnegative")
 
 
 def relevance_cases() -> list[dict[str, Any]]:
@@ -161,6 +177,7 @@ def load_baseline(path: Path) -> dict[str, Any]:
         raise ValueError("relevance baseline benchmark name is invalid")
     if not isinstance(baseline.get("tolerances"), dict):
         raise ValueError("relevance baseline tolerances are missing")
+    _validate_tolerances(baseline["tolerances"])
     if not isinstance(baseline.get("summaries"), dict):
         raise ValueError("relevance baseline summaries are missing")
     for mode in MODES:
@@ -186,7 +203,11 @@ def compare_relevance(result: dict[str, Any], baseline: dict[str, Any]) -> dict[
             f"embedding_mode changed from {baseline.get('embedding_mode')} to {result.get('embedding_mode')}"
         )
 
-    tolerances = {**DEFAULT_TOLERANCES, **baseline.get("tolerances", {})}
+    baseline_tolerances = baseline.get("tolerances", {})
+    if not isinstance(baseline_tolerances, dict):
+        raise ValueError("relevance baseline tolerances are missing")
+    tolerances = {**DEFAULT_TOLERANCES, **baseline_tolerances}
+    _validate_tolerances(tolerances)
     for mode in MODES:
         current_summary = result["summaries"][mode]
         baseline_summary = baseline["summaries"][mode]

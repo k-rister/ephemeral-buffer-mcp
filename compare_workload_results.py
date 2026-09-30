@@ -608,7 +608,20 @@ def check_passes(comparison: dict[str, Any]) -> bool:
     A document narrowed with ``PATH#RUN_ID`` or a label filter is judged by
     its selected runs, so failures elsewhere in the file do not fail the check.
     """
+    if check_selection_failure(comparison):
+        return False
     return comparison["summary"]["regressions"] == 0 and comparison["summary"]["all_succeeded"]
+
+
+def check_selection_failure(comparison: dict[str, Any]) -> str | None:
+    """Explain when CLI filters leave a regression check with nothing to check."""
+    options = comparison.get("options", {})
+    comparisons = comparison.get("comparisons", [])
+    if options.get("label_filters") and not any(item["runs"] for item in comparisons):
+        return "label filters selected no runs"
+    if options.get("metrics") is not None and not any(item["entries"] for item in comparisons):
+        return "requested metrics selected no measurements"
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -751,7 +764,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--check", action="store_true",
         help=(
             f"Exit with status {EXIT_CHECK_FAILED} when any metric regressed or any document (its selected runs, "
-            "when narrowed with PATH#RUN_ID or --select) has a non-success status"
+            "when narrowed with PATH#RUN_ID or --select) has a non-success status; fail if --select or --metric "
+            "filters leave nothing to check"
         ),
     )
     return parser
@@ -789,6 +803,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(format_report(comparison))
     sys.stdout.flush()
     if args.check and not check_passes(comparison):
+        selection_failure = check_selection_failure(comparison)
+        if selection_failure:
+            print(f"check failed: {selection_failure}", file=sys.stderr)
+            return EXIT_CHECK_FAILED
         summary = comparison["summary"]
         print(
             f"check failed: {summary['regressions']} regressed metric(s), "

@@ -569,9 +569,10 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
 ```
 
 The baseline is compact and versioned: it stores aggregate scores, query
-counts, fixture/schema versions, embedding mode, and per-metric tolerances. A
-baseline update is a deliberate repository change and should explain the
-fixture or intended-behavior change in review. Never add captures, raw command
+counts, fixture/schema versions, embedding mode, and per-metric tolerances.
+Tolerances must be finite and nonnegative. A baseline update is a deliberate
+repository change and should explain the fixture or intended-behavior change in
+review. Never add captures, raw command
 output, or user queries to the baseline. CI retains relevance, latency, and
 effectiveness JSON outputs as machine-readable artifacts; timing artifacts are
 diagnostic and are not exact cross-run gates.
@@ -666,7 +667,8 @@ agent A/B summary:
 Compare later summaries with `--baseline` and `--fail-on-regression`. The
 baseline compares completion and retrieval as primary gated outcomes, latency
 and context/token metrics with tolerances, and MCP/tool usage as reported
-observations. Missing provider telemetry is unavailable rather than zero.
+observations. Tolerances must be finite and nonnegative. Missing provider
+telemetry is unavailable rather than zero.
 Do not make live Codex calls part of required pull-request CI; run this manual
 workflow or an explicitly scheduled experiment after privacy review.
 
@@ -799,7 +801,9 @@ path:
 the tolerance or when either document has a non-success `status` (a document
 narrowed with `PATH#RUN_ID` or `--select` is judged by its selected runs, so a
 failure elsewhere in the file does not fail the check); invalid or
-incomparable input exits with status 1. The JSON written by `--output` is a
+incomparable input exits with status 1. With `--check`, a `--select` filter
+that selects no runs or a `--metric` filter that selects no measurements fails
+the check. The JSON written by `--output` is a
 `coding-agent-workload-comparison` document that records the options, every
 document's workload block and environment, and each entry's outcome, so a
 failed check can be reviewed without rerunning the workload. Missing metrics

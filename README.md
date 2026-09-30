@@ -1572,7 +1572,9 @@ environment blocks. `--check` exits with status 2 when any metric regressed or
 any document has a non-success status, which `OPERATIONS.md` uses for
 regression checks. A document narrowed with `PATH#RUN_ID` or `--select` is
 judged by its selected runs, and the report shows the whole file's
-`document_status` beside it when the two differ.
+`document_status` beside it when the two differ. In check mode, `--select` and
+`--metric` must each select at least one run or measurement; empty selections
+fail instead of passing without a comparison.
 
 ### Organizing experiments
 
