@@ -112,10 +112,10 @@ session-scoped and not persisted; decreases evict the least-recently-used
 captures until the effective budget is satisfied. The result and latest
 adjustment are included in `get_buffer_stats` and runtime diagnostics.
 
-The byte budget covers retained capture content. Embedding storage, the search
-index, Python objects, and process RSS are reported separately by
-`get_buffer_stats`; process RSS is an approximate operational metric rather
-than an allocation limit.
+The byte budget covers each capture's retained UTF-8 content and label.
+Embedding storage, the search index, Python objects, and process RSS are
+reported separately by `get_buffer_stats`; process RSS is an approximate
+operational metric rather than an allocation limit.
 
 FastEmbed is warmed in a background thread after socket startup succeeds, so
 the MCP handshake and BM25 search remain available while model loading and one
@@ -607,12 +607,14 @@ does not write transcripts or raw command output to the records file. Its
 provider-reported model-context measurement.
 If the fixture does not contain an importable `server` module, provide the
 absolute server path with `--mcp-server-script`.
-Records schema version 4 also includes exit code, failure reason, MCP-specific
-tool-call counts, optional provider-reported input/output token counts, and
-the complete provider usage samples observed in the Codex JSONL stream.
-It separates the observable context proxy into prompt and output byte
-components. Version-1 through version-3 records remain readable by the
-analyzer; unavailable provider metrics are distinct from zero values.
+Records schema version 5 adds data-path byte counters for capture input,
+retained and original bytes, tool/search/retrieval responses, and socket
+requests and responses. Version 4 records include exit code, failure reason,
+MCP-specific tool-call counts, optional provider-reported input/output token
+counts and samples, and the prompt/output components of the context proxy.
+The analyzer reads records from versions 1 through 5; a missing version field
+is treated as version 1. Data-path and provider metrics absent from older
+records are reported as unavailable, not zero.
 The aggregate summary reports usage sample counts, monotonicity observations,
 and first-to-last deltas. A monotonic sequence is not treated as proof of
 cumulative accounting; use a controlled calibration matrix to establish the

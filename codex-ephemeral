@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 launcher_log_level=""
 launcher_log_level_set=0
@@ -40,17 +41,17 @@ if (( launcher_log_level_set )); then
 fi
 
 # shellcheck source=/dev/null
-source "$DIR/ephemeral-session-env"
+source "$dir/ephemeral-session-env"
 
 # Pass the identity explicitly through Codex's MCP configuration as well as
 # the parent environment. This matters when Codex sanitizes the environment
 # used to launch MCP child processes. JSON escaping is compatible with TOML
 # basic strings here; keep Unicode scalars as UTF-8 instead of JSON's non-BMP
 # surrogate-pair escapes, which TOML does not accept.
-SESSION_ID_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_SESSION_ID")"
-METRICS_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_METRICS")"
-LOG_LEVEL_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_LEVEL")"
-LOG_FILE_TOML="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_FILE")"
-MCP_ENV_CONFIG="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_METRICS=${METRICS_TOML}, EPHEMERAL_SESSION_ID=${SESSION_ID_TOML}, EPHEMERAL_LOG_LEVEL=${LOG_LEVEL_TOML}, EPHEMERAL_LOG_FILE=${LOG_FILE_TOML}}"
+session_id_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_SESSION_ID")"
+metrics_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_METRICS")"
+log_level_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_LEVEL")"
+log_file_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_FILE")"
+mcp_env_config="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_METRICS=${metrics_toml}, EPHEMERAL_SESSION_ID=${session_id_toml}, EPHEMERAL_LOG_LEVEL=${log_level_toml}, EPHEMERAL_LOG_FILE=${log_file_toml}}"
 
-exec codex --config "$MCP_ENV_CONFIG" "$@"
+exec codex --config "$mcp_env_config" "$@"
