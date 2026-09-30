@@ -5,3 +5,4 @@ mcp==1.29.1
 fastembed==0.8.0
 numpy==2.2.6; python_version < "3.11"
 numpy==2.5.2; python_version >= "3.11"
+urllib3==2.8.0
