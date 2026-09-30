@@ -416,6 +416,16 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("max_bytes must be at least 1", result)
 
+    def test_capture_file_rejects_fifo_without_opening_it(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO creation is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            fifo_path = Path(directory) / "capture.pipe"
+            os.mkfifo(fifo_path)
+            result = server.capture_file(str(fifo_path))
+
+        self.assertIn("not a regular file", result)
+
     def test_capture_file_reports_read_failure(self):
         with tempfile.NamedTemporaryFile() as file_handle, \
                 patch.object(server, "read_file_bounded", side_effect=OSError("permission denied")):

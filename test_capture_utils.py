@@ -1068,6 +1068,15 @@ class TestBoundedCommandCapture(unittest.TestCase):
             file_handle.flush()
             self.assertEqual(read_file_bounded(file_handle.name, 512), "héllo")
 
+    def test_file_read_rejects_fifo_without_blocking(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO creation is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            fifo_path = Path(directory) / "capture.pipe"
+            os.mkfifo(fifo_path)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                read_file_bounded(str(fifo_path), 512)
+
     def test_file_read_rejects_non_positive_limit(self):
         with tempfile.NamedTemporaryFile() as file_handle:
             with self.assertRaisesRegex(ValueError, "at least 1"):
