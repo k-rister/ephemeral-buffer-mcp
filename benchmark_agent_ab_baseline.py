@@ -92,6 +92,24 @@ def _validate_summary(summary: dict[str, Any]) -> None:
     _assert_private(summary)
 
 
+def _validate_threshold_tolerances(thresholds: dict[str, Any]) -> None:
+    """Reject invalid tolerance values in aggregate regression thresholds."""
+    for metric, threshold in thresholds.items():
+        if metric not in METRICS or not isinstance(threshold, dict):
+            raise ValueError(f"baseline threshold for {metric!r} must be an object for a known metric")
+        merged = {**DEFAULT_THRESHOLDS[metric], **threshold}
+        for field in ("absolute_tolerance", "relative_tolerance"):
+            value = merged[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"baseline threshold {metric}.{field} must be finite and nonnegative")
+            try:
+                numeric = float(value)
+            except (OverflowError, ValueError):
+                numeric = math.inf
+            if not math.isfinite(numeric) or numeric < 0:
+                raise ValueError(f"baseline threshold {metric}.{field} must be finite and nonnegative")
+
+
 def build_baseline(summary: dict[str, Any], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create a compact baseline from an aggregate agent A/B summary."""
     _validate_summary(summary)
@@ -100,6 +118,7 @@ def build_baseline(summary: dict[str, Any], thresholds: dict[str, Any] | None = 
         if metric not in METRICS or not isinstance(threshold, dict):
             raise ValueError(f"unknown baseline threshold: {metric}")
         merged_thresholds[metric].update(threshold)
+    _validate_threshold_tolerances(merged_thresholds)
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK,
@@ -123,6 +142,7 @@ def load_baseline(path: Path) -> dict[str, Any]:
         raise ValueError("baseline schema or benchmark name is invalid")
     if not isinstance(baseline.get("metrics"), dict) or not isinstance(baseline.get("thresholds"), dict):
         raise ValueError("baseline metrics and thresholds are required")
+    _validate_threshold_tolerances(baseline["thresholds"])
     for mode in MODES:
         if not isinstance(baseline["metrics"].get(mode), dict):
             raise ValueError(f"baseline metrics are missing {mode}")
@@ -186,6 +206,7 @@ def load_baseline_dict(baseline: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("baseline schema or benchmark name is invalid")
     if not isinstance(baseline.get("metrics"), dict) or not isinstance(baseline.get("thresholds"), dict):
         raise ValueError("baseline metrics and thresholds are required")
+    _validate_threshold_tolerances(baseline["thresholds"])
     for mode in MODES:
         if not isinstance(baseline["metrics"].get(mode), dict):
             raise ValueError(f"baseline metrics are missing {mode}")
