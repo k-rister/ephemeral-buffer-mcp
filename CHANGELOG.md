@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.3 - 2026-09-30
+
+- Require urllib3 2.8.0 or newer at runtime so package upgrades replace
+  vulnerable versions and receive the upstream fixes for CVE-2026-97687 and
+  CVE-2026-97689.
+
 ## 0.6.2 - 2026-09-29
 
 - Bound semantic-index memory work with token-length bucketed embedding batches,
