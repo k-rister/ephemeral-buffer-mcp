@@ -1,8 +1,10 @@
 """Tests for durable phase-level execution and resume behavior."""
 
+import ctypes
 import errno
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -296,6 +298,128 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with patch.object(execution.os, "killpg") as killpg:
             self.assertFalse(execution._terminate_stale_process({"process_id": 0, "process_group_id": 456}))
         killpg.assert_called_once_with(456, 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "process recovery requires Linux")
+    def test_recovery_cleans_marked_descendant_after_supervisor_is_reaped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = f"restart-recovery-{os.getpid()}-{time.monotonic_ns()}"
+            pid_path = Path(directory) / "detached-pid"
+            child_script = (
+                "import os, signal, sys, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(sys.argv[1], 'w', encoding='ascii').write(str(os.getpid())); "
+                "time.sleep(60)"
+            )
+            supervisor_script = (
+                "import subprocess, sys, time; "
+                "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
+                "start_new_session=True, stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL); "
+                "time.sleep(60)"
+            )
+            environment = os.environ.copy()
+            environment[execution.PROCESS_MARKER_ENV] = marker
+            supervisor = None
+            detached_pid = None
+            libc = ctypes.CDLL(None, use_errno=True)
+            previous_subreaper = ctypes.c_int()
+            self.assertEqual(
+                libc.prctl(37, ctypes.byref(previous_subreaper), 0, 0, 0), 0,
+                "PR_GET_CHILD_SUBREAPER failed",
+            )
+            self.assertEqual(
+                libc.prctl(36, 1, 0, 0, 0), 0,
+                "PR_SET_CHILD_SUBREAPER failed",
+            )
+            try:
+                supervisor = subprocess.Popen(
+                    [sys.executable, "-c", supervisor_script, child_script, str(pid_path)],
+                    env=environment,
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                for _ in range(200):
+                    if pid_path.exists():
+                        break
+                    if supervisor.poll() is not None:
+                        self.fail("test supervisor exited before creating its detached child")
+                    time.sleep(0.01)
+                self.assertTrue(pid_path.exists())
+                detached_pid = int(pid_path.read_text(encoding="ascii"))
+                process_start, process_boot = execution._proc_identity(supervisor.pid)
+                self.assertIsNotNone(process_start)
+                self.assertIsNotNone(process_boot)
+
+                manager = PhaseExecutionManager(
+                    Path(directory) / "state", command_runner=Runner()
+                )
+                manager.create(
+                    [self.phase("detached", "detached")],
+                    execution_id="reaped-supervisor",
+                )
+                record = manager.store.load("reaped-supervisor", recover=False)
+                phase = record["phases"][0]
+                phase.update(
+                    {
+                        "status": "started",
+                        "attempts": 1,
+                        "process_id": supervisor.pid,
+                        "process_group_id": os.getpgid(supervisor.pid),
+                        "process_start_time": process_start,
+                        "process_boot_id": process_boot,
+                        "process_containment": execution.PROCESS_CONTAINMENT_SUBREAPER,
+                        "process_launch_token": marker,
+                        "process_fence_pending": True,
+                    }
+                )
+                manager.store.save(record)
+
+                terminate_pidfd = execution._terminate_pidfd
+
+                def terminate_and_reap(process_id, **kwargs):
+                    if process_id == supervisor.pid:
+                        os.kill(process_id, signal.SIGTERM)
+                        supervisor.wait(timeout=5)
+                        group_absent = execution._process_group_is_absent(
+                            kwargs["expected_group"]
+                        )
+                        self.assertTrue(group_absent)
+                        return group_absent
+                    return terminate_pidfd(process_id, **kwargs)
+
+                with patch.object(
+                    execution, "_terminate_pidfd", side_effect=terminate_and_reap
+                ), patch.object(
+                    execution, "_marker_processes", side_effect=[{detached_pid}, set()]
+                ):
+                    recovered = PhaseExecutionManager(
+                        manager.store.state_dir, command_runner=Runner()
+                    ).public("reaped-supervisor")
+
+                self.assertEqual(recovered["phases"][0]["status"], "interrupted")
+                self.assertTrue(recovered["resume"]["available"], recovered)
+                reaped_pid, _status = os.waitpid(detached_pid, os.WNOHANG)
+                self.assertEqual(reaped_pid, detached_pid)
+            finally:
+                if supervisor is not None and supervisor.poll() is None:
+                    supervisor.terminate()
+                if supervisor is not None:
+                    try:
+                        supervisor.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        supervisor.kill()
+                        supervisor.wait(timeout=5)
+                if detached_pid is not None:
+                    try:
+                        os.kill(detached_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(detached_pid, 0)
+                    except ChildProcessError:
+                        pass
+                libc.prctl(36, previous_subreaper.value, 0, 0, 0)
 
     def test_recovery_refuses_a_reused_process_id(self):
         stale = {
