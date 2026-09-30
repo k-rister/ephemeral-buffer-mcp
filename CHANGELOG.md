@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep BM25 effectiveness benchmarks isolated from semantic prefetch work and
+  shut down benchmark engines after each run. Reject nonfinite agent A/B
+  measurements, use unique default run directories, clean up interrupted Codex
+  process groups, and count response signals from stdout only.
+
 ## 0.6.3 - 2026-09-30
 
 - Require urllib3 2.8.0 or newer at runtime so package upgrades replace

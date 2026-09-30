@@ -2,7 +2,7 @@
 """Measure deterministic command-output workflows with and without the buffer."""
 
 import argparse
-from contextlib import ContextDecorator
+from contextlib import ContextDecorator, contextmanager
 import json
 import math
 import platform
@@ -10,7 +10,7 @@ import re
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, Iterator, List
 from unittest.mock import patch
 
 import workload_results as wr
@@ -25,6 +25,16 @@ TOKEN_PROXY_NOTE = "ceil(UTF-8 bytes / 4) proxy; no model was invoked"
 PRIVACY_NOTE = "fixtures are generated in code; no user content, captures, or prompts are recorded"
 
 
+@contextmanager
+def _benchmark_engine(max_captures: int) -> Iterator[EphemeralEngine]:
+    """Create a benchmark engine without background semantic indexing."""
+    engine = EphemeralEngine(max_captures=max_captures, semantic_prefetch=False)
+    try:
+        yield engine
+    finally:
+        engine.shutdown()
+
+
 class _IsolatedSummaryEngine(ContextDecorator):
     """Give the summary benchmark a private engine without mutating callers."""
 
@@ -32,7 +42,9 @@ class _IsolatedSummaryEngine(ContextDecorator):
         return type(self)()
 
     def __enter__(self):
-        self._benchmark_engine = EphemeralEngine(max_captures=len(summary_scenarios()))
+        self._benchmark_engine = EphemeralEngine(
+            max_captures=len(summary_scenarios()), semantic_prefetch=False
+        )
         self._engine_token = server._ENGINE_OVERRIDE.set(self._benchmark_engine)
         return self._benchmark_engine
 
@@ -383,36 +395,37 @@ def run_mcp(scenario: Dict[str, Any], engine: EphemeralEngine) -> Dict[str, Any]
 def _run_sequential_workflow(selected: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Measure one capture/search/slice path per synthetic repository."""
     started = time.perf_counter()
-    engine = EphemeralEngine(max_captures=len(selected))
     overview_bytes = 0
     retrieval_bytes = 0
     successes = 0
     searches = 0
     retrievals = 0
-    for scenario in selected:
-        capture = engine.ingest(
-            "\n".join(scenario["lines"]),
-            label=f"benchmark-{scenario['id']}",
-            content_type=scenario["content_type"],
-        )
-        summary = engine.get_summary(capture.capture_id)
-        overview_bytes += len(json.dumps(summary, sort_keys=True).encode("utf-8"))
-        search = engine.search(
-            scenario["query"], mode="bm25", capture_id=capture.capture_id,
-            top_k=3, context_lines=CONTEXT_LINES,
-        )
-        searches += 1
-        retrieval_bytes += len(json.dumps(search, sort_keys=True).encode("utf-8"))
-        useful = next((match for match in search.get("matches", [])
-                       if scenario["marker"] in match["snippet"]), None)
-        slice_result: Dict[str, Any] = {}
-        if useful:
-            line_range = _matched_range(useful.get("matched_range", ""))
-            if line_range:
-                slice_result = engine.get_slice(*line_range, capture_id=capture.capture_id)
-                retrievals += 1
-                retrieval_bytes += len(json.dumps(slice_result, sort_keys=True).encode("utf-8"))
-        successes += int(bool(useful and scenario["marker"] in slice_result.get("content", "")))
+    with _benchmark_engine(max_captures=len(selected)) as engine:
+        for scenario in selected:
+            capture = engine.ingest(
+                "\n".join(scenario["lines"]),
+                label=f"benchmark-{scenario['id']}",
+                content_type=scenario["content_type"],
+            )
+            summary = engine.get_summary(capture.capture_id)
+            overview_bytes += len(json.dumps(summary, sort_keys=True).encode("utf-8"))
+            search = engine.search(
+                scenario["query"], mode="bm25", capture_id=capture.capture_id,
+                top_k=3, context_lines=CONTEXT_LINES,
+            )
+            searches += 1
+            retrieval_bytes += len(json.dumps(search, sort_keys=True).encode("utf-8"))
+            useful = next((match for match in search.get("matches", [])
+                           if scenario["marker"] in match["snippet"]), None)
+            slice_result: Dict[str, Any] = {}
+            if useful:
+                line_range = _matched_range(useful.get("matched_range", ""))
+                if line_range:
+                    slice_result = engine.get_slice(*line_range, capture_id=capture.capture_id)
+                    retrievals += 1
+                    retrieval_bytes += len(json.dumps(slice_result, sort_keys=True).encode("utf-8"))
+            successes += int(bool(useful and scenario["marker"] in slice_result.get("content", "")))
+        elapsed = time.perf_counter() - started
     return {
         "mode": "sequential",
         "successes": successes,
@@ -421,54 +434,55 @@ def _run_sequential_workflow(selected: List[Dict[str, Any]]) -> Dict[str, Any]:
         "retrievals": retrievals,
         "overview_bytes": overview_bytes,
         "retrieval_bytes": retrieval_bytes,
-        "time_seconds": time.perf_counter() - started,
+        "time_seconds": elapsed,
     }
 
 
 def _run_consolidated_workflow(selected: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Measure one consolidated overview followed by targeted retrievals."""
     started = time.perf_counter()
-    engine = EphemeralEngine(max_captures=len(selected) + 1)
-    capture_ids = [
-        engine.ingest(
-            "\n".join(scenario["lines"]),
-            label=f"benchmark-{scenario['id']}",
-            content_type=scenario["content_type"],
-        ).capture_id
-        for scenario in selected
-    ]
-    # Keep the benchmark's source fixture complete; the MCP tool still exposes
-    # bounded omission behavior independently through its caller-provided limit.
-    consolidated = engine.consolidate(capture_ids, max_captures=len(selected), max_bytes=100000)
-    consolidated_capture = engine.ingest(
-        consolidated["content"], label="benchmark-consolidated", content_type="text"
-    )
-    overview = {
-        key: value for key, value in consolidated.items() if key != "content"
-    }
-    overview_bytes = len(json.dumps(overview, sort_keys=True).encode("utf-8"))
-    retrieval_bytes = 0
-    successes = 0
-    searches = 0
-    retrievals = 0
-    consolidated_id = consolidated_capture.capture_id
-    for scenario in selected:
-        search = engine.search(
-            scenario["query"], mode="bm25", capture_id=consolidated_id,
-            top_k=3, context_lines=CONTEXT_LINES,
+    with _benchmark_engine(max_captures=len(selected) + 1) as engine:
+        capture_ids = [
+            engine.ingest(
+                "\n".join(scenario["lines"]),
+                label=f"benchmark-{scenario['id']}",
+                content_type=scenario["content_type"],
+            ).capture_id
+            for scenario in selected
+        ]
+        # Keep the benchmark's source fixture complete; the MCP tool still exposes
+        # bounded omission behavior independently through its caller-provided limit.
+        consolidated = engine.consolidate(capture_ids, max_captures=len(selected), max_bytes=100000)
+        consolidated_capture = engine.ingest(
+            consolidated["content"], label="benchmark-consolidated", content_type="text"
         )
-        searches += 1
-        retrieval_bytes += len(json.dumps(search, sort_keys=True).encode("utf-8"))
-        useful = next((match for match in search.get("matches", [])
-                       if scenario["marker"] in match["snippet"]), None)
-        slice_result: Dict[str, Any] = {}
-        if useful:
-            line_range = _matched_range(useful.get("matched_range", ""))
-            if line_range:
-                slice_result = engine.get_slice(*line_range, capture_id=consolidated_id)
-                retrievals += 1
-                retrieval_bytes += len(json.dumps(slice_result, sort_keys=True).encode("utf-8"))
-        successes += int(bool(useful and scenario["marker"] in slice_result.get("content", "")))
+        overview = {
+            key: value for key, value in consolidated.items() if key != "content"
+        }
+        overview_bytes = len(json.dumps(overview, sort_keys=True).encode("utf-8"))
+        retrieval_bytes = 0
+        successes = 0
+        searches = 0
+        retrievals = 0
+        consolidated_id = consolidated_capture.capture_id
+        for scenario in selected:
+            search = engine.search(
+                scenario["query"], mode="bm25", capture_id=consolidated_id,
+                top_k=3, context_lines=CONTEXT_LINES,
+            )
+            searches += 1
+            retrieval_bytes += len(json.dumps(search, sort_keys=True).encode("utf-8"))
+            useful = next((match for match in search.get("matches", [])
+                           if scenario["marker"] in match["snippet"]), None)
+            slice_result: Dict[str, Any] = {}
+            if useful:
+                line_range = _matched_range(useful.get("matched_range", ""))
+                if line_range:
+                    slice_result = engine.get_slice(*line_range, capture_id=consolidated_id)
+                    retrievals += 1
+                    retrieval_bytes += len(json.dumps(slice_result, sort_keys=True).encode("utf-8"))
+            successes += int(bool(useful and scenario["marker"] in slice_result.get("content", "")))
+        elapsed = time.perf_counter() - started
     return {
         "mode": "consolidated",
         "successes": successes,
@@ -479,7 +493,7 @@ def _run_consolidated_workflow(selected: List[Dict[str, Any]]) -> Dict[str, Any]
         "retrieval_bytes": retrieval_bytes,
         "consolidated_bytes": len(consolidated["content"].encode("utf-8")),
         "omitted_record_count": consolidated["omitted_record_count"],
-        "time_seconds": time.perf_counter() - started,
+        "time_seconds": elapsed,
     }
 
 
@@ -618,30 +632,30 @@ def run_ab_evaluation(repetitions: int = 5, seed: int = 20260907) -> Dict[str, A
     rng = random.Random(seed)
     records: List[Dict[str, Any]] = []
     schedules: List[Dict[str, Any]] = []
-    engine = EphemeralEngine(max_captures=len(selected) * repetitions)
-    for repetition in range(1, repetitions + 1):
-        ordered = list(selected)
-        rng.shuffle(ordered)
-        task_order = [scenario["id"] for scenario in ordered]
-        mode_orders: Dict[str, List[str]] = {}
-        for scenario in ordered:
-            modes = ["baseline", "mcp"]
-            rng.shuffle(modes)
-            mode_orders[scenario["id"]] = modes
-            for mode in modes:
-                rss_before = process_rss_bytes()
-                result = (run_baseline(scenario) if mode == "baseline" else run_mcp(scenario, engine))
-                rss_after = process_rss_bytes()
-                result.update({
-                    "repetition": repetition,
-                    "task_order": len(task_order) - len(ordered) + ordered.index(scenario) + 1,
-                    "paired_mode_order": modes,
-                    "rss_before_bytes": rss_before,
-                    "rss_after_bytes": rss_after,
-                    "rss_delta_bytes": (rss_after - rss_before) if rss_before is not None and rss_after is not None else None,
-                })
-                records.append(result)
-        schedules.append({"repetition": repetition, "task_order": task_order, "mode_orders": mode_orders})
+    with _benchmark_engine(max_captures=len(selected) * repetitions) as engine:
+        for repetition in range(1, repetitions + 1):
+            ordered = list(selected)
+            rng.shuffle(ordered)
+            task_order = [scenario["id"] for scenario in ordered]
+            mode_orders: Dict[str, List[str]] = {}
+            for scenario in ordered:
+                modes = ["baseline", "mcp"]
+                rng.shuffle(modes)
+                mode_orders[scenario["id"]] = modes
+                for mode in modes:
+                    rss_before = process_rss_bytes()
+                    result = (run_baseline(scenario) if mode == "baseline" else run_mcp(scenario, engine))
+                    rss_after = process_rss_bytes()
+                    result.update({
+                        "repetition": repetition,
+                        "task_order": len(task_order) - len(ordered) + ordered.index(scenario) + 1,
+                        "paired_mode_order": modes,
+                        "rss_before_bytes": rss_before,
+                        "rss_after_bytes": rss_after,
+                        "rss_delta_bytes": (rss_after - rss_before) if rss_before is not None and rss_after is not None else None,
+                    })
+                    records.append(result)
+            schedules.append({"repetition": repetition, "task_order": task_order, "mode_orders": mode_orders})
 
     comparisons: List[Dict[str, Any]] = []
     for scenario in selected:
@@ -688,8 +702,8 @@ def run_benchmark(mode: str = "both") -> Dict[str, Any]:
     if mode in ("baseline", "both"):
         results.extend(run_baseline(scenario) for scenario in selected)
     if mode in ("mcp", "both"):
-        engine = EphemeralEngine(max_captures=len(selected))
-        results.extend(run_mcp(scenario, engine) for scenario in selected)
+        with _benchmark_engine(max_captures=len(selected)) as engine:
+            results.extend(run_mcp(scenario, engine) for scenario in selected)
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": "mcp-effectiveness",

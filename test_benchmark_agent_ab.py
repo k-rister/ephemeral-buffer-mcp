@@ -110,6 +110,13 @@ class TestAgentAbBenchmark(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
 
+    def test_validation_rejects_json_nonfinite_measurements(self):
+        schedule, payload = _records_payload()
+        payload["runs"][0]["duration_seconds"] = json.loads("1e999")
+
+        with self.assertRaisesRegex(ValueError, "duration_seconds must be a non-negative number"):
+            validate_records(payload, schedule)
+
     def test_validation_accepts_legacy_protocol_without_embedding_metadata(self):
         schedule, payload = _records_payload()
         for field in ("embedding_mode", "embedding_model", "embedding_cache"):

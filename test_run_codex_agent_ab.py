@@ -76,6 +76,35 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(killpg.call_args_list[0].args, (4242, 15))
         self.assertEqual(killpg.call_args_list[1].args, (4242, 9))
 
+    def test_codex_interruption_terminates_process_group_and_reaps_leader(self):
+        class Process:
+            pid = 42
+            returncode = -15
+
+            def __init__(self):
+                self.wait_calls = []
+
+            def communicate(self, timeout=None):
+                raise KeyboardInterrupt
+
+            def wait(self, timeout=None):
+                self.wait_calls.append(timeout)
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        process = Process()
+        with patch("run_codex_agent_ab.subprocess.Popen", return_value=process), \
+                patch("run_codex_agent_ab.os.getpgid", return_value=4242), \
+                patch("run_codex_agent_ab.os.killpg") as killpg:
+            with self.assertRaises(KeyboardInterrupt):
+                _run_codex_process(["codex"], cwd=Path("."), timeout=1)
+
+        self.assertEqual(killpg.call_args_list[0].args, (4242, 15))
+        self.assertEqual(killpg.call_args_list[1].args, (4242, 9))
+        self.assertEqual(process.wait_calls, [1, None])
+
     def test_timeout_emits_record_and_next_run_can_continue(self):
         item = {"sequence": 1, "repetition": 1, "task_id": "timeout", "mode": "control"}
         next_item = {"sequence": 2, "repetition": 1, "task_id": "after-timeout", "mode": "control"}
@@ -247,6 +276,31 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(output["mcp_tool_calls"], 0)
         self.assertIsNone(output["input_tokens"])
         self.assertEqual(output["peak_rss_bytes"], 1234)
+
+    def test_run_one_ignores_stderr_for_events_and_signal_markers(self):
+        item = {"sequence": 1, "repetition": 1, "task_id": "stderr-marker", "mode": "control"}
+        task = {"prompt": "inspect the fixture", "signal_marker": "TARGETED_SIGNAL"}
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        stderr = json.dumps({
+            "type": "command_execution",
+            "command": "grep TARGETED_SIGNAL missing-file",
+            "aggregated_output": "TARGETED_SIGNAL diagnostic",
+        })
+        completed = subprocess_result(stdout="normal response\n", stderr=stderr)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_codex_agent_ab._run_codex_process", return_value=completed
+        ):
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            output = _run_one(item, task, args=args, repository=repository, scratch=Path(directory))
+
+        self.assertFalse(output["signal_retrieved"])
+        self.assertEqual(output["tool_calls"], 0)
+        self.assertEqual(output["output_bytes_proxy"], len((completed.stdout + stderr).encode()))
 
     def test_mcp_approval_mode_uses_automatic_review_and_isolated_write_sandbox(self):
         from run_codex_agent_ab import _codex_command

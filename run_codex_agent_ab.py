@@ -221,6 +221,10 @@ def _run_codex_process(
     monitor.start()
     try:
         stdout, stderr = process.communicate(timeout=timeout)
+    except KeyboardInterrupt:
+        _terminate_process_group(process, process_group_id)
+        process.wait()
+        raise
     except subprocess.TimeoutExpired:
         _terminate_process_group(process, process_group_id)
         try:
@@ -452,6 +456,8 @@ def _run_one(
     exit_code = None
     failure_reason = None
     peak_rss_bytes = 0
+    stdout = ""
+    stderr = ""
     require_mcp_calls = item["mode"] == "mcp" and getattr(args, "require_mcp_calls", False)
     prompt = task["prompt"]
     if require_mcp_calls:
@@ -465,14 +471,18 @@ def _run_one(
         completed = _run_codex_process(
             [*command, prompt], cwd=fixture, timeout=args.timeout
         )
-        output = completed.stdout + completed.stderr
+        stdout = completed.stdout
+        stderr = completed.stderr
+        output = stdout + stderr
         success = completed.returncode == 0
         exit_code = completed.returncode
         peak_rss_bytes = getattr(completed, "peak_rss_bytes", 0)
         if not success:
             failure_reason = "codex_exit_nonzero"
     except subprocess.TimeoutExpired as exc:
-        output = _as_text(exc.stdout) + _as_text(exc.stderr)
+        stdout = _as_text(exc.stdout)
+        stderr = _as_text(exc.stderr)
+        output = stdout + stderr
         success = False
         failure_reason = "timeout"
     duration = time.monotonic() - started
@@ -485,7 +495,7 @@ def _run_one(
         output_tokens,
         input_token_samples,
         output_token_samples,
-    ) = _event_metrics(output)
+    ) = _event_metrics(stdout)
     if require_mcp_calls and success and mcp_tool_calls == 0:
         success = False
         failure_reason = "mcp_not_used"
@@ -495,7 +505,7 @@ def _run_one(
         "repetition": item["repetition"],
         "mode": item["mode"],
         "completed": success,
-        "signal_retrieved": _signal_retrieved(output, marker),
+        "signal_retrieved": _signal_retrieved(stdout, marker),
         "duration_seconds": duration,
         "tool_calls": tool_calls,
         "repeated_commands": repeated_commands,
