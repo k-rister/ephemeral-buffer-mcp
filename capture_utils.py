@@ -7,6 +7,7 @@ import logging
 import select
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -408,8 +409,17 @@ def read_file_bounded(file_path: str, max_bytes: int) -> str:
     """Read a UTF-8 file only when it fits within the configured byte limit."""
     if max_bytes < 1:
         raise ValueError("max_bytes must be at least 1")
-    with Path(file_path).open("rb") as stream:
-        content = stream.read(max_bytes + 1)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    file_descriptor = os.open(file_path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+            raise ValueError("File must be a regular file")
+        with os.fdopen(file_descriptor, "rb") as stream:
+            file_descriptor = -1
+            content = stream.read(max_bytes + 1)
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
     if len(content) > max_bytes:
         raise ValueError(f"File exceeds the {max_bytes:,}-byte capture limit")
     return content.decode("utf-8", errors="replace")

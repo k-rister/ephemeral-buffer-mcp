@@ -325,9 +325,11 @@ sliding windows with two-line overlap so exact line ranges stay tight. Semantic
 embeddings use separate windows packed from consecutive lines, closed at eight
 lines or 1,024 UTF-8 bytes, whichever comes first, with no overlap. That keeps
 every window inside the model's token limit and, because embedding cost tracks
-total tokens, roughly halves the work by not embedding the overlap twice. Hybrid ranking fuses the
-two grids in line space: a semantic window boosts the lexical hits it overlaps
-and appears on its own only when nothing lexical matched inside it. Each match
+total tokens, roughly halves the work by not embedding the overlap twice. Hybrid
+ranking fuses the two grids in line space: each semantic window boosts lexical
+hits whose first line it contains. If semantic windows overlap, a lexical hit
+receives only the boost from the highest-ranked matching window. A semantic
+window appears on its own only when no lexical hit belongs to it. Each match
 reports `chunk_index` as `lexical` or `semantic` alongside its line range. Tune
 the windows when output has very long or very short lines:
 
@@ -479,7 +481,8 @@ content and label.
 
 `ephbuf` also bounds wrapped-command and piped-stdin capture with
 `--max-output-bytes`; it defaults to `EPHEMERAL_MAX_BUFFER_BYTES` or 50 MiB and
-retains the beginning and end of oversized output.
+retains the beginning and end of oversized output. Wrapped command output stays
+on stdout, while the `ephbuf` execution banner and status messages go to stderr.
 Use `--timeout-seconds` to stop a wrapped command after a bounded runtime; timed
 out commands retain the output collected so far and exit with status 124.
 Requested `max_output_bytes` and `capture_file` `max_bytes` values may not
@@ -500,7 +503,7 @@ The agent has access to the following tools:
 | `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves a bounded output chunk persisted for all phases or one phase, including after a server restart; use `offset` to continue a large phase. |
 | `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact IDs with pagination metadata. |
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
-| `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded log/output file from disk and returns the same compact summary schema. |
+| `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded regular file from disk and returns the same compact summary schema; symlinks are followed, but pipes and devices are rejected. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
 | `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
 | `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |

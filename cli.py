@@ -153,7 +153,7 @@ def main():
             
         cmd_str = shlex.join(cmd_list)
         label = args.label or cmd_str
-        print(f"[ephbuf] Executing: {cmd_str}")
+        print(f"[ephbuf] Executing: {cmd_str}", file=sys.stderr)
         
         command_started = time.perf_counter()
         try:

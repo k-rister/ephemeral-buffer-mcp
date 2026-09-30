@@ -1372,6 +1372,8 @@ def capture_file(
         read_limit = active_engine.max_buffer_bytes if max_bytes is None else max_bytes
         if read_limit < 1:
             return "Error: max_bytes must be at least 1."
+        if not stat.S_ISREG(os.stat(file_path).st_mode):
+            return f"Error: File '{file_path}' is not a regular file."
         content = read_file_bounded(file_path, read_limit)
         if not label:
             label = os.path.basename(file_path)
