@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import random
 import statistics
 from pathlib import Path
@@ -162,6 +163,14 @@ def _run_key(record: dict[str, Any]) -> tuple[int, str, str]:
     return (int(record["repetition"]), record["task_id"], record["mode"])
 
 
+def _is_nonnegative_finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    return isinstance(value, float) and math.isfinite(value) and value >= 0
+
+
 def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[dict[str, Any]]:
     """Validate balanced metadata-only agent records against a schedule."""
     if payload.get("schema_version") != SCHEMA_VERSION or payload.get("benchmark") != "agent-ab":
@@ -217,7 +226,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
             )
         for field in numeric_fields:
             value = record[field]
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            if not _is_nonnegative_finite_number(value):
                 raise ValueError(f"{field} must be a non-negative number in run: {key}")
         if records_schema_version >= 2:
             if record["exit_code"] is not None and (isinstance(record["exit_code"], bool) or not isinstance(record["exit_code"], int)):
@@ -226,14 +235,14 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
                 raise ValueError(f"failure_reason must be a string or null in run: {key}")
             for field in ("input_tokens", "output_tokens"):
                 value = record[field]
-                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
+                if value is not None and not _is_nonnegative_finite_number(value):
                     raise ValueError(f"{field} must be a non-negative number or null in run: {key}")
         if records_schema_version >= 3:
             for field in ("input_token_samples", "output_token_samples"):
                 samples = record[field]
                 if not isinstance(samples, list):
                     raise ValueError(f"{field} must be a list in run: {key}")
-                if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 for value in samples):
+                if any(not _is_nonnegative_finite_number(value) for value in samples):
                     raise ValueError(f"{field} must contain non-negative numbers in run: {key}")
         if records_schema_version >= 4:
             if record["prompt_bytes_proxy"] + record["output_bytes_proxy"] != record["context_bytes_proxy"]:
@@ -241,7 +250,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         if records_schema_version >= 5:
             for field in DATA_PATH_BYTE_FIELDS:
                 value = record[field]
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                if not _is_nonnegative_finite_number(value):
                     raise ValueError(f"{field} must be a non-negative number in run: {key}")
         actual[key] = record
     missing = sorted(set(expected) - set(actual))

@@ -642,9 +642,9 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
   ./run_agent_ab_experiment.sh
 ```
 
-The script checks Codex authentication, creates a timestamped `/tmp` run
-directory, executes paired control and MCP sessions, and writes metadata
-records, an aggregate summary, the corresponding `records.result.json` and
+The script checks Codex authentication, creates a unique run directory under
+`TMPDIR` (or `/tmp` when unset), executes paired control and MCP sessions, and
+writes metadata records, an aggregate summary, `records.result.json` and
 `summary.result.json` workload result documents, and content-free lifecycle
 logs there. Set `AGENT_AB_RUN_DIR` to choose another output directory, and
 `AGENT_AB_EXPERIMENT` and `AGENT_AB_VARIANT` to tag the result documents with

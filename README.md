@@ -1312,7 +1312,8 @@ not contain a production repository or user data.
 
 Repeat the complete five-repetition Codex A/B run with the repository script.
 Set `CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
-records, and lifecycle logs remain under `/tmp` by default:
+records, and lifecycle logs remain under a unique temporary directory (normally
+`/tmp`) by default:
 
 ```bash
 CODEX_HOME=/path/to/writable/authenticated-codex-home \

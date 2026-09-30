@@ -10,7 +10,7 @@ seed="${AGENT_AB_SEED:-20260909}"
 timeout_seconds="${AGENT_AB_TIMEOUT_SECONDS:-900}"
 fixture_profile="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
 test_embeddings="${AGENT_AB_TEST_EMBEDDINGS:-1}"
-run_dir="${AGENT_AB_RUN_DIR:-/tmp/agent-ab-run-$(date +%Y%m%d-%H%M%S)}"
+run_dir="${AGENT_AB_RUN_DIR:-}"
 experiment="${AGENT_AB_EXPERIMENT:-}"
 variant="${AGENT_AB_VARIANT:-}"
 started_at="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
@@ -37,6 +37,9 @@ if [[ "$test_embeddings" != "0" && "$test_embeddings" != "1" ]]; then
 fi
 
 CODEX_HOME="$CODEX_HOME" codex login status >/dev/null
+if [[ -z "$run_dir" ]]; then
+    run_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-ab-run.XXXXXX")"
+fi
 mkdir -p "$run_dir"
 
 # Experiment group and metadata recorded in both workload result documents so
