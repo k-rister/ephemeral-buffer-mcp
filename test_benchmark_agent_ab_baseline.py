@@ -5,10 +5,11 @@ import io
 import sys
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from unittest.mock import patch
 
-from benchmark_agent_ab import build_schedule, summarize_records
-from benchmark_agent_ab_baseline import build_baseline, compare_summary, load_baseline_dict, main
+from benchmark_agent_ab import DATA_PATH_BYTE_FIELDS, RECORDS_SCHEMA_VERSION, build_schedule, summarize_records
+from benchmark_agent_ab_baseline import build_baseline, compare_summary, load_baseline, load_baseline_dict, main
 
 
 def summary_fixture():
@@ -16,15 +17,20 @@ def summary_fixture():
     runs = []
     for item in schedule["schedule"]:
         mcp = item["mode"] == "mcp"
-        runs.append({
+        record = {
             "task_id": item["task_id"], "repetition": item["repetition"], "mode": item["mode"],
-            "completed": True, "signal_retrieved": True, "duration_seconds": 2 if mcp else 1,
+            "completed": True, "task_success": mcp, "signal_retrieved": mcp,
+            "duration_seconds": 2 if mcp else 1,
             "tool_calls": 3, "repeated_commands": 0, "context_bytes_proxy": 100 if mcp else 80,
             "peak_rss_bytes": 1000, "exit_code": 0, "failure_reason": None,
             "mcp_tool_calls": 2 if mcp else 0, "input_tokens": 100, "output_tokens": 20,
-        })
+            "input_token_samples": [100], "output_token_samples": [20],
+            "prompt_bytes_proxy": 40, "output_bytes_proxy": 60 if mcp else 40,
+        }
+        record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
+        runs.append(record)
     payload = {
-        "schema_version": 1, "benchmark": "agent-ab", "records_schema_version": 2,
+        "schema_version": 1, "benchmark": "agent-ab", "records_schema_version": RECORDS_SCHEMA_VERSION,
         "task_fixture_version": schedule["task_fixture_version"], "protocol": {
             "model_config": "gpt-5.6-luna", "repository_fixture": "fixture-v1",
             "environment": "test", "reset_policy": "fresh-copy-per-run", "agent_adapter": "codex-cli",
@@ -40,6 +46,7 @@ class TestAgentAbBaseline(unittest.TestCase):
         baseline = build_baseline(summary_fixture())
         self.assertEqual(baseline["benchmark"], "agent-ab-baseline")
         self.assertIn("duration_seconds", baseline["metrics"]["mcp"])
+        self.assertEqual(baseline["metrics"]["mcp"]["task_success_rate"], 1.0)
         self.assertNotIn("runs", baseline)
         load_baseline_dict(baseline)
 
@@ -82,6 +89,29 @@ class TestAgentAbBaseline(unittest.TestCase):
         result = compare_summary(summary, baseline)
         self.assertTrue(result["passed"])
         self.assertFalse(result["comparisons"]["mcp"]["input_tokens"]["available"])
+
+    def test_legacy_summaries_keep_objective_outcomes_unavailable(self):
+        legacy = summary_fixture()
+        legacy["records_schema_version"] = 5
+
+        legacy_baseline = build_baseline(legacy)
+        for mode in ("control", "mcp"):
+            self.assertIsNone(legacy_baseline["metrics"][mode]["task_success_rate"])
+            self.assertIsNone(legacy_baseline["metrics"][mode]["signal_retrieval_rate"])
+
+        current_baseline = build_baseline(summary_fixture())
+        result = compare_summary(legacy, current_baseline)
+        for mode in ("control", "mcp"):
+            for metric in ("task_success_rate", "signal_retrieval_rate"):
+                comparison = result["comparisons"][mode][metric]
+                self.assertIsNone(comparison["current"])
+                self.assertFalse(comparison["available"])
+
+    def test_checked_in_legacy_baseline_does_not_claim_objective_scores(self):
+        baseline = load_baseline(Path(__file__).with_name("benchmark_agent_ab_baseline.json"))
+        for mode in ("control", "mcp"):
+            self.assertIsNone(baseline["metrics"][mode]["task_success_rate"])
+            self.assertIsNone(baseline["metrics"][mode]["signal_retrieval_rate"])
 
     def test_create_baseline_rejects_fail_on_regression(self):
         stderr = io.StringIO()

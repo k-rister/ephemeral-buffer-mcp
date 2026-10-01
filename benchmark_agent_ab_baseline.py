@@ -7,12 +7,15 @@ import math
 from pathlib import Path
 from typing import Any
 
+from benchmark_agent_ab import RECORDS_SCHEMA_VERSION
+
 
 SCHEMA_VERSION = 1
 BENCHMARK = "agent-ab-baseline"
 MODES = ("control", "mcp")
 METRICS = (
     "completion_rate",
+    "task_success_rate",
     "signal_retrieval_rate",
     "duration_seconds",
     "tool_calls",
@@ -24,6 +27,7 @@ METRICS = (
 )
 DEFAULT_THRESHOLDS = {
     "completion_rate": {"gate": True, "direction": "higher", "absolute_tolerance": 0.05, "relative_tolerance": 0.0},
+    "task_success_rate": {"gate": True, "direction": "higher", "absolute_tolerance": 0.05, "relative_tolerance": 0.0},
     "signal_retrieval_rate": {"gate": True, "direction": "higher", "absolute_tolerance": 0.05, "relative_tolerance": 0.0},
     "duration_seconds": {"gate": True, "direction": "lower", "absolute_tolerance": 0.0, "relative_tolerance": 0.25},
     "tool_calls": {"gate": False, "direction": "lower", "absolute_tolerance": 0.0, "relative_tolerance": 0.25},
@@ -58,6 +62,11 @@ def _assert_private(value: Any) -> None:
 
 
 def _summary_metric(summary: dict[str, Any], mode: str, metric: str) -> float | None:
+    if (
+        metric in {"task_success_rate", "signal_retrieval_rate"}
+        and summary.get("records_schema_version", 1) < RECORDS_SCHEMA_VERSION
+    ):
+        return None
     mode_summary = summary.get("mode_summaries", {}).get(mode, {})
     entry = mode_summary.get(metric)
     if entry is None and metric == "context_bytes_proxy":
@@ -85,6 +94,9 @@ def _validate_summary(summary: dict[str, Any]) -> None:
             raise ValueError(f"summary protocol field {field} is required")
     if not isinstance(summary.get("repetitions"), int) or summary["repetitions"] < 1:
         raise ValueError("summary repetitions must be positive")
+    records_schema_version = summary.get("records_schema_version", 1)
+    if isinstance(records_schema_version, bool) or not isinstance(records_schema_version, int):
+        raise ValueError("summary records_schema_version must be an integer")
     for field in ("embedding_mode", "embedding_model", "embedding_cache"):
         value = summary["protocol"].get(field)
         if value is not None and (not isinstance(value, str) or not value.strip()):

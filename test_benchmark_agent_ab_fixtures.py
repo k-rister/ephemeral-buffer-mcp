@@ -16,8 +16,15 @@ class TestAgentAbFixtures(unittest.TestCase):
         for task in manifest["tasks"].values():
             self.assertTrue(task["prompt"])
             self.assertTrue(task["signal_marker"])
-            self.assertTrue(task["success_criteria"])
+            criteria = task["success_criteria"]
+            self.assertTrue(criteria["description"])
+            self.assertGreaterEqual(len(criteria["required_phrases"]), 2)
+            self.assertIn(task["signal_marker"], criteria["required_phrases"])
             self.assertTrue(task["output_profile"])
+        self.assertEqual(
+            manifest["tasks"]["build-log-search"]["success_criteria"]["required_phrases"],
+            ["BUILD_FAILURE_SIGNAL", "src/parser.c", "917"],
+        )
 
     def test_create_fixture_is_deterministic_and_contains_no_logs(self):
         with tempfile.TemporaryDirectory() as directory:
