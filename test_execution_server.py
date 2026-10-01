@@ -62,6 +62,11 @@ class TestExecutionTools(unittest.TestCase):
         )
         self.assertEqual(started["execution_status"], "completed")
         self.assertTrue(started["phases"][0]["result"]["capture_id"].startswith("cap_"))
+        self.assertEqual(
+            started["phases"][0]["result"]["capture_session_id"],
+            server.engine.session_id,
+        )
+        self.assertTrue(started["phases"][0]["result"]["capture_available"])
         self.assertEqual(json.loads(server.resume_execution("tool-execution"))["execution_status"], "completed")
         self.assertEqual(json.loads(server.get_execution("tool-execution"))["partial"], False)
         with_output = json.loads(server.get_execution("tool-execution", include_output=True))
@@ -118,22 +123,53 @@ class TestExecutionTools(unittest.TestCase):
         self.assertEqual(len(json.loads(response)["phases"][0]["output"]), 8192)
 
     def test_durable_execution_marks_session_capture_unavailable_after_restart(self):
-        started = json.loads(
-            server.start_execution(
-                [self.phase("durable", "durable")],
-                execution_id="durable-capture",
-            )
+        original_engine = server.EphemeralEngine(
+            max_buffer_bytes=server.engine.max_buffer_bytes
         )
-        self.assertTrue(started["phases"][0]["result"]["capture_available"])
-        server.engine.clear("all")
-        fresh_manager = PhaseExecutionManager(
-            self.directory.name,
-            max_output_bytes=server.engine.max_buffer_bytes,
-            command_runner=self.runner,
+        fresh_engine = server.EphemeralEngine(
+            max_buffer_bytes=server.engine.max_buffer_bytes
         )
-        with patch.object(server, "execution_manager", fresh_manager):
-            result = json.loads(server.get_execution("durable-capture"))
-        self.assertFalse(result["phases"][0]["result"]["capture_available"])
+        try:
+            with patch.object(server, "engine", original_engine):
+                started = json.loads(
+                    server.start_execution(
+                        [self.phase("durable", "durable")],
+                        execution_id="durable-capture",
+                    )
+                )
+                phase_result = started["phases"][0]["result"]
+                original_capture_id = phase_result["capture_id"]
+                self.assertEqual(original_capture_id, "cap_1")
+                self.assertEqual(phase_result["capture_session_id"], original_engine.session_id)
+                self.assertTrue(phase_result["capture_available"])
+
+                unrelated_capture = fresh_engine.ingest("UNRELATED NEW SERVER OUTPUT")
+                self.assertEqual(unrelated_capture.capture_id, original_capture_id)
+                self.assertNotEqual(fresh_engine.session_id, original_engine.session_id)
+
+                fresh_manager = PhaseExecutionManager(
+                    self.directory.name,
+                    max_output_bytes=fresh_engine.max_buffer_bytes,
+                    command_runner=self.runner,
+                )
+                with patch.object(server, "execution_manager", fresh_manager), \
+                        patch.object(server, "engine", fresh_engine):
+                    result = json.loads(server.get_execution("durable-capture"))
+                    durable_output = json.loads(
+                        server.get_execution_output("durable-capture", "durable")
+                    )
+            self.assertFalse(result["phases"][0]["result"]["capture_available"])
+            self.assertEqual(durable_output["phases"][0]["output"], "durable output")
+        finally:
+            original_engine.shutdown()
+            fresh_engine.shutdown()
+
+    def test_legacy_execution_capture_reference_is_unavailable(self):
+        capture = server.engine.ingest("current session output")
+        payload = {"phases": [{"result": {"capture_id": capture.capture_id}}]}
+
+        self.assertIs(server._execution_public_payload(payload), payload)
+        self.assertFalse(payload["phases"][0]["result"]["capture_available"])
 
     def test_unsafe_side_effect_alias_normalizes_before_manager_validation(self):
         ordinary = server.ExecutionPhaseInput(name="ordinary", command="ordinary")

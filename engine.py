@@ -13,6 +13,7 @@ import hashlib
 import sqlite3
 import threading
 import json
+import uuid
 import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import Counter, OrderedDict
@@ -663,6 +664,7 @@ class EphemeralEngine:
         self._embedding_lock = threading.RLock()
         self.captures: Dict[str, Capture] = {}
         self.capture_order: OrderedDict[str, None] = OrderedDict()
+        self.session_id = uuid.uuid4().hex
         self._total_bytes = 0
         self._indexed_chunks = 0
         self._last_index_budget_adjustment = {
