@@ -139,6 +139,22 @@ class TestBuildListing(ListingFixture):
         # Invalid rows sort after every valid document.
         self.assertEqual(self.paths(lw.build_listing([str(self.root)]))[-1], bad)
 
+    def test_malformed_optional_environment_fields_are_listed_as_invalid(self):
+        malformed = result()
+        malformed["environment"]["tool"] = "not-an-object"
+        malformed_path = self.root / "malformed-tool.json"
+        malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+
+        listing = lw.build_listing([self.plain, malformed_path])
+        self.assertEqual(listing["summary"]["listed"], 1)
+        self.assertEqual(listing["summary"]["invalid"], 1)
+        rows = {row["path"]: row for row in listing["results"]}
+        self.assertTrue(rows[self.plain]["valid"])
+        invalid_row = rows[str(malformed_path)]
+        self.assertFalse(invalid_row["valid"])
+        self.assertEqual(invalid_row["status"], "invalid")
+        self.assertEqual(invalid_row["error"], "environment.tool must be an object")
+
     def test_redaction_hides_values_but_keeps_keys(self):
         listing = lw.build_listing([self.sweep_a], redact=["owner", "absent"])
         self.assertEqual(listing["results"][0]["metadata"]["owner"], wr.REDACTED)

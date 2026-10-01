@@ -688,6 +688,26 @@ def validate_result(result: Any) -> dict[str, Any]:
     _expect(isinstance(env, dict), "environment must be an object")
     for key in ("python_version", "platform", "recorded_at"):
         _expect(isinstance(env.get(key), str) and bool(env[key]), f"environment.{key} must be a non-empty string")
+    if "machine" in env:
+        _expect(env["machine"] is None or isinstance(env["machine"], str), "environment.machine must be a string or null")
+    if "cpu_count" in env:
+        cpu_count = env["cpu_count"]
+        _expect(
+            cpu_count is None or (isinstance(cpu_count, int) and not isinstance(cpu_count, bool)),
+            "environment.cpu_count must be an integer or null",
+        )
+    if "tool" in env:
+        tool = env["tool"]
+        _expect(isinstance(tool, dict), "environment.tool must be an object")
+        if "name" in tool:
+            _expect(isinstance(tool["name"], str), "environment.tool.name must be a string")
+        if "version" in tool:
+            _expect(tool["version"] is None or isinstance(tool["version"], str), "environment.tool.version must be a string or null")
+    if "source_revision" in env:
+        _expect(
+            env["source_revision"] is None or isinstance(env["source_revision"], str),
+            "environment.source_revision must be a string or null",
+        )
 
     _expect(result["status"] in STATUSES, f"status must be one of {', '.join(STATUSES)}")
     _expect(isinstance(result["errors"], list) and all(isinstance(error, str) for error in result["errors"]), "errors must be a list of strings")
