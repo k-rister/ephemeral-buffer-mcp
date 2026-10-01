@@ -2,7 +2,9 @@
 
 import copy
 import io
+import json
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -42,6 +44,19 @@ def summary_fixture():
 
 
 class TestAgentAbBaseline(unittest.TestCase):
+    def assert_threshold_rejected_by_both_loaders(self, summary, baseline, message):
+        with self.assertRaisesRegex(ValueError, message):
+            load_baseline_dict(copy.deepcopy(baseline))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, message):
+                load_baseline(path)
+
+        with self.assertRaisesRegex(ValueError, message):
+            compare_summary(summary, copy.deepcopy(baseline))
+
     def test_build_baseline_is_aggregate_only(self):
         baseline = build_baseline(summary_fixture())
         self.assertEqual(baseline["benchmark"], "agent-ab-baseline")
@@ -49,6 +64,40 @@ class TestAgentAbBaseline(unittest.TestCase):
         self.assertEqual(baseline["metrics"]["mcp"]["task_success_rate"], 1.0)
         self.assertNotIn("runs", baseline)
         load_baseline_dict(baseline)
+
+    def test_build_baseline_rejects_invalid_threshold_direction_and_gate(self):
+        for override, message in (
+            ({"direction": "higer"}, "completion_rate.direction must be one of"),
+            ({"gate": "false"}, "completion_rate.gate must be a boolean"),
+            ({"gate": 1}, "completion_rate.gate must be a boolean"),
+        ):
+            with self.subTest(override=override), self.assertRaisesRegex(ValueError, message):
+                build_baseline(summary_fixture(), thresholds={"completion_rate": override})
+
+    def test_misspelled_threshold_direction_is_rejected_by_file_and_memory_paths(self):
+        summary = summary_fixture()
+        baseline = build_baseline(summary)
+        baseline["thresholds"]["completion_rate"]["direction"] = "higer"
+        changed = copy.deepcopy(summary)
+        changed["mode_summaries"]["mcp"]["completion_rate"] = 0.0
+
+        self.assert_threshold_rejected_by_both_loaders(
+            changed,
+            baseline,
+            "completion_rate.direction must be one of higher, lower, informational",
+        )
+
+    def test_nonboolean_threshold_gate_is_rejected_by_file_and_memory_paths(self):
+        summary = summary_fixture()
+        for gate in ("false", 1):
+            baseline = build_baseline(summary)
+            baseline["thresholds"]["completion_rate"]["gate"] = gate
+            with self.subTest(gate=gate):
+                self.assert_threshold_rejected_by_both_loaders(
+                    summary,
+                    baseline,
+                    "completion_rate.gate must be a boolean",
+                )
 
     def test_compare_passes_same_summary(self):
         summary = summary_fixture()
