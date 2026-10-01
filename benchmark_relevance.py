@@ -14,7 +14,8 @@ from engine import EphemeralEngine
 
 
 SCHEMA_VERSION = 1
-FIXTURE_VERSION = 1
+FIXTURE_VERSION = 2
+SEMANTIC_CANDIDATE_LINES = 8
 MODES = ("bm25", "semantic", "hybrid")
 METRICS = ("hit_at_1", "hit_at_k", "mrr")
 DEFAULT_TOLERANCES = {metric: 0.05 for metric in METRICS}
@@ -36,65 +37,184 @@ def _validate_tolerances(tolerances: dict[str, Any]) -> None:
 
 
 def relevance_cases() -> list[dict[str, Any]]:
-    """Return privacy-safe fixtures with one expected relevant marker each."""
+    """Return synthetic cases with competing windows and explicit expected ranges."""
+
+    def case(
+        case_id: str,
+        query: str,
+        marker: str,
+        candidates: list[list[str]],
+        relevant_candidate: int,
+        expected_lines: tuple[int, int],
+    ) -> dict[str, Any]:
+        lines = [line for candidate in candidates for line in candidate]
+        expected_range = {
+            "start_line": (
+                relevant_candidate * SEMANTIC_CANDIDATE_LINES + expected_lines[0]
+            ),
+            "end_line": (
+                relevant_candidate * SEMANTIC_CANDIDATE_LINES + expected_lines[1]
+            ),
+        }
+        return {
+            "id": case_id,
+            "query": query,
+            "expected_marker": marker,
+            "expected_range": expected_range,
+            "lines": lines,
+        }
+
     return [
-        {
-            "id": "exact-database-error",
-            "query": "database connection refused",
-            "marker": "ERROR database connection refused",
-            "lines": [
-                "INFO service started",
-                "INFO accepting requests",
-                "WARN retry budget is low",
-                "ERROR database connection refused retryable=true",
-                "INFO retry scheduled",
-                "INFO health check complete",
+        case(
+            "exact-database-error",
+            "database connection refused",
+            "ERROR database connection refused",
+            [
+                [
+                    "INFO telemetry exporter started", "INFO scrape cycle completed",
+                    "WARN storage watermark near threshold", "INFO metrics archive rotated",
+                    "DETAIL counter shard four active", "INFO exporter flush successful",
+                    "INFO dashboard cache refreshed", "INFO telemetry cycle complete",
+                ],
+                [
+                    "INFO database client initialized", "INFO connection pool warmed",
+                    "ERROR database connection refused retryable=true", "WARN reconnect backoff selected",
+                    "INFO service retained request", "DETAIL retry budget remains",
+                    "INFO health probe passed", "INFO diagnostic bundle ready",
+                ],
+                [
+                    "INFO climate controller booted", "INFO thermostat reports stable",
+                    "WARN ventilation threshold adjusted", "INFO cooling cycle entered idle",
+                    "DETAIL ambient reading twenty one", "INFO fan speed returned to nominal",
+                    "INFO climate record archived", "INFO thermal loop ready",
+                ],
+                [
+                    "INFO batch compactor started", "INFO segment manifest loaded",
+                    "DETAIL shard count remains constant", "INFO checksum verification passed",
+                    "WARN archival queue reached half capacity", "INFO object store sync completed",
+                    "INFO compaction checkpoint written", "INFO maintenance cycle complete",
+                ],
             ],
-        },
-        {
-            "id": "punctuation-error-token",
-            "query": "ECONNREFUSED:",
-            "marker": "ECONNREFUSED: endpoint unavailable",
-            "lines": [
-                "INFO checking cache endpoint",
-                "WARN cache request delayed",
-                "ERROR ECONNREFUSED: endpoint unavailable",
-                "INFO fallback enabled",
-                "INFO request completed",
+            relevant_candidate=1,
+            expected_lines=(3, 4),
+        ),
+        case(
+            "punctuation-error-token",
+            "ECONNREFUSED:",
+            "ECONNREFUSED: endpoint unavailable",
+            [
+                [
+                    "INFO image cache mounted", "INFO thumbnail worker ready",
+                    "WARN cache refresh delayed", "INFO local asset served",
+                    "DETAIL image dimensions validated", "INFO cache entry retained",
+                    "INFO thumbnail queue drained", "INFO image pipeline idle",
+                ],
+                [
+                    "INFO credential verifier initialized", "INFO token signature accepted",
+                    "DETAIL account policy loaded", "INFO access scope evaluated",
+                    "INFO audit record appended", "WARN session expires soon",
+                    "INFO authentication response sent", "INFO identity check complete",
+                ],
+                [
+                    "INFO outbound endpoint probe started", "DETAIL socket descriptor opened",
+                    "ERROR ECONNREFUSED: endpoint unavailable", "INFO retry delay selected",
+                    "WARN alternate endpoint configured", "INFO fallback path enabled",
+                    "DETAIL request remains queued", "INFO endpoint probe complete",
+                ],
+                [
+                    "INFO scheduler heartbeat received", "INFO worker lease renewed",
+                    "DETAIL queue depth measured", "INFO background task resumed",
+                    "WARN worker utilization increased", "INFO task checkpoint persisted",
+                    "INFO scheduler cycle complete", "INFO lease monitor idle",
+                ],
             ],
-        },
-        {
-            "id": "semantic-network-disconnect",
-            "query": "where did the network disconnect?",
-            "marker": "remote host closed TCP connection",
-            "lines": [
-                "INFO replication sync started",
-                "INFO primary node healthy",
-                "WARN IO stream unexpectedly terminated; remote host closed TCP connection",
-                "INFO fallback replica selected",
-                "INFO replication sync resumed",
+            relevant_candidate=2,
+            expected_lines=(3, 4),
+        ),
+        case(
+            "semantic-network-disconnect",
+            "where did the network disconnect?",
+            "remote host closed TCP connection",
+            [
+                [
+                    "INFO audio mixer initialized", "INFO channel levels normalized",
+                    "DETAIL equalizer profile selected", "INFO playback buffer filled",
+                    "WARN output volume adjusted", "INFO stereo stream active",
+                    "INFO audio frame rendered", "INFO mixer cycle complete",
+                ],
+                [
+                    "INFO thermal sensor sampled", "DETAIL cooling fan remains steady",
+                    "INFO voltage regulator checked", "WARN battery threshold updated",
+                    "INFO power profile applied", "DETAIL temperature within range",
+                    "INFO energy report stored", "INFO sensor cycle complete",
+                ],
+                [
+                    "INFO document renderer started", "INFO page layout selected",
+                    "DETAIL font cache loaded", "INFO vector layer rasterized",
+                    "WARN output scale rounded", "INFO preview image written",
+                    "INFO render queue drained", "INFO document task complete",
+                ],
+                [
+                    "INFO replica synchronization started", "INFO primary node remained healthy",
+                    "WARN IO stream unexpectedly terminated", "DETAIL remote host closed TCP connection",
+                    "INFO fallback replica selected", "INFO replication resumed from checkpoint",
+                    "DETAIL pending segment count recovered", "INFO synchronization cycle complete",
+                ],
             ],
-        },
-        {
-            "id": "lexical-semantic-conflict",
-            "query": "payment test failure card declined",
-            "marker": "PaymentGateway: received 402 Payment Required",
-            "lines": [
-                "INFO payment test suite started",
-                "INFO payment authorization request sent",
-                "INFO payment test completed successfully for test card",
-                "FAIL PaymentGateway: received 402 Payment Required",
-                "DETAIL card declined by issuing bank",
-                "INFO retry disabled",
+            relevant_candidate=3,
+            expected_lines=(3, 4),
+        ),
+        case(
+            "lexical-semantic-conflict",
+            "payment test failure card declined",
+            "PaymentGateway: received 402 Payment Required",
+            [
+                [
+                    "INFO renderer started", "INFO frame palette loaded",
+                    "DETAIL canvas dimensions accepted", "INFO texture atlas prepared",
+                    "WARN animation frame skipped", "INFO scene graph updated",
+                    "INFO display refresh completed", "INFO renderer idle",
+                ],
+                [
+                    "INFO catalog snapshot loaded", "DETAIL product index verified",
+                    "INFO inventory cache refreshed", "WARN catalog page took longer",
+                    "INFO search index checkpointed", "DETAIL stock record normalized",
+                    "INFO catalog response assembled", "INFO inventory task complete",
+                ],
+                [
+                    "INFO integration suite started", "INFO authorization request dispatched",
+                    "DETAIL issuer response received", "FAIL PaymentGateway: received 402 Payment Required",
+                    "DETAIL card declined by issuing bank", "INFO retry disabled by policy",
+                    "INFO failure summary recorded", "INFO integration task complete",
+                ],
+                [
+                    "INFO media transcoder started", "INFO source track inspected",
+                    "DETAIL codec profile selected", "WARN bitrate target adjusted",
+                    "INFO segment encoder warmed", "INFO output container opened",
+                    "INFO media manifest written", "INFO transcoding task complete",
+                ],
             ],
-        },
+            relevant_candidate=2,
+            expected_lines=(4, 5),
+        ),
     ]
 
 
-def _marker_rank(matches: list[dict[str, Any]], marker: str) -> int | None:
-    """Return the one-based rank of the first result containing marker."""
+def _expected_range_rank(
+    matches: list[dict[str, Any]], expected_range: dict[str, int]
+) -> int | None:
+    """Return the first rank whose matched lines overlap the expected evidence range."""
+    expected_start = expected_range["start_line"]
+    expected_end = expected_range["end_line"]
     for rank, match in enumerate(matches, start=1):
-        if marker in match.get("context", "") or marker in match.get("snippet", ""):
+        value = match.get("matched_range", "")
+        try:
+            start_text, end_text = value.split("-L", 1)
+            matched_start = int(start_text.removeprefix("L"))
+            matched_end = int(end_text)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if matched_start <= expected_end and expected_start <= matched_end:
             return rank
     return None
 
@@ -105,7 +225,12 @@ def run_relevance_benchmark(top_k: int = 3) -> dict[str, Any]:
         raise ValueError("top_k must be positive")
 
     cases = relevance_cases()
-    engine = EphemeralEngine(max_captures=len(cases))
+    engine = EphemeralEngine(
+        max_captures=len(cases),
+        semantic_chunk_lines=SEMANTIC_CANDIDATE_LINES,
+        semantic_chunk_bytes=4096,
+        semantic_chunk_overlap=0,
+    )
     records = []
     try:
         captures = {
@@ -116,14 +241,17 @@ def run_relevance_benchmark(top_k: int = 3) -> dict[str, Any]:
             for case in cases:
                 result = engine.search(
                     case["query"], mode=mode, capture_id=captures[case["id"]].capture_id,
-                    top_k=top_k, context_lines=1,
+                    top_k=top_k, context_lines=0,
                 )
-                rank = _marker_rank(result.get("matches", []), case["marker"])
+                rank = _expected_range_rank(
+                    result.get("matches", []), case["expected_range"]
+                )
                 records.append({
                     "case": case["id"],
                     "mode": mode,
                     "query": case["query"],
-                    "expected_marker": case["marker"],
+                    "expected_marker": case["expected_marker"],
+                    "expected_range": case["expected_range"],
                     "rank": rank,
                     "hit_at_1": rank == 1,
                     "hit_at_k": rank is not None and rank <= top_k,
@@ -153,7 +281,7 @@ def run_relevance_benchmark(top_k: int = 3) -> dict[str, Any]:
         "platform": platform.platform(),
         "top_k": top_k,
         "controls": {
-            "fixtures": "deterministic synthetic output with explicit expected markers",
+            "fixtures": "deterministic synthetic output with competing windows and expected matched ranges",
             "embedding_model": "EPHEMERAL_TEST_EMBEDDINGS when enabled by caller",
             "telemetry": "none; all measurements are local",
             "scope": "retrieval relevance only; no agent answer quality or token usage",
@@ -287,7 +415,7 @@ def workload_result(result: dict[str, Any]) -> dict[str, Any]:
         errors=global_regressions,
         runs=runs,
         details=result,
-        privacy="synthetic fixtures with explicit expected markers; no user queries or captures",
+        privacy="synthetic fixtures with explicit expected ranges; no user queries or captures",
     )
 
 

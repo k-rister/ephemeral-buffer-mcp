@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 import benchmark_relevance
 import workload_results as wr
+from engine import EphemeralEngine
 from benchmark_relevance import (
+    _expected_range_rank,
     compare_relevance,
     load_baseline,
     relevance_cases,
@@ -26,12 +28,48 @@ class TestRelevanceBenchmark(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(all("synthetic" not in "\n".join(case["lines"]) for case in first))
         self.assertEqual(len(first), 4)
+        engine = EphemeralEngine(
+            max_captures=1,
+            semantic_chunk_lines=8,
+            semantic_chunk_bytes=4096,
+            semantic_chunk_overlap=0,
+            embedding_warmup=False,
+            semantic_prefetch=False,
+        )
+        try:
+            for case in first:
+                chunks = engine._semantic_chunk_lines(case["lines"])
+                expected = case["expected_range"]
+                self.assertEqual(len(chunks), 4)
+                self.assertGreater(expected["start_line"], chunks[0].end_line)
+                self.assertLessEqual(expected["end_line"], chunks[-1].end_line)
+                expected_text = "\n".join(
+                    case["lines"][expected["start_line"] - 1:expected["end_line"]]
+                )
+                self.assertIn(case["expected_marker"], expected_text)
+        finally:
+            engine.shutdown()
+
+    def test_relevance_scores_matched_ranges_not_incidental_context(self):
+        matches = [
+            {
+                "matched_range": "L1-L8",
+                "context": "unrelated result\nexpected diagnostic",
+                "snippet": "unrelated result\nexpected diagnostic",
+            },
+            {"matched_range": "L9-L16", "context": "expected diagnostic"},
+        ]
+
+        self.assertEqual(
+            _expected_range_rank(matches, {"start_line": 9, "end_line": 9}),
+            2,
+        )
 
     def test_all_modes_report_machine_readable_relevance_scores(self):
         result = run_relevance_benchmark()
 
         self.assertEqual(result["schema_version"], 1)
-        self.assertEqual(result["fixture_version"], 1)
+        self.assertEqual(result["fixture_version"], 2)
         self.assertEqual(result["embedding_mode"], "deterministic-test")
         self.assertEqual(result["top_k"], 3)
         self.assertEqual(set(result["summaries"]), {"bm25", "semantic", "hybrid"})
@@ -63,6 +101,25 @@ class TestRelevanceBenchmark(unittest.TestCase):
         self.assertFalse(comparison["passed"])
         self.assertTrue(any("hybrid.hit_at_1" in item for item in comparison["regressions"]))
 
+    def test_query_insensitive_embeddings_fail_relevance_baseline(self):
+        class QueryInsensitiveEmbedding:
+            def embed(self, texts):
+                return [[1.0] + [0.0] * 383 for _ in texts]
+
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "1"}), patch.object(
+            EphemeralEngine,
+            "_get_embedding_model",
+            return_value=QueryInsensitiveEmbedding(),
+        ):
+            result = run_relevance_benchmark()
+        baseline = load_baseline(Path(__file__).with_name("benchmark_relevance_baseline.json"))
+        comparison = compare_relevance(result, baseline)
+
+        self.assertFalse(comparison["passed"])
+        self.assertTrue(
+            any(item.startswith("semantic.hit_at_1") for item in comparison["regressions"])
+        )
+
     def test_baseline_loader_rejects_schema_and_missing_metrics(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "baseline.json"
@@ -83,7 +140,7 @@ class TestRelevanceBenchmark(unittest.TestCase):
         record = run_relevance_benchmark()
         result = workload_result(record)
         self.assertEqual(result["workload"]["name"], "search-relevance")
-        self.assertEqual(result["workload"]["fixture_version"], 1)
+        self.assertEqual(result["workload"]["fixture_version"], 2)
         self.assertFalse(result["workload"]["parameters"]["baseline_compared"])
         self.assertEqual([item["id"] for item in result["runs"]], ["bm25", "semantic", "hybrid"])
         self.assertEqual(result["runs"][0]["labels"], {"mode": "bm25", "top_k": 3})

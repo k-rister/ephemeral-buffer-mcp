@@ -9,6 +9,8 @@
   values in generated, file-loaded, and in-memory baselines.
 - Reject nonfinite concurrency baseline throughput rates before regression
   comparisons so NaN or infinity cannot disable the performance gate.
+- Give search-relevance fixtures four competing semantic windows and score
+  expected matched ranges, so query-insensitive ranking can fail the baseline.
 - Keep BM25 effectiveness benchmarks isolated from semantic prefetch work and
   shut down benchmark engines after each run. Reject nonfinite agent A/B
   measurements, use unique default run directories, clean up interrupted Codex

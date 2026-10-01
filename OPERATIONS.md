@@ -569,11 +569,12 @@ performance. In particular:
 - local timing covers capture, indexing, search, and retrieval only.
 
 The separate `benchmark_relevance.py` harness evaluates retrieval quality for
-BM25, semantic, and hybrid search against explicit synthetic markers. It
-reports hit@1, hit@k, and mean reciprocal rank (MRR). These are retrieval
-metrics only: they do not measure agent answer quality, token usage, or
-performance on arbitrary repositories. Run it with `EPHEMERAL_TEST_EMBEDDINGS=1`
-for deterministic results and compare it with the checked-in baseline:
+BM25, semantic, and hybrid search against synthetic evidence ranges. Each query
+has four competing semantic windows, and scoring checks the matched line range
+rather than surrounding context. It reports hit@1, hit@k, and mean reciprocal
+rank (MRR). These are retrieval metrics only: they do not measure agent answer
+quality, token usage, or performance on arbitrary repositories. Run it with
+deterministic test embeddings and compare it with the checked-in baseline:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
