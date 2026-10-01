@@ -610,7 +610,8 @@ def _capture_execution_phase(
     result: Dict[str, Any],
 ) -> Optional[str]:
     """Retain a phase result in the searchable ring as a convenience snapshot."""
-    capture = _active_engine().ingest(
+    active_engine = _active_engine()
+    capture = active_engine.ingest(
         output,
         label=f"execution phase: {phase['name']}",
         content_type="auto",
@@ -624,6 +625,7 @@ def _capture_execution_phase(
         duration_ms=result.get("duration_ms"),
         structured_metrics=phase.get("structured_metrics", {}),
     )
+    result["capture_session_id"] = active_engine.session_id
     return capture.capture_id
 
 
@@ -713,11 +715,15 @@ def _json_dumps_with_limit(payload: Any, max_bytes: Optional[int]) -> Optional[s
 
 def _execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Annotate session-local capture references before returning durable state."""
+    active_engine = _active_engine()
     for phase in payload.get("phases", []):
         result = phase.get("result")
         if not isinstance(result, dict) or "capture_id" not in result:
             continue
-        result["capture_available"] = _active_engine().get_capture(result["capture_id"]) is not None
+        result["capture_available"] = (
+            result.get("capture_session_id") == active_engine.session_id
+            and active_engine.get_capture(result["capture_id"]) is not None
+        )
     return payload
 
 
