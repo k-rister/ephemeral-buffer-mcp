@@ -613,14 +613,19 @@ does not write transcripts or raw command output to the records file. Its
 provider-reported model-context measurement.
 If the fixture does not contain an importable `server` module, provide the
 absolute server path with `--mcp-server-script`.
-Records schema version 5 adds data-path byte counters for capture input,
-retained and original bytes, tool/search/retrieval responses, and socket
-requests and responses. Version 4 records include exit code, failure reason,
+Records schema version 6 adds an objective `task_success` score. The existing
+`completed` field means the Codex invocation exited successfully and is
+reported separately from task success. Version 5 records include data-path
+byte counters for capture input, retained and original bytes,
+tool/search/retrieval responses, and socket requests and responses. Version 4
+records include exit code, failure reason,
 MCP-specific tool-call counts, optional provider-reported input/output token
 counts and samples, and the prompt/output components of the context proxy.
-The analyzer reads records from versions 1 through 5; a missing version field
+The analyzer reads records from versions 1 through 6; a missing version field
 is treated as version 1. Data-path and provider metrics absent from older
-records are reported as unavailable, not zero.
+records are reported as unavailable, not zero. Task-success and affirmative
+retrieval rates are unavailable for versions 1 through 5; they are never
+inferred from a zero exit code or the prior marker-only score.
 The aggregate summary reports usage sample counts, monotonicity observations,
 and first-to-last deltas. A monotonic sequence is not treated as proof of
 cumulative accounting; use a controlled calibration matrix to establish the
@@ -637,7 +642,11 @@ run manifest before an experiment:
 ```
 
 It emits large test/build output only when a task runs, includes a small
-targeted-output control, and defines objective success criteria for each task.
+targeted-output control, and defines deterministic required answer phrases for
+each task. A task succeeds only when its final answer contains every required
+phrase and is not a refusal. A refusal that repeats the marker does not count
+as successful retrieval; successful command or MCP result content can still
+establish retrieval independently.
 Keep generated fixtures, manifests, records, and captures outside the
 repository unless they have passed a separate privacy review.
 
@@ -673,10 +682,14 @@ agent A/B summary:
 ```
 
 Compare later summaries with `--baseline` and `--fail-on-regression`. The
-baseline compares completion and retrieval as primary gated outcomes, latency
-and context/token metrics with tolerances, and MCP/tool usage as reported
-observations. Tolerances must be finite and nonnegative. Missing provider
-telemetry is unavailable rather than zero.
+baseline compares objective task success and affirmative retrieval as primary
+gated outcomes, invocation completion separately, latency and context/token
+metrics with tolerances, and MCP/tool usage as reported observations. The
+checked-in task fixture v1 baseline predates objective scoring, so its
+task-success and retrieval values are unavailable; regenerate it from a
+reviewed v2 experiment before using those outcome gates. Tolerances must be
+finite and nonnegative. Missing provider telemetry is unavailable rather than
+zero.
 Do not make live Codex calls part of required pull-request CI; run this manual
 workflow or an explicitly scheduled experiment after privacy review.
 

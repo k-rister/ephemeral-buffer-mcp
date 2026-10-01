@@ -56,6 +56,53 @@ def _records_payload():
     }
 
 
+def _scored_records_payload():
+    schedule, payload = _records_payload()
+    payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
+    for record in payload["runs"]:
+        context_bytes = record.pop("context_bytes")
+        record.update({
+            "context_bytes_proxy": context_bytes,
+            "exit_code": 0,
+            "failure_reason": None,
+            "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "input_token_samples": [],
+            "output_token_samples": [],
+            "prompt_bytes_proxy": 40,
+            "output_bytes_proxy": context_bytes - 40,
+            "task_success": record["mode"] == "mcp" and record["repetition"] == 2,
+        })
+        record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
+        record["completed"] = True
+        record["signal_retrieved"] = record["task_success"] or (
+            record["mode"] == "mcp" and record["repetition"] == 1 and record["task_id"] == "targeted-inspection"
+        )
+    return schedule, payload
+
+
+def _legacy_v5_records_payload():
+    schedule, payload = _records_payload()
+    payload["records_schema_version"] = 5
+    for record in payload["runs"]:
+        context_bytes = record.pop("context_bytes")
+        record.update({
+            "context_bytes_proxy": context_bytes,
+            "exit_code": 0,
+            "failure_reason": None if record["completed"] else "mcp_not_used",
+            "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "input_token_samples": [],
+            "output_token_samples": [],
+            "prompt_bytes_proxy": 40,
+            "output_bytes_proxy": context_bytes - 40,
+        })
+        record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
+    return schedule, payload
+
+
 class TestAgentAbBenchmark(unittest.TestCase):
     def test_schedule_is_reproducible_and_balanced(self):
         first = build_schedule(repetitions=3, seed=17)
@@ -72,8 +119,48 @@ class TestAgentAbBenchmark(unittest.TestCase):
         summary = summarize_records(payload, schedule)
         self.assertEqual(summary["mode_summaries"]["mcp"]["runs"], 8)
         self.assertEqual(summary["mode_summaries"]["mcp"]["completion_rate"], 1.0)
-        self.assertEqual(summary["paired_deltas_mcp_minus_control"]["completed"]["mean"], 1.0)
+        self.assertIsNone(summary["mode_summaries"]["mcp"]["invocation_completion_rate"])
+        self.assertFalse(summary["paired_deltas_mcp_minus_control"]["completed"]["available"])
+        self.assertIsNone(summary["mode_summaries"]["mcp"]["task_success_rate"])
+        self.assertFalse(summary["paired_deltas_mcp_minus_control"]["task_success"]["available"])
         self.assertTrue(summary["recommendations"])
+
+    def test_legacy_v5_invocation_completion_uses_exit_code(self):
+        schedule, payload = _legacy_v5_records_payload()
+        summary = summarize_records(payload, schedule)
+
+        control = summary["mode_summaries"]["control"]
+        self.assertEqual(control["completion_rate"], 0.0)
+        self.assertEqual(control["invocation_completion_rate"], 1.0)
+        self.assertEqual(summary["mode_summaries"]["mcp"]["invocation_completion_rate"], 1.0)
+        paired_completion = summary["paired_deltas_mcp_minus_control"]["completed"]
+        self.assertEqual(paired_completion["mean"], 0.0)
+        self.assertTrue(paired_completion["available"])
+
+        summary_result = summary_workload_result(summary)
+        control_result = next(item for item in summary_result["runs"] if item["id"] == "control")
+        self.assertEqual(control_result["measurements"]["invocation_completion_rate"]["value"], 1.0)
+
+        run_result = records_workload_result(payload, schedule)
+        control_run = next(item for item in run_result["runs"] if item["labels"]["mode"] == "control")
+        self.assertEqual(control_run["status"], "partial")
+        self.assertEqual(control_run["measurements"]["invocation_completion_rate"]["value"], 1.0)
+
+    def test_summary_separates_invocation_completion_from_objective_task_success(self):
+        schedule, payload = _scored_records_payload()
+        summary = summarize_records(payload, schedule)
+        mcp = summary["mode_summaries"]["mcp"]
+        self.assertEqual(mcp["invocation_completion_rate"], 1.0)
+        self.assertEqual(mcp["task_success_rate"], 0.5)
+        self.assertEqual(mcp["signal_retrieval_rate"], 0.625)
+        paired = summary["paired_deltas_mcp_minus_control"]
+        self.assertEqual(paired["completed"]["mean"], 0.0)
+        self.assertEqual(paired["task_success"]["mean"], 0.5)
+        result = summary_workload_result(summary)
+        mcp_result = next(item for item in result["runs"] if item["id"] == "mcp")
+        self.assertEqual(mcp_result["status"], "partial")
+        self.assertEqual(mcp_result["measurements"]["success_rate"]["value"], 0.5)
+        self.assertEqual(mcp_result["measurements"]["invocation_completion_rate"]["value"], 1.0)
 
     def test_summary_excludes_unavailable_rss_measurements(self):
         schedule, payload = _records_payload()
@@ -166,7 +253,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_summary_reports_session_data_path_bytes_for_version_five(self):
         schedule, payload = _records_payload()
-        payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
+        payload["records_schema_version"] = 5
         for record in payload["runs"]:
             record.pop("context_bytes", None)
             record.update({
@@ -221,18 +308,26 @@ def json_text(value):
         self.assertEqual(result["workload"]["parameters"]["protocol"]["agent_adapter"], "test-adapter")
         self.assertEqual([item["id"] for item in result["runs"]], ["control", "mcp", "paired-delta"])
         control, mcp, paired = result["runs"]
-        self.assertEqual(control["status"], "failure")
-        self.assertEqual(mcp["status"], "success")
-        self.assertEqual(mcp["measurements"]["success_rate"], {"unit": "ratio", "value": 1.0, "samples": 8})
+        self.assertEqual(control["status"], "partial")
+        self.assertEqual(mcp["status"], "partial")
+        self.assertEqual(mcp["measurements"]["success_rate"], {"unit": "ratio", "value": None, "samples": 0, "note": "legacy records lack objective task-success criteria"})
         self.assertEqual(mcp["measurements"]["wall_time_seconds"]["mean"], 2.0)
         self.assertEqual(mcp["measurements"]["context_bytes"]["note"], benchmark_agent_ab.CONTEXT_PROXY_NOTE)
         # Version-one records carry no token or data-path fields: they are absent, not zero.
         self.assertEqual(mcp["measurements"]["input_tokens"]["value"], None)
         self.assertEqual(mcp["measurements"]["capture_input_bytes"]["value"], None)
+        self.assertIsNone(mcp["measurements"]["invocation_completion_rate"]["value"])
+        self.assertEqual(mcp["measurements"]["invocation_completion_rate"]["samples"], 0)
         self.assertEqual(paired["labels"], {"comparison": "mcp_minus_control"})
-        self.assertEqual(paired["measurements"]["success_rate"]["mean"], 1.0)
+        self.assertIsNone(paired["measurements"]["success_rate"]["value"])
+        self.assertIsNone(paired["measurements"]["invocation_completion_rate"]["value"])
         self.assertEqual(paired["measurements"]["wall_time_seconds"]["mean"], -1.0)
         self.assertEqual(result["details"], summary)
+
+        records_result = records_workload_result(payload, schedule)
+        control_record = next(item for item in records_result["runs"] if item["labels"]["mode"] == "control")
+        self.assertEqual(control_record["status"], "partial")
+        self.assertIsNone(control_record["measurements"]["invocation_completion_rate"]["value"])
 
     def test_records_workload_result_keeps_timeouts_and_unavailable_values(self):
         schedule = build_schedule(repetitions=1, seed=3)
@@ -280,7 +375,9 @@ def json_text(value):
         self.assertIsNone(control["measurements"]["input_tokens"]["value"])
         mcp = next(item for item in result["runs"] if item["labels"]["mode"] == "mcp")
         self.assertEqual(mcp["id"], f"{mcp['labels']['task_id']}-r1-mcp")
-        self.assertEqual(mcp["status"], "success")
+        self.assertEqual(mcp["status"], "partial")
+        self.assertIsNone(mcp["measurements"]["success_rate"]["value"])
+        self.assertEqual(mcp["measurements"]["invocation_completion_rate"]["value"], 1.0)
         self.assertEqual(mcp["measurements"]["peak_rss_bytes"]["value"], 4096)
         self.assertEqual(mcp["measurements"]["input_tokens"]["value"], 100)
         self.assertEqual(mcp["measurements"]["wall_time_seconds"]["value"], 1.5)

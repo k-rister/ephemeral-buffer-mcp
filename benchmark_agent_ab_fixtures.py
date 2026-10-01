@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-FIXTURE_VERSION = 1
+FIXTURE_VERSION = 2
 TASKS = {
     "targeted-inspection": {
         "category": "small-targeted-output",
@@ -18,7 +18,10 @@ TASKS = {
             "Do not paste the complete output."
         ),
         "signal_marker": "TARGETED_SIGNAL",
-        "success_criteria": "Final response contains TARGETED_SIGNAL and the correct source line number.",
+        "success_criteria": {
+            "description": "Final response contains TARGETED_SIGNAL and the correct source line number.",
+            "required_phrases": ["TARGETED_SIGNAL", "line 32"],
+        },
     },
     "noisy-test-failure": {
         "category": "noisy-test-output",
@@ -29,7 +32,14 @@ TASKS = {
             "Do not paste the complete output."
         ),
         "signal_marker": "TEST_FAILURE_SIGNAL",
-        "success_criteria": "Final response identifies test_case_1379, TEST_FAILURE_SIGNAL, and the assertion text.",
+        "success_criteria": {
+            "description": "Final response identifies test_case_1379, TEST_FAILURE_SIGNAL, and the assertion text.",
+            "required_phrases": [
+                "test_case_1379",
+                "TEST_FAILURE_SIGNAL",
+                "expected status=ready, got status=stalled",
+            ],
+        },
     },
     "build-log-search": {
         "category": "noisy-build-output",
@@ -40,7 +50,10 @@ TASKS = {
             "Do not paste the complete output."
         ),
         "signal_marker": "BUILD_FAILURE_SIGNAL",
-        "success_criteria": "Final response contains BUILD_FAILURE_SIGNAL, src/parser.c, and line 917.",
+        "success_criteria": {
+            "description": "Final response contains BUILD_FAILURE_SIGNAL, src/parser.c, and line number 917.",
+            "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c", "917"],
+        },
     },
     "follow-up-context": {
         "category": "search-and-retrieval",
@@ -51,7 +64,10 @@ TASKS = {
             "test_case_1379 and TEST_FAILURE_SIGNAL without pasting the complete output."
         ),
         "signal_marker": "TEST_FAILURE_SIGNAL",
-        "success_criteria": "Final response preserves the earlier result and identifies test_case_1379 with TEST_FAILURE_SIGNAL.",
+        "success_criteria": {
+            "description": "Final response preserves the earlier result and identifies test_case_1379 with TEST_FAILURE_SIGNAL.",
+            "required_phrases": ["test_case_1379", "TEST_FAILURE_SIGNAL"],
+        },
     },
 }
 

@@ -1225,16 +1225,49 @@ captures; share only the aggregate summary after privacy review.
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
 run, isolates control and MCP configuration, and writes metadata-only records.
-Create a private task manifest (do not commit it) with one prompt and optional
-signal marker for each scheduled task:
+Create a private task manifest (do not commit it) with fixture version 2, a
+prompt, signal marker, and objective success criteria for each scheduled task:
 
 ```json
 {
+  "fixture_version": 2,
   "tasks": {
-    "targeted-inspection": {"prompt": "Inspect the fixture and report the marker.", "signal_marker": "MARKER"},
-    "noisy-test-failure": {"prompt": "Run the fixture test and report the failure marker.", "signal_marker": "MARKER"},
-    "build-log-search": {"prompt": "Inspect the build log and report the marker.", "signal_marker": "MARKER"},
-    "follow-up-context": {"prompt": "Find the earlier marker and report it.", "signal_marker": "MARKER"}
+    "targeted-inspection": {
+      "prompt": "Inspect the fixture and report the marker and line number.",
+      "signal_marker": "TARGETED_SIGNAL",
+      "success_criteria": {
+        "description": "Report the signal and its correct output line.",
+        "required_phrases": ["TARGETED_SIGNAL", "line 32"]
+      }
+    },
+    "noisy-test-failure": {
+      "prompt": "Run the fixture test and report the failed test, marker, and assertion.",
+      "signal_marker": "TEST_FAILURE_SIGNAL",
+      "success_criteria": {
+        "description": "Identify the failed test, marker, and assertion.",
+        "required_phrases": [
+          "test_case_1379",
+          "TEST_FAILURE_SIGNAL",
+          "expected status=ready, got status=stalled"
+        ]
+      }
+    },
+    "build-log-search": {
+      "prompt": "Inspect the build log and report the marker, source file, and line.",
+      "signal_marker": "BUILD_FAILURE_SIGNAL",
+      "success_criteria": {
+        "description": "Report the marker and its source location.",
+        "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c:917"]
+      }
+    },
+    "follow-up-context": {
+      "prompt": "Find the earlier marker and report which test failed.",
+      "signal_marker": "TEST_FAILURE_SIGNAL",
+      "success_criteria": {
+        "description": "Identify the earlier failed test and marker.",
+        "required_phrases": ["test_case_1379", "TEST_FAILURE_SIGNAL"]
+      }
+    }
   }
 }
 ```
@@ -1264,17 +1297,22 @@ server, add `--allow-mcp-approvals`. This uses Codex automatic review with a
 privacy-reviewed fixture. Control runs continue to use the read-only sandbox
 without MCP approval routing; the records protocol identifies the selected
 policy. Add `--require-mcp-calls` when the MCP arm must exercise at least one
-MCP tool; runs that bypass MCP are then marked incomplete with reason
-`mcp_not_used`.
+MCP tool; runs that bypass MCP are marked with reason `mcp_not_used`. A zero
+exit records invocation completion, while objective task success is scored
+separately from all required answer phrases. Explicit refusals do not pass
+task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 5 and add exit code, failure reason, MCP-specific
-tool-call count, provider-reported input/output token counts, and every
-provider usage sample when Codex emits them. They also break the observable
-context proxy into prompt and output byte components. Version-1 through
-version-4 records remain readable; missing provider metrics are reported as
-unavailable rather than zero. Version-5 MCP records additionally include
+Runner records use version 6 and add objective `task_success` separately from
+the zero-exit `completed` invocation flag. They also include exit code, failure
+reason, MCP-specific tool-call count, provider-reported input/output token
+counts, and every provider usage sample when Codex emits them. They break the
+observable context proxy into prompt and output byte components. Version-1
+through version-5 records remain readable; missing task-success and
+affirmative retrieval scores are unavailable rather than inferred from
+invocation status or marker-only scoring. Missing provider metrics are
+reported as unavailable rather than zero. Version-5 and version-6 MCP records include
 content-free session data-path byte counters for capture input/retention,
 tool/search/retrieval responses, and framed socket traffic. The adapter enables
 local metrics for MCP runs and collects the server snapshot after each run;
@@ -1350,7 +1388,11 @@ Create and compare an aggregate agent A/B baseline after a privacy review:
 
 The baseline stores agent and embedding model configuration, embedding mode and
 cache, fixture, seed, repetition, aggregate metrics, and explicit tolerances
-only. It never stores prompts, transcripts, commands,
+only. Objective task success and affirmative signal retrieval are primary
+gated outcomes; invocation completion is reported separately. The checked-in
+fixture v1 baseline predates objective scoring, so its task-success and
+retrieval values are unavailable. Regenerate it from a reviewed fixture v2
+experiment before using those gates. It never stores prompts, transcripts, commands,
 captures, or user content. This comparison is a documented manual workflow;
 live model calls are not part of required pull-request CI. Update a checked-in
 baseline only when fixture or model changes are explained in review.

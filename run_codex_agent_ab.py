@@ -9,6 +9,7 @@ manifest and are never copied to the output records.
 import argparse
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
     MODES,
     RECORDS_SCHEMA_VERSION,
+    TASK_FIXTURE_VERSION,
     TASKS,
     _read_json,
     records_workload_result,
@@ -38,8 +40,12 @@ DEFAULT_TIMEOUT = 900
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 
 
-def _load_manifest(path: Path) -> dict[str, dict[str, str]]:
+def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
     payload = _read_json(path)
+    if payload.get("fixture_version") != TASK_FIXTURE_VERSION:
+        raise ValueError(
+            f"task manifest fixture_version must be {TASK_FIXTURE_VERSION}"
+        )
     tasks = payload.get("tasks")
     if not isinstance(tasks, dict):
         raise ValueError("task manifest must contain a tasks object")
@@ -54,7 +60,36 @@ def _load_manifest(path: Path) -> dict[str, dict[str, str]]:
             raise ValueError(f"task {task_id} requires a non-empty prompt")
         if not isinstance(marker, str):
             raise ValueError(f"task {task_id} signal_marker must be a string")
-        manifest[task_id] = {"prompt": prompt, "signal_marker": marker}
+        criteria = task.get("success_criteria")
+        if not isinstance(criteria, dict):
+            raise ValueError(f"task {task_id} requires structured success_criteria")
+        description = criteria.get("description")
+        required_phrases = criteria.get("required_phrases")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError(f"task {task_id} success_criteria requires a description")
+        if (
+            not isinstance(required_phrases, list)
+            or len(required_phrases) < 2
+            or any(not isinstance(value, str) or not value.strip() for value in required_phrases)
+        ):
+            raise ValueError(
+                f"task {task_id} success_criteria requires at least two non-empty required_phrases"
+            )
+        normalized_phrases = [" ".join(value.casefold().split()) for value in required_phrases]
+        if len(normalized_phrases) != len(set(normalized_phrases)):
+            raise ValueError(f"task {task_id} success_criteria contains duplicate required_phrases")
+        if marker and marker.casefold() not in normalized_phrases:
+            raise ValueError(
+                f"task {task_id} success_criteria must require its signal_marker"
+            )
+        manifest[task_id] = {
+            "prompt": prompt,
+            "signal_marker": marker,
+            "success_criteria": {
+                "description": description,
+                "required_phrases": required_phrases,
+            },
+        }
     missing = known - set(manifest)
     if missing:
         raise ValueError(f"task manifest is missing task: {sorted(missing)[0]}")
@@ -80,6 +115,40 @@ def _event_objects(output: str) -> list[dict[str, Any]]:
     return events
 
 
+def _nested_result_text(value: Any) -> list[str]:
+    """Extract text from structured MCP result content without reading inputs."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [text for child in value for text in _nested_result_text(child)]
+    if not isinstance(value, dict):
+        return []
+
+    evidence = []
+    text = value.get("text")
+    if isinstance(text, str):
+        evidence.append(text)
+    for key in ("content", "result", "output", "data", "structuredContent", "resource"):
+        if key in value:
+            evidence.extend(_nested_result_text(value[key]))
+    return evidence
+
+
+def _nested_result_is_error(value: Any) -> bool:
+    """Return whether an MCP result payload contains its standard error flag."""
+    if isinstance(value, list):
+        return any(_nested_result_is_error(child) for child in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("isError") is True:
+        return True
+    return any(
+        _nested_result_is_error(value[key])
+        for key in ("content", "result", "output", "data", "structuredContent", "resource")
+        if key in value
+    )
+
+
 def _signal_evidence_text(item: dict[str, Any]) -> list[str]:
     """Return validated result or answer text from one protocol item."""
     event_type = item.get("type")
@@ -89,6 +158,7 @@ def _signal_evidence_text(item: dict[str, Any]) -> list[str]:
     if "error" in normalized_type or "failure" in normalized_type:
         return []
 
+    nested_result = False
     if "command_execution" in normalized_type:
         status = item.get("status")
         exit_code = item.get("exit_code")
@@ -100,7 +170,13 @@ def _signal_evidence_text(item: dict[str, Any]) -> list[str]:
     elif "mcp" in normalized_type and ("call" in normalized_type or "tool" in normalized_type):
         if item.get("status") in {"failed", "error", "cancelled", "canceled"}:
             return []
+        result_keys = ("result", "output", "content", "data", "structuredContent")
+        if item.get("isError") is True or any(
+            _nested_result_is_error(item[key]) for key in result_keys if key in item
+        ):
+            return []
         keys = ("result", "output", "content", "text", "data")
+        nested_result = True
     elif "agent_message" in normalized_type or "assistant" in normalized_type or normalized_type in {"message", "final"}:
         keys = ("text", "content", "message")
     else:
@@ -111,27 +187,103 @@ def _signal_evidence_text(item: dict[str, Any]) -> list[str]:
         value = item.get(key)
         if isinstance(value, str):
             evidence.append(value)
+        elif nested_result:
+            evidence.extend(_nested_result_text(value))
     return evidence
 
 
 def _signal_retrieved(output: str, marker: str) -> bool:
-    """Check only returned results or answers, never serialized requests."""
+    """Check successful result text or a non-refusal agent answer."""
     if not marker:
         return False
 
-    for line in output.splitlines():
-        try:
-            json.loads(line)
-        except json.JSONDecodeError:
-            if marker in line:
-                return True
-            continue
+    answer = _final_answer_text(output)
+    if marker in answer and not _is_refusal(answer):
+        return True
 
     for event in _event_objects(output):
         for item in _walk_dicts(event):
+            event_type = item.get("type")
+            if not isinstance(event_type, str):
+                continue
+            normalized_type = event_type.lower()
+            if (
+                "agent_message" in normalized_type
+                or "assistant" in normalized_type
+                or normalized_type in {"message", "final"}
+            ):
+                continue
             if any(marker in evidence for evidence in _signal_evidence_text(item)):
                 return True
     return False
+
+
+# “Can't help but” is an idiom meaning “can't avoid,” not a task refusal.
+_REFUSAL_ACTION_PATTERN = r"(?:answer|complete|solve|help(?!\s+but\b)|provide|assist|comply|fulfill|fulfil|do|run|execute|perform|launch|test)"
+_REFUSAL_OUTCOME_ACTION_PATTERN = r"(?:answer|complete|solve|help(?!\s+but\b)|provide|assist|comply|fulfill|fulfil|do)"
+_REFUSAL_NEGATION_PATTERN = r"(?:cannot|can't|could not|couldn't|won't|will not)"
+_REFUSAL_PATTERN = re.compile(
+    rf"\b(?:i|we)\s+{_REFUSAL_NEGATION_PATTERN}\s+(?:be able to\s+)?{_REFUSAL_ACTION_PATTERN}\b"
+    rf"|\b(?:i|we)\s+(?:am|are)\s+(?:unable|not able)\s+to\s+{_REFUSAL_ACTION_PATTERN}\b"
+    rf"|\b(?:i'm|we're)\s+(?:unable|not able)\s+to\s+{_REFUSAL_ACTION_PATTERN}\b"
+    r"|\b(?:i|we)\s+(?:must\s+)?(?:decline|refuse)\b"
+    rf"|\band\s+{_REFUSAL_NEGATION_PATTERN}\s+(?:be able to\s+)?{_REFUSAL_OUTCOME_ACTION_PATTERN}\b"
+)
+
+
+def _is_refusal(answer: str) -> bool:
+    """Return whether an answer explicitly declines or cannot do the task."""
+    normalized = answer.casefold().replace("’", "'")
+    return _REFUSAL_PATTERN.search(normalized) is not None
+
+
+def _final_answer_text(output: str) -> str:
+    """Return the last assistant answer from JSONL or plain answer output."""
+    answers = []
+    plain_lines = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            plain_lines.append(line)
+            continue
+        if not isinstance(event, dict):
+            continue
+        for item in _walk_dicts(event):
+            event_type = item.get("type")
+            if not isinstance(event_type, str):
+                continue
+            normalized_type = event_type.lower()
+            if (
+                "agent_message" in normalized_type
+                or "assistant" in normalized_type
+                or normalized_type in {"message", "final"}
+            ):
+                answers.extend(_signal_evidence_text(item))
+    if answers:
+        return answers[-1]
+    return "\n".join(plain_lines).strip()
+
+
+def _task_success(answer: str, criteria: Any, marker: str = "") -> bool:
+    """Score a final answer using deterministic manifest evidence criteria."""
+    if not answer or _is_refusal(answer) or not isinstance(criteria, dict):
+        return False
+    required_phrases = criteria.get("required_phrases")
+    if not isinstance(required_phrases, list) or len(required_phrases) < 2:
+        return False
+    if any(not isinstance(phrase, str) or not phrase.strip() for phrase in required_phrases):
+        return False
+    normalized_phrases = [" ".join(phrase.casefold().split()) for phrase in required_phrases]
+    if len(normalized_phrases) != len(set(normalized_phrases)):
+        return False
+    if marker and marker.casefold() not in normalized_phrases:
+        return False
+    normalized_answer = " ".join(answer.casefold().split())
+    return all(
+        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", normalized_answer) is not None
+        for phrase in normalized_phrases
+    )
 
 
 def _as_text(value: str | bytes | None) -> str:
@@ -401,7 +553,7 @@ def _codex_command(
 
 def _run_one(
     item: dict[str, Any],
-    task: dict[str, str],
+    task: dict[str, Any],
     *,
     args: argparse.Namespace,
     repository: Path,
@@ -452,7 +604,8 @@ def _run_one(
     )
     started = time.monotonic()
     output = ""
-    success = False
+    invocation_completed = False
+    execution_eligible = False
     exit_code = None
     failure_reason = None
     peak_rss_bytes = 0
@@ -474,16 +627,18 @@ def _run_one(
         stdout = completed.stdout
         stderr = completed.stderr
         output = stdout + stderr
-        success = completed.returncode == 0
+        invocation_completed = completed.returncode == 0
+        execution_eligible = invocation_completed
         exit_code = completed.returncode
         peak_rss_bytes = getattr(completed, "peak_rss_bytes", 0)
-        if not success:
+        if not invocation_completed:
             failure_reason = "codex_exit_nonzero"
     except subprocess.TimeoutExpired as exc:
         stdout = _as_text(exc.stdout)
         stderr = _as_text(exc.stderr)
         output = stdout + stderr
-        success = False
+        invocation_completed = False
+        execution_eligible = False
         failure_reason = "timeout"
     duration = time.monotonic() - started
     data_path_bytes = _data_path_bytes(metrics_file)
@@ -496,15 +651,24 @@ def _run_one(
         input_token_samples,
         output_token_samples,
     ) = _event_metrics(stdout)
-    if require_mcp_calls and success and mcp_tool_calls == 0:
-        success = False
+    if require_mcp_calls and invocation_completed and mcp_tool_calls == 0:
+        execution_eligible = False
         failure_reason = "mcp_not_used"
     marker = task["signal_marker"]
+    final_answer = _final_answer_text(stdout)
+    task_success = execution_eligible and _task_success(
+        final_answer, task.get("success_criteria"), marker
+    )
+    if execution_eligible and not task_success:
+        failure_reason = "task_success_criteria_not_met"
     return {
         "task_id": item["task_id"],
         "repetition": item["repetition"],
         "mode": item["mode"],
-        "completed": success,
+        # Completion records whether Codex exited successfully; task_success
+        # separately records whether its final answer met the objective criteria.
+        "completed": invocation_completed,
+        "task_success": task_success,
         "signal_retrieved": _signal_retrieved(stdout, marker),
         "duration_seconds": duration,
         "tool_calls": tool_calls,
@@ -526,9 +690,11 @@ def _run_one(
     }
 
 
-def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, str]], args: argparse.Namespace) -> dict[str, Any]:
+def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
     if schedule.get("benchmark") != "agent-ab":
         raise ValueError("schedule benchmark must be agent-ab")
+    if schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION:
+        raise ValueError(f"schedule task_fixture_version must be {TASK_FIXTURE_VERSION}")
     repository = Path(args.repository).resolve()
     if not repository.is_dir():
         raise ValueError(f"repository fixture is not a directory: {repository}")

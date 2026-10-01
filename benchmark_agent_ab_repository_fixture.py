@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-FIXTURE_VERSION = 1
+FIXTURE_VERSION = 2
 PROFILE = "repository-shaped-v1"
 
 TASKS = {
@@ -15,28 +15,44 @@ TASKS = {
         "output_profile": "32 lines",
         "prompt": "From the repository root, run python3 tools/repository_checks.py targeted. Use the repository source and configuration to find the exact line containing TARGETED_SIGNAL and report that signal and its source line number. Do not paste the complete output.",
         "signal_marker": "TARGETED_SIGNAL",
-        "success_criteria": "Final response contains TARGETED_SIGNAL and the correct source line number.",
+        "success_criteria": {
+            "description": "Final response contains TARGETED_SIGNAL and the correct source line number.",
+            "required_phrases": ["TARGETED_SIGNAL", "src/packet_parser/parser.py:12"],
+        },
     },
     "noisy-test-failure": {
         "category": "repository-test-output",
         "output_profile": "1,600 lines",
         "prompt": "From the repository root, run python3 tools/repository_checks.py tests. Locate the failed test, assertion, and TEST_FAILURE_SIGNAL, then report all three. Do not paste the complete output.",
         "signal_marker": "TEST_FAILURE_SIGNAL",
-        "success_criteria": "Final response identifies test_case_1379, TEST_FAILURE_SIGNAL, and the assertion text.",
+        "success_criteria": {
+            "description": "Final response identifies test_case_1379, TEST_FAILURE_SIGNAL, and the assertion text.",
+            "required_phrases": [
+                "test_case_1379",
+                "TEST_FAILURE_SIGNAL",
+                "expected status=ready, got status=stalled",
+            ],
+        },
     },
     "build-log-search": {
         "category": "repository-build-output",
         "output_profile": "2,000 lines",
         "prompt": "From the repository root, run python3 tools/repository_checks.py build. Search the build output and report BUILD_FAILURE_SIGNAL with its source file and line number. Do not paste the complete output.",
         "signal_marker": "BUILD_FAILURE_SIGNAL",
-        "success_criteria": "Final response contains BUILD_FAILURE_SIGNAL, src/parser.c, and line 917.",
+        "success_criteria": {
+            "description": "Final response contains BUILD_FAILURE_SIGNAL, src/parser.c, and line 917.",
+            "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c:917"],
+        },
     },
     "follow-up-context": {
         "category": "repository-search-and-retrieval",
         "output_profile": "1,600 lines plus follow-up question",
         "prompt": "From the repository root, run python3 tools/repository_checks.py tests, retain the result, then answer the follow-up: which test failed and what signal identifies it? Report test_case_1379 and TEST_FAILURE_SIGNAL without pasting the complete output.",
         "signal_marker": "TEST_FAILURE_SIGNAL",
-        "success_criteria": "Final response preserves the earlier result and identifies test_case_1379 with TEST_FAILURE_SIGNAL.",
+        "success_criteria": {
+            "description": "Final response preserves the earlier result and identifies test_case_1379 with TEST_FAILURE_SIGNAL.",
+            "required_phrases": ["test_case_1379", "TEST_FAILURE_SIGNAL"],
+        },
     },
 }
 

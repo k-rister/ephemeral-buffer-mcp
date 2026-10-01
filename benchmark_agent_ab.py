@@ -13,8 +13,8 @@ import workload_results as wr
 
 
 SCHEMA_VERSION = 1
-RECORDS_SCHEMA_VERSION = 5
-TASK_FIXTURE_VERSION = 1
+RECORDS_SCHEMA_VERSION = 6
+TASK_FIXTURE_VERSION = 2
 MODES = ("control", "mcp")
 TASKS = (
     {"id": "targeted-inspection", "category": "small-targeted-output"},
@@ -55,8 +55,10 @@ DATA_PATH_BYTE_FIELDS = (
     "socket_response_bytes",
 )
 RUN_KEYS_V5 = RUN_KEYS_V4 | set(DATA_PATH_BYTE_FIELDS)
+RUN_KEYS_V6 = RUN_KEYS_V5 | {"task_success"}
 METRICS = (
     "completed",
+    "task_success",
     "signal_retrieved",
     "duration_seconds",
     "tool_calls",
@@ -92,7 +94,8 @@ RECORD_MEASUREMENTS = {
     **{field: (field, "bytes") for field in DATA_PATH_BYTE_FIELDS},
 }
 PAIRED_MEASUREMENTS = {
-    "completed": ("success_rate", "ratio"),
+    "completed": ("invocation_completion_rate", "ratio"),
+    "task_success": ("success_rate", "ratio"),
     "signal_retrieved": ("signal_retrieval_rate", "ratio"),
     **RECORD_MEASUREMENTS,
 }
@@ -179,7 +182,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, 4, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, 4, 5, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
     run_keys = (
         RUN_KEYS
@@ -191,6 +194,8 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         else RUN_KEYS_V4
         if records_schema_version == 4
         else RUN_KEYS_V5
+        if records_schema_version == 5
+        else RUN_KEYS_V6
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
@@ -212,6 +217,8 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         for field in ("completed", "signal_retrieved"):
             if not isinstance(record[field], bool):
                 raise ValueError(f"{field} must be boolean in run: {key}")
+        if records_schema_version >= 6 and not isinstance(record["task_success"], bool):
+            raise ValueError(f"task_success must be boolean in run: {key}")
         numeric_fields = ("duration_seconds", "tool_calls", "repeated_commands", "peak_rss_bytes")
         if records_schema_version == 1:
             numeric_fields += ("context_bytes",)
@@ -264,6 +271,16 @@ def _metric_value(record: dict[str, Any], metric: str) -> float:
     if metric == "context_bytes_proxy":
         return float(record.get("context_bytes_proxy", record.get("context_bytes", 0)))
     return float(record.get(metric, 0))
+
+
+def _invocation_completed(record: dict[str, Any], records_schema_version: int) -> bool | None:
+    """Return invocation completion when the records schema can distinguish it."""
+    if records_schema_version >= RECORDS_SCHEMA_VERSION:
+        return record["completed"]
+    if records_schema_version >= 2:
+        exit_code = record.get("exit_code")
+        return exit_code == 0 if exit_code is not None else None
+    return None
 
 
 def _optional_stats(records: list[dict[str, Any]], field: str) -> dict[str, Any]:
@@ -338,13 +355,31 @@ def _usage_accounting(records: list[dict[str, Any]], field: str) -> dict[str, An
 def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict[str, Any]:
     """Return aggregate and paired outcome summaries without raw agent data."""
     runs = validate_records(payload, schedule)
+    records_schema_version = payload.get("records_schema_version", 1)
     by_mode = {}
     for mode in MODES:
         selected = [record for record in runs if record["mode"] == mode]
+        invocation_statuses = [
+            _invocation_completed(record, records_schema_version) for record in selected
+        ]
         by_mode[mode] = {
             "runs": len(selected),
             "completion_rate": sum(record["completed"] for record in selected) / len(selected),
-            "signal_retrieval_rate": sum(record["signal_retrieved"] for record in selected) / len(selected),
+            "invocation_completion_rate": (
+                sum(invocation_statuses) / len(invocation_statuses)
+                if all(status is not None for status in invocation_statuses)
+                else None
+            ),
+            "task_success_rate": (
+                sum(record["task_success"] for record in selected) / len(selected)
+                if all("task_success" in record for record in selected)
+                else None
+            ),
+            "signal_retrieval_rate": (
+                sum(record["signal_retrieved"] for record in selected) / len(selected)
+                if all("task_success" in record for record in selected)
+                else None
+            ),
             "duration_seconds": _stats([_metric_value(record, "duration_seconds") for record in selected]),
             "tool_calls": _stats([_metric_value(record, "tool_calls") for record in selected]),
             "mcp_tool_calls": _stats([_metric_value(record, "mcp_tool_calls") for record in selected]),
@@ -376,14 +411,27 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
+            if metric in {"task_success", "signal_retrieved"} and not all(
+                metric in pair[mode] and "task_success" in pair[mode]
+                for mode in MODES
+            ):
+                continue
             if metric == "peak_rss_bytes" and (
                 pair["control"].get(metric, 0) <= 0 or pair["mcp"].get(metric, 0) <= 0
             ):
                 continue
-            control = _metric_value(pair["control"], metric)
-            mcp = _metric_value(pair["mcp"], metric)
+            if metric == "completed":
+                control = _invocation_completed(pair["control"], records_schema_version)
+                mcp = _invocation_completed(pair["mcp"], records_schema_version)
+                if control is None or mcp is None:
+                    continue
+            else:
+                control = _metric_value(pair["control"], metric)
+                mcp = _metric_value(pair["mcp"], metric)
             deltas.append(mcp - control)
         paired[metric] = _stats(deltas)
+        if metric in {"completed", "task_success", "signal_retrieved"}:
+            paired[metric]["available"] = bool(deltas)
         if metric == "peak_rss_bytes":
             paired[metric]["available"] = bool(deltas)
     for metric in ("prompt_bytes_proxy", "output_bytes_proxy"):
@@ -400,12 +448,14 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             ])
 
     recommendations = [
-        "Treat completion and signal retrieval as primary outcomes; interpret cost metrics as secondary.",
+        "Treat objectively scored task success and affirmative signal retrieval as primary outcomes; interpret invocation completion and cost metrics as secondary.",
         "Repeat with representative privacy-reviewed agent tasks before changing defaults.",
     ]
-    if paired["completed"]["mean"] > 0 or paired["signal_retrieved"]["mean"] > 0:
+    if not paired["task_success"].get("available"):
+        recommendations.insert(1, "Legacy records lack objective task-success criteria and cannot support task-success or signal-retrieval comparisons.")
+    elif paired["task_success"]["mean"] > 0 or paired["signal_retrieved"]["mean"] > 0:
         recommendations.insert(1, "MCP improved at least one paired task outcome; inspect task-level variance before generalizing.")
-    elif paired["completed"]["mean"] < 0 or paired["signal_retrieved"]["mean"] < 0:
+    elif paired["task_success"]["mean"] < 0 or paired["signal_retrieved"]["mean"] < 0:
         recommendations.insert(1, "MCP reduced at least one paired task outcome; inspect failures and routing choices before enabling broader use.")
 
     return {
@@ -439,9 +489,23 @@ def summary_workload_result(summary: dict[str, Any]) -> dict[str, Any]:
     runs = []
     for mode, block in summary["mode_summaries"].items():
         count = block["runs"]
+        invocation_completion_rate = block["invocation_completion_rate"]
         measurements = {
-            "success_rate": wr.measurement("ratio", value=block["completion_rate"], samples=count),
-            "signal_retrieval_rate": wr.measurement("ratio", value=block["signal_retrieval_rate"], samples=count),
+            "invocation_completion_rate": (
+                wr.measurement("ratio", value=invocation_completion_rate, samples=count)
+                if invocation_completion_rate is not None
+                else wr.unavailable("ratio", "legacy records lack exit codes to determine invocation completion")
+            ),
+            "success_rate": (
+                wr.measurement("ratio", value=block["task_success_rate"], samples=count)
+                if block["task_success_rate"] is not None
+                else wr.unavailable("ratio", "legacy records lack objective task-success criteria")
+            ),
+            "signal_retrieval_rate": (
+                wr.measurement("ratio", value=block["signal_retrieval_rate"], samples=count)
+                if block["signal_retrieval_rate"] is not None
+                else wr.unavailable("ratio", "legacy records use the prior marker-only retrieval scoring")
+            ),
         }
         for field, (name, unit) in RECORD_MEASUREMENTS.items():
             stats = block["data_path_bytes"].get(field) if field in DATA_PATH_BYTE_FIELDS else block.get(field)
@@ -452,7 +516,11 @@ def summary_workload_result(summary: dict[str, Any]) -> dict[str, Any]:
         runs.append(wr.run(
             mode,
             labels={"mode": mode},
-            status=_rate_status(block["completion_rate"]),
+            status=(
+                _rate_status(block["task_success_rate"])
+                if block["task_success_rate"] is not None
+                else "partial"
+            ),
             measurements=measurements,
             errors=[f"{reason}: {total}" for reason, total in block["failure_reasons"].items()],
         ))
@@ -483,17 +551,36 @@ def records_workload_result(
 ) -> dict[str, Any]:
     """Return one workload run per agent execution in a records envelope."""
     schedule = schedule if schedule is not None else payload["schedule"]
+    records_schema_version = payload.get("records_schema_version", 1)
     runs = []
     for record in validate_records(payload, schedule):
         failure_reason = record.get("failure_reason")
-        if record["completed"]:
+        task_success = record.get("task_success")
+        invocation_completed = _invocation_completed(record, records_schema_version)
+        if task_success is True:
             status = "success"
         elif failure_reason == "timeout":
             status = "timeout"
+        elif task_success is None:
+            status = "failure" if invocation_completed is False else "partial"
         else:
             status = "failure"
         measurements = {
-            "signal_retrieval_rate": wr.measurement("ratio", value=1.0 if record["signal_retrieved"] else 0.0, samples=1),
+            "invocation_completion_rate": (
+                wr.measurement("ratio", value=1.0 if invocation_completed else 0.0, samples=1)
+                if invocation_completed is not None
+                else wr.unavailable("ratio", "legacy record lacks an exit code to determine invocation completion")
+            ),
+            "success_rate": (
+                wr.measurement("ratio", value=1.0 if task_success else 0.0, samples=1)
+                if task_success is not None
+                else wr.unavailable("ratio", "legacy record has no objective task-success score")
+            ),
+            "signal_retrieval_rate": (
+                wr.measurement("ratio", value=1.0 if record["signal_retrieved"] else 0.0, samples=1)
+                if task_success is not None
+                else wr.unavailable("ratio", "legacy record uses marker-only retrieval scoring")
+            ),
             "context_bytes": wr.measurement(
                 "bytes", value=_metric_value(record, "context_bytes_proxy"), samples=1, note=CONTEXT_PROXY_NOTE
             ),
