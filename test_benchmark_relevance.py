@@ -97,11 +97,29 @@ class TestRelevanceBenchmark(unittest.TestCase):
         self.assertTrue(compared["workload"]["parameters"]["baseline_compared"])
         self.assertEqual(compared["status"], "success")
         record["baseline_comparison"]["regressions"] = ["hybrid.mrr dropped from 1.0000 to 0.5000 (allowed drop 0.0500)"]
+        record["baseline_comparison"]["passed"] = False
         regressed = workload_result(record)
-        self.assertEqual(regressed["status"], "partial")
+        self.assertEqual(regressed["status"], "failure")
+        self.assertEqual(regressed["errors"], [])
         self.assertEqual(regressed["runs"][2]["status"], "failure")
         self.assertEqual(regressed["runs"][2]["errors"], record["baseline_comparison"]["regressions"])
         self.assertEqual(regressed["runs"][0]["status"], "success")
+
+    def test_workload_result_preserves_global_baseline_incompatibilities(self):
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "1"}):
+            record = run_relevance_benchmark(top_k=2)
+        baseline = load_baseline(Path(__file__).with_name("benchmark_relevance_baseline.json"))
+        baseline["summaries"] = record["summaries"]
+        comparison = compare_relevance(record, baseline)
+        self.assertFalse(comparison["passed"])
+        self.assertEqual(comparison["regressions"], ["top_k changed"])
+        record["baseline_comparison"] = comparison
+
+        exported = workload_result(record)
+        self.assertEqual(exported["status"], "failure")
+        self.assertEqual(exported["errors"], ["top_k changed"])
+        self.assertTrue(all(run["status"] == "success" for run in exported["runs"]))
+        self.assertEqual(exported["details"]["baseline_comparison"], comparison)
 
     def test_result_flag_emits_json_on_stdout(self):
         argv = ["benchmark_relevance.py", "--top-k", "2", "--result", "-"]
