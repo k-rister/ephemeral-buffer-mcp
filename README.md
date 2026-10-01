@@ -1140,13 +1140,15 @@ EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
 The relevance benchmark covers exact errors, punctuation-heavy queries,
 conceptual semantic queries, and lexical/semantic conflicts. It reports
 hit@1, hit@k, and mean reciprocal rank (MRR) for BM25, semantic, and hybrid
-search. The fixtures define expected retrieval markers, so this measures
-retrieval relevance only—not agent answer quality, token usage, or universal
-performance. CI compares the deterministic scores with the checked-in
-`benchmark_relevance_baseline.json` and fails only when a metric drops by more
-than the recorded tolerance. Baseline changes must be deliberate, reviewable,
-and accompanied by a fixture or intended-behavior explanation. The evaluation
-uploads its machine-readable JSON result with the other benchmark artifacts.
+search. Each query has four competing semantic windows, and fixtures define
+expected evidence ranges scored against each result's matched lines, not its
+surrounding context. This measures retrieval relevance only—not agent answer
+quality, token usage, or universal performance. CI compares deterministic
+scores with `benchmark_relevance_baseline.json` and fails only when a metric
+drops by more than the recorded tolerance. Baseline changes must be deliberate,
+reviewable, and accompanied by a fixture or intended-behavior explanation. The
+evaluation uploads its machine-readable JSON result with the other benchmark
+artifacts.
 
 The baseline stores only schema and fixture versions, deterministic embedding
 mode, aggregate per-mode scores, query counts, and explicit tolerances. It does
