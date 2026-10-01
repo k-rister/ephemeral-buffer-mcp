@@ -1531,6 +1531,190 @@ class TestServerTools(unittest.TestCase):
         self.assertLessEqual(len(result.encode("utf-8")), server.SEARCH_RESPONSE_MAX_BYTES)
         self.assertIn("Additional matches omitted", result)
 
+    def test_search_response_truncates_oversized_first_match_with_retrievable_ranges(self):
+        content = "\n".join(
+            f"line {line_number} "
+            + ("needle " if 8 <= line_number <= 11 else "")
+            + ("é" * 5_000)
+            for line_number in range(1, 17)
+        )
+        capture = json.loads(server.capture_text(content, label="oversized-search-match"))
+        capture_id = capture["capture_id"]
+        search_result = server.engine.search(
+            "needle",
+            mode="bm25",
+            capture_id=capture_id,
+            top_k=1,
+            context_lines=3,
+        )
+        match = search_result["matches"][0]
+        self.assertGreater(
+            len(match["snippet"].encode("utf-8")),
+            server.SEARCH_RESPONSE_MAX_BYTES,
+        )
+
+        with patch.object(server.engine, "search", return_value=search_result):
+            response = server.search_capture(
+                "needle",
+                mode="bm25",
+                capture_id=capture_id,
+                top_k=1,
+                context_lines=3,
+            )
+
+        self.assertLessEqual(
+            len(response.encode("utf-8")),
+            server.SEARCH_RESPONSE_MAX_BYTES,
+        )
+        self.assertIn(
+            f"Range: {match['matched_range']}, Context: {match['context_range']}",
+            response,
+        )
+        self.assertIn("snippet truncated", response)
+        self.assertIn("get_capture_slice", response)
+
+        retrieved = server.get_capture_slice(
+            match["context_start_line"],
+            match["context_end_line"],
+            capture_id=capture_id,
+        )
+        self.assertIn(
+            f"Lines {match['context_start_line']} to {match['context_end_line']}",
+            retrieved,
+        )
+        self.assertIn("needle", retrieved)
+
+    def test_search_response_reports_final_match_omitted_at_budget_boundary(self):
+        omission_note = (
+            "Additional matches omitted because the search response reached "
+            f"its {server.SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. "
+            "Use get_capture_slice for full content."
+        )
+        first_header = "### Match #1 (Score: 1.0, Range: L1-L1, Context: L1-L1)"
+        empty_first_response = "\n".join([
+            'Search Results for: "query" [Mode: bm25]',
+            "Capture: `cap` (label, 1 total lines)",
+            "Found 2 relevant section(s):\n",
+            first_header,
+            "```text",
+            "",
+            "```\n",
+        ])
+        # Leave room for the omission note but less than the second match's
+        # header and truncation marker, forcing the final match to be skipped.
+        first_snippet_size = (
+            server.SEARCH_RESPONSE_MAX_BYTES
+            - len(empty_first_response.encode("utf-8"))
+            - 1
+            - len(omission_note.encode("utf-8"))
+            - 5
+        )
+        matches = [
+            {
+                "score": 1.0,
+                "matched_range": "L1-L1",
+                "context_range": "L1-L1",
+                "snippet": "x" * first_snippet_size,
+            },
+            {
+                "score": 1.0,
+                "matched_range": "L2-L2",
+                "context_range": "L1-L2",
+                "snippet": "y" * 1_000,
+            },
+        ]
+        with patch.object(
+            server.engine,
+            "search",
+            return_value={
+                "status": "ok",
+                "mode": "bm25",
+                "capture_id": "cap",
+                "label": "label",
+                "total_lines": 1,
+                "matches": matches,
+            },
+        ):
+            response = server.search_capture("query", mode="bm25")
+
+        self.assertLessEqual(
+            len(response.encode("utf-8")),
+            server.SEARCH_RESPONSE_MAX_BYTES,
+        )
+        self.assertIn("Found 2 relevant section(s)", response)
+        self.assertIn("Range: L1-L1, Context: L1-L1", response)
+        self.assertNotIn("Range: L2-L2, Context: L1-L2", response)
+        self.assertIn("Additional matches omitted", response)
+
+    def test_search_response_does_not_claim_snippet_truncated_when_it_fits(self):
+        omission_note = (
+            "Additional matches omitted because the search response reached "
+            f"its {server.SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. "
+            "Use get_capture_slice for full content."
+        )
+        first_header = "### Match #1 (Score: 1.0, Range: L1-L1, Context: L1-L1)"
+        empty_first_response = "\n".join([
+            'Search Results for: "query" [Mode: bm25]',
+            "Capture: `cap` (label, 1 total lines)",
+            "Found 2 relevant section(s):\n",
+            first_header,
+            "```text",
+            "",
+            "```\n",
+        ])
+        combined_marker_bytes = len(
+            server.SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER.encode("utf-8")
+        )
+        omission_marker_bytes = len(server.SEARCH_MATCHES_OMITTED_MARKER.encode("utf-8"))
+        note_with_separator_bytes = len(omission_note.encode("utf-8")) + 1
+        response_slack = combined_marker_bytes + 3
+        self.assertLess(response_slack, note_with_separator_bytes)
+        self.assertLessEqual(omission_marker_bytes, response_slack)
+
+        unique_suffix = "UNIQUE_END"
+        first_snippet_size = (
+            server.SEARCH_RESPONSE_MAX_BYTES
+            - len(empty_first_response.encode("utf-8"))
+            - response_slack
+        )
+        first_snippet = "x" * (first_snippet_size - len(unique_suffix)) + unique_suffix
+        matches = [
+            {
+                "score": 1.0,
+                "matched_range": "L1-L1",
+                "context_range": "L1-L1",
+                "snippet": first_snippet,
+            },
+            {
+                "score": 1.0,
+                "matched_range": "L2-L2",
+                "context_range": "L1-L2",
+                "snippet": "y" * 1_000,
+            },
+        ]
+        with patch.object(
+            server.engine,
+            "search",
+            return_value={
+                "status": "ok",
+                "mode": "bm25",
+                "capture_id": "cap",
+                "label": "label",
+                "total_lines": 1,
+                "matches": matches,
+            },
+        ):
+            response = server.search_capture("query", mode="bm25")
+
+        self.assertLessEqual(
+            len(response.encode("utf-8")),
+            server.SEARCH_RESPONSE_MAX_BYTES,
+        )
+        self.assertIn(unique_suffix, response)
+        self.assertNotIn("snippet truncated", response)
+        self.assertIn("Additional matches omitted", response)
+        self.assertNotIn("get_capture_slice", response)
+
     def test_clear_capture_delegates_success_and_missing_results(self):
         with patch.object(server.engine, "clear", return_value="Cleared capture 'cap'.") as clear:
             self.assertEqual(server.clear_captures("cap"), "Cleared capture 'cap'.")

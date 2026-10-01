@@ -80,6 +80,16 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SOCKET_JSON_MAX_EXPANSION = 6
 EXECUTION_OUTPUT_RESPONSE_MAX_BYTES = 64 * 1024
 SEARCH_RESPONSE_MAX_BYTES = 64 * 1024
+SEARCH_SNIPPET_TRUNCATION_MARKER = (
+    "... [snippet truncated; use the Context range above with get_capture_slice for full content]"
+)
+SEARCH_MATCHES_OMITTED_MARKER = (
+    "... [Additional matches omitted; the search response reached its byte budget]"
+)
+SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER = (
+    "... [snippet truncated; Additional matches omitted. "
+    "Use the Context range above with get_capture_slice for full content]"
+)
 SUMMARY_DIFF_FILE_MAP_MAX_BYTES = 8 * 1024
 SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES = 100
 SUMMARY_COMMAND_MAX_BYTES = 1024
@@ -1188,6 +1198,16 @@ def _bounded_summary_text(value: str, max_bytes: int, marker: str) -> tuple[str,
     return prefix + marker, True
 
 
+def _truncate_utf8_with_marker(value: str, max_bytes: int, marker: str) -> Optional[str]:
+    """Truncate UTF-8 text to a byte limit while retaining a visible marker."""
+    marker_bytes = marker.encode("utf-8")
+    if max_bytes < len(marker_bytes):
+        return None
+    prefix_bytes = value.encode("utf-8")[: max_bytes - len(marker_bytes)]
+    prefix = prefix_bytes.decode("utf-8", errors="ignore")
+    return prefix + marker
+
+
 def _bounded_command(command: str) -> tuple[str, bool]:
     """Bound command metadata included alongside an execution summary."""
     return _bounded_summary_text(
@@ -1657,20 +1677,58 @@ def search_capture(
     elif pending_note:
         out.insert(1, pending_note.strip())
     
-    for i, m in enumerate(matches, 1):
+    omission_note = (
+        "Additional matches omitted because the search response reached "
+        f"its {SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. Use get_capture_slice for full content."
+    )
+    for index, m in enumerate(matches):
+        i = index + 1
         match_output = [
             f"### Match #{i} (Score: {m['score']}, Range: {m['matched_range']}, Context: {m['context_range']})",
             "```text",
             m["snippet"],
             "```\n",
         ]
-        if len("\n".join(out + match_output).encode("utf-8")) > SEARCH_RESPONSE_MAX_BYTES:
-            out.append(
-                "Additional matches omitted because the search response reached "
-                f"its {SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. Use get_capture_slice for full content."
-            )
-            break
-        out.extend(match_output)
+        has_more_matches = index < len(matches) - 1
+        candidate = "\n".join(out + match_output)
+        if len(candidate.encode("utf-8")) <= SEARCH_RESPONSE_MAX_BYTES:
+            if not has_more_matches:
+                out.extend(match_output)
+                continue
+            candidate_with_omission_note = "\n".join(out + match_output + [omission_note])
+            if len(candidate_with_omission_note.encode("utf-8")) <= SEARCH_RESPONSE_MAX_BYTES:
+                out.extend(match_output)
+                continue
+
+        marker = (
+            SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER
+            if has_more_matches
+            else SEARCH_SNIPPET_TRUNCATION_MARKER
+        )
+        prefix = "\n".join(out + [match_output[0], match_output[1]])
+        closing_fence = "\n```\n"
+        snippet_budget = (
+            SEARCH_RESPONSE_MAX_BYTES
+            - len(prefix.encode("utf-8"))
+            - 1  # newline between the opening fence and the snippet
+            - len(closing_fence.encode("utf-8"))
+        )
+        snippet = m["snippet"]
+        if has_more_matches and (
+            len(snippet.encode("utf-8"))
+            + len(SEARCH_MATCHES_OMITTED_MARKER.encode("utf-8"))
+            <= snippet_budget
+        ):
+            bounded_snippet = snippet + SEARCH_MATCHES_OMITTED_MARKER
+        else:
+            bounded_snippet = _truncate_utf8_with_marker(snippet, snippet_budget, marker)
+        if bounded_snippet is not None:
+            out.extend([match_output[0], match_output[1], bounded_snippet, match_output[3]])
+        else:
+            note_candidate = "\n".join(out + [omission_note])
+            if len(note_candidate.encode("utf-8")) <= SEARCH_RESPONSE_MAX_BYTES:
+                out.append(omission_note)
+        break
         
     return "\n".join(out)
 
