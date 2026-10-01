@@ -275,6 +275,12 @@ status, event history, metrics, and the first incomplete phase;
 `get_execution_output` retrieves bounded chunks of persisted phase output after
 a restart; pass `phase_name`, `offset`, and `max_bytes` to page through a large
 phase without creating an oversized MCP response.
+The `capture_id` included with a phase result is a convenience reference into
+the active engine's in-memory capture ring. Its `capture_session_id` identifies
+the engine session, and `capture_available` is true only when that same session
+still owns the capture. Legacy references without a session identifier are
+reported unavailable; persisted phase output remains available through
+`get_execution_output`.
 If detailed execution metadata would exceed the 64 KiB tool-response budget,
 the server returns a compact response that preserves the durable execution ID
 and sets `response_truncated: true`.
