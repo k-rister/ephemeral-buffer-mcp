@@ -397,29 +397,17 @@ def _marker_processes(marker: str) -> Optional[set[int]]:
     except OSError:
         return None
     processes: set[int] = set()
-    current_uid = getattr(os, "getuid", lambda: None)()
     for process_name in process_names:
         if not process_name.isdigit():
             continue
         process_id = int(process_name)
-        process_path = f"/proc/{process_id}"
-        try:
-            process_uid = os.stat(process_path).st_uid
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return None
-        foreign_uid = current_uid is not None and process_uid != current_uid
         try:
             environment = Path(f"/proc/{process_id}/environ").read_bytes()
         except FileNotFoundError:
             continue
-        except PermissionError:
-            if foreign_uid:
-                # Unrelated foreign-owned processes must not block recovery.
-                continue
-            return None
         except OSError:
+            # Without reading this entry, recovery cannot prove that it is
+            # unrelated to the execution being recovered.
             return None
         if marker_bytes not in environment.split(b"\0"):
             continue
