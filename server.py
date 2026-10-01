@@ -926,7 +926,13 @@ def _resolve_preflight_executable(tokens: list[str], resolved_cwd: str) -> dict[
         if candidate.exists() and candidate.is_file() and os.access(candidate, os.X_OK):
             return {"status": "resolved", "requested": token, "resolved": str(candidate)}
         return {"status": "unavailable", "requested": token, "reason": "path is not an executable file"}
-    resolved = shutil.which(token)
+
+    search_path = os.environ.get("PATH", os.defpath)
+    search_entries = [
+        entry if os.path.isabs(entry) else os.path.abspath(os.path.join(resolved_cwd, entry))
+        for entry in search_path.split(os.pathsep)
+    ]
+    resolved = shutil.which(token, path=os.pathsep.join(search_entries))
     if resolved:
         return {"status": "resolved", "requested": token, "resolved": str(Path(resolved).resolve(strict=False))}
     return {"status": "unavailable", "requested": token, "reason": "executable was not found on PATH"}
@@ -938,7 +944,8 @@ def preflight_command(command: str, cwd: Optional[str] = None) -> str:
     """Return content-free path and executable diagnostics without running ``command``.
 
     This resolves the working directory, symlink target, detectable Git
-    repository root, and first executable token. Shell expansion, aliases,
+    repository root, and first executable token. Relative and empty PATH entries
+    are resolved against the requested working directory. Shell expansion, aliases,
     pipelines, redirections, environment changes, and arbitrary shell logic
     cannot be verified here. The requested command is never executed.
     """

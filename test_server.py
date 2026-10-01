@@ -388,6 +388,60 @@ class TestServerTools(unittest.TestCase):
             not_directory = json.loads(server.preflight_command("echo hello", cwd=str(regular_file)))
             self.assertEqual(not_directory["working_directory"]["status"], "not-a-directory")
 
+    def test_preflight_resolves_path_entries_from_requested_cwd(self):
+        process_cwd = os.getcwd()
+
+        def create_executable(path, body):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+            path.chmod(0o755)
+
+        with tempfile.TemporaryDirectory(
+            prefix=".preflight-path-test-", dir=process_cwd
+        ) as directory:
+            root = Path(directory)
+
+            requested_cwd = root / "requested"
+            server_bin = root / "server-tools"
+            create_executable(server_bin / "relative_probe", "exit 0")
+            relative_path = os.path.relpath(server_bin, process_cwd)
+            requested_bin = requested_cwd / relative_path
+            create_executable(requested_bin / "relative_probe", "exit 0")
+            with patch.dict(os.environ, {"PATH": relative_path}):
+                relative = json.loads(
+                    server.preflight_command("relative_probe", cwd=str(requested_cwd))
+                )
+            self.assertEqual(
+                relative["command"]["executable"]["resolved"],
+                str((requested_bin / "relative_probe").resolve()),
+            )
+
+            empty_path_cwd = root / "empty-path-cwd"
+            create_executable(empty_path_cwd / "empty_probe", "exit 0")
+            with patch.dict(os.environ, {"PATH": ""}):
+                empty = json.loads(
+                    server.preflight_command("empty_probe", cwd=str(empty_path_cwd))
+                )
+            self.assertEqual(
+                empty["command"]["executable"]["resolved"],
+                str((empty_path_cwd / "empty_probe").resolve()),
+            )
+
+            absolute_cwd = root / "absolute-cwd"
+            absolute_bin = root / "absolute-bin"
+            create_executable(absolute_cwd / "absolute_probe", "exit 0")
+            create_executable(absolute_bin / "absolute_probe", "exit 0")
+            with patch.dict(os.environ, {"PATH": str(absolute_bin)}):
+                absolute = json.loads(
+                    server.preflight_command("absolute_probe", cwd=str(absolute_cwd))
+                )
+            self.assertEqual(
+                absolute["command"]["executable"]["resolved"],
+                str((absolute_bin / "absolute_probe").resolve()),
+            )
+
+        self.assertEqual(os.getcwd(), process_cwd)
+
     def test_preflight_reports_repository_probe_and_unexpected_failures(self):
         with patch.object(server.subprocess, "run", side_effect=OSError("git unavailable")):
             unavailable = json.loads(server.preflight_command("echo hello", cwd=os.getcwd()))
