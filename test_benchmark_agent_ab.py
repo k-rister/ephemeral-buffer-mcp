@@ -299,6 +299,7 @@ def json_text(value):
     return json.dumps(value, sort_keys=True)
 
 
+class TestAgentAbWorkloadResults(unittest.TestCase):
     def test_summary_workload_result_reports_modes_and_paired_deltas(self):
         schedule, payload = _records_payload()
         summary = summarize_records(payload, schedule)
@@ -366,7 +367,7 @@ def json_text(value):
         self.assertEqual(result["workload"]["kind"], "agent-run")
         self.assertEqual(result["workload"]["producer"], "custom-runner")
         self.assertEqual(result["workload"]["producer_schema_version"], 2)
-        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["status"], "failure")
         self.assertEqual(len(result["runs"]), 8)
         control = next(item for item in result["runs"] if item["labels"]["mode"] == "control")
         self.assertEqual(control["status"], "timeout")

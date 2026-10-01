@@ -1,6 +1,7 @@
 """Tests for the Codex-specific agent A/B runner."""
 
 import argparse
+import copy
 import io
 import json
 import os
@@ -312,7 +313,7 @@ class TestCodexAgentRunner(unittest.TestCase):
                 _load_manifest(path)
 
     def test_manifest_rejects_criteria_that_only_repeat_the_marker(self):
-        manifest = build_manifest()
+        manifest = copy.deepcopy(build_manifest())
         manifest["tasks"]["noisy-test-failure"]["success_criteria"]["required_phrases"] = [
             "TEST_FAILURE_SIGNAL", " TEST_FAILURE_SIGNAL "
         ]
@@ -689,6 +690,7 @@ def subprocess_result(**kwargs):
     return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": "", **kwargs})()
 
 
+class TestCodexAgentWorkloadResult(unittest.TestCase):
     def test_main_emits_a_workload_result_next_to_the_records(self):
         schedule = build_schedule(repetitions=1, seed=3)
         manifest = build_manifest()
