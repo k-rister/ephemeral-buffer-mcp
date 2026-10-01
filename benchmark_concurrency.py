@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import platform
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -60,10 +61,24 @@ def load_baseline(path: Path) -> dict:
         ingest = float(baseline["ingest_per_second"])
         reads = float(baseline["reads_per_second"])
         tolerance = float(baseline["minimum_ratio"])
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        json.JSONDecodeError,
+    ) as exc:
         raise ValueError(f"invalid benchmark baseline {path}: {exc}") from exc
-    if ingest <= 0 or reads <= 0 or not 0 < tolerance <= 1:
-        raise ValueError("baseline rates must be positive and minimum_ratio must be in (0, 1]")
+    if (
+        not math.isfinite(ingest)
+        or not math.isfinite(reads)
+        or ingest <= 0
+        or reads <= 0
+    ):
+        raise ValueError("baseline rates must be finite and positive")
+    if not math.isfinite(tolerance) or not 0 < tolerance <= 1:
+        raise ValueError("minimum_ratio must be finite and in (0, 1]")
     return {
         "ingest_per_second": ingest,
         "reads_per_second": reads,
