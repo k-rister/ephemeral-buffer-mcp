@@ -700,6 +700,45 @@ class TestPhaseExecutionManager(unittest.TestCase):
             )
         killpg.assert_called_once_with(456, 0)
 
+        with patch.object(execution.sys, "platform", "linux"), \
+                patch.object(execution, "_proc_identity", return_value=(None, None)), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(
+                    execution.os,
+                    "killpg",
+                    side_effect=[None, OSError(errno.ESRCH, "group gone")],
+                ) as killpg, \
+                patch.object(
+                    execution.os,
+                    "kill",
+                    side_effect=OSError(errno.ESRCH, "leader gone"),
+                ) as kill, \
+                patch.object(execution.os, "waitpid", side_effect=ChildProcessError()) as waitpid:
+            self.assertTrue(
+                execution._process_group_is_absent(
+                    456, expected_leader=(456, ("leader", "boot"))
+                )
+            )
+        kill.assert_called_once_with(456, 0)
+        waitpid.assert_called_once_with(-456, os.WNOHANG)
+        self.assertEqual(killpg.call_count, 2)
+
+        with patch.object(execution.sys, "platform", "linux"), \
+                patch.object(execution, "_proc_identity", return_value=(None, None)), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg") as killpg, \
+                patch.object(
+                    execution.os, "kill", side_effect=OSError(errno.EPERM, "denied")
+                ), \
+                patch.object(execution.os, "waitpid") as waitpid:
+            self.assertFalse(
+                execution._process_group_is_absent(
+                    456, expected_leader=(456, ("leader", "boot"))
+                )
+            )
+        killpg.assert_called_once_with(456, 0)
+        waitpid.assert_not_called()
+
         with patch.object(execution, "_proc_identity", return_value=("leader", "boot")), \
                 patch.object(execution.os, "getpgrp", return_value=1), \
                 patch.object(execution.os, "killpg", side_effect=[None, None]), \
@@ -754,6 +793,24 @@ class TestPhaseExecutionManager(unittest.TestCase):
                     patch.object(execution.os, "getgid", return_value=2000), \
                     patch.object(execution.os, "getegid", return_value=2001):
                 self.assertEqual(execution._proc_visibility_restricted(), restricted)
+        for mounts in (
+            "proc /proc proc rw,hidepid=2,hidepid=4 0 0\n",
+            "proc /proc proc rw,hidepid=unknown 0 0\n",
+            "proc /proc proc rw,hidepid=3 0 0\n",
+            "proc /proc proc rw,hidepid=2,gid=invalid 0 0\n",
+        ):
+            with self.subTest(mounts=mounts), \
+                    patch.object(execution.Path, "read_text", return_value=mounts), \
+                    patch.object(execution.os, "getgroups", return_value=[1000]), \
+                    patch.object(execution.os, "getgid", return_value=2000), \
+                    patch.object(execution.os, "getegid", return_value=2001):
+                self.assertTrue(execution._proc_visibility_restricted())
+        with patch.object(
+            execution.Path,
+            "read_text",
+            return_value="proc /proc proc rw,hidepid=2,gid=1000 0 0\n",
+        ), patch.object(execution.os, "getgroups", side_effect=OSError("groups unavailable")):
+            self.assertTrue(execution._proc_visibility_restricted())
         for groups, real_gid, effective_gid in (
             ([1000], 2000, 2001),
             ([3000], 1000, 2001),
@@ -870,8 +927,6 @@ class TestPhaseExecutionManager(unittest.TestCase):
     def test_marker_process_scan_fails_closed_for_unavailable_proc_metadata(
         self, _proc_visibility
     ):
-        same_uid_stat = type("Stat", (), {"st_uid": 10})()
-        foreign_uid_stat = type("Stat", (), {"st_uid": 11})()
         with patch.object(execution.sys, "platform", "win32"):
             self.assertIsNone(execution._marker_process_groups("marker"))
         with patch.object(execution, "_proc_visibility_restricted", return_value=True):
@@ -879,18 +934,12 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with patch.object(execution.os, "listdir", side_effect=OSError("proc unavailable")):
             self.assertIsNone(execution._marker_process_groups("marker"))
         with patch.object(execution.os, "listdir", return_value=["not-a-pid", "123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", side_effect=FileNotFoundError()):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=foreign_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"OTHER=value\0"):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=foreign_uid_stat), \
                 patch.object(
                     execution.Path,
                     "read_bytes",
@@ -898,22 +947,16 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 ):
             self.assertEqual(execution._marker_processes("marker"), {123})
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", side_effect=FileNotFoundError()):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=foreign_uid_stat), \
                 patch.object(
                     execution.Path,
                     "read_bytes",
-                    side_effect=PermissionError(errno.EACCES, "environ unavailable"),
+                    side_effect=OSError(errno.EIO, "environ read failed"),
                 ):
-            self.assertEqual(execution._marker_process_groups("marker"), set())
+            self.assertIsNone(execution._marker_process_groups("marker"))
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(
                     execution.Path,
                     "read_bytes",
@@ -921,22 +964,13 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 ):
             self.assertIsNone(execution._marker_process_groups("marker"))
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "stat", side_effect=PermissionError(errno.EACCES, "proc unavailable")):
-            self.assertIsNone(execution._marker_process_groups("marker"))
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"OTHER=value\0"):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
                 patch.object(execution.os, "getpgid", side_effect=OSError(errno.ESRCH, "gone")):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
                 patch.object(execution.os, "getpgid", side_effect=OSError(errno.EPERM, "denied")):
             self.assertIsNone(execution._marker_process_groups("marker"))

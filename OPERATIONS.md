@@ -288,15 +288,20 @@ The state directory is checked for current-user ownership before use, and
 directory metadata is synchronized after atomic record replacement so a
 completed phase checkpoint survives normal host-crash recovery.
 
-On restart, a phase left in `started` is recovered as `interrupted`. Resume
-signals the persisted supervisor through a pidfd; that supervisor adopts and
-terminates descendants that escaped the original process group before recovery
-is permitted, then skips `completed` phases. Linux process start and boot
-identities are revalidated while the pidfd is pinned so a reused process ID is
-not signalled; if identity lookup, supervisor termination, or group absence
-cannot be confirmed, resume remains blocked. The launch fence is written before
-spawning, and older in-progress records without process identities are held
-fence-pending until they are inspected or retired. A `failed` or `timed_out` phase is only retried with
+On restart, a phase left in `started` is recovered as `interrupted`. Recovery
+signals the persisted supervisor through a pidfd, scans for processes carrying
+the phase's durable launch marker, and terminates marked descendants that
+remain, including descendants that escaped the original process group. It
+permits resume only after marker cleanup succeeds and the original process
+group is confirmed absent; if identity lookup, marker scanning, supervisor
+termination, or group absence cannot be confirmed, the fence remains pending.
+An unreadable process environment makes the marker scan inconclusive and keeps
+recovery blocked, including when the process belongs to another user.
+Linux process start and boot identities are revalidated while the pidfd is
+pinned so a reused process ID is not signalled. The launch fence is written
+before spawning, and older in-progress records without process identities are
+held fence-pending until they are inspected or retired. A `failed` or
+`timed_out` phase is only retried with
 `retry_failed=True`; a timed-out phase whose process-group cleanup is not
 confirmed remains fence-pending and blocks retry. A safe phase recovered as `interrupted` resumes on the
 normal resume call. Mark operations that can write, deploy, publish, or make

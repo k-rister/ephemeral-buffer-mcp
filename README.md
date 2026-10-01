@@ -605,15 +605,20 @@ or provide an external deduplication guarantee. The compatibility alias
 fields are supplied, they must agree.
 The command is run beneath a Linux subreaper supervisor that adopts and
 terminates descendants which escape the original process group. The supervisor
-identity is checkpointed while a phase runs and is signalled through a pidfd
-before restart recovery permits that phase to resume. Linux process start and
-boot identities are revalidated while the pidfd is pinned, protecting recovery
-from signalling a reused process ID; resume stays blocked if supervisor
-termination or group absence cannot be confirmed. A phase marks its launch
-fence before spawning the command, so a crash before process identity is
-persisted also fails closed. Older in-progress records without these identity
-fields are recovered as fence-pending and must be inspected or retired rather
-than being retried automatically.
+identity and a durable phase launch marker are checkpointed while a phase runs.
+During restart recovery, the supervisor is signalled through a pidfd, then the
+remaining processes carrying that phase marker are found and terminated before
+the original process group is checked for absence. Resume stays blocked if
+identity lookup, marker scanning, supervisor termination, descendant cleanup,
+or group absence cannot be confirmed. Linux process start and boot identities
+are revalidated while the pidfd is pinned, protecting recovery from signalling
+a reused process ID. A phase marks its launch fence before spawning the
+command, so a crash before process identity is persisted also fails closed.
+An unreadable process environment makes the marker scan inconclusive and keeps
+recovery blocked, including when the process belongs to another user.
+Older in-progress records without these identity fields are recovered as
+fence-pending and must be inspected or retired rather than being retried
+automatically.
 
 Execution responses include a human-readable `summary`, machine-readable
 `execution_status` and `partial` fields, per-phase event history, and the
