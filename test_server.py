@@ -1033,11 +1033,13 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(payload, {"enabled": False, "schema_version": 2})
 
     def test_metrics_snapshot_file_is_opt_in_and_content_free(self):
+        from engine import EphemeralEngine
+
         original_metrics = server.METRICS
-        original_engine_metrics = server.engine.metrics
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
-        server.engine.metrics = metrics
+        isolated_engine = EphemeralEngine(metrics=metrics, semantic_prefetch=False)
+        engine_token = server._ENGINE_OVERRIDE.set(isolated_engine)
         try:
             with tempfile.TemporaryDirectory() as directory, patch.dict(
                 os.environ,
@@ -1048,8 +1050,9 @@ class TestServerTools(unittest.TestCase):
                 server._write_metrics_snapshot()
                 snapshot = json.loads(Path(directory, "metrics.json").read_text(encoding="utf-8"))
         finally:
+            server._ENGINE_OVERRIDE.reset(engine_token)
+            isolated_engine.shutdown()
             server.METRICS = original_metrics
-            server.engine.metrics = original_engine_metrics
 
         self.assertEqual(snapshot["bytes"]["capture_input_bytes"], len("private snapshot content"))
         self.assertNotIn("private snapshot content", json.dumps(snapshot))
