@@ -27,6 +27,7 @@ from engine import (
     _bounded_preview,
     _decode_git_path,
     _parse_git_diff_paths,
+    _parse_unified_file_path,
     detect_content_type,
     detect_signals,
     estimate_tokens,
@@ -184,6 +185,73 @@ class TestEngineClassification(unittest.TestCase):
         self.assertEqual(renamed["files"][0]["old_path"], "source/foo.txt")
         self.assertEqual(renamed["files"][0]["new_path"], "target/foo.txt")
         self.assertEqual(renamed["files"][0]["status"], "renamed")
+
+    def test_diff_path_helpers_handle_malformed_headers_and_spaced_renames(self):
+        self.assertIsNone(_parse_git_diff_paths("ordinary text"))
+        self.assertEqual(
+            _parse_git_diff_paths("diff --git a/old file.txt b/new file.txt"),
+            ("a/old file.txt", "b/new file.txt"),
+        )
+        self.assertIsNone(_parse_unified_file_path("+++ file.txt", "--- "))
+        self.assertIsNone(_parse_unified_file_path('--- "unterminated', "--- "))
+        self.assertIsNone(_parse_unified_file_path("--- ", "--- "))
+
+    def test_parse_plain_added_and_deleted_unified_diff_paths(self):
+        parsed = parse_unified_diff([
+            "--- /dev/null",
+            "+++ b/added file.txt",
+            "@@ -0,0 +1 @@",
+            "+new content",
+            "--- a/deleted file.txt",
+            "+++ /dev/null",
+            "@@ -1 +0,0 @@",
+            "-old content",
+        ])
+
+        self.assertEqual(
+            [(item["path"], item["status"]) for item in parsed["files"]],
+            [("added file.txt", "added"), ("deleted file.txt", "deleted")],
+        )
+
+    def test_parse_git_diff_falls_back_to_paired_headers_and_handles_empty_hunks(self):
+        parsed = parse_unified_diff([
+            "diff --git malformed-header",
+            "--- a/file.txt",
+            "+++ b/file.txt",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+            "diff --git a/empty.txt b/empty.txt",
+            "--- a/empty.txt",
+            "+++ b/empty.txt",
+            "@@ -0,0 +0,0 @@",
+        ])
+
+        self.assertEqual(parsed["total_files"], 2)
+        self.assertEqual(
+            [(item["path"], item["status"], item["hunks"])
+             for item in parsed["files"]],
+            [
+                ("file.txt", "modified", 1),
+                ("empty.txt", "modified", 1),
+            ],
+        )
+
+    def test_paired_headers_reclassify_ambiguous_spaced_git_rename(self):
+        parsed = parse_unified_diff([
+            "diff --git a/name b/file b/name b/file",
+            "--- a/name b/file b/name",
+            "+++ b/file",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+
+        self.assertEqual(parsed["total_files"], 1)
+        self.assertEqual(parsed["files"][0]["old_path"], "name b/file b/name")
+        self.assertEqual(parsed["files"][0]["new_path"], "file")
+        self.assertEqual(parsed["files"][0]["path"], "file")
+        self.assertEqual(parsed["files"][0]["status"], "renamed")
 
     def test_parse_real_git_diff_preserves_multiple_filenames_with_spaces(self):
         with tempfile.TemporaryDirectory() as directory:
