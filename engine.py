@@ -205,7 +205,7 @@ def synchronized(method):
 
 DIFF_GIT_RE = re.compile(r"^diff --git (.+)$")
 DIFF_PATH_TOKEN_RE = re.compile(r'"(?:\\.|[^"])*"|[^\s]+')
-HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 BENIGN_SIGNAL_RE = re.compile(
     r"(\b0\s*(errors?|failures?|failed|warnings?)\b|"
     r"\b(errors?|failures?|failed|warnings?)\s*[:=]\s*0\b|"
@@ -283,15 +283,92 @@ def _decode_git_path(token: str) -> str:
     return decoded.decode("utf-8", errors="replace")
 
 
+def _normalize_diff_path_pair(
+    old_path: str,
+    new_path: str,
+    *,
+    allow_custom_prefixes: bool = False,
+) -> Tuple[str, str]:
+    """Remove paired Git diff prefixes without mistaking paths for renames."""
+    if old_path == "/dev/null":
+        if new_path.startswith("b/"):
+            new_path = new_path[2:]
+        return old_path, new_path
+    if new_path == "/dev/null":
+        if old_path.startswith("a/"):
+            old_path = old_path[2:]
+        return old_path, new_path
+
+    if old_path.startswith("a/") and new_path.startswith("b/"):
+        return old_path[2:], new_path[2:]
+
+    old_prefix, old_separator, old_suffix = old_path.partition("/")
+    new_prefix, new_separator, new_suffix = new_path.partition("/")
+    if old_separator and new_separator:
+        if old_path == new_path and old_prefix in {"a", "b"}:
+            return old_suffix, new_suffix
+        if (
+            allow_custom_prefixes
+            and old_prefix != new_prefix
+            and old_suffix == new_suffix
+        ):
+            return old_suffix, new_suffix
+    return old_path, new_path
+
+
 def _parse_git_diff_paths(line: str) -> Optional[Tuple[str, str]]:
     """Return decoded old/new paths from a ``diff --git`` header."""
     match = DIFF_GIT_RE.match(line)
     if not match:
         return None
-    tokens = DIFF_PATH_TOKEN_RE.findall(match.group(1))
+    header = match.group(1)
+    tokens = DIFF_PATH_TOKEN_RE.findall(header)
     if len(tokens) != 2:
+        # Git leaves ordinary spaces unquoted. A path-like token boundary
+        # separates the two names in the usual case; paired ---/+++ headers
+        # later resolve ambiguous names containing the same delimiter.
+        candidates = []
+        for delimiter in re.finditer(r" (?=[^/\s]+/)", header):
+            old_token = header[:delimiter.start()]
+            new_token = header[delimiter.start() + 1:]
+            if old_token and new_token:
+                old_path = _decode_git_path(old_token)
+                new_path = _decode_git_path(new_token)
+                candidates.append((old_path, new_path))
+        matching_paths = [
+            candidate for candidate in candidates
+            if _normalize_diff_path_pair(
+                *candidate,
+                allow_custom_prefixes=True,
+            )[0]
+            == _normalize_diff_path_pair(
+                *candidate,
+                allow_custom_prefixes=True,
+            )[1]
+        ]
+        if len(matching_paths) == 1:
+            return matching_paths[0]
+        if len(candidates) == 1:
+            return candidates[0]
         return None
     return _decode_git_path(tokens[0]), _decode_git_path(tokens[1])
+
+
+def _parse_unified_file_path(line: str, header: str) -> Optional[str]:
+    """Parse one ---/+++ path, discarding an optional tab-separated timestamp."""
+    if not line.startswith(header):
+        return None
+    value = line[len(header):].rstrip("\r\n")
+    if value.startswith('"'):
+        match = re.match(r'"(?:\\.|[^"])*"', value)
+        if not match:
+            return None
+        value = match.group(0)
+    else:
+        value = value.partition("\t")[0]
+    if not value:
+        return None
+    return _decode_git_path(value)
 
 
 def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
@@ -311,54 +388,121 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
     files: List[Dict[str, Any]] = []
     current_file: Optional[Dict[str, Any]] = None
     in_hunk = False
+    hunk_old_remaining = 0
+    hunk_new_remaining = 0
+    pending_git_header = False
+    pending_git_start_line = 0
     has_conflicts = False
+
+    def new_file(
+        old_path: str,
+        new_path: str,
+        start_line: int,
+        *,
+        allow_custom_prefixes: bool = False,
+    ) -> Dict[str, Any]:
+        old_path, new_path = _normalize_diff_path_pair(
+            old_path,
+            new_path,
+            allow_custom_prefixes=allow_custom_prefixes,
+        )
+        path = new_path if new_path != "/dev/null" else old_path
+        if old_path == "/dev/null":
+            status = "added"
+        elif new_path == "/dev/null":
+            status = "deleted"
+        elif old_path != new_path:
+            status = "renamed"
+        else:
+            status = "modified"
+        return {
+            "path": path,
+            "old_path": old_path,
+            "new_path": new_path,
+            "status": status,
+            "start_line": start_line,
+            "end_line": len(lines),
+            "additions": 0,
+            "deletions": 0,
+            "hunks": 0,
+        }
+
+    def set_file_paths(file: Dict[str, Any], old_path: str, new_path: str) -> None:
+        if old_path == "/dev/null" and file["new_path"] != "/dev/null":
+            new_path = file["new_path"]
+        elif new_path == "/dev/null" and file["old_path"] != "/dev/null":
+            old_path = file["old_path"]
+        else:
+            old_path, new_path = _normalize_diff_path_pair(
+                old_path,
+                new_path,
+                allow_custom_prefixes=True,
+            )
+        file["old_path"] = old_path
+        file["new_path"] = new_path
+        file["path"] = new_path if new_path != "/dev/null" else old_path
+        if old_path == "/dev/null":
+            file["status"] = "added"
+        elif new_path == "/dev/null":
+            file["status"] = "deleted"
+        elif old_path != new_path and file["status"] == "modified":
+            file["status"] = "renamed"
 
     for idx, line in enumerate(lines, start=1):
         if _contains_conflict_marker(line):
             has_conflicts = True
 
-        git_paths = _parse_git_diff_paths(line)
-        if git_paths:
+        if line.startswith("diff --git "):
             if current_file:
                 current_file["end_line"] = idx - 1
                 files.append(current_file)
-            old_p, new_p = git_paths
-            if old_p.startswith("a/"):
-                old_p = old_p[2:]
-            if new_p.startswith("b/"):
-                new_p = new_p[2:]
-            path = new_p if new_p != "/dev/null" else old_p
-            current_file = {
-                "path": path,
-                "old_path": old_p,
-                "new_path": new_p,
-                "status": "modified",
-                "start_line": idx,
-                "end_line": len(lines),
-                "additions": 0,
-                "deletions": 0,
-                "hunks": 0
-            }
+            git_paths = _parse_git_diff_paths(line)
+            current_file = (
+                new_file(
+                    git_paths[0],
+                    git_paths[1],
+                    idx,
+                    allow_custom_prefixes=True,
+                )
+                if git_paths
+                else None
+            )
+            pending_git_header = True
+            pending_git_start_line = idx
             in_hunk = False
+            hunk_old_remaining = 0
+            hunk_new_remaining = 0
             continue
 
-        if current_file is None and (line.startswith("--- ") or line.startswith("+++ ")):
-            path = _decode_git_path(line[4:].strip())
-            if path.startswith("a/") or path.startswith("b/"):
-                path = path[2:]
-            if path:
-                current_file = {
-                    "path": path,
-                    "old_path": path,
-                    "new_path": path,
-                    "status": "modified",
-                    "start_line": idx,
-                    "end_line": len(lines),
-                    "additions": 0,
-                    "deletions": 0,
-                    "hunks": 0
-                }
+        if (
+            not in_hunk
+            and line.startswith("--- ")
+            and idx < len(lines)
+            and lines[idx].startswith("+++ ")
+        ):
+            old_path = _parse_unified_file_path(line, "--- ")
+            new_path = _parse_unified_file_path(lines[idx], "+++ ")
+            if old_path is not None and new_path is not None:
+                if pending_git_header:
+                    if current_file is None:
+                        current_file = new_file(
+                            old_path,
+                            new_path,
+                            pending_git_start_line or idx,
+                            allow_custom_prefixes=True,
+                        )
+                    else:
+                        set_file_paths(current_file, old_path, new_path)
+                else:
+                    if current_file:
+                        current_file["end_line"] = idx - 1
+                        files.append(current_file)
+                    current_file = new_file(old_path, new_path, idx)
+                pending_git_header = False
                 in_hunk = False
+                hunk_old_remaining = 0
+                hunk_new_remaining = 0
+                continue
 
         if current_file:
             if line.startswith("new file mode"):
@@ -367,13 +511,24 @@ def parse_unified_diff(lines: List[str]) -> Optional[Dict[str, Any]]:
                 current_file["status"] = "deleted"
             elif line.startswith("similarity index") or line.startswith("rename from"):
                 current_file["status"] = "renamed"
-            elif HUNK_RE.match(line):
+            elif (hunk_match := HUNK_RE.match(line)):
                 current_file["hunks"] += 1
                 in_hunk = True
+                hunk_old_remaining = int(hunk_match.group(1) or 1)
+                hunk_new_remaining = int(hunk_match.group(2) or 1)
+                if hunk_old_remaining == 0 and hunk_new_remaining == 0:
+                    in_hunk = False
             elif in_hunk and line.startswith("+"):
                 current_file["additions"] += 1
+                hunk_new_remaining -= 1
             elif in_hunk and line.startswith("-"):
                 current_file["deletions"] += 1
+                hunk_old_remaining -= 1
+            elif in_hunk and line.startswith(" "):
+                hunk_old_remaining -= 1
+                hunk_new_remaining -= 1
+            if in_hunk and hunk_old_remaining <= 0 and hunk_new_remaining <= 0:
+                in_hunk = False
 
     if current_file:
         current_file["end_line"] = len(lines)
