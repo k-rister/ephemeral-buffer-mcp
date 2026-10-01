@@ -366,7 +366,9 @@ those checks.
 When those facts need a content-free diagnostic before execution, call
 `preflight_command(command, cwd)`. It reports the resolved working directory,
 symlink status and target, detectable local Git root, and first executable-token
-resolution. It never runs the requested command and does not expose captured
+resolution. For a bare executable token, relative and empty `PATH` entries are
+resolved from that working directory, while absolute entries keep their usual
+meaning. It never runs the requested command and does not expose captured
 output or environment data. A result marked unavailable means the check could
 not be established; it is not a safety approval. Shell expansion, aliases,
 pipelines, redirections, environment changes, and arbitrary shell logic remain
