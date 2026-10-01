@@ -205,6 +205,52 @@ class TestBuildAndValidate(unittest.TestCase):
         self.assertInvalid(sample_result(environment={"python_version": "3", "platform": ""}), "environment.platform")
         self.assertInvalid(sample_result(details={"value": {1, 2}}), "not JSON-serializable")
 
+    def test_validation_rejects_malformed_optional_environment_fields(self):
+        def with_environment(**changes):
+            result = sample_result()
+            result["environment"].update(changes)
+            return result
+
+        def with_tool(**changes):
+            result = sample_result()
+            result["environment"]["tool"].update(changes)
+            return result
+
+        for invalid, message in (
+            (with_environment(machine=1), "environment.machine must be a string or null"),
+            (with_environment(cpu_count=True), "environment.cpu_count must be an integer or null"),
+            (with_environment(cpu_count=1.5), "environment.cpu_count must be an integer or null"),
+            (with_environment(tool="not-an-object"), "environment.tool must be an object"),
+            (with_tool(name=1), "environment.tool.name must be a string"),
+            (with_tool(version=1), "environment.tool.version must be a string or null"),
+            (with_environment(source_revision=1), "environment.source_revision must be a string or null"),
+        ):
+            with self.subTest(message=message):
+                self.assertInvalid(invalid, message)
+
+    def test_validation_accepts_missing_and_nullable_optional_environment_fields(self):
+        required_only = sample_result()
+        required_only["environment"] = {
+            "python_version": "3.12",
+            "platform": "Linux",
+            "recorded_at": "2026-09-18T15:00:00+00:00",
+        }
+        validate_result(required_only)
+
+        nullable_optional = sample_result()
+        nullable_optional["environment"].update(
+            machine=None,
+            cpu_count=None,
+            tool={"version": None, "extension": "allowed"},
+            source_revision=None,
+            extension_field={"allowed": True},
+        )
+        validate_result(nullable_optional)
+
+        tool_without_version = sample_result()
+        tool_without_version["environment"]["tool"] = {"name": "runner"}
+        validate_result(tool_without_version)
+
     def test_validation_rejects_workload_problems(self):
         def with_workload(**changes):
             result = sample_result()
@@ -550,10 +596,50 @@ class TestSchemaFile(unittest.TestCase):
 
         validator = jsonschema.Draft202012Validator(SCHEMA)
         validator.validate(sample_result())
+        required_environment = sample_result()
+        required_environment["environment"] = {
+            "python_version": "3.12",
+            "platform": "Linux",
+            "recorded_at": "2026-09-18T15:00:00+00:00",
+        }
+        validator.validate(required_environment)
+        nullable_environment = sample_result()
+        nullable_environment["environment"] = {
+            "python_version": "3.12",
+            "platform": "Linux",
+            "recorded_at": "2026-09-18T15:00:00+00:00",
+            "machine": None,
+            "cpu_count": None,
+            "tool": {"version": None, "extension": "allowed"},
+            "source_revision": None,
+            "extension_field": {"allowed": True},
+        }
+        validator.validate(nullable_environment)
+        tool_without_version = sample_result()
+        tool_without_version["environment"]["tool"] = {"name": "runner"}
+        validator.validate(tool_without_version)
         validator.validate(sample_result(experiment=wr.experiment("g", {"variant": "a", "size": 1, "flag": True, "none": None, "api_key": "x"})))
         validator.validate(sample_result(experiment=wr.experiment(None, {"model": "m"})))
+
+        def with_environment(**changes):
+            result = sample_result()
+            result["environment"].update(changes)
+            return result
+
+        def with_tool(**changes):
+            result = sample_result()
+            result["environment"]["tool"].update(changes)
+            return result
+
         for invalid in (
             sample_result(format="other"),
+            with_environment(machine=1),
+            with_environment(cpu_count=True),
+            with_environment(cpu_count=1.5),
+            with_environment(tool="not-an-object"),
+            with_tool(name=1),
+            with_tool(version=1),
+            with_environment(source_revision=1),
             sample_result(measurements={"x": {"unit": "bytes"}}),
             sample_result(measurements={"wall_time_seconds": {"unit": "bytes", "value": 1}}),
             sample_result(runs=[run("r", measurements={"output_bytes": measurement("seconds", value=1)})]),
