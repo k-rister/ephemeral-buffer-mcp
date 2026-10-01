@@ -297,13 +297,13 @@ class TestPhaseExecutionManager(unittest.TestCase):
             self.assertFalse(execution._terminate_stale_process(stale))
         with patch.object(execution.os, "killpg") as killpg:
             self.assertFalse(execution._terminate_stale_process({"process_id": 0, "process_group_id": 456}))
-        killpg.assert_called_once_with(456, 0)
+        self.assertEqual(killpg.call_count, 1)
+        killpg.assert_called_with(456, 0)
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "process recovery requires Linux")
-    def test_recovery_cleans_marked_descendant_after_supervisor_is_reaped(self):
+    def _assert_recovery_cleans_marked_descendant(self, *, detached):
         with tempfile.TemporaryDirectory() as directory:
             marker = f"restart-recovery-{os.getpid()}-{time.monotonic_ns()}"
-            pid_path = Path(directory) / "detached-pid"
+            pid_path = Path(directory) / "child-pid"
             child_script = (
                 "import os, signal, sys, time; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -313,14 +313,17 @@ class TestPhaseExecutionManager(unittest.TestCase):
             supervisor_script = (
                 "import subprocess, sys, time; "
                 "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
-                "start_new_session=True, stdout=subprocess.DEVNULL, "
+                "start_new_session=bool(int(sys.argv[3])), "
+                "stdout=subprocess.DEVNULL, "
                 "stderr=subprocess.DEVNULL); "
                 "time.sleep(60)"
             )
             environment = os.environ.copy()
             environment[execution.PROCESS_MARKER_ENV] = marker
             supervisor = None
-            detached_pid = None
+            child_pid = None
+            child_reaper = None
+            reaper_result = []
             libc = ctypes.CDLL(None, use_errno=True)
             previous_subreaper = ctypes.c_int()
             self.assertEqual(
@@ -333,7 +336,14 @@ class TestPhaseExecutionManager(unittest.TestCase):
             )
             try:
                 supervisor = subprocess.Popen(
-                    [sys.executable, "-c", supervisor_script, child_script, str(pid_path)],
+                    [
+                        sys.executable,
+                        "-c",
+                        supervisor_script,
+                        child_script,
+                        str(pid_path),
+                        "1" if detached else "0",
+                    ],
                     env=environment,
                     start_new_session=True,
                     stdout=subprocess.DEVNULL,
@@ -341,15 +351,20 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 )
                 for _ in range(200):
                     if pid_path.exists():
-                        break
+                        try:
+                            child_pid = int(pid_path.read_text(encoding="ascii"))
+                        except (OSError, ValueError):
+                            pass
+                        else:
+                            break
                     if supervisor.poll() is not None:
-                        self.fail("test supervisor exited before creating its detached child")
+                        self.fail("test supervisor exited before creating its phase child")
                     time.sleep(0.01)
-                self.assertTrue(pid_path.exists())
-                detached_pid = int(pid_path.read_text(encoding="ascii"))
+                self.assertIsNotNone(child_pid)
                 process_start, process_boot = execution._proc_identity(supervisor.pid)
                 self.assertIsNotNone(process_start)
                 self.assertIsNotNone(process_boot)
+                supervisor_group = os.getpgid(supervisor.pid)
 
                 manager = PhaseExecutionManager(
                     Path(directory) / "state", command_runner=Runner()
@@ -365,7 +380,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
                         "status": "started",
                         "attempts": 1,
                         "process_id": supervisor.pid,
-                        "process_group_id": os.getpgid(supervisor.pid),
+                        "process_group_id": supervisor_group,
                         "process_start_time": process_start,
                         "process_boot_id": process_boot,
                         "process_containment": execution.PROCESS_CONTAINMENT_SUBREAPER,
@@ -378,20 +393,32 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 terminate_pidfd = execution._terminate_pidfd
 
                 def terminate_and_reap(process_id, **kwargs):
+                    nonlocal child_reaper
                     if process_id == supervisor.pid:
                         os.kill(process_id, signal.SIGTERM)
                         supervisor.wait(timeout=5)
-                        group_absent = execution._process_group_is_absent(
-                            kwargs["expected_group"]
+                        child_reaper = threading.Thread(
+                            target=lambda: reaper_result.append(
+                                os.waitpid(child_pid, 0)
+                            ),
+                            daemon=True,
                         )
-                        self.assertTrue(group_absent)
-                        return group_absent
-                    return terminate_pidfd(process_id, **kwargs)
+                        child_reaper.start()
+                        if "expected_group" in kwargs:
+                            return execution._process_group_is_absent(
+                                kwargs["expected_group"]
+                            )
+                        return True
+                    result = terminate_pidfd(process_id, **kwargs)
+                    if process_id == child_pid and child_reaper is not None:
+                        child_reaper.join(timeout=5)
+                        self.assertFalse(child_reaper.is_alive())
+                    return result
 
                 with patch.object(
                     execution, "_terminate_pidfd", side_effect=terminate_and_reap
                 ), patch.object(
-                    execution, "_marker_processes", side_effect=[{detached_pid}, set()]
+                    execution, "_marker_processes", side_effect=[{child_pid}, set()]
                 ):
                     recovered = PhaseExecutionManager(
                         manager.store.state_dir, command_runner=Runner()
@@ -399,8 +426,8 @@ class TestPhaseExecutionManager(unittest.TestCase):
 
                 self.assertEqual(recovered["phases"][0]["status"], "interrupted")
                 self.assertTrue(recovered["resume"]["available"], recovered)
-                reaped_pid, _status = os.waitpid(detached_pid, os.WNOHANG)
-                self.assertEqual(reaped_pid, detached_pid)
+                self.assertEqual(len(reaper_result), 1)
+                self.assertEqual(reaper_result[0][0], child_pid)
             finally:
                 if supervisor is not None and supervisor.poll() is None:
                     supervisor.terminate()
@@ -410,16 +437,27 @@ class TestPhaseExecutionManager(unittest.TestCase):
                     except subprocess.TimeoutExpired:
                         supervisor.kill()
                         supervisor.wait(timeout=5)
-                if detached_pid is not None:
+                if child_pid is not None:
                     try:
-                        os.kill(detached_pid, signal.SIGKILL)
+                        os.kill(child_pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+                if child_reaper is not None:
+                    child_reaper.join(timeout=5)
+                elif child_pid is not None:
                     try:
-                        os.waitpid(detached_pid, 0)
+                        os.waitpid(child_pid, 0)
                     except ChildProcessError:
                         pass
                 libc.prctl(36, previous_subreaper.value, 0, 0, 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "process recovery requires Linux")
+    def test_recovery_cleans_marked_detached_descendant_after_supervisor_is_reaped(self):
+        self._assert_recovery_cleans_marked_descendant(detached=True)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "process recovery requires Linux")
+    def test_recovery_cleans_marked_same_group_descendant_after_supervisor_is_reaped(self):
+        self._assert_recovery_cleans_marked_descendant(detached=False)
 
     def test_recovery_refuses_a_reused_process_id(self):
         stale = {
@@ -466,6 +504,18 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with patch.object(execution.os, "pidfd_open", side_effect=OSError(errno.ESRCH, "gone")), \
                 patch.object(execution, "_process_group_is_absent", return_value=True):
             self.assertTrue(execution._terminate_pidfd(123, expected_group=456))
+        with patch.object(execution.os, "pidfd_open", side_effect=OSError(errno.ESRCH, "gone")), \
+                patch.object(execution, "_process_group_is_absent", return_value=True) as group_absent:
+            self.assertTrue(
+                execution._terminate_pidfd(
+                    123,
+                    expected_identity=("start", "boot"),
+                    expected_group=456,
+                )
+            )
+        group_absent.assert_called_once_with(
+            456, expected_leader=(123, ("start", "boot"))
+        )
 
         with patch.object(execution.os, "pidfd_open", return_value=9), \
                 patch.object(execution, "_proc_identity", return_value=("new", "boot")), \
@@ -570,6 +620,158 @@ class TestPhaseExecutionManager(unittest.TestCase):
                     patch.object(execution.os, "killpg", side_effect=side_effect):
                 self.assertEqual(execution._terminate_process_group(456), expected)
 
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and hasattr(os, "waitid"),
+        "unreaped process-group recovery requires Linux waitid",
+    )
+    def test_process_group_with_only_unreaped_zombies_is_terminated(self):
+        read_fd, write_fd = os.pipe()
+        child_pid = os.fork()
+        if child_pid == 0:
+            os.close(read_fd)
+            os.setsid()
+            os.write(write_fd, b"1")
+            os.close(write_fd)
+            os._exit(0)
+
+        os.close(write_fd)
+        child_reaped = False
+        try:
+            self.assertEqual(os.read(read_fd, 1), b"1")
+            for _ in range(200):
+                result = os.waitid(
+                    os.P_PID,
+                    child_pid,
+                    os.WEXITED | os.WNOWAIT | os.WNOHANG,
+                )
+                if result is not None and result.si_pid == child_pid:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("test child did not exit before the timeout")
+
+            expected_identity = execution._proc_identity(child_pid)
+            self.assertTrue(all(expected_identity))
+            os.killpg(child_pid, 0)
+            self.assertTrue(
+                execution._process_group_is_absent(
+                    child_pid,
+                    expected_leader=(child_pid, expected_identity),
+                )
+            )
+            child_reaped = True
+        finally:
+            os.close(read_fd)
+            if not child_reaped:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(child_pid, 0)
+                except ChildProcessError:
+                    pass
+
+    def test_process_group_reaping_fails_closed_on_wait_errors(self):
+        for wait_result in (
+            ChildProcessError(),
+            OSError(errno.ECHILD, "no children"),
+        ):
+            with self.subTest(wait_result=wait_result), \
+                    patch.object(execution, "_proc_identity", return_value=("leader", "boot")), \
+                    patch.object(execution.os, "getpgrp", return_value=1), \
+                    patch.object(execution.os, "killpg", side_effect=[None, None]), \
+                    patch.object(execution.os, "waitpid", side_effect=wait_result) as waitpid:
+                self.assertFalse(
+                    execution._process_group_is_absent(
+                        456, expected_leader=(456, ("leader", "boot"))
+                    )
+                )
+                waitpid.assert_called_once_with(-456, os.WNOHANG)
+
+        with patch.object(execution, "_proc_identity", return_value=("leader", "boot")), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg") as killpg, \
+                patch.object(execution.os, "waitpid", side_effect=OSError(errno.EPERM, "denied")):
+            self.assertFalse(
+                execution._process_group_is_absent(
+                    456, expected_leader=(456, ("leader", "boot"))
+                )
+            )
+        killpg.assert_called_once_with(456, 0)
+
+        with patch.object(execution, "_proc_identity", return_value=("leader", "boot")), \
+                patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg", side_effect=[None, None]), \
+                patch.object(execution.os, "waitpid", return_value=(0, 0)):
+            self.assertFalse(
+                execution._process_group_is_absent(
+                    456, expected_leader=(456, ("leader", "boot"))
+                )
+            )
+
+        with patch.object(execution.os, "getpgrp", return_value=1), \
+                patch.object(execution.os, "killpg", return_value=None), \
+                patch.object(execution.os, "waitpid") as waitpid:
+            self.assertFalse(
+                execution._process_group_is_absent(
+                    456, expected_leader=(456, (None, None))
+                )
+            )
+        waitpid.assert_not_called()
+
+        with patch.object(execution.sys, "platform", "win32"), \
+                patch.object(execution.os, "getpgrp") as getpgrp, \
+                patch.object(execution.os, "killpg") as killpg, \
+                patch.object(execution.os, "waitpid") as waitpid:
+            self.assertFalse(execution._process_group_is_absent(456))
+        waitpid.assert_not_called()
+        getpgrp.assert_not_called()
+        killpg.assert_not_called()
+
+        with patch.object(execution.os, "getpgrp", return_value=456), \
+                patch.object(execution.os, "killpg") as killpg, \
+                patch.object(execution.os, "waitpid") as waitpid:
+            self.assertFalse(execution._process_group_is_absent(456))
+        waitpid.assert_not_called()
+        killpg.assert_not_called()
+
+    def test_proc_visibility_detection_fails_closed_for_hidepid_or_unknown_mounts(self):
+        for mounts, restricted in (
+            ("proc /proc proc rw,nosuid,nodev 0 0\n", False),
+            ("proc /proc proc rw,hidepid=off 0 0\n", False),
+            ("proc /proc proc rw,hidepid=1 0 0\n", False),
+            ("proc /proc proc rw,hidepid=noaccess 0 0\n", False),
+            ("proc /proc proc rw,hidepid=2,gid=1000 0 0\n", True),
+            ("proc /proc proc rw,hidepid=invisible 0 0\n", True),
+            ("proc /proc proc rw,hidepid=4 0 0\n", True),
+            ("proc /proc proc rw,hidepid=ptraceable 0 0\n", True),
+            ("sysfs /sys sysfs rw 0 0\n", True),
+        ):
+            with self.subTest(mounts=mounts), \
+                    patch.object(execution.Path, "read_text", return_value=mounts), \
+                    patch.object(execution.os, "getgroups", return_value=[3000]), \
+                    patch.object(execution.os, "getgid", return_value=2000), \
+                    patch.object(execution.os, "getegid", return_value=2001):
+                self.assertEqual(execution._proc_visibility_restricted(), restricted)
+        for groups, real_gid, effective_gid in (
+            ([1000], 2000, 2001),
+            ([3000], 1000, 2001),
+            ([3000], 2000, 1000),
+        ):
+            with self.subTest(groups=groups, real_gid=real_gid, effective_gid=effective_gid), \
+                    patch.object(
+                        execution.Path,
+                        "read_text",
+                        return_value="proc /proc proc rw,hidepid=2,gid=1000 0 0\n",
+                    ), \
+                    patch.object(execution.os, "getgroups", return_value=groups), \
+                    patch.object(execution.os, "getgid", return_value=real_gid), \
+                    patch.object(execution.os, "getegid", return_value=effective_gid):
+                self.assertFalse(execution._proc_visibility_restricted())
+        with patch.object(execution.Path, "read_text", side_effect=OSError("mounts unavailable")):
+            self.assertTrue(execution._proc_visibility_restricted())
+
     def test_process_recovery_capability_probe_and_startup_gate(self):
         with patch.object(execution.sys, "platform", "win32"):
             self.assertFalse(execution._process_recovery_supported())
@@ -642,47 +844,99 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")):
             self.assertTrue(execution._terminate_stale_process({"process_id": 0, "process_group_id": 456}))
 
-    def test_marker_process_scan_fails_closed_for_unavailable_proc_metadata(self):
+    def test_recovery_keeps_fence_when_unmarked_group_member_survives_marker_cleanup(self):
+        phase = {
+            "process_id": 123,
+            "process_group_id": 456,
+            "process_start_time": "start",
+            "process_boot_id": "boot",
+            "process_launch_token": "marker",
+        }
+        with patch.object(execution, "_proc_identity", return_value=(None, None)), \
+                patch.object(
+                    execution,
+                    "_marker_process_identities",
+                    side_effect=[{789: ("child-start", "boot")}, {}],
+                ), \
+                patch.object(execution, "_terminate_pidfd", return_value=True) as terminate, \
+                patch.object(execution, "_process_group_is_absent", return_value=False) as group_absent:
+            self.assertFalse(execution._terminate_stale_process(phase))
+        terminate.assert_called_once_with(789, expected_identity=("child-start", "boot"))
+        group_absent.assert_called_once_with(
+            456, expected_leader=(123, ("start", "boot"))
+        )
+
+    @patch.object(execution, "_proc_visibility_restricted", return_value=False)
+    def test_marker_process_scan_fails_closed_for_unavailable_proc_metadata(
+        self, _proc_visibility
+    ):
+        same_uid_stat = type("Stat", (), {"st_uid": 10})()
+        foreign_uid_stat = type("Stat", (), {"st_uid": 11})()
         with patch.object(execution.sys, "platform", "win32"):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution, "_proc_visibility_restricted", return_value=True):
             self.assertIsNone(execution._marker_process_groups("marker"))
         with patch.object(execution.os, "listdir", side_effect=OSError("proc unavailable")):
             self.assertIsNone(execution._marker_process_groups("marker"))
         with patch.object(execution.os, "listdir", return_value=["not-a-pid", "123"]), \
                 patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", side_effect=FileNotFoundError()):
-            self.assertEqual(execution._marker_process_groups("marker"), set())
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 11})()):
-            self.assertEqual(execution._marker_process_groups("marker"), set())
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", side_effect=OSError("stat unavailable")):
-            self.assertIsNone(execution._marker_process_groups("marker"))
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", side_effect=FileNotFoundError()):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
                 patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
-                patch.object(execution.Path, "read_bytes", side_effect=OSError("environ unavailable")):
-            self.assertIsNone(execution._marker_process_groups("marker"))
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.os, "stat", return_value=foreign_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"OTHER=value\0"):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
                 patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.os, "stat", return_value=foreign_uid_stat), \
+                patch.object(
+                    execution.Path,
+                    "read_bytes",
+                    return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0",
+                ):
+            self.assertEqual(execution._marker_processes("marker"), {123})
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=same_uid_stat), \
+                patch.object(execution.Path, "read_bytes", side_effect=FileNotFoundError()):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=foreign_uid_stat), \
+                patch.object(
+                    execution.Path,
+                    "read_bytes",
+                    side_effect=PermissionError(errno.EACCES, "environ unavailable"),
+                ):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=same_uid_stat), \
+                patch.object(
+                    execution.Path,
+                    "read_bytes",
+                    side_effect=PermissionError(errno.EACCES, "environ unavailable"),
+                ):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "stat", side_effect=PermissionError(errno.EACCES, "proc unavailable")):
+            self.assertIsNone(execution._marker_process_groups("marker"))
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=same_uid_stat), \
+                patch.object(execution.Path, "read_bytes", return_value=b"OTHER=value\0"):
+            self.assertEqual(execution._marker_process_groups("marker"), set())
+        with patch.object(execution.os, "listdir", return_value=["123"]), \
+                patch.object(execution.os, "getuid", return_value=10), \
+                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
                 patch.object(execution.os, "getpgid", side_effect=OSError(errno.ESRCH, "gone")):
             self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
                 patch.object(execution.os, "getuid", return_value=10), \
-                patch.object(execution.os, "stat", return_value=type("Stat", (), {"st_uid": 10})()), \
+                patch.object(execution.os, "stat", return_value=same_uid_stat), \
                 patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
                 patch.object(execution.os, "getpgid", side_effect=OSError(errno.EPERM, "denied")):
             self.assertIsNone(execution._marker_process_groups("marker"))

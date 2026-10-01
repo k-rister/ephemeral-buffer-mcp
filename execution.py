@@ -147,8 +147,109 @@ def _process_group_absent(error: OSError) -> bool:
     return getattr(error, "errno", None) == errno.ESRCH
 
 
-def _process_group_is_absent(process_group_id: int) -> bool:
-    """Prove that a persisted process group no longer exists."""
+def _proc_visibility_restricted() -> bool:
+    """Return true when procfs may hide process entries needed for recovery."""
+    try:
+        mounts = Path("/proc/mounts").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return True
+    proc_mount_found = False
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[1] != "/proc" or fields[2] != "proc":
+            continue
+        proc_mount_found = True
+        options = fields[3].split(",")
+        hidepid_values = [option.partition("=")[2] for option in options
+                          if option.startswith("hidepid=")]
+        if not hidepid_values:
+            continue
+        if len(hidepid_values) != 1:
+            return True
+        hidepid_value = hidepid_values[0]
+        hidepid_aliases = {
+            "off": 0,
+            "noaccess": 1,
+            "invisible": 2,
+            "ptraceable": 4,
+        }
+        if hidepid_value in hidepid_aliases:
+            hidepid = hidepid_aliases[hidepid_value]
+        else:
+            try:
+                hidepid = int(hidepid_value)
+            except ValueError:
+                return True
+        # hidepid=1 keeps PID directories visible while restricting their
+        # contents. Higher modes hide process entries unless the service is in
+        # the procfs gid= group that is allowed to inspect restricted entries.
+        if hidepid in (0, 1):
+            continue
+        if hidepid not in (2, 4):
+            return True
+        gid_values = [option.partition("=")[2] for option in options
+                      if option.startswith("gid=")]
+        if len(gid_values) != 1:
+            return True
+        try:
+            proc_gid = int(gid_values[0])
+            service_gids = set(os.getgroups())
+            service_gids.update((os.getgid(), os.getegid()))
+        except (OSError, ValueError):
+            return True
+        if proc_gid < 0 or proc_gid not in service_gids:
+            return True
+    return not proc_mount_found
+
+
+def _process_group_is_absent(
+    process_group_id: int,
+    *,
+    expected_leader: Optional[Tuple[int, Tuple[str, str]]] = None,
+) -> bool:
+    """Return true when a process group is gone after reaping owned zombies."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if os.getpgrp() == process_group_id:
+        return False
+    try:
+        os.killpg(process_group_id, 0)
+    except OSError as exc:
+        return _process_group_absent(exc)
+
+    can_reap_children = False
+    if expected_leader is not None:
+        leader_id, leader_identity = expected_leader
+        if (
+            leader_id == process_group_id
+            and isinstance(leader_identity, tuple)
+            and len(leader_identity) == 2
+            and all(isinstance(value, str) and value for value in leader_identity)
+        ):
+            current_identity = _proc_identity(leader_id)
+            if current_identity == leader_identity:
+                can_reap_children = True
+            elif current_identity == (None, None):
+                try:
+                    os.kill(leader_id, 0)
+                except OSError as exc:
+                    can_reap_children = _process_group_absent(exc)
+
+    if not can_reap_children:
+        return False
+    while True:
+        try:
+            child_pid, _status = os.waitpid(-process_group_id, os.WNOHANG)
+        except ChildProcessError:
+            break
+        except OSError:
+            return False
+        if child_pid == 0:
+            break
+
+    # Recheck with the kernel after reaping only children owned by this process.
+    # Any surviving member, including one hidden by procfs permissions, keeps
+    # recovery fenced.
     try:
         os.killpg(process_group_id, 0)
     except OSError as exc:
@@ -206,13 +307,21 @@ def _terminate_pidfd(
     except OSError as exc:
         if not _process_group_absent(exc):
             return False
-        return expected_group is None or _process_group_is_absent(expected_group)
+        return expected_group is None or _process_group_is_absent(
+            expected_group,
+            expected_leader=(process_id, expected_identity)
+            if expected_identity is not None
+            else None,
+        )
     try:
         if expected_identity is not None:
             current_identity = _proc_identity(process_id)
             if current_identity != expected_identity:
                 if current_identity == (None, None) and _pidfd_terminated(pidfd):
-                    return expected_group is None or _process_group_is_absent(expected_group)
+                    return expected_group is None or _process_group_is_absent(
+                        expected_group,
+                        expected_leader=(process_id, expected_identity),
+                    )
                 return False
         if expected_group is not None:
             try:
@@ -221,12 +330,22 @@ def _terminate_pidfd(
             except OSError as exc:
                 if not _process_group_absent(exc):
                     return False
-                return _pidfd_terminated(pidfd) and _process_group_is_absent(expected_group)
+                return _pidfd_terminated(pidfd) and _process_group_is_absent(
+                    expected_group,
+                    expected_leader=(process_id, expected_identity)
+                    if expected_identity is not None
+                    else None,
+                )
         try:
             pidfd_send_signal(pidfd, signal.SIGTERM)
         except ProcessLookupError:
             return True if expected_group is None else (
-                _pidfd_terminated(pidfd) and _process_group_is_absent(expected_group)
+                _pidfd_terminated(pidfd) and _process_group_is_absent(
+                    expected_group,
+                    expected_leader=(process_id, expected_identity)
+                    if expected_identity is not None
+                    else None,
+                )
             )
         if not _pidfd_terminated(pidfd, 1):
             try:
@@ -235,7 +354,12 @@ def _terminate_pidfd(
                 pass
             if not _pidfd_terminated(pidfd, 1):
                 return False
-        return expected_group is None or _process_group_is_absent(expected_group)
+        return expected_group is None or _process_group_is_absent(
+            expected_group,
+            expected_leader=(process_id, expected_identity)
+            if expected_identity is not None
+            else None,
+        )
     finally:
         os.close(pidfd)
 
@@ -265,7 +389,7 @@ def _terminate_process_group(process_group_id: int) -> bool:
 
 def _marker_processes(marker: str) -> Optional[set[int]]:
     """Find Linux processes carrying a durable execution marker."""
-    if not sys.platform.startswith("linux"):
+    if not sys.platform.startswith("linux") or _proc_visibility_restricted():
         return None
     marker_bytes = f"{PROCESS_MARKER_ENV}={marker}".encode("ascii")
     try:
@@ -278,17 +402,23 @@ def _marker_processes(marker: str) -> Optional[set[int]]:
         if not process_name.isdigit():
             continue
         process_id = int(process_name)
+        process_path = f"/proc/{process_id}"
         try:
-            if current_uid is not None and os.stat(f"/proc/{process_id}").st_uid != current_uid:
-                continue
+            process_uid = os.stat(process_path).st_uid
         except FileNotFoundError:
             continue
         except OSError:
             return None
+        foreign_uid = current_uid is not None and process_uid != current_uid
         try:
             environment = Path(f"/proc/{process_id}/environ").read_bytes()
         except FileNotFoundError:
             continue
+        except PermissionError:
+            if foreign_uid:
+                # Unrelated foreign-owned processes must not block recovery.
+                continue
+            return None
         except OSError:
             return None
         if marker_bytes not in environment.split(b"\0"):
@@ -348,14 +478,22 @@ def _terminate_marker_processes(
 def _terminate_marker_processes_or_confirm_group_absent(
     marker: str,
     process_group_id: int,
+    *,
+    expected_leader: Optional[Tuple[int, Tuple[str, str]]] = None,
 ) -> bool:
-    """Clean marked descendants before accepting an absent process group."""
+    """Clean marked descendants and confirm no live group member remains."""
     identities = _marker_process_identities(marker)
     if identities is None:
         return False
     if identities:
-        return _terminate_marker_processes(marker, identities)
-    return _process_group_is_absent(process_group_id)
+        return _terminate_marker_processes(
+            marker, identities
+        ) and _process_group_is_absent(
+            process_group_id, expected_leader=expected_leader
+        )
+    return _process_group_is_absent(
+        process_group_id, expected_leader=expected_leader
+    )
 
 
 def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
@@ -412,16 +550,31 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
         or current_boot != expected_boot
     ):
         # A missing /proc identity is not proof that the original leader is
-        # gone, unless the kernel also proves the whole persisted group gone.
+        # inactive, unless the kernel also proves the whole persisted group
+        # has no live members.
         if isinstance(marker, str) and marker:
             return _terminate_marker_processes_or_confirm_group_absent(
-                marker, process_group_id
+                marker,
+                process_group_id,
+                expected_leader=(process_id, (expected_start, expected_boot)),
             )
         return _process_group_is_absent(process_group_id)
     if phase.get("process_containment") != PROCESS_CONTAINMENT_SUBREAPER:
         # Legacy records have no pinned supervisor.  Never signal a numeric
         # group whose membership can have changed since the checkpoint.
         return _process_group_is_absent(process_group_id)
+    if isinstance(marker, str) and marker:
+        # Stop the pinned supervisor, clean its marked descendants, and then
+        # require the original process group to have no live members.
+        if not _terminate_pidfd(
+            process_id,
+            expected_identity=(expected_start, expected_boot),
+        ):
+            return False
+        return _terminate_marker_processes(marker) and _process_group_is_absent(
+            process_group_id,
+            expected_leader=(process_id, (expected_start, expected_boot)),
+        )
     terminated = _terminate_pidfd(
         process_id,
         expected_identity=(expected_start, expected_boot),
@@ -429,12 +582,6 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
     )
     if not terminated:
         return False
-    if isinstance(marker, str) and marker:
-        # A prompt supervisor exit does not prove that its detached descendants
-        # are gone.  Recover the durable marker tree before releasing the fence.
-        return _terminate_marker_processes_or_confirm_group_absent(
-            marker, process_group_id
-        )
     return True
 
 
