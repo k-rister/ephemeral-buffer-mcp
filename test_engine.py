@@ -4,7 +4,9 @@ Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 
 import io
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -130,6 +132,151 @@ class TestEngineClassification(unittest.TestCase):
         )
         self.assertEqual(statuses["files"][0]["path"], "added.py")
         self.assertEqual(statuses["files"][1]["path"], "deleted.py")
+
+    def test_parse_unified_diff_normalizes_paired_git_prefixes(self):
+        for old_path, new_path, expected_path in (
+            ("i/src/file.txt", "w/src/file.txt", "src/file.txt"),
+            ("source/src/file.txt", "target/src/file.txt", "src/file.txt"),
+            (
+                "source/first file.txt",
+                "target/first file.txt",
+                "first file.txt",
+            ),
+        ):
+            with self.subTest(old_path=old_path, new_path=new_path):
+                parsed = parse_unified_diff([
+                    f"diff --git {old_path} {new_path}",
+                    f"--- {old_path}",
+                    f"+++ {new_path}",
+                    "@@ -1 +1 @@",
+                    "-old",
+                    "+new",
+                ])
+
+                self.assertEqual(parsed["total_files"], 1)
+                self.assertEqual(parsed["files"][0]["path"], expected_path)
+                self.assertEqual(parsed["files"][0]["old_path"], expected_path)
+                self.assertEqual(parsed["files"][0]["new_path"], expected_path)
+                self.assertEqual(parsed["files"][0]["status"], "modified")
+
+    def test_parse_plain_unified_diff_strips_matching_git_style_prefixes(self):
+        parsed = parse_unified_diff([
+            "--- a/foo.txt",
+            "+++ a/foo.txt",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+
+        self.assertEqual(parsed["total_files"], 1)
+        self.assertEqual(parsed["files"][0]["path"], "foo.txt")
+        self.assertEqual(parsed["files"][0]["old_path"], "foo.txt")
+        self.assertEqual(parsed["files"][0]["new_path"], "foo.txt")
+        self.assertEqual(parsed["files"][0]["status"], "modified")
+
+        renamed = parse_unified_diff([
+            "--- source/foo.txt",
+            "+++ target/foo.txt",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+        self.assertEqual(renamed["files"][0]["old_path"], "source/foo.txt")
+        self.assertEqual(renamed["files"][0]["new_path"], "target/foo.txt")
+        self.assertEqual(renamed["files"][0]["status"], "renamed")
+
+    def test_parse_real_git_diff_preserves_multiple_filenames_with_spaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content in (
+                ("first file.txt", "first\n"),
+                ("second file.txt", "second\n"),
+            ):
+                with open(f"{directory}/{name}", "w", encoding="utf-8") as stream:
+                    stream.write(content)
+            subprocess.run(["git", "init", "-q"], cwd=directory, check=True)
+            subprocess.run(
+                ["git", "add", "--", "first file.txt", "second file.txt"],
+                cwd=directory,
+                check=True,
+            )
+            diff_commands = (
+                [
+                    "git", "-c", "core.quotePath=false", "diff", "--cached",
+                    "--no-ext-diff", "--",
+                ],
+                [
+                    "git", "-c", "core.quotePath=false", "-c",
+                    "diff.mnemonicPrefix=true", "diff", "--cached", "--no-ext-diff", "--",
+                ],
+                [
+                    "git", "-c", "core.quotePath=false", "diff", "--cached",
+                    "--no-ext-diff", "--src-prefix=source/", "--dst-prefix=target/", "--",
+                ],
+            )
+            diffs = [
+                subprocess.run(
+                    command,
+                    cwd=directory,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+                for command in diff_commands
+            ]
+
+        for diff in diffs:
+            with self.subTest(diff_header=diff[0]):
+                parsed = parse_unified_diff(diff)
+                self.assertEqual(parsed["total_files"], 2)
+                self.assertEqual(parsed["total_additions"], 2)
+                self.assertEqual(parsed["total_deletions"], 0)
+                self.assertEqual(
+                    [
+                        (item["path"], item["status"], item["additions"], item["deletions"])
+                        for item in parsed["files"]
+                    ],
+                    [
+                        ("first file.txt", "added", 1, 0),
+                        ("second file.txt", "added", 1, 0),
+                    ],
+                )
+
+    def test_parse_plain_multi_file_unified_diff_with_timestamps(self):
+        parsed = parse_unified_diff([
+            "--- first file.txt\t2026-10-01 12:00:00",
+            "+++ first file.txt\t2026-10-01 12:00:01",
+            "@@ -1 +1 @@",
+            "-first old",
+            "+first new",
+            "--- second file.txt\t2026-10-01 12:00:00",
+            "+++ second file.txt\t2026-10-01 12:00:01",
+            "@@ -1 +1 @@",
+            "-second old",
+            "+second new",
+        ])
+
+        self.assertEqual(parsed["total_files"], 2)
+        self.assertEqual(parsed["total_additions"], 2)
+        self.assertEqual(parsed["total_deletions"], 2)
+        self.assertEqual(
+            [(item["path"], item["additions"], item["deletions"])
+             for item in parsed["files"]],
+            [("first file.txt", 1, 1), ("second file.txt", 1, 1)],
+        )
+
+    def test_parse_unified_diff_keeps_header_like_hunk_content_in_current_file(self):
+        parsed = parse_unified_diff([
+            "--- source file.txt",
+            "+++ source file.txt",
+            "@@ -1 +1 @@",
+            "--- old content that resembles a file header",
+            "+++ new content that resembles a file header",
+        ])
+
+        self.assertEqual(parsed["total_files"], 1)
+        self.assertEqual(parsed["files"][0]["path"], "source file.txt")
+        self.assertEqual(parsed["files"][0]["additions"], 1)
+        self.assertEqual(parsed["files"][0]["deletions"], 1)
 
     def test_parse_unified_diff_counts_header_like_hunk_content(self):
         parsed = parse_unified_diff([
