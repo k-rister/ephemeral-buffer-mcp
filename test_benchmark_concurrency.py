@@ -32,12 +32,69 @@ class TestBenchmarkResults(unittest.TestCase):
         self.assertIn("ingest_per_second", failures[0])
         self.assertIn("reads_per_second", failures[1])
 
+    def test_zero_throughput_fails_against_a_finite_baseline(self):
+        results = {"ingest_per_second": 0.0, "reads_per_second": 0.0}
+
+        failures = check_regression(results, self.baseline)
+
+        self.assertEqual(len(failures), 2)
+        self.assertIn("ingest_per_second", failures[0])
+        self.assertIn("reads_per_second", failures[1])
+
     def test_baseline_is_loaded_and_validated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "baseline.json"
             path.write_text(json.dumps(self.baseline), encoding="utf-8")
 
             self.assertEqual(load_baseline(path), self.baseline)
+
+        checked_in = load_baseline(Path(__file__).with_name("benchmark_baseline.json"))
+        self.assertEqual(
+            checked_in,
+            {"ingest_per_second": 1.0, "reads_per_second": 1000.0, "minimum_ratio": 0.8},
+        )
+
+    def test_nonfinite_baseline_rates_are_rejected(self):
+        invalid_values = (
+            ("NaN string", json.dumps("NaN")),
+            ("positive infinity string", json.dumps("Infinity")),
+            ("negative infinity string", json.dumps("-Infinity")),
+            ("NaN number", "NaN"),
+            ("positive infinity number", "Infinity"),
+            ("negative infinity number", "-Infinity"),
+            ("overflowing JSON number", "1e999"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            for metric in ("ingest_per_second", "reads_per_second"):
+                for label, encoded_value in invalid_values:
+                    fields = [
+                        f"{json.dumps(key)}:{encoded_value if key == metric else json.dumps(value)}"
+                        for key, value in self.baseline.items()
+                    ]
+                    path.write_text("{" + ",".join(fields) + "}", encoding="utf-8")
+                    with self.subTest(metric=metric, value=label):
+                        with self.assertRaisesRegex(ValueError, "baseline rates must be finite and positive"):
+                            load_baseline(path)
+
+    def test_invalid_minimum_ratio_is_still_rejected(self):
+        invalid_values = (
+            ("NaN string", json.dumps("NaN")),
+            ("infinity number", "Infinity"),
+            ("zero", "0"),
+            ("greater than one", "1.1"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            for label, encoded_value in invalid_values:
+                fields = [
+                    f"{json.dumps(key)}:{encoded_value if key == 'minimum_ratio' else json.dumps(value)}"
+                    for key, value in self.baseline.items()
+                ]
+                path.write_text("{" + ",".join(fields) + "}", encoding="utf-8")
+                with self.subTest(value=label):
+                    with self.assertRaisesRegex(ValueError, "minimum_ratio must be finite and in \\(0, 1\\]"):
+                        load_baseline(path)
 
     def test_invalid_baseline_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

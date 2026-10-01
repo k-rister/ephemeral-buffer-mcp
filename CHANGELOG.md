@@ -7,6 +7,8 @@
   rejected before listing or comparison consumers inspect it.
 - Reject unknown agent A/B baseline threshold directions and nonboolean gate
   values in generated, file-loaded, and in-memory baselines.
+- Reject nonfinite concurrency baseline throughput rates before regression
+  comparisons so NaN or infinity cannot disable the performance gate.
 - Keep BM25 effectiveness benchmarks isolated from semantic prefetch work and
   shut down benchmark engines after each run. Reject nonfinite agent A/B
   measurements, use unique default run directories, clean up interrupted Codex
