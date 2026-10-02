@@ -35,6 +35,8 @@ DEFAULT_SEMANTIC_CHUNK_OVERLAP = 0
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 DEFAULT_SOCKET_TIMEOUT_SECONDS = 10.0
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
+DEFAULT_EXECUTION_STATE_QUOTA_BYTES = 4 * 1024 * 1024 * 1024
+DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES = 128 * 1024 * 1024
 DEFAULT_EXECUTION_STATE_DIR = tempfile.mkdtemp(
     prefix="ephemeral_buffer_executions-",
     dir=tempfile.gettempdir(),
@@ -129,6 +131,22 @@ def execution_state_dir() -> str:
         digest = hashlib.sha256(configured_socket.encode("utf-8")).hexdigest()[:16]
         return os.path.join(tempfile.gettempdir(), f"{EXECUTION_STATE_SOCKET_PREFIX}{digest}")
     return DEFAULT_EXECUTION_STATE_DIR
+
+
+def execution_state_quota_bytes() -> int:
+    """Return the aggregate on-disk envelope for durable execution state."""
+    return positive_int_env(
+        "EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES",
+        DEFAULT_EXECUTION_STATE_QUOTA_BYTES,
+    )
+
+
+def execution_checkpoint_reserve_bytes() -> int:
+    """Return disk headroom kept available for atomic execution checkpoints."""
+    return positive_int_env(
+        "EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES",
+        DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES,
+    )
 
 
 def embedding_model_name() -> str:

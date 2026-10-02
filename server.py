@@ -63,9 +63,10 @@ from engine import (
 )
 from capture_utils import read_file_bounded, run_command_bounded
 from execution import (
-MAX_EXECUTION_ID_BYTES,
+    MAX_EXECUTION_ID_BYTES,
+    MAX_EXECUTION_RETIRE_BATCH,
     MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
-MAX_EXECUTION_PHASES,
+    MAX_EXECUTION_PHASES,
     MAX_STRUCTURED_METRICS_BYTES,
     MAX_PHASE_NAME_BYTES,
     PhaseExecutionManager,
@@ -1280,6 +1281,44 @@ def list_executions(
             "offset": offset,
             "executions": execution_manager.list_public(limit=limit, offset=offset),
         },
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("get_execution_capacity", "execution")
+@_instrument_tool("get_execution_capacity")
+def get_execution_capacity() -> str:
+    """Report durable execution storage, quota, checkpoint headroom, and anomalies."""
+    return _execution_json(
+        lambda: execution_manager.capacity(),
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("retire_executions", "execution")
+@_instrument_tool("retire_executions")
+def retire_executions(
+    execution_ids: Annotated[
+        List[str], Field(min_length=1, max_length=MAX_EXECUTION_RETIRE_BATCH)
+    ],
+    archive_path: Optional[Annotated[str, Field(
+        json_schema_extra={"maxUtf8Bytes": 4096}
+    )]] = None,
+    dry_run: bool = True,
+) -> str:
+    """Preview selected durable records or archive and retire them.
+
+    A dry run is read-only and reports eligibility and projected space reclaimed.
+    Actual retirement requires an archive path outside the state directory; the
+    archived bundle is durably written before the source record pair is removed.
+    Active and fence-pending executions are never retired.
+    """
+    return _execution_json(
+        lambda: execution_manager.retire(
+            execution_ids,
+            archive_path=archive_path,
+            dry_run=dry_run,
+        ),
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
     )
 

@@ -350,10 +350,34 @@ optional `idempotency_key` is persisted as an audit identifier, not as a
 claim that the external system deduplicates requests. Keep the state directory
 access-controlled because it contains the stored commands and bounded output.
 Execution records are capped at 64 MiB, 64 phases, 32 attempts per phase, and
-1,000 records per state directory; `list_executions` is paginated. There is no
-automatic expiry. If the record cap is reached, stop the server and archive or
-rotate the state directory, or remove completed records and their matching
-summary files before restarting. When no explicit state directory is set,
+1,000 records per state directory; `list_executions` is paginated. The aggregate
+state quota defaults to 4 GiB and is configurable with
+`EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES`. The default 128 MiB checkpoint reserve
+is configurable with `EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES`; it must be
+at least the 64 MiB per-record limit and smaller than the quota. Processes
+sharing one state directory must use the same quota and reserve settings. Record and
+summary JSON bytes, atomic-write temporary files (including crash leftovers), and
+active phase reservations count toward the usable quota;
+the configured reserve is excluded from committed data and provides allowance
+for atomic file replacement. Before a phase starts, the server checks that the
+filesystem currently has room for its bounded checkpoint reservation plus that
+reserve. Capacity reports include filesystem free space, active and
+fence-pending records, unpaired files, and stale checkpoint reservations. The
+quota accounts for EB-managed files; unrelated processes can still consume
+filesystem space after the check. The capacity scan is read-only and does not
+attempt process recovery.
+
+Use `get_execution_capacity` to inspect current use and headroom. To reclaim
+space, first call `retire_executions(execution_ids)` and review each record's
+eligibility and projected reclaimed bytes. The default is a read-only dry run.
+For retirement, call it again with `dry_run: false` and an `archive_path` for a
+new tar file outside the managed state directory. Its existing parent
+directory must be current-user-owned and not group/world writable. The archive
+is created with owner-only file permissions and synchronized before the source record and
+summary pair are removed. Keep the archive in an access-controlled location;
+it contains stored commands and bounded output. Active, started, and
+fence-pending executions are refused. There is no automatic expiry. When no
+explicit state directory is set,
 state is isolated by `EPHEMERAL_SESSION_ID` or by the explicit socket path;
 otherwise each server process receives a fresh private directory that is
 removed during normal shutdown on POSIX platforms. Windows may retain that

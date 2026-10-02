@@ -76,6 +76,29 @@ class TestExecutionTools(unittest.TestCase):
         listed = json.loads(server.list_executions())
         self.assertEqual(listed["executions"][0]["execution_id"], "tool-execution")
 
+    def test_capacity_and_retirement_tools(self):
+        server.start_execution(
+            [self.phase("retire", "retire")],
+            execution_id="tool-retire",
+        )
+        capacity = json.loads(server.get_execution_capacity())
+        self.assertEqual(capacity["record_count"], 1)
+        self.assertEqual(capacity["paired_record_count"], 1)
+
+        preview = json.loads(server.retire_executions(["tool-retire"]))
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["eligible_count"], 1)
+        self.assertGreater(preview["projected_reclaimed_bytes"], 0)
+
+        with tempfile.TemporaryDirectory() as archive_directory:
+            result = json.loads(server.retire_executions(
+                ["tool-retire"],
+                archive_path=os.path.join(archive_directory, "tool-record.tar"),
+                dry_run=False,
+            ))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(json.loads(server.list_executions())["executions"], [])
+
     def test_partial_timeout_is_machine_readable_and_capture_is_searchable(self):
         self.runner.results["timeout"] = ("partial output", 124, True, 2000, True)
         result = json.loads(
@@ -454,7 +477,8 @@ class TestExecutionTools(unittest.TestCase):
         names = server.mcp._tool_manager._tools
         for name in (
             "start_execution", "resume_execution", "get_execution",
-            "get_execution_output", "list_executions",
+            "get_execution_output", "list_executions", "get_execution_capacity",
+            "retire_executions",
         ):
             self.assertIn(name, names)
         start_schema = names["start_execution"].parameters
@@ -483,6 +507,10 @@ class TestExecutionTools(unittest.TestCase):
         list_schema = names["list_executions"].parameters
         self.assertEqual(list_schema["properties"]["limit"]["minimum"], 1)
         self.assertEqual(list_schema["properties"]["limit"]["maximum"], 100)
+        retirement_schema = names["retire_executions"].parameters
+        self.assertEqual(
+            retirement_schema["properties"]["execution_ids"]["maxItems"], 20
+        )
         output_schema = names["get_execution_output"].parameters
         self.assertEqual(output_schema["properties"]["max_bytes"]["minimum"], 512)
         self.assertEqual(start_schema["properties"]["label"]["maxUtf8Bytes"], 1024)

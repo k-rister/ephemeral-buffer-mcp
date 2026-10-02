@@ -802,7 +802,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Data-path bytes: {", result)
         self.assertIn('"captures": 1', result)
         self.assertIn('"interface_coverage": {', result)
-        self.assertIn('"available": 19', result)
+        self.assertIn('"available": 21', result)
         self.assertIn('"get_buffer_stats": {', result)
         self.assertNotIn("secret metrics payload", result)
         self.assertNotIn("private metrics label", result)
@@ -824,7 +824,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(payload["scope"], "process")
         self.assertIn("started_at", payload)
         self.assertIn("snapshot_at", payload)
-        self.assertEqual(payload["interface_coverage"]["available"], 19)
+        self.assertEqual(payload["interface_coverage"]["available"], 21)
         self.assertNotIn("get_usage_metrics", payload["interface_coverage"]["unused_tools"])
         self.assertEqual(
             payload["interface_coverage"]["by_category"]["diagnostics"]["used"],
@@ -1007,6 +1007,8 @@ class TestServerTools(unittest.TestCase):
                 "get_execution": "execution",
                 "get_execution_output": "execution",
                 "list_executions": "execution",
+                "get_execution_capacity": "execution",
+                "retire_executions": "execution",
                 "capture_text": "capture",
                 "capture_file": "capture",
                 "execute_and_capture": "capture",
@@ -1022,7 +1024,7 @@ class TestServerTools(unittest.TestCase):
                 "set_semantic_index_budget": "configuration",
             },
         )
-        self.assertEqual(len(fastmcp_names), 19)
+        self.assertEqual(len(fastmcp_names), 21)
 
     def test_usage_metrics_reports_disabled_state_as_versioned_json(self):
         original_metrics = server.METRICS

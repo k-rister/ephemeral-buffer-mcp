@@ -10,7 +10,9 @@ from unittest.mock import patch
 import config
 from config import (
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES,
     DEFAULT_EXECUTION_STATE_DIR,
+    DEFAULT_EXECUTION_STATE_QUOTA_BYTES,
     DEFAULT_SOCKET_PATH,
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     DEFAULT_SEMANTIC_WAIT_SECONDS,
@@ -22,6 +24,8 @@ from config import (
     embedding_model_name,
     embedding_threads,
     embedding_warmup_enabled,
+    execution_checkpoint_reserve_bytes,
+    execution_state_quota_bytes,
     execution_state_dir,
     optional_positive_int_env,
     positive_int_env,
@@ -77,6 +81,20 @@ class TestPositiveIntEnv(unittest.TestCase):
             second = execution_state_dir()
         self.assertIn("ephemeral_buffer_executions-socket-", first)
         self.assertNotEqual(first, second)
+
+    def test_execution_storage_limits_default_and_can_be_overridden(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(execution_state_quota_bytes(), DEFAULT_EXECUTION_STATE_QUOTA_BYTES)
+            self.assertEqual(
+                execution_checkpoint_reserve_bytes(),
+                DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES,
+            )
+        with patch.dict(os.environ, {
+            "EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES": "8589934592",
+            "EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES": "268435456",
+        }, clear=True):
+            self.assertEqual(execution_state_quota_bytes(), 8 * 1024 * 1024 * 1024)
+            self.assertEqual(execution_checkpoint_reserve_bytes(), 256 * 1024 * 1024)
 
     def test_default_execution_state_cleanup_only_removes_private_default(self):
         with tempfile.TemporaryDirectory() as directory:

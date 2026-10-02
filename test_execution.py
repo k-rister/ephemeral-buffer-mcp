@@ -7,11 +7,13 @@ import os
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import execution
@@ -1734,6 +1736,389 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             absent = ExecutionStore(Path(directory) / "absent")
             self.assertFalse(absent.is_locked("missing"))
+
+    def test_capacity_reports_pairs_and_does_not_run_recovery(self):
+        manager = self.manager()
+        manager.create([self.phase("inspect", "inspect")], execution_id="capacity-record")
+        record = manager.get("capacity-record")
+        record["phases"][0]["status"] = "started"
+        record["phases"][0]["process_fence_pending"] = True
+        manager.store.save(record)
+        extra = manager.store.state_dir / "unmanaged.bin"
+        extra.write_bytes(b"other")
+
+        with patch("execution._terminate_stale_process", side_effect=AssertionError("capacity must not recover")):
+            capacity = manager.capacity()
+
+        self.assertEqual(capacity["record_count"], 1)
+        self.assertEqual(capacity["summary_count"], 1)
+        self.assertEqual(capacity["paired_record_count"], 1)
+        self.assertEqual(capacity["fence_pending_record_count"], 1)
+        self.assertEqual(capacity["other_file_bytes"], 5)
+        self.assertEqual(capacity["committed_bytes"], capacity["record_bytes"] + capacity["summary_bytes"])
+        self.assertTrue(capacity["capacity_confident"])
+
+    def test_capacity_reports_missing_paths_and_uncertain_filesystem_or_leases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = ExecutionStore(Path(directory) / "missing")
+            capacity = missing.capacity()
+            self.assertFalse(capacity["state_directory_exists"])
+            self.assertEqual(capacity["record_count"], 0)
+
+        manager = self.manager()
+        manager.create([self.phase("capacity", "capacity")], execution_id="capacity-lock")
+        with patch("execution.shutil.disk_usage", side_effect=OSError("no statvfs")), \
+                patch.object(manager.store, "is_locked", side_effect=OSError("lock error")):
+            capacity = manager.capacity()
+        self.assertIsNone(capacity["filesystem"]["free_bytes"])
+        self.assertGreater(capacity["uncertain_lock_count"], 0)
+        self.assertFalse(capacity["capacity_confident"])
+        self.assertEqual(capacity["available_bytes"], 0)
+
+    def test_invalid_checkpoint_reservation_fails_capacity_closed(self):
+        manager = self.manager()
+        (manager.store.state_dir / ".checkpoint-invalid.json").write_text(
+            "not json", encoding="utf-8"
+        )
+        capacity = manager.capacity()
+        self.assertEqual(capacity["invalid_reservation_count"], 1)
+        self.assertFalse(capacity["capacity_confident"])
+        self.assertEqual(capacity["available_bytes"], 0)
+        with self.assertRaisesRegex(ValueError, "reservation is unreadable"):
+            manager.store.save({"execution_id": "quota-fail-closed", "phases": []})
+
+    def test_capacity_reports_symlink_checkpoint_reservation(self):
+        manager = self.manager()
+        target = manager.store.state_dir / "reservation-target"
+        target.write_text("{}", encoding="utf-8")
+        reservation = manager.store.state_dir / ".checkpoint-symlink.json"
+        try:
+            reservation.symlink_to(target)
+        except OSError:
+            self.skipTest("symlinks are unavailable on this platform")
+
+        capacity = manager.capacity()
+        self.assertEqual(capacity["symlink_count"], 1)
+        self.assertEqual(capacity["invalid_reservation_count"], 1)
+        self.assertFalse(capacity["capacity_confident"])
+        self.assertEqual(capacity["available_bytes"], 0)
+
+    def test_aggregate_quota_and_checkpoint_reservation_are_accounted(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            execution, "MAX_EXECUTION_STATE_BYTES", 4096
+        ):
+            store = ExecutionStore(
+                directory,
+                quota_bytes=10 * 1024,
+                checkpoint_reserve_bytes=4096,
+            )
+            store.save({"execution_id": "quota-a", "payload": "a" * 1100})
+            store.save({"execution_id": "quota-b", "payload": "b" * 1100})
+            with self.assertRaisesRegex(ValueError, "aggregate quota"):
+                store.save({"execution_id": "quota-c", "payload": "c" * 1100})
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            execution, "MAX_EXECUTION_STATE_BYTES", 1024
+        ):
+            store = ExecutionStore(
+                directory,
+                quota_bytes=4096,
+                checkpoint_reserve_bytes=1024,
+            )
+            store.save({"execution_id": "reserved", "phases": []})
+            with store.lease("reserved"):
+                store.reserve_checkpoint("reserved", 512)
+                capacity = store.capacity()
+                self.assertEqual(capacity["active_reserved_bytes"], 512)
+                with self.assertRaisesRegex(ValueError, "exceeded its reserved growth"):
+                    store.save({
+                        "execution_id": "reserved",
+                        "phases": [],
+                        "large": "x" * 800,
+                    })
+                store.save({"execution_id": "reserved", "phases": [], "updated": True})
+                store.release_checkpoint("reserved")
+                store.reserve_checkpoint("reserved", 512)
+                store.save(
+                    {"execution_id": "reserved", "phases": [], "updated": True, "result": "done"},
+                    consume_checkpoint_reservation=True,
+                )
+                store.release_checkpoint("reserved")
+            self.assertEqual(store.capacity()["active_reserved_bytes"], 0)
+
+            with store.lease("reserved"):
+                store.reserve_checkpoint("reserved", 512)
+            self.assertEqual(store.capacity()["stale_reserved_bytes"], 512)
+            store.save({"execution_id": "after-stale", "phases": []})
+            self.assertEqual(store.capacity()["stale_reserved_bytes"], 0)
+
+            with store.lease("reserved"):
+                with self.assertRaisesRegex(ValueError, "insufficient checkpoint headroom"):
+                    store.reserve_checkpoint("reserved", 3000)
+
+            with store.lease("reserved"), patch(
+                "execution.shutil.disk_usage",
+                return_value=SimpleNamespace(total=4096, used=4096, free=0),
+            ):
+                with self.assertRaisesRegex(ValueError, "filesystem has insufficient free space"):
+                    store.reserve_checkpoint("reserved", 512)
+
+    def test_storage_limits_and_checkpoint_reservation_validate_inputs(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            execution, "MAX_EXECUTION_STATE_BYTES", 1024
+        ):
+            with self.assertRaisesRegex(ValueError, "quota must be a positive integer"):
+                ExecutionStore(directory, quota_bytes=0, checkpoint_reserve_bytes=1024)
+            with self.assertRaisesRegex(ValueError, "at least 1,024 bytes"):
+                ExecutionStore(directory, quota_bytes=4096, checkpoint_reserve_bytes=512)
+            with self.assertRaisesRegex(ValueError, "smaller than the quota"):
+                ExecutionStore(directory, quota_bytes=1024, checkpoint_reserve_bytes=1024)
+
+            store = ExecutionStore(
+                directory,
+                quota_bytes=4096,
+                checkpoint_reserve_bytes=1024,
+            )
+            with self.assertRaisesRegex(RuntimeError, "require the execution lease"):
+                store.reserve_checkpoint("no-lease", 100)
+            with store.lease("no-lease"):
+                with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                    store.reserve_checkpoint("no-lease", True)
+            store.release_checkpoint("no-reservation")
+
+    def test_retirement_dry_run_and_archive_preserve_record_pair(self):
+        manager = self.manager()
+        manager.create([self.phase("archive", "archive")], execution_id="archive-me", label="archive label")
+        record_path = manager.store._path("archive-me")
+        summary_path = manager.store._summary_path("archive-me")
+        expected_bytes = record_path.stat().st_size + summary_path.stat().st_size
+
+        preview = manager.retire(["archive-me"])
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["eligible_count"], 1)
+        self.assertEqual(preview["projected_reclaimed_bytes"], expected_bytes)
+        self.assertTrue(record_path.exists())
+        self.assertTrue(summary_path.exists())
+
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_path = Path(archive_directory) / "execution-records.tar"
+            result = manager.retire(
+                ["archive-me"],
+                archive_path=str(archive_path),
+                dry_run=False,
+            )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["projected_reclaimed_bytes"], expected_bytes)
+            self.assertFalse(record_path.exists())
+            self.assertFalse(summary_path.exists())
+            self.assertEqual(archive_path.stat().st_mode & 0o777, 0o600)
+            with tarfile.open(archive_path, "r") as archive:
+                manifest = json.load(archive.extractfile("manifest.json"))
+                names = set(archive.getnames())
+            self.assertEqual(manifest["executions"][0]["execution_id"], "archive-me")
+            self.assertIn(f"records/{manager.store._filename('archive-me')}", names)
+            self.assertIn(
+                f"records/{manager.store._filename('archive-me')[:-5]}.summary.json",
+                names,
+            )
+
+    def test_retirement_refuses_active_fence_pending_and_in_directory_archives(self):
+        manager = self.manager()
+        manager.create([self.phase("protected", "protected")], execution_id="protected")
+        with manager.store.lease("protected"):
+            preview = manager.retire(["protected"])
+            self.assertFalse(preview["items"][0]["eligible"])
+            self.assertIn("active lease", preview["items"][0]["reason"])
+
+        record = manager.get("protected")
+        record["phases"][0]["process_fence_pending"] = True
+        manager.store.save(record)
+        preview = manager.retire(["protected"])
+        self.assertFalse(preview["items"][0]["eligible"])
+        self.assertIn("fence-pending", preview["items"][0]["reason"])
+
+        with self.assertRaisesRegex(ValueError, "outside"):
+            manager.retire(
+                ["protected"],
+                archive_path=str(manager.store.state_dir / "archive.tar"),
+                dry_run=False,
+            )
+
+    def test_retirement_validates_ids_and_archive_destination(self):
+        manager = self.manager()
+        manager.create([self.phase("archive", "archive")], execution_id="archive-validation")
+        with self.assertRaisesRegex(ValueError, "non-empty list"):
+            manager.retire([])
+        with self.assertRaisesRegex(ValueError, "at most"):
+            manager.retire([
+                f"retire-{index}"
+                for index in range(execution.MAX_EXECUTION_RETIRE_BATCH + 1)
+            ])
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            manager.retire(["archive-validation", "archive-validation"])
+        with self.assertRaisesRegex(ValueError, "execution_id"):
+            manager.retire([""])
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            manager.retire(["archive-validation"], dry_run=1)
+        with self.assertRaisesRegex(ValueError, "archive_path is required"):
+            manager.retire(["archive-validation"], dry_run=False)
+
+        with tempfile.TemporaryDirectory() as archive_directory:
+            with self.assertRaisesRegex(ValueError, "non-empty"):
+                manager.retire(["archive-validation"], archive_path="", dry_run=False)
+            with self.assertRaisesRegex(ValueError, "too long"):
+                manager.retire(["archive-validation"], archive_path="x" * 4097, dry_run=False)
+            with self.assertRaisesRegex(ValueError, "already exist"):
+                manager.retire(
+                    ["archive-validation"],
+                    archive_path=str(Path(archive_directory) / "missing" / "archive.tar"),
+                    dry_run=False,
+                )
+            existing = Path(archive_directory) / "existing.tar"
+            existing.touch()
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                manager.retire(
+                    ["archive-validation"], archive_path=str(existing), dry_run=False
+                )
+            symlink = Path(archive_directory) / "archive-link.tar"
+            try:
+                symlink.symlink_to(existing)
+            except OSError:
+                pass
+            else:
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    manager.retire(
+                        ["archive-validation"], archive_path=str(symlink), dry_run=False
+                    )
+                real_parent = Path(archive_directory) / "real-parent"
+                real_parent.mkdir()
+                parent_link = Path(archive_directory) / "parent-link"
+                parent_link.symlink_to(real_parent, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    manager.retire(
+                        ["archive-validation"],
+                        archive_path=str(parent_link / "archive.tar"),
+                        dry_run=False,
+                    )
+
+            with patch("execution.os.access", return_value=False):
+                with self.assertRaisesRegex(ValueError, "not writable"):
+                    manager.retire(
+                        ["archive-validation"],
+                        archive_path=str(Path(archive_directory) / "unwritable.tar"),
+                        dry_run=False,
+                    )
+
+            parent_mode = os.stat(archive_directory).st_mode & 0o777
+            try:
+                os.chmod(archive_directory, 0o777)
+                with self.assertRaisesRegex(ValueError, "group/world writable"):
+                    manager.retire(
+                        ["archive-validation"],
+                        archive_path=str(Path(archive_directory) / "unsafe.tar"),
+                        dry_run=False,
+                    )
+            finally:
+                os.chmod(archive_directory, parent_mode)
+
+            foreign_uid = os.stat(archive_directory).st_uid + 1
+            with patch("execution.os.getuid", return_value=foreign_uid):
+                with self.assertRaisesRegex(ValueError, "owned by the current user"):
+                    manager.retire(
+                        ["archive-validation"],
+                        archive_path=str(Path(archive_directory) / "foreign.tar"),
+                        dry_run=False,
+                    )
+
+    def test_retirement_preview_reports_missing_and_unpaired_records(self):
+        manager = self.manager()
+        missing = manager.retire(["missing-record"])
+        self.assertFalse(missing["items"][0]["eligible"])
+        self.assertIn("missing", missing["items"][0]["reason"])
+
+        manager.create([self.phase("unpaired", "unpaired")], execution_id="unpaired-record")
+        manager.store._summary_path("unpaired-record").unlink()
+        unpaired = manager.retire(["unpaired-record"])
+        self.assertFalse(unpaired["items"][0]["eligible"])
+        self.assertEqual(unpaired["projected_reclaimed_bytes"], 0)
+        capacity = manager.capacity()
+        self.assertEqual(capacity["unpaired_record_count"], 1)
+        (manager.store.state_dir / "invalid.json").write_text("not json", encoding="utf-8")
+        self.assertEqual(manager.capacity()["invalid_record_count"], 1)
+
+        manager.create([self.phase("corrupt", "corrupt")], execution_id="corrupt-pair")
+        manager.store._summary_path("corrupt-pair").write_text("not json", encoding="utf-8")
+        corrupt = manager.retire(["corrupt-pair"])
+        self.assertFalse(corrupt["items"][0]["eligible"])
+        self.assertIn("unreadable", corrupt["items"][0]["reason"])
+
+    def test_retirement_revalidates_races_and_leaves_sources_on_archive_failure(self):
+        manager = self.manager()
+        manager.create([self.phase("race", "race")], execution_id="retire-race")
+        store = manager.store
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_path = Path(archive_directory) / "raced.tar"
+            original_writer = store._write_archive_temp
+
+            def change_record_after_archiving(target, snapshots, *, source_digests=None):
+                temporary = original_writer(
+                    target,
+                    snapshots,
+                    source_digests=source_digests,
+                )
+                record_path = snapshots[0][2]
+                record_path.write_bytes(record_path.read_bytes().replace(b"race", b"racy", 1))
+                return temporary
+
+            with patch.object(store, "_write_archive_temp", side_effect=change_record_after_archiving):
+                with self.assertRaisesRegex(ValueError, "state changed"):
+                    manager.retire(
+                        ["retire-race"],
+                        archive_path=str(archive_path),
+                        dry_run=False,
+                    )
+            self.assertTrue(store._path("retire-race").exists())
+            self.assertFalse(archive_path.exists())
+
+        manager.create([self.phase("busy", "busy")], execution_id="retire-busy")
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_path = Path(archive_directory) / "busy.tar"
+            with patch.object(store, "lease", side_effect=ExecutionBusyError("busy")):
+                refused = manager.retire(
+                    ["retire-busy"],
+                    archive_path=str(archive_path),
+                    dry_run=False,
+                )
+            self.assertEqual(refused["status"], "refused")
+            self.assertIn("became active", refused["reason"])
+            self.assertFalse(archive_path.exists())
+
+        manager.create([self.phase("archive-failure", "archive-failure")], execution_id="archive-failure")
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_path = Path(archive_directory) / "failed.tar"
+            with patch.object(store, "_write_archive_temp", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    manager.retire(
+                        ["archive-failure"],
+                        archive_path=str(archive_path),
+                        dry_run=False,
+                    )
+            self.assertTrue(store._path("archive-failure").exists())
+            self.assertFalse(archive_path.exists())
+
+    def test_archive_temp_cleanup_when_a_source_disappears(self):
+        manager = self.manager()
+        manager.create([self.phase("archive-temp", "archive-temp")], execution_id="archive-temp")
+        item, record, record_path, summary_path = manager.store._retirement_snapshot("archive-temp")
+        record_path.unlink()
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_path = Path(archive_directory) / "temporary.tar"
+            with self.assertRaises(FileNotFoundError):
+                manager.store._write_archive_temp(
+                    archive_path,
+                    [(item, record, record_path, summary_path)],
+                )
+            self.assertEqual(list(Path(archive_directory).glob(".ephemeral-executions-archive-*")), [])
 
 
 if __name__ == "__main__":
