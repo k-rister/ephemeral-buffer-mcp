@@ -798,9 +798,16 @@ records:
   `workload_result.schema.json` checks the same structure, including the unit
   pinned to each canonical measurement name, but it cannot enforce unique run
   ids beyond rejecting identical runs, so a schema-only consumer must check
-  ids itself before matching runs. `format_version` changes only when a
-  consumer would otherwise misread a document; new optional fields do not
-  bump it.
+  ids itself before matching runs. The fixed result structure is closed:
+  adding a field to the envelope, workload descriptor, run, measurement, phase,
+  or experiment record requires a `format_version` change because strict
+  readers reject unknown fields. Changes to the type or meaning of declared
+  fields also require a version change. Readers refuse versions they do not
+  support. Additive entries in the open data maps are compatible within the
+  existing version: `workload.parameters`, `environment` (including
+  `environment.tool`), workload and run measurement maps, run `labels`,
+  `experiment.metadata`, and producer-owned `details`. Consumers should treat
+  unrecognized entries in those maps as opaque data.
 - Compare like with like. Two results are comparable when `workload.name` and
   `format_version` match; then match runs by `id` and measurements by name and
   statistic (`median` against `median`, never `median` against `mean`).
