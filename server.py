@@ -2095,16 +2095,17 @@ def run_socket_server():
     asyncio.set_event_loop(loop)
     _set_socket_state("starting")
     bound_socket_identity = None
-    socket_path_lock = _socket_path_lock(SOCKET_PATH)
+    socket_path_lock = None
     lock_acquired = False
 
     try:
-        socket_path_lock.__enter__()
-        lock_acquired = True
         if socket_isolation_required() and not socket_isolation_configured():
             raise RuntimeError(
                 "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
             )
+        socket_path_lock = _socket_path_lock(SOCKET_PATH)
+        socket_path_lock.__enter__()
+        lock_acquired = True
         if os.path.lexists(SOCKET_PATH):
             initial_path_stat = os.lstat(SOCKET_PATH)
             if not stat.S_ISSOCK(initial_path_stat.st_mode):
@@ -2202,7 +2203,7 @@ def run_socket_server():
                         except FileNotFoundError:
                             pass
         finally:
-            if lock_acquired:
+            if lock_acquired and socket_path_lock is not None:
                 socket_path_lock.__exit__(None, None, None)
             loop.close()
 

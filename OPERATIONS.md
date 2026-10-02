@@ -3,6 +3,25 @@
 This guide covers the settings and maintenance procedures that matter when
 running `ephemeral-buffer` outside of a local development session.
 
+## Development and test isolation
+
+Run tests from an active EB shell through `scripts/with-test-env.sh`:
+
+```bash
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_server
+```
+
+The wrapper replaces inherited session, socket, execution-state, metrics, and
+log paths with a private temporary namespace. The server, CLI subprocesses, and
+execution manager inherit the same paths; strict isolation makes startup fail
+if a subprocess loses that identity. The wrapper removes the temporary
+namespace after the test command exits. CI assigns each job its own namespace
+and uses the wrapper for test commands as well.
+
+Use the active-agent launcher for interactive work and the wrapper for local
+development/test commands. This keeps an active listener's socket lock and
+execution records separate from test processes.
+
 ## Socket configuration
 
 The CLI communicates with the server over a Unix domain socket. If the session

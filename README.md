@@ -901,15 +901,22 @@ before merging. Downstream users install the package normally; its compatible
 dependency ranges in `pyproject.toml` are intentionally not replaced by the
 development locks.
 
+Run local tests through `scripts/with-test-env.sh`. It replaces inherited
+session, socket, execution-state, metrics, and log paths with one private
+temporary namespace, enables required socket isolation, and passes those
+settings to test subprocesses. The temporary paths are removed when the command
+exits, so tests run safely from a shell that also belongs to an active EB
+session.
+
 Run the test suite:
 ```bash
-.venv/bin/python -m unittest test_benchmark_warmup.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
-.venv/bin/python -m unittest test_e2e_pipe.py
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_benchmark_warmup.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
 Measure focused-test coverage locally:
 ```bash
-.venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
 .venv/bin/python -m coverage report
 ```
 CI requires 100% coverage for application runtime modules and excludes test,
@@ -919,7 +926,7 @@ targeted tests.
 The release guardrail utility is measured separately because it is a workflow
 utility rather than application runtime code:
 ```bash
-COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage run --source=. -m unittest test_release_checks.py
+COVERAGE_FILE=.coverage.release EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run --source=. -m unittest test_release_checks.py
 COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report --include='release_checks.py'
 ```
 

@@ -6,8 +6,10 @@ import json
 import math
 import os
 import runpy
+import select
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -662,7 +664,7 @@ class TestServerTools(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"EPHEMERAL_SESSION_ID": "diagnostic-session"},
-            clear=False,
+            clear=True,
         ):
             result = server.get_runtime_diagnostics()
 
@@ -2297,6 +2299,80 @@ class TestSocketServerStartup(unittest.TestCase):
             server.run_socket_server()
 
         self.assertIn("Socket isolation is required", stderr.getvalue())
+
+    def test_strict_isolation_fails_before_acquiring_active_session_socket_lock(self):
+        if server.fcntl is None:
+            self.skipTest("requires fcntl file locks")
+
+        class FailingLoop:
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            active_socket_path = os.path.join(directory, "active-session.sock")
+            lock_holder_code = (
+                "import fcntl, os, sys, time; "
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600); "
+                "fcntl.flock(fd, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(30)"
+            )
+            lock_holder = subprocess.Popen(
+                [sys.executable, "-c", lock_holder_code, active_socket_path + ".lock"],
+                env={
+                    **os.environ,
+                    "EPHEMERAL_SESSION_ID": "active-listener-session",
+                    "EPHEMERAL_SOCKET_PATH": active_socket_path,
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            startup_finished = threading.Event()
+
+            def start_unconfigured_server():
+                try:
+                    server.run_socket_server()
+                finally:
+                    startup_finished.set()
+
+            startup_thread = threading.Thread(target=start_unconfigured_server, daemon=True)
+            completed_while_lock_was_held = False
+            diagnostic = ""
+
+            def stop_lock_holder():
+                if lock_holder.poll() is None:
+                    lock_holder.terminate()
+                    try:
+                        lock_holder.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        lock_holder.kill()
+                        lock_holder.communicate(timeout=3)
+
+            try:
+                readable, _, _ = select.select([lock_holder.stdout], [], [], 5)
+                if not readable or lock_holder.stdout.readline().strip() != "locked":
+                    stop_lock_holder()
+                    self.fail("could not acquire the active session socket lock")
+
+                with patch.object(server, "SOCKET_PATH", active_socket_path), \
+                        patch.object(server, "socket_isolation_required", return_value=True), \
+                        patch.object(server, "socket_isolation_configured", return_value=False), \
+                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(server.asyncio, "set_event_loop"), \
+                        patch.object(server, "_set_socket_state"), \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    startup_thread.start()
+                    completed_while_lock_was_held = startup_finished.wait(timeout=1)
+                    stop_lock_holder()
+                    startup_thread.join(timeout=3)
+                    diagnostic = stderr.getvalue()
+            finally:
+                stop_lock_holder()
+                if startup_thread.ident is not None:
+                    startup_thread.join(timeout=3)
+
+            self.assertTrue(completed_while_lock_was_held, "startup waited for the active session's socket lock")
+            self.assertFalse(startup_thread.is_alive())
+            self.assertIn("Socket isolation is required", diagnostic)
 
     def _run_with_existing_socket(self, probe_error, unlink=None):
         class FailingLoop:

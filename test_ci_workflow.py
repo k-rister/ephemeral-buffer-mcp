@@ -45,6 +45,19 @@ class TestCiWorkflow(unittest.TestCase):
             self.assertIn(f" {module}", source)
             self.assertIn(f" test_{module}", source)
 
+    def test_runner_temp_paths_are_scoped_to_steps(self):
+        workflow = Path(__file__).with_name(".github") / "workflows" / "ci.yml"
+        source = workflow.read_text()
+        steps = source[source.index("    steps:"):]
+
+        self.assertNotIn("runner.temp", source[:source.index("    steps:")])
+        for variable in (
+            "EPHEMERAL_SOCKET_PATH",
+            "EPHEMERAL_EXECUTION_STATE_DIR",
+            "EPHEMERAL_METRICS_FILE",
+        ):
+            self.assertIn(f"{variable}: ${{{{ runner.temp }}}}", steps)
+
 
 if __name__ == "__main__":
     unittest.main()
