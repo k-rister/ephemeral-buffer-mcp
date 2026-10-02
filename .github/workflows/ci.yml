@@ -67,9 +67,15 @@ jobs:
       - name: Verify installed CLI entry point
         run: |
           python -m venv /tmp/ephemeral-package-venv
-          /tmp/ephemeral-package-venv/bin/python -m pip install --no-deps dist/*.whl
+          /tmp/ephemeral-package-venv/bin/python -m pip install -c constraints.txt dist/*.whl
           /tmp/ephemeral-package-venv/bin/ephbuf --help
           /tmp/ephemeral-package-venv/bin/python -c "from metrics import LocalMetrics; assert LocalMetrics"
+          smoke_workdir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_workdir"' EXIT
+          (
+            cd "$smoke_workdir"
+            /tmp/ephemeral-package-venv/bin/python "$GITHUB_WORKSPACE/scripts/installed_package_mcp_smoke.py"
+          )
 
       - name: Compile sources
         run: python -m py_compile cli.py config.py engine.py execution.py server.py capture_utils.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py benchmark_relevance.py benchmark_routing.py benchmark_prefetch.py benchmark_semantic_index.py benchmark_semantic_memory.py benchmark_warmup.py benchmark_agent_ab.py benchmark_agent_ab_fixtures.py benchmark_agent_ab_baseline.py run_codex_agent_ab.py release_checks.py workload_results.py compare_workload_results.py list_workload_results.py
