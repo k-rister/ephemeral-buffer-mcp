@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/k-rister/ephemeral-buffer-mcp/workload_result.schema.json",
+  "$comment": "Frozen version-1 consumer contract from before issue 332; tests use this snapshot to check producer/consumer compatibility. Do not sync it with the live schema.",
   "title": "Coding-agent workload result",
-  "description": "Versioned, tool-agnostic measurements of one benchmark, evaluation, or agent run. Fixed structural records are closed and versioned; designated data maps are extensible. workload_results.py is the reference validator; this schema covers the structure but cannot enforce unique run ids.",
+  "description": "Versioned, tool-agnostic measurements of one benchmark, evaluation, or agent run. workload_results.py is the reference validator; this schema covers the structure but cannot enforce unique run ids.",
   "type": "object",
   "required": ["format", "format_version", "workload", "environment", "status", "errors", "measurements", "runs"],
   "additionalProperties": false,
@@ -17,7 +18,7 @@
         "name": {"type": "string", "minLength": 1, "description": "Stable workload identifier shared by every run of the same measurement"},
         "kind": {"enum": ["benchmark", "evaluation", "agent-run"]},
         "producer": {"type": "string", "minLength": 1, "description": "Command or module that produced the result"},
-        "parameters": {"type": "object", "additionalProperties": true, "description": "Extensible producer parameters needed to reproduce the run: sizes, seeds, modes, option overrides"},
+        "parameters": {"type": "object", "description": "Everything needed to reproduce the run: sizes, seeds, modes, option overrides"},
         "producer_schema_version": {"type": "integer", "minimum": 0, "description": "Version of the producer's own record embedded in details"},
         "fixture_version": {"type": "integer", "minimum": 0},
         "description": {"type": "string", "minLength": 1},
@@ -26,8 +27,6 @@
     },
     "environment": {
       "type": "object",
-      "additionalProperties": true,
-      "description": "Known environment fields are validated; additional environment fields are an extension point",
       "required": ["python_version", "platform", "recorded_at"],
       "properties": {
         "python_version": {"type": "string", "minLength": 1},
@@ -37,8 +36,6 @@
         "recorded_at": {"type": "string", "minLength": 1, "description": "UTC ISO 8601 timestamp"},
         "tool": {
           "type": "object",
-          "additionalProperties": true,
-          "description": "Known tool fields are validated; additional tool fields are an extension point",
           "properties": {
             "name": {"type": "string"},
             "version": {"type": ["string", "null"]}
@@ -60,7 +57,6 @@
         "group": {"type": ["string", "null"], "minLength": 1, "description": "Experiment or run-group identifier shared by related documents; null records metadata alone"},
         "metadata": {
           "type": "object",
-          "description": "Extensible scalar metadata map",
           "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
           "additionalProperties": {
             "type": ["string", "number", "boolean", "null"],
@@ -70,7 +66,7 @@
         }
       }
     },
-    "details": {"type": "object", "additionalProperties": true, "description": "The producer's native record, kept for humans and producer-specific tooling"}
+    "details": {"type": "object", "description": "The producer's native record, kept for humans and producer-specific tooling"}
   },
   "$defs": {
     "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
@@ -106,7 +102,7 @@
     },
     "measurements": {
       "type": "object",
-      "description": "Extensible map of measurements. Canonical names (CANONICAL_MEASUREMENTS in workload_results.py) are pinned to their unit; other names may use any unit",
+      "description": "Canonical names (CANONICAL_MEASUREMENTS in workload_results.py) are pinned to their unit; other names may use any unit",
       "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
       "properties": {
         "wall_time_seconds": {"$ref": "#/$defs/measurement", "properties": {"unit": {"const": "seconds"}}},
@@ -174,7 +170,6 @@
         "id": {"type": "string", "minLength": 1, "description": "Unique within the result; consumers match runs across results by id. JSON Schema cannot express this uniqueness, so validate ids with workload_results.validate_result or an equivalent check"},
         "labels": {
           "type": "object",
-          "description": "Extensible scalar labels for this run",
           "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
           "additionalProperties": {"type": ["string", "number", "boolean", "null"]}
         },

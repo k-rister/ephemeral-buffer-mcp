@@ -27,6 +27,9 @@ from workload_results import (
 
 
 SCHEMA = json.loads(wr.SCHEMA_PATH.read_text(encoding="utf-8"))
+FROZEN_V1_CONSUMER_SCHEMA_PATH = (
+    Path(__file__).with_name("test_fixtures") / "workload_result_v1_consumer.schema.json"
+)
 
 
 def sample_result(**overrides):
@@ -56,6 +59,20 @@ def sample_result(**overrides):
         privacy="no user content",
     )
     result.update(overrides)
+    return result
+
+
+def extended_sample_result():
+    """Return a result using the format's documented open extension points."""
+    result = sample_result()
+    result["workload"]["parameters"]["producer_option"] = {"mode": "future"}
+    result["environment"]["host_class"] = "future-host"
+    result["environment"]["tool"]["channel"] = "nightly"
+    result["measurements"]["custom_score"] = measurement("score", value=0.9)
+    result["runs"][0]["labels"]["agent_channel"] = "nightly"
+    result["runs"][0]["measurements"]["custom_run_score"] = measurement("score", value=0.8)
+    result["experiment"] = wr.experiment("compatibility", {"producer_revision": "future"})
+    result["details"]["future_record"] = {"revision": 2}
     return result
 
 
@@ -251,6 +268,10 @@ class TestBuildAndValidate(unittest.TestCase):
         tool_without_version["environment"]["tool"] = {"name": "runner"}
         validate_result(tool_without_version)
 
+    def test_validation_accepts_documented_extension_points(self):
+        result = extended_sample_result()
+        self.assertIs(validate_result(result), result)
+
     def test_validation_rejects_workload_problems(self):
         def with_workload(**changes):
             result = sample_result()
@@ -295,6 +316,10 @@ class TestBuildAndValidate(unittest.TestCase):
         self.assertInvalid(with_run(phases={}), "phases must be a list")
         self.assertInvalid(with_run(phases=[{"unit": "seconds", "value": 1}]), "phases\\[0\\].name")
         self.assertInvalid(with_run(phases=[phase("a", value=1), phase("a", value=2)]), "duplicated")
+        self.assertInvalid(
+            with_run(phases=[{"name": "a", "unit": "seconds", "value": 1, "extra": 1}]),
+            "not a recognised measurement field",
+        )
         self.assertInvalid(with_run(phases=[{"name": "a", "unit": "bytes", "value": 1}]), "unit must be 'seconds'")
         self.assertInvalid(with_run(errors=[None]), "errors must be a list of strings")
         self.assertInvalid(sample_result(runs=[run("dup"), run("dup")]), "runs\\[1\\].id 'dup' is duplicated")
@@ -305,6 +330,10 @@ class TestBuildAndValidate(unittest.TestCase):
 
         self.assertInvalid(with_experiment([]), "experiment must be an object")
         self.assertInvalid(with_experiment({"group": "g"}), "exactly group and metadata")
+        self.assertInvalid(
+            with_experiment({"group": "g", "metadata": {}, "extra": True}),
+            "exactly group and metadata",
+        )
         self.assertInvalid(with_experiment({"group": "", "metadata": {}}), "experiment.group must be a non-empty string or null")
         self.assertInvalid(with_experiment({"group": 5, "metadata": {}}), "experiment.group must be")
         self.assertInvalid(with_experiment({"group": None, "metadata": []}), "experiment.metadata must be an object")
@@ -563,6 +592,16 @@ class TestExperiment(unittest.TestCase):
 
 class TestSchemaFile(unittest.TestCase):
     def test_schema_constants_match_the_reference_validator(self):
+        self.assertFalse(SCHEMA["additionalProperties"])
+        self.assertFalse(SCHEMA["properties"]["workload"]["additionalProperties"])
+        self.assertTrue(SCHEMA["properties"]["workload"]["properties"]["parameters"]["additionalProperties"])
+        self.assertTrue(SCHEMA["properties"]["environment"]["additionalProperties"])
+        self.assertTrue(SCHEMA["properties"]["environment"]["properties"]["tool"]["additionalProperties"])
+        self.assertTrue(SCHEMA["properties"]["details"]["additionalProperties"])
+        self.assertFalse(SCHEMA["properties"]["experiment"]["additionalProperties"])
+        self.assertFalse(SCHEMA["$defs"]["measurement"]["additionalProperties"])
+        self.assertFalse(SCHEMA["$defs"]["measurement_fields"]["additionalProperties"])
+        self.assertFalse(SCHEMA["$defs"]["run"]["additionalProperties"])
         self.assertEqual(SCHEMA["properties"]["format"]["const"], wr.FORMAT)
         self.assertEqual(SCHEMA["properties"]["format_version"]["const"], wr.FORMAT_VERSION)
         self.assertEqual(SCHEMA["$defs"]["status"]["enum"], list(wr.STATUSES))
@@ -596,6 +635,7 @@ class TestSchemaFile(unittest.TestCase):
 
         validator = jsonschema.Draft202012Validator(SCHEMA)
         validator.validate(sample_result())
+        validator.validate(extended_sample_result())
         required_environment = sample_result()
         required_environment["environment"] = {
             "python_version": "3.12",
@@ -633,6 +673,8 @@ class TestSchemaFile(unittest.TestCase):
 
         for invalid in (
             sample_result(format="other"),
+            sample_result(extra=1),
+            sample_result(workload={**sample_result()["workload"], "extra": 1}),
             with_environment(machine=1),
             with_environment(cpu_count=True),
             with_environment(cpu_count=1.5),
@@ -645,8 +687,10 @@ class TestSchemaFile(unittest.TestCase):
             sample_result(runs=[run("r", measurements={"output_bytes": measurement("seconds", value=1)})]),
             sample_result(runs=[run("r"), run("r")]),
             sample_result(runs=[{**run("r"), "extra": 1}]),
+            sample_result(runs=[run("r", phases=[{"name": "p", "unit": "seconds", "value": 1, "extra": 1}])]),
             sample_result(runs=[run("r", phases=[{"name": "p", "unit": "bytes", "value": 1}])]),
             sample_result(experiment={"group": "g"}),
+            sample_result(experiment={"group": "g", "metadata": {}, "extra": 1}),
             sample_result(experiment={"group": "", "metadata": {}}),
             sample_result(experiment={"group": "g", "metadata": {"nested": {}}}),
             sample_result(experiment={"group": "g", "metadata": {"Bad": 1}}),
@@ -661,6 +705,28 @@ class TestSchemaFile(unittest.TestCase):
         validator.validate(same_id)
         with self.assertRaisesRegex(WorkloadResultError, "runs\\[1\\].id 'r' is duplicated"):
             wr.validate_result(same_id)
+
+    def test_frozen_v1_consumer_accepts_extension_skew_and_rejects_core_changes(self):
+        if importlib.util.find_spec("jsonschema") is None:
+            self.skipTest("jsonschema is not installed")
+        import jsonschema
+
+        frozen_schema = json.loads(FROZEN_V1_CONSUMER_SCHEMA_PATH.read_text(encoding="utf-8"))
+        prior_consumer = jsonschema.Draft202012Validator(frozen_schema)
+        produced = extended_sample_result()
+        validate_result(produced)
+        jsonschema.Draft202012Validator(SCHEMA).validate(produced)
+        prior_consumer.validate(produced)
+
+        # A same-version structural addition is rejected by the frozen reader.
+        with_unknown_core_field = {**produced, "new_envelope_field": True}
+        with self.assertRaises(jsonschema.ValidationError):
+            prior_consumer.validate(with_unknown_core_field)
+
+        # A producer that changes the closed contract must advertise a new version.
+        with_new_version = {**produced, "format_version": wr.FORMAT_VERSION + 1}
+        with self.assertRaises(jsonschema.ValidationError):
+            prior_consumer.validate(with_new_version)
 
 
 class TestCliHelpers(unittest.TestCase):

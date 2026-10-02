@@ -34,6 +34,15 @@ measurements with a ``name``.  Producers should prefer the canonical
 measurement names in ``CANONICAL_MEASUREMENTS`` whenever the meaning matches so
 results from different tools line up; other names are allowed.
 
+Compatibility policy: the result envelope and its fixed structural records are
+closed. Adding a field to one of those records, or changing the type or meaning
+of a declared field, requires a ``FORMAT_VERSION`` change. Explicit extension
+points remain open within a format version: ``workload.parameters``,
+``environment`` (including ``environment.tool``), workload and run measurement
+maps, ``run.labels``, ``experiment.metadata``, and producer-owned ``details``.
+Consumers must treat unrecognized entries in those extension points as opaque
+data.
+
 The optional ``experiment`` block assigns a document to a named group of
 related runs (a sweep, an A/B study, a regression series) and carries flat
 metadata describing what varied: task type, repository revision, agent
@@ -620,6 +629,7 @@ def _validate_measurement(value: Any, where: str, unit: str | None = None) -> No
 
 def _validate_measurements(block: Any, where: str) -> None:
     _expect(isinstance(block, dict), f"{where} must be an object")
+    # Measurement names are extensible; each measurement record is closed.
     for name, value in block.items():
         _expect(isinstance(name, str) and bool(_NAME.match(name)), f"{where} key {name!r} must match {_NAME.pattern}")
         _validate_measurement(value, f"{where}.{name}", CANONICAL_MEASUREMENTS.get(name))
@@ -630,6 +640,7 @@ def _validate_run(item: Any, where: str) -> None:
     _expect(set(item) == {"id", "labels", "status", "measurements", "phases", "errors"}, f"{where} must have exactly id, labels, status, measurements, phases, errors")
     _expect(isinstance(item["id"], str) and bool(item["id"]), f"{where}.id must be a non-empty string")
     _expect(isinstance(item["labels"], dict), f"{where}.labels must be an object")
+    # Label keys are extensible, while the run record itself has a fixed shape.
     for key, value in item["labels"].items():
         _expect(isinstance(key, str) and bool(_NAME.match(key)), f"{where}.labels key {key!r} must match {_NAME.pattern}")
         _expect(isinstance(value, LABEL_TYPES), f"{where}.labels.{key} must be a string, number, boolean, or null")
@@ -652,6 +663,7 @@ def _validate_experiment(block: Any) -> None:
     group = block["group"]
     _expect(group is None or (isinstance(group, str) and bool(group)), "experiment.group must be a non-empty string or null")
     _expect(isinstance(block["metadata"], dict), "experiment.metadata must be an object")
+    # Metadata is an open scalar map inside a closed experiment record.
     for key, value in block["metadata"].items():
         _check_metadata_key(key, "experiment.metadata")
         _check_metadata_value(key, value, "experiment.metadata")
@@ -673,6 +685,8 @@ def validate_result(result: Any) -> dict[str, Any]:
     for key in ("name", "producer"):
         _expect(isinstance(workload.get(key), str) and bool(workload[key]), f"workload.{key} must be a non-empty string")
     _expect(workload.get("kind") in KINDS, f"workload.kind must be one of {', '.join(KINDS)}")
+    # parameters is an intentional open data map; the surrounding workload
+    # record remains closed so structural additions require a format version.
     _expect(isinstance(workload.get("parameters"), dict), "workload.parameters must be an object")
     for key in ("producer_schema_version", "fixture_version"):
         if key in workload:
@@ -686,6 +700,8 @@ def validate_result(result: Any) -> dict[str, Any]:
 
     env = result["environment"]
     _expect(isinstance(env, dict), "environment must be an object")
+    # Environment objects are extension points. Validate known fields while
+    # accepting additional fields from newer producers with the same format.
     for key in ("python_version", "platform", "recorded_at"):
         _expect(isinstance(env.get(key), str) and bool(env[key]), f"environment.{key} must be a non-empty string")
     if "machine" in env:
@@ -699,6 +715,7 @@ def validate_result(result: Any) -> dict[str, Any]:
     if "tool" in env:
         tool = env["tool"]
         _expect(isinstance(tool, dict), "environment.tool must be an object")
+        # The tool subobject is open for the same additive compatibility rule.
         if "name" in tool:
             _expect(isinstance(tool["name"], str), "environment.tool.name must be a string")
         if "version" in tool:
@@ -719,6 +736,7 @@ def validate_result(result: Any) -> dict[str, Any]:
         _expect(item["id"] not in ids, f"runs[{index}].id {item['id']!r} is duplicated")
         ids.add(item["id"])
     if "details" in result:
+        # details is producer-owned opaque data, not part of the shared schema.
         _expect(isinstance(result["details"], dict), "details must be an object")
     if "experiment" in result:
         _validate_experiment(result["experiment"])

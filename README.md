@@ -1485,6 +1485,16 @@ mechanism. The reference validator is `workload_results.py` (also usable as a
 CLI, as above) and the same contract is published as JSON Schema in
 `workload_result.schema.json`.
 
+The fixed result structure is closed. Adding a field to the result envelope,
+workload descriptor, run, measurement, phase, or experiment record requires a
+`format_version` change because strict readers reject unknown fields. Changes to
+the type or meaning of declared fields also require a version change. Readers
+reject versions they do not support. Additive entries are compatible within the
+existing version only in the format's open data maps: `workload.parameters`,
+`environment` (including `environment.tool`), workload and run measurement
+maps, run `labels`, `experiment.metadata`, and producer-owned `details`.
+Consumers should treat unrecognized entries in those maps as opaque data.
+
 ```json
 {
   "format": "coding-agent-workload-result",
