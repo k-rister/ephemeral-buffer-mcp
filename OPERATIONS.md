@@ -119,12 +119,14 @@ The buffer is intentionally transient. The defaults are:
 - 50 MiB of captured UTF-8 content (`EPHEMERAL_MAX_BUFFER_BYTES`)
 - least-recently-used (LRU) eviction when either limit is reached
 
-Semantic and BM25 indexes have a separate total limit of 32,768 indexed
-chunks, configurable with `EPHEMERAL_MAX_INDEXED_CHUNKS`. LRU eviction also
-makes room under this limit. If one capture requires more indexed chunks than
-the entire configured index budget, ingestion is rejected instead of creating
-a partial index; this preserves complete search coverage for retained
-captures.
+The retained BM25 (lexical) chunks have a separate total limit of 32,768,
+configurable with `EPHEMERAL_MAX_INDEXED_CHUNKS`. This count covers each
+capture's lexical sliding chunks; it does not count semantic windows. LRU
+eviction also makes room under this limit. If one capture requires more lexical
+chunks than the entire configured budget, ingestion is rejected instead of
+creating a partial index; this preserves complete lexical search coverage for
+retained captures. Semantic inference has its own per-capture byte budget,
+described below.
 For an explicitly authorized session, set `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`
 to enable `set_semantic_index_budget(max_indexed_chunks)`. The adjustment is
 session-scoped and not persisted; decreases evict the least-recently-used
@@ -170,14 +172,14 @@ its allocator; set it to `1` to opt back in after measuring on the deployment
 host.
 
 Each capture has a 4 MiB semantic-input budget by default
-(`EPHEMERAL_SEMANTIC_MAX_INDEX_INPUT_BYTES`). It counts UTF-8 bytes across its
-semantic windows, including configured overlap. Above the budget, embedding
-inference is skipped and semantic coverage is `unavailable`; hybrid and
-semantic searches return BM25 results with
-`semantic_fallback: SemanticIndexBudgetExceeded`. The captured content remains
-available to BM25 and slice tools. This limits semantic inference work; it is
-not a hard process RSS cap. Buffer stats and runtime diagnostics report the
-effective limits and the number of over-budget captures.
+(`EPHEMERAL_SEMANTIC_MAX_INDEX_INPUT_BYTES`). It counts the sum of UTF-8 byte
+lengths of the semantic-window text sent for inference, counting text repeated
+by overlap again. Above the budget, embedding inference is skipped and semantic
+coverage is `unavailable`; hybrid and semantic searches return BM25 results
+with `semantic_fallback: SemanticIndexBudgetExceeded`. The captured content
+remains available to BM25 and slice tools. This limits semantic inference work;
+it is not a hard process RSS cap. Buffer stats and runtime diagnostics report
+the effective limits and the number of over-budget captures.
 
 Use `benchmark_semantic_memory.py` to measure RSS before and after model load,
 semantic indexing, and capture cleanup on the deployment host.
@@ -194,12 +196,17 @@ BM25 grid: up to `EPHEMERAL_SEMANTIC_CHUNK_LINES` lines (default `8`) or
 `EPHEMERAL_SEMANTIC_CHUNK_BYTES` UTF-8 bytes (default `1024`) per window, with
 `EPHEMERAL_SEMANTIC_CHUNK_OVERLAP` shared lines (default `0`). The byte cap
 keeps windows under the model's 512-token limit for ordinary text, and a single
-oversized line becomes its own window. Embedding cost scales with total tokens,
-so overlap and window count are the main levers; windows beyond about eight
-short lines cost more per token without reducing total work. The index budget
-counts lexical chunks; semantic windows are never more numerous than lexical
-ones unless overlap is raised above the lexical grid's. `get_buffer_stats`
-reports the active window settings and the semantic window count.
+oversized line becomes its own window. A sufficiently small semantic line cap
+can also produce more windows than the BM25 grid's four-line sliding chunks.
+Independently, the byte cap can close a semantic window inside a lexical span,
+increasing the count even with zero overlap. For example, eight lines of about
+700 bytes each produce three BM25 chunks but eight semantic windows under the
+default byte cap. Configured overlap can increase the window count further.
+Embedding cost scales with the total tokens across these windows, including
+repeated overlap. This semantic-input byte budget is separate from the
+retained BM25 chunk-count limit described above.
+`get_buffer_stats` reports the active window settings and semantic window
+count.
 
 Semantic indexing prefetch is enabled by default. Set
 `EPHEMERAL_SEMANTIC_PREFETCH=0` for lexical-only or CPU-constrained hosts, and
