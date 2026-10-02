@@ -2120,6 +2120,381 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 )
             self.assertEqual(list(Path(archive_directory).glob(".ephemeral-executions-archive-*")), [])
 
+    def test_managed_file_inventory_handles_disappearing_and_unmanaged_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = ExecutionStore(Path(directory) / "missing")
+            self.assertEqual(missing._managed_file_sizes(), (0, 0, 0, 0))
+
+            missing.state_dir.mkdir(mode=0o700)
+            state_dir = missing.state_dir
+            (state_dir / "record.json").write_bytes(b"rec")
+            (state_dir / "record.summary.json").write_bytes(b"sum!")
+            (state_dir / "tmp-crash-leftover").write_bytes(b"temp")
+            (state_dir / "readme.txt").write_bytes(b"ignored")
+            vanished = state_dir / "vanished.json"
+            vanished.write_bytes(b"gone")
+            original_stat = Path.stat
+            vanished_stat_calls = 0
+
+            def stat_with_disappearing_file(path, *args, **kwargs):
+                nonlocal vanished_stat_calls
+                if path == vanished:
+                    vanished_stat_calls += 1
+                    if vanished_stat_calls > 1:
+                        raise FileNotFoundError(path)
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", stat_with_disappearing_file):
+                self.assertEqual(missing._managed_file_sizes(), (3, 4, 1, 4))
+
+            (state_dir / "not-a-record.json").mkdir()
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                missing._managed_file_sizes()
+
+    def test_reservation_scans_and_checkpoint_cleanup_handle_races(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExecutionStore(Path(directory) / "state")
+            self.assertEqual(store._reservation_entries(), [])
+            store.state_dir.mkdir(mode=0o700)
+
+            fifo = store.state_dir / ".checkpoint-fifo.json"
+            try:
+                os.mkfifo(fifo)
+            except (AttributeError, OSError):
+                self.skipTest("FIFO creation is unavailable on this platform")
+            fifo_entries = store._reservation_entries()
+            self.assertEqual(len(fifo_entries), 1)
+            self.assertTrue(fifo_entries[0]["invalid"])
+            fifo.unlink()
+
+            execution_id = "reservation-scan"
+            reservation = store._reservation_path(execution_id)
+            reservation.write_text(
+                json.dumps({"execution_id": execution_id, "reserved_bytes": 9}),
+                encoding="utf-8",
+            )
+            with patch("execution.stat.S_ISREG", side_effect=[True, False]):
+                scanned = store._reservation_entries()
+            self.assertTrue(scanned[0]["invalid"])
+            reservation.write_text(
+                json.dumps({"execution_id": "different-id", "reserved_bytes": 9}),
+                encoding="utf-8",
+            )
+            self.assertTrue(store._reservation_entries()[0]["invalid"])
+            reservation.unlink()
+
+            store._write_reservation_locked("stale-reservation", 11)
+            stale_path = store._reservation_path("stale-reservation")
+            original_unlink = Path.unlink
+
+            def stale_reservation_disappears(path, *args, **kwargs):
+                if path == stale_path:
+                    raise FileNotFoundError(path)
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(store, "is_locked", return_value=False), patch.object(
+                Path, "unlink", stale_reservation_disappears
+            ):
+                self.assertEqual(
+                    store._reserved_checkpoint_bytes_locked(clean_stale=True), 0
+                )
+
+            store._write_reservation_locked("counted-reservation", 37)
+            self.assertEqual(
+                store._reserved_checkpoint_bytes_locked(
+                    exclude_execution_id="stale-reservation"
+                ),
+                37,
+            )
+
+            store._write_reservation_locked("own-stale-reservation", 17)
+            store.save({"execution_id": "own-stale-reservation", "phases": []})
+            self.assertFalse(store._reservation_path("own-stale-reservation").exists())
+
+            replacement_failure = store._reservation_path("replace-failure")
+            with patch("execution.os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    store._write_reservation_locked("replace-failure", 1)
+            self.assertFalse(replacement_failure.exists())
+            self.assertEqual(list(store.state_dir.glob("tmp*")), [])
+
+    def test_consumed_reservation_disappearing_during_unlink_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExecutionStore(directory)
+            execution_id = "consume-race"
+            store.save({"execution_id": execution_id, "phases": []})
+            with store.lease(execution_id):
+                store.reserve_checkpoint(execution_id, 256)
+                reservation = store._reservation_path(execution_id)
+                original_unlink = Path.unlink
+
+                def consume_reservation_race(path, *args, **kwargs):
+                    if path == reservation:
+                        original_unlink(path, *args, **kwargs)
+                        raise FileNotFoundError(path)
+                    return original_unlink(path, *args, **kwargs)
+
+                with patch.object(Path, "unlink", consume_reservation_race):
+                    store.save(
+                        {"execution_id": execution_id, "phases": [], "saved": True},
+                        consume_checkpoint_reservation=True,
+                    )
+            self.assertFalse(reservation.exists())
+
+    def test_capacity_skips_vanished_nonregular_and_temporary_entries(self):
+        manager = self.manager()
+        manager.create([self.phase("capacity-race", "capacity-race")], execution_id="capacity-race")
+        state_dir = manager.store.state_dir
+        (state_dir / "not-a-file").mkdir()
+        (state_dir / ".diagnostic-note").write_bytes(b"hidden")
+        (state_dir / "tmp-orphan").write_bytes(b"orphan")
+        (state_dir / "mismatched.json").write_text(
+            json.dumps({"execution_id": "wrong-id", "phases": []}), encoding="utf-8"
+        )
+        vanished = state_dir / "vanished-during-scan.json"
+        vanished.write_text("{}", encoding="utf-8")
+        manager.store._write_reservation_locked("uncertain-reservation", 73)
+        original_stat = Path.stat
+
+        def stat_with_disappearing_file(path, *args, **kwargs):
+            if path == vanished:
+                raise FileNotFoundError(path)
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", stat_with_disappearing_file), patch.object(
+            manager.store, "is_locked", side_effect=OSError("lease state unavailable")
+        ):
+            capacity = manager.capacity()
+
+        self.assertEqual(capacity["temporary_file_bytes"], len(b"orphan"))
+        self.assertEqual(capacity["other_file_bytes"], len(b"hidden"))
+        self.assertGreaterEqual(capacity["invalid_record_count"], 1)
+        self.assertGreaterEqual(capacity["uncertain_lock_count"], 1)
+        self.assertFalse(capacity["capacity_confident"])
+
+    def test_retirement_snapshot_normalizes_metadata_and_rejects_bad_state(self):
+        manager = self.manager()
+        store = manager.store
+        store._ensure_state_dir()
+
+        invalid_phases_id = "retirement-invalid-phases"
+        phases_path = store._path(invalid_phases_id)
+        phases_path.write_text(
+            json.dumps({"execution_id": invalid_phases_id, "phases": None}),
+            encoding="utf-8",
+        )
+        store._summary_path(invalid_phases_id).write_text("{}", encoding="utf-8")
+        invalid_phases = store._retirement_snapshot(invalid_phases_id)[0]
+        self.assertIn("ValueError", invalid_phases["reason"])
+
+        invalid_summary_id = "retirement-invalid-summary"
+        manager.create([self.phase("summary", "summary")], execution_id=invalid_summary_id)
+        store._summary_path(invalid_summary_id).write_text("[]", encoding="utf-8")
+        invalid_summary = store._retirement_snapshot(invalid_summary_id)[0]
+        self.assertIn("unreadable", invalid_summary["reason"])
+
+        metadata_id = "retirement-metadata"
+        store.save({
+            "execution_id": metadata_id,
+            "execution_status": None,
+            "label": None,
+            "updated_at": 123,
+            "phases": [],
+        })
+        metadata, *_ = store._retirement_snapshot(metadata_id)
+        self.assertEqual(metadata["execution_status"], "unknown")
+        self.assertEqual(metadata["label"], "")
+        self.assertIsNone(metadata["updated_at"])
+
+        with patch.object(store, "is_locked", side_effect=OSError("uncertain lease")):
+            uncertain = store._retirement_snapshot(metadata_id)[0]
+        self.assertIn("lease state is uncertain", uncertain["reason"])
+
+    def test_retirement_refusal_revalidation_and_removal_failures(self):
+        manager = self.manager()
+        store = manager.store
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_root = Path(archive_directory)
+
+            manager.create([self.phase("fenced", "fenced")], execution_id="retire-fenced")
+            fenced = manager.get("retire-fenced")
+            fenced["phases"][0]["process_fence_pending"] = True
+            store.save(fenced)
+            refused = manager.retire(
+                ["retire-fenced"],
+                archive_path=str(archive_root / "fenced.tar"),
+                dry_run=False,
+            )
+            self.assertEqual(refused["status"], "refused")
+
+            refresh_id = "retire-refresh"
+            manager.create([self.phase("refresh", "refresh")], execution_id=refresh_id)
+            original_snapshot = store._retirement_snapshot
+            snapshot_calls = 0
+
+            def become_fence_pending(execution_id, *, ignore_active_lease=False):
+                nonlocal snapshot_calls
+                snapshot_calls += 1
+                if snapshot_calls == 2:
+                    record = store._read_record(execution_id)
+                    record["phases"][0]["process_fence_pending"] = True
+                    store.save(record)
+                return original_snapshot(
+                    execution_id, ignore_active_lease=ignore_active_lease
+                )
+
+            with patch.object(store, "_retirement_snapshot", side_effect=become_fence_pending):
+                changed = manager.retire(
+                    [refresh_id],
+                    archive_path=str(archive_root / "refresh.tar"),
+                    dry_run=False,
+                )
+            self.assertEqual(changed["status"], "refused")
+            self.assertIn("no longer eligible", changed["reason"])
+
+            nonregular_id = "retire-nonregular-reservation"
+            manager.create([self.phase("reservation", "reservation")], execution_id=nonregular_id)
+            store._reservation_path(nonregular_id).mkdir()
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                manager.retire(
+                    [nonregular_id],
+                    archive_path=str(archive_root / "nonregular.tar"),
+                    dry_run=False,
+                )
+            self.assertTrue(store._path(nonregular_id).exists())
+            store._reservation_path(nonregular_id).rmdir()
+
+            unlink_id = "retire-record-unlink-failure"
+            manager.create([self.phase("unlink", "unlink")], execution_id=unlink_id)
+            record_path = store._path(unlink_id)
+            original_unlink = Path.unlink
+
+            def fail_record_unlink(path, *args, **kwargs):
+                if path == record_path:
+                    raise PermissionError("record removal denied")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_record_unlink):
+                removal = manager.retire(
+                    [unlink_id],
+                    archive_path=str(archive_root / "unlink.tar"),
+                    dry_run=False,
+                )
+            self.assertEqual(removal["status"], "partial")
+            self.assertEqual(removal["retired_count"], 0)
+            self.assertTrue(record_path.exists())
+
+            reservation_id = "retire-reservation-unlink-failure"
+            manager.create([self.phase("reservation-remove", "reservation-remove")], execution_id=reservation_id)
+            reservation_path = store._reservation_path(reservation_id)
+            store._write_reservation_locked(reservation_id, 32)
+
+            def fail_reservation_unlink(path, *args, **kwargs):
+                if path == reservation_path:
+                    raise PermissionError("reservation removal denied")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_reservation_unlink):
+                reservation_removal = manager.retire(
+                    [reservation_id],
+                    archive_path=str(archive_root / "reservation.tar"),
+                    dry_run=False,
+                )
+            self.assertEqual(reservation_removal["status"], "partial")
+            self.assertEqual(reservation_removal["retired_count"], 1)
+            self.assertTrue(reservation_path.exists())
+
+            fsync_id = "retire-directory-fsync-failure"
+            manager.create([self.phase("fsync", "fsync")], execution_id=fsync_id)
+            original_fsync_directory = store._fsync_directory
+
+            def fail_state_directory_fsync(path):
+                if path == store.state_dir:
+                    raise OSError("state directory fsync failed")
+                return original_fsync_directory(path)
+
+            with patch.object(store, "_fsync_directory", side_effect=fail_state_directory_fsync):
+                fsync_result = manager.retire(
+                    [fsync_id],
+                    archive_path=str(archive_root / "fsync.tar"),
+                    dry_run=False,
+                )
+            self.assertEqual(fsync_result["status"], "partial")
+            self.assertEqual(fsync_result["retired_count"], 1)
+
+    def test_retirement_archive_temp_cleanup_tolerates_missing_temp_files(self):
+        manager = self.manager()
+        store = manager.store
+        manager.create([self.phase("archive-temp-race", "archive-temp-race")], execution_id="archive-temp-race")
+        item, metadata, record_path, summary_path = store._retirement_snapshot("archive-temp-race")
+        record_path.unlink()
+        original_unlink = Path.unlink
+
+        def archive_temp_disappears(path, *args, **kwargs):
+            if path.name.startswith(".ephemeral-executions-archive-"):
+                original_unlink(path, *args, **kwargs)
+                raise FileNotFoundError(path)
+            return original_unlink(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as archive_directory:
+            with patch.object(Path, "unlink", archive_temp_disappears):
+                with self.assertRaises(FileNotFoundError):
+                    store._write_archive_temp(
+                        Path(archive_directory) / "missing-source.tar",
+                        [(item, metadata, record_path, summary_path)],
+                    )
+
+            manager.create([self.phase("retire-temp-race", "retire-temp-race")], execution_id="retire-temp-race")
+            original_writer = store._write_archive_temp
+            temporary_archives = []
+
+            def remember_archive_temp(*args, **kwargs):
+                temporary = original_writer(*args, **kwargs)
+                temporary_archives.append(temporary)
+                return temporary
+
+            def final_archive_temp_disappears(path, *args, **kwargs):
+                if temporary_archives and path == temporary_archives[0]:
+                    original_unlink(path, *args, **kwargs)
+                    raise FileNotFoundError(path)
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(store, "_write_archive_temp", side_effect=remember_archive_temp), \
+                    patch.object(store, "_file_digest", side_effect=OSError("digest failed")), \
+                    patch.object(Path, "unlink", final_archive_temp_disappears):
+                with self.assertRaisesRegex(OSError, "digest failed"):
+                    manager.retire(
+                        ["retire-temp-race"],
+                        archive_path=str(Path(archive_directory) / "retire-temp.tar"),
+                        dry_run=False,
+                    )
+
+    def test_start_releases_checkpoint_reservation_when_save_fails(self):
+        manager = self.manager(Runner())
+        initial_id = "initial-save-failure"
+        initial_reservation = manager.store._reservation_path(initial_id)
+        with patch.object(manager.store, "save", side_effect=OSError("initial save failed")):
+            with self.assertRaisesRegex(OSError, "initial save failed"):
+                manager.start([self.phase("initial", "initial")], execution_id=initial_id)
+        self.assertFalse(initial_reservation.exists())
+
+        started_id = "started-save-failure"
+        started_reservation = manager.store._reservation_path(started_id)
+        original_save = manager.store.save
+        save_calls = 0
+
+        def fail_started_save(record, **kwargs):
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 2:
+                raise OSError("started save failed")
+            return original_save(record, **kwargs)
+
+        with patch.object(manager.store, "save", side_effect=fail_started_save):
+            with self.assertRaisesRegex(OSError, "started save failed"):
+                manager.start([self.phase("started", "started")], execution_id=started_id)
+        self.assertFalse(started_reservation.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
