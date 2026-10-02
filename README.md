@@ -436,7 +436,7 @@ flowchart TD
         X["Agent Tools: start_execution / resume_execution"] --> Y["Phase Execution Manager"]
         Y --> Z["Persistent Execution State & Bounded Phase Output"]
         Y --> E
-        Z --> AA["get_execution / get_execution_output / list_executions"]
+        Z --> AA["get_execution / get_execution_output / list_executions / capacity / retirement"]
     end
 
     subgraph Indexing["3. Classification & Search Indexing"]
@@ -502,6 +502,8 @@ The agent has access to the following tools:
 | `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. |
 | `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves a bounded output chunk persisted for all phases or one phase, including after a server restart; use `offset` to continue a large phase. |
 | `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact IDs with pagination metadata. |
+| `get_execution_capacity()` | Reports durable record, summary, and atomic-write temporary-file bytes, aggregate quota, checkpoint headroom, filesystem free space, and storage anomalies without attempting recovery. |
+| `retire_executions(execution_ids, archive_path=None, dry_run=True)` | Previews eligibility and projected reclaimed space; actual retirement writes a private tar archive outside the state directory before removing selected record pairs. |
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded regular file from disk and returns the same compact summary schema; symlinks are followed, but pipes and devices are rejected. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
@@ -654,10 +656,22 @@ or results are sensitive.
 
 Execution metadata is bounded to 64 MiB per record, 64 phases, 32 attempts per
 phase, 16 KiB of structured metrics, and 1,000 records per state directory;
-list results are paginated with a maximum page size of 100. There is no
-automatic expiry: when the record cap is reached, stop the server and archive
-or rotate the state directory, or remove completed records together with their
-matching summary files before restarting. State and execution leases are
+list results are paginated with a maximum page size of 100. The aggregate state
+quota defaults to 4 GiB (`EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES`) with a 128 MiB
+checkpoint reserve (`EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES`). The reserve
+must be at least the per-record limit and smaller than the aggregate quota;
+servers sharing a state directory must use the same values.
+Record and summary JSON bytes, atomic-write temporary files (including crash
+leftovers), and active phase reservations use the quota;
+the configured reserve is excluded from committed data and provides allowance
+for atomic checkpoint writes. Before a phase starts, the server checks current
+filesystem free space for the bounded checkpoint reservation plus that reserve.
+Other processes can still consume filesystem space after this check. There is no
+automatic expiry. Use `get_execution_capacity()` to inspect usage, then call
+`retire_executions(execution_ids)` to preview which records can be retired and
+how many bytes their record/summary pairs occupy. Actual retirement requires
+`dry_run=False` and a new `archive_path` outside the state directory. Active,
+started, or fence-pending records are refused. State and execution leases are
 isolated by the explicit execution-state directory, session ID, or socket path;
 without one, each server process receives a fresh private state directory that
 is removed during normal shutdown on POSIX platforms. Windows may retain that
@@ -782,7 +796,7 @@ tool. The categories are:
 | `capture` | `capture_text`, `capture_file`, `execute_and_capture`, `consolidate_captures` |
 | `configuration` | `set_semantic_index_budget` |
 | `diagnostics` | `preflight_command`, `get_buffer_stats`, `get_runtime_diagnostics`, `get_usage_metrics` |
-| `execution` | `start_execution`, `resume_execution`, `get_execution`, `get_execution_output`, `list_executions` |
+| `execution` | `start_execution`, `resume_execution`, `get_execution`, `get_execution_output`, `list_executions`, `get_execution_capacity`, `retire_executions` |
 | `lifecycle` | `clear_captures` |
 | `retrieval` | `get_capture_slice`, `get_capture_summary`, `list_captures` |
 | `search` | `search_capture` |

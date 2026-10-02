@@ -9,23 +9,30 @@ after a process restart.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import select
 import signal
+import shutil
 import stat
 import sys
+import tarfile
 import tempfile
 import threading
 import time
 import uuid
 import errno
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from capture_utils import run_command_bounded
-from config import DEFAULT_MAX_OUTPUT_BYTES
+from config import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    execution_checkpoint_reserve_bytes,
+    execution_state_quota_bytes,
+)
 
 try:
     import fcntl
@@ -48,6 +55,7 @@ MAX_EXECUTION_RECORDS = 1000
 DEFAULT_EXECUTION_LIST_LIMIT = 20
 MAX_EXECUTION_LIST_LIMIT = 100
 MAX_EXECUTION_OUTPUT_CHUNK_BYTES = 8 * 1024
+MAX_EXECUTION_RETIRE_BATCH = 20
 JSON_OUTPUT_EXPANSION_BOUND = 6
 PROCESS_MARKER_ENV = "EPHEMERAL_EXECUTION_PROCESS_MARKER"
 PROCESS_CONTAINMENT_SUBREAPER = "linux-subreaper"
@@ -123,6 +131,22 @@ def _phase_event(phase: Dict[str, Any], status: str, **details: Any) -> None:
     event = {"status": status, "timestamp": _now(), "attempt": phase["attempts"]}
     event.update(details)
     phase["events"].append(event)
+
+
+class _DigestingReader:
+    """Hash the exact bytes copied from a file into a tar member."""
+
+    def __init__(self, source: Any):
+        self.source = source
+        self.digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.source.read(size)
+        self.digest.update(chunk)
+        return chunk
+
+    def hexdigest(self) -> str:
+        return self.digest.hexdigest()
 
 
 def _proc_identity(process_id: int) -> Tuple[Optional[str], Optional[str]]:
@@ -576,8 +600,39 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
 class ExecutionStore:
     """Atomic JSON-file storage for resumable execution records."""
 
-    def __init__(self, state_dir: str | os.PathLike[str]):
+    def __init__(
+        self,
+        state_dir: str | os.PathLike[str],
+        *,
+        quota_bytes: Optional[int] = None,
+        checkpoint_reserve_bytes: Optional[int] = None,
+    ):
         self.state_dir = Path(os.path.abspath(os.path.expanduser(os.fspath(state_dir))))
+        self.quota_bytes = (
+            execution_state_quota_bytes() if quota_bytes is None else quota_bytes
+        )
+        self.checkpoint_reserve_bytes = (
+            execution_checkpoint_reserve_bytes()
+            if checkpoint_reserve_bytes is None
+            else checkpoint_reserve_bytes
+        )
+        if (
+            isinstance(self.quota_bytes, bool)
+            or not isinstance(self.quota_bytes, int)
+            or self.quota_bytes < 1
+        ):
+            raise ValueError("execution state quota must be a positive integer")
+        if (
+            isinstance(self.checkpoint_reserve_bytes, bool)
+            or not isinstance(self.checkpoint_reserve_bytes, int)
+            or self.checkpoint_reserve_bytes < MAX_EXECUTION_STATE_BYTES
+        ):
+            raise ValueError(
+                "execution checkpoint reserve must be at least "
+                f"{MAX_EXECUTION_STATE_BYTES:,} bytes"
+            )
+        if self.checkpoint_reserve_bytes >= self.quota_bytes:
+            raise ValueError("execution checkpoint reserve must be smaller than the quota")
         self._lock = threading.RLock()
 
     @staticmethod
@@ -593,6 +648,181 @@ class ExecutionStore:
 
     def _summary_path(self, execution_id: str) -> Path:
         return self.state_dir / f"{self._filename(execution_id)[:-5]}.summary.json"
+
+    def _reservation_path(self, execution_id: str) -> Path:
+        digest = self._filename(execution_id)[:-5]
+        return self.state_dir / f".checkpoint-{digest}.json"
+
+    def _managed_file_sizes(self) -> Tuple[int, int, int, int]:
+        """Return record, summary, record-count, and atomic-temp byte totals."""
+        record_bytes = 0
+        summary_bytes = 0
+        record_count = 0
+        temporary_bytes = 0
+        if not self._validate_state_dir(require_exists=False):
+            return record_bytes, summary_bytes, record_count, temporary_bytes
+        for path in self.state_dir.iterdir():
+            if path.name.startswith("."):
+                continue
+            is_summary = path.name.endswith(".summary.json")
+            is_record = path.name.endswith(".json") and not is_summary
+            is_temporary = path.name.startswith("tmp")
+            if not (is_record or is_summary or is_temporary):
+                continue
+            self._reject_symlink(path, "state file")
+            try:
+                info = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"execution state file is not a regular file: {path}")
+            if is_summary:
+                summary_bytes += info.st_size
+            elif is_temporary:
+                temporary_bytes += info.st_size
+            else:
+                record_bytes += info.st_size
+                record_count += 1
+        return record_bytes, summary_bytes, record_count, temporary_bytes
+
+    def _reservation_entries(self) -> List[Dict[str, Any]]:
+        entries = []
+        if not self._validate_state_dir(require_exists=False):
+            return entries
+        for path in self.state_dir.glob(".checkpoint-*.json"):
+            try:
+                path_info = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(path_info.st_mode):
+                    raise ValueError("checkpoint reservation is not a regular file")
+                open_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                open_flags |= getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(path, open_flags)
+                try:
+                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        raise ValueError("checkpoint reservation is not a regular file")
+                    stream = os.fdopen(descriptor, "r", encoding="utf-8")
+                    descriptor = -1
+                    with stream:
+                        reservation = json.load(stream)
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                execution_id = reservation.get("execution_id")
+                reserved_bytes = reservation.get("reserved_bytes")
+                if (
+                    not isinstance(reservation, dict)
+                    or not isinstance(execution_id, str)
+                    or self._reservation_path(execution_id).name != path.name
+                    or isinstance(reserved_bytes, bool)
+                    or not isinstance(reserved_bytes, int)
+                    or reserved_bytes < 0
+                ):
+                    raise ValueError("invalid checkpoint reservation")
+            except (OSError, json.JSONDecodeError, UnicodeError, AttributeError, ValueError):
+                entries.append({
+                    "path": path,
+                    "execution_id": None,
+                    "reserved_bytes": 0,
+                    "invalid": True,
+                })
+                continue
+            entries.append({
+                "path": path,
+                "execution_id": execution_id,
+                "reserved_bytes": reserved_bytes,
+                "invalid": False,
+            })
+        return entries
+
+    def _reserved_checkpoint_bytes_locked(
+        self,
+        *,
+        exclude_execution_id: Optional[str] = None,
+        clean_stale: bool = False,
+    ) -> int:
+        reserved_bytes = 0
+        for entry in self._reservation_entries():
+            execution_id = entry["execution_id"]
+            if entry["invalid"] or execution_id is None:
+                raise ValueError(
+                    "execution checkpoint reservation is unreadable; inspect the state directory"
+                )
+            if clean_stale and not self.is_locked(execution_id):
+                try:
+                    entry["path"].unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            if execution_id != exclude_execution_id:
+                reserved_bytes += entry["reserved_bytes"]
+        return reserved_bytes
+
+    def _write_reservation_locked(self, execution_id: str, reserved_bytes: int) -> None:
+        path = self._reservation_path(execution_id)
+        self._reject_symlink(path, "checkpoint reservation")
+        encoded = json.dumps(
+            {"execution_id": execution_id, "reserved_bytes": reserved_bytes},
+            sort_keys=True,
+        ).encode("utf-8")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=self.state_dir, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._fsync_directory(self.state_dir)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+
+    def reserve_checkpoint(self, execution_id: str, reserved_bytes: int) -> None:
+        """Reserve bounded record growth before starting a durable phase."""
+        if isinstance(reserved_bytes, bool) or not isinstance(reserved_bytes, int) or reserved_bytes < 0:
+            raise ValueError("checkpoint reservation must be a non-negative integer")
+        with self._lock:
+            with self._record_lease():
+                self._ensure_state_dir()
+                if not self.is_locked(execution_id):
+                    raise RuntimeError("checkpoint reservations require the execution lease")
+                record_bytes, summary_bytes, _, temporary_bytes = self._managed_file_sizes()
+                other_reserved = self._reserved_checkpoint_bytes_locked(
+                    exclude_execution_id=execution_id,
+                    clean_stale=True,
+                )
+                if (
+                    record_bytes
+                    + summary_bytes
+                    + temporary_bytes
+                    + other_reserved
+                    + reserved_bytes
+                    > self.quota_bytes - self.checkpoint_reserve_bytes
+                ):
+                    raise ValueError(
+                        "execution state quota has insufficient checkpoint headroom; "
+                        "retire durable records or increase EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES"
+                    )
+                required_free_bytes = (
+                    other_reserved + reserved_bytes + self.checkpoint_reserve_bytes
+                )
+                if shutil.disk_usage(self.state_dir).free < required_free_bytes:
+                    raise ValueError(
+                        "filesystem has insufficient free space for the next checkpoint"
+                    )
+                self._write_reservation_locked(execution_id, reserved_bytes)
+
+    def release_checkpoint(self, execution_id: str) -> None:
+        """Release a phase reservation after its checkpoint has been saved."""
+        with self._lock:
+            with self._record_lease():
+                path = self._reservation_path(execution_id)
+                self._reject_symlink(path, "checkpoint reservation")
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    return
+                self._fsync_directory(self.state_dir)
 
     def _ensure_state_dir(self) -> None:
         """Create the state directory with owner-only permissions."""
@@ -716,23 +946,29 @@ class ExecutionStore:
         finally:
             lock_stream.close()
 
-    def save(self, record: Dict[str, Any]) -> None:
+    def save(
+        self,
+        record: Dict[str, Any],
+        *,
+        consume_checkpoint_reservation: bool = False,
+    ) -> None:
         """Persist one record with a replace, so readers never see a half-file."""
         with self._lock:
             with self._record_lease():
                 self._ensure_state_dir()
                 path = self._path(record["execution_id"])
+                summary_path = self._summary_path(record["execution_id"])
+                self._reject_symlink(path, "record file")
+                self._reject_symlink(summary_path, "summary file")
                 encoded = json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
                 if len(encoded) > MAX_EXECUTION_STATE_BYTES:
                     raise ValueError(
                         f"execution state exceeds the {MAX_EXECUTION_STATE_BYTES:,}-byte limit"
                     )
-                record_paths = [
-                    candidate
-                    for candidate in self.state_dir.glob("*.json")
-                    if not candidate.name.endswith(".summary.json")
-                ]
-                if not path.exists() and len(record_paths) >= MAX_EXECUTION_RECORDS:
+                record_bytes, summary_bytes, record_count, temporary_bytes = (
+                    self._managed_file_sizes()
+                )
+                if not path.exists() and record_count >= MAX_EXECUTION_RECORDS:
                     raise ValueError(
                         f"execution state contains the maximum of {MAX_EXECUTION_RECORDS:,} records"
                     )
@@ -750,9 +986,47 @@ class ExecutionStore:
                 summary_encoded = json.dumps(
                     summary_record, ensure_ascii=False, sort_keys=True
                 ).encode("utf-8")
+                previous_record_bytes = path.stat().st_size if path.exists() else 0
+                previous_summary_bytes = summary_path.stat().st_size if summary_path.exists() else 0
+                current_accounted_bytes = record_bytes + summary_bytes + temporary_bytes
+                projected_accounted_bytes = (
+                    current_accounted_bytes
+                    - previous_record_bytes
+                    - previous_summary_bytes
+                    + len(encoded)
+                    + len(summary_encoded)
+                )
+                reservation_entries = self._reservation_entries()
+                own_reservation = sum(
+                    entry["reserved_bytes"]
+                    for entry in reservation_entries
+                    if not entry["invalid"] and entry["execution_id"] == record["execution_id"]
+                )
+                if own_reservation and not self.is_locked(record["execution_id"]):
+                    own_reservation = 0
+                other_reserved = self._reserved_checkpoint_bytes_locked(
+                    exclude_execution_id=record["execution_id"],
+                    clean_stale=True,
+                )
+                committed_growth = max(0, projected_accounted_bytes - current_accounted_bytes)
+                if own_reservation and committed_growth > own_reservation:
+                    raise ValueError(
+                        "execution checkpoint exceeded its reserved growth; "
+                        "the command result was not committed"
+                    )
+                if (
+                    projected_accounted_bytes
+                    + other_reserved
+                    + (0 if consume_checkpoint_reservation else own_reservation)
+                    > self.quota_bytes - self.checkpoint_reserve_bytes
+                ):
+                    raise ValueError(
+                        "execution state aggregate quota would be exceeded; "
+                        "retire durable records or increase EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES"
+                    )
                 for destination, payload in (
                     (path, encoded),
-                    (self._summary_path(record["execution_id"]), summary_encoded),
+                    (summary_path, summary_encoded),
                 ):
                     temporary = None
                     try:
@@ -767,6 +1041,13 @@ class ExecutionStore:
                     finally:
                         if temporary is not None and temporary.exists():
                             temporary.unlink()
+                if consume_checkpoint_reservation and own_reservation:
+                    reservation_path = self._reservation_path(record["execution_id"])
+                    self._reject_symlink(reservation_path, "checkpoint reservation")
+                    try:
+                        reservation_path.unlink()
+                    except FileNotFoundError:
+                        pass
                 directory_fd = os.open(
                     self.state_dir,
                     os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
@@ -775,6 +1056,538 @@ class ExecutionStore:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
+
+    def capacity(self) -> Dict[str, Any]:
+        """Return read-only capacity and recovery-state diagnostics."""
+        with self._lock:
+            exists = self._validate_state_dir(require_exists=False)
+            record_paths: Dict[str, Path] = {}
+            summary_paths: Dict[str, Path] = {}
+            record_bytes = 0
+            summary_bytes = 0
+            temporary_file_bytes = 0
+            other_file_bytes = 0
+            other_file_count = 0
+            symlink_count = 0
+            invalid_record_count = 0
+            active_record_count = 0
+            fence_pending_record_count = 0
+            uncertain_lock_count = 0
+            if exists:
+                for path in self.state_dir.iterdir():
+                    try:
+                        info = path.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISLNK(info.st_mode):
+                        symlink_count += 1
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        continue
+                    if path.name.startswith("."):
+                        if path.name in {".records.lock"} or path.name.endswith(".lock"):
+                            continue
+                        if path.name.startswith(".checkpoint-"):
+                            continue
+                        other_file_count += 1
+                        other_file_bytes += info.st_size
+                        continue
+                    if path.name.startswith("tmp"):
+                        temporary_file_bytes += info.st_size
+                        continue
+                    if path.name.endswith(".summary.json"):
+                        summary_paths[path.name.removesuffix(".summary.json") + ".json"] = path
+                        summary_bytes += info.st_size
+                    elif path.name.endswith(".json"):
+                        record_paths[path.name] = path
+                        record_bytes += info.st_size
+                    else:
+                        other_file_count += 1
+                        other_file_bytes += info.st_size
+
+            for name, path in record_paths.items():
+                try:
+                    with path.open("r", encoding="utf-8") as stream:
+                        record = json.load(stream)
+                    execution_id = record.get("execution_id") if isinstance(record, dict) else None
+                    if (
+                        not isinstance(execution_id, str)
+                        or self._filename(execution_id) != name
+                        or not isinstance(record.get("phases"), list)
+                        or not all(isinstance(phase, dict) for phase in record["phases"])
+                    ):
+                        invalid_record_count += 1
+                        continue
+                    try:
+                        if self.is_locked(execution_id):
+                            active_record_count += 1
+                    except (OSError, ValueError):
+                        uncertain_lock_count += 1
+                    phases = record["phases"]
+                    if record.get("execution_status") == "running" or any(
+                        isinstance(phase, dict)
+                        and (
+                            phase.get("status") == "started"
+                            or phase.get("process_fence_pending") is True
+                        )
+                        for phase in phases
+                    ):
+                        fence_pending_record_count += 1
+                except (OSError, json.JSONDecodeError, UnicodeError, AttributeError):
+                    invalid_record_count += 1
+
+            reservations = self._reservation_entries() if exists else []
+            active_reserved_bytes = 0
+            stale_reserved_bytes = 0
+            invalid_reservation_count = 0
+            for entry in reservations:
+                if entry["invalid"]:
+                    invalid_reservation_count += 1
+                    continue
+                try:
+                    active = self.is_locked(entry["execution_id"])
+                except (OSError, ValueError):
+                    active = None
+                    uncertain_lock_count += 1
+                if active is True:
+                    active_reserved_bytes += entry["reserved_bytes"]
+                elif active is False:
+                    stale_reserved_bytes += entry["reserved_bytes"]
+
+            main_names = set(record_paths)
+            summary_names = set(summary_paths)
+            paired_count = len(main_names & summary_names)
+            try:
+                filesystem_path = self.state_dir
+                while not filesystem_path.exists() and filesystem_path != filesystem_path.parent:
+                    filesystem_path = filesystem_path.parent
+                disk = shutil.disk_usage(filesystem_path)
+                filesystem = {
+                    "total_bytes": disk.total,
+                    "free_bytes": disk.free,
+                }
+            except OSError:
+                filesystem = {"total_bytes": None, "free_bytes": None}
+
+            record_storage_limit = self.quota_bytes - self.checkpoint_reserve_bytes
+            capacity_confident = invalid_reservation_count == 0 and uncertain_lock_count == 0
+            available = (
+                max(
+                    0,
+                    record_storage_limit
+                    - record_bytes
+                    - summary_bytes
+                    - temporary_file_bytes
+                    - active_reserved_bytes,
+                )
+                if capacity_confident
+                else 0
+            )
+            return {
+                "status": "ok",
+                "state_directory": str(self.state_dir),
+                "state_directory_exists": exists,
+                "quota_bytes": self.quota_bytes,
+                "checkpoint_reserve_bytes": self.checkpoint_reserve_bytes,
+                "record_storage_limit_bytes": record_storage_limit,
+                "record_count": len(record_paths),
+                "summary_count": len(summary_paths),
+                "paired_record_count": paired_count,
+                "unpaired_record_count": len(main_names - summary_names),
+                "unpaired_summary_count": len(summary_names - main_names),
+                "record_bytes": record_bytes,
+                "summary_bytes": summary_bytes,
+                "committed_bytes": record_bytes + summary_bytes,
+                "temporary_file_bytes": temporary_file_bytes,
+                "accounted_bytes": record_bytes + summary_bytes + temporary_file_bytes,
+                "active_reserved_bytes": active_reserved_bytes,
+                "stale_reserved_bytes": stale_reserved_bytes,
+                "available_bytes": available,
+                "capacity_confident": capacity_confident,
+                "active_record_count": active_record_count,
+                "fence_pending_record_count": fence_pending_record_count,
+                "invalid_record_count": invalid_record_count,
+                "invalid_reservation_count": invalid_reservation_count,
+                "uncertain_lock_count": uncertain_lock_count,
+                "other_file_count": other_file_count,
+                "other_file_bytes": other_file_bytes,
+                "symlink_count": symlink_count,
+                "filesystem": filesystem,
+            }
+
+    def _retirement_snapshot(
+        self,
+        execution_id: str,
+        *,
+        ignore_active_lease: bool = False,
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Path], Optional[Path]]:
+        record_path = self._path(execution_id)
+        summary_path = self._summary_path(execution_id)
+        item: Dict[str, Any] = {
+            "execution_id": execution_id,
+            "eligible": False,
+            "record_bytes": 0,
+            "summary_bytes": 0,
+            "projected_reclaimed_bytes": 0,
+        }
+        try:
+            self._reject_symlink(record_path, "record file")
+            self._reject_symlink(summary_path, "summary file")
+            record = self._read_record(execution_id)
+            if (
+                not isinstance(record.get("phases"), list)
+                or not all(isinstance(phase, dict) for phase in record["phases"])
+            ):
+                raise ValueError(f"Execution '{execution_id}' has invalid state")
+            with summary_path.open("r", encoding="utf-8") as stream:
+                summary = json.load(stream)
+            if (
+                not isinstance(summary, dict)
+                or summary.get("execution_id") != execution_id
+                or not isinstance(summary.get("phases"), list)
+                or not all(isinstance(phase, dict) for phase in summary["phases"])
+            ):
+                raise ValueError(f"Execution '{execution_id}' has an invalid summary")
+            record_size = record_path.stat(follow_symlinks=False).st_size
+            summary_size = summary_path.stat(follow_symlinks=False).st_size
+        except (FileNotFoundError, KeyError):
+            item["reason"] = "record or matching summary is missing"
+            return item, None, None, None
+        except (KeyError, OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            item["reason"] = f"record pair is unreadable: {type(exc).__name__}"
+            return item, None, None, None
+
+        status = record.get("execution_status", "unknown")
+        if not isinstance(status, str) or status not in {
+            "pending", "running", "completed", "interrupted", "failed", "partial",
+        }:
+            status = "unknown"
+        label = record.get("label")
+        if not isinstance(label, str):
+            label = ""
+        label = label[:1024]
+        updated_at = record.get("updated_at")
+        if not isinstance(updated_at, str):
+            updated_at = None
+        else:
+            updated_at = updated_at[:128]
+        record_metadata = {
+            "execution_id": execution_id,
+            "label": label,
+            "execution_status": status,
+            "updated_at": updated_at,
+        }
+        item.update({
+            "label": label,
+            "execution_status": status,
+            "updated_at": updated_at,
+            "record_bytes": record_size,
+            "summary_bytes": summary_size,
+            "projected_reclaimed_bytes": record_size + summary_size,
+        })
+        if not ignore_active_lease:
+            try:
+                if self.is_locked(execution_id):
+                    item["reason"] = "execution has an active lease"
+                    return item, record_metadata, record_path, summary_path
+            except (OSError, ValueError) as exc:
+                item["reason"] = f"execution lease state is uncertain: {type(exc).__name__}"
+                return item, record_metadata, record_path, summary_path
+        if record.get("execution_status") == "running" or any(
+            phase.get("status") == "started" or phase.get("process_fence_pending") is True
+            for phase in record["phases"]
+        ):
+            item["reason"] = "execution is started or fence-pending"
+            return item, record_metadata, record_path, summary_path
+        item["eligible"] = True
+        return item, record_metadata, record_path, summary_path
+
+    def _validate_archive_path(self, archive_path: str) -> Path:
+        if not isinstance(archive_path, str) or not archive_path.strip():
+            raise ValueError("archive_path must be a non-empty path")
+        if len(archive_path.encode("utf-8")) > 4096:
+            raise ValueError("archive_path is too long")
+        target = Path(os.path.abspath(os.path.expanduser(archive_path)))
+        parent = target.parent
+        self._reject_symlink_components(parent)
+        self._reject_symlink(parent, "archive directory")
+        if not parent.is_dir():
+            raise ValueError("archive_path parent directory must already exist")
+        parent_stat = parent.stat()
+        current_uid = getattr(os, "getuid", lambda: None)()
+        if current_uid is not None and parent_stat.st_uid != current_uid:
+            raise ValueError("archive_path parent directory must be owned by the current user")
+        if stat.S_IMODE(parent_stat.st_mode) & 0o022:
+            raise ValueError("archive_path parent directory must not be group/world writable")
+        self._reject_symlink(target, "archive file")
+        try:
+            target.relative_to(self.state_dir)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("archive_path must be outside the execution state directory")
+        if target.exists():
+            raise ValueError("archive_path already exists")
+        if not os.access(parent, os.W_OK):
+            raise ValueError("archive_path parent directory is not writable")
+        return target
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _write_archive_temp(
+        self,
+        archive_path: Path,
+        snapshots: List[Tuple[Dict[str, Any], Dict[str, Any], Path, Path]],
+        *,
+        source_digests: Optional[Dict[str, str]] = None,
+    ) -> Path:
+        source_digests = source_digests if source_digests is not None else {}
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w+b",
+                dir=archive_path.parent,
+                prefix=".ephemeral-executions-archive-",
+                delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                manifest = []
+                with tarfile.open(fileobj=stream, mode="w") as archive:
+                    for item, record_metadata, record_path, summary_path in snapshots:
+                        digest = self._filename(record_metadata["execution_id"])
+                        for member_name, source_path, size_key in (
+                            (f"records/{digest}", record_path, "record_bytes"),
+                            (f"records/{digest[:-5]}.summary.json", summary_path, "summary_bytes"),
+                        ):
+                            size = item[size_key]
+                            info = tarfile.TarInfo(member_name)
+                            info.size = size
+                            info.mode = 0o600
+                            info.mtime = 0
+                            with source_path.open("rb") as source:
+                                digesting_source = _DigestingReader(source)
+                                archive.addfile(info, digesting_source)
+                                source_digests[member_name] = digesting_source.hexdigest()
+                        manifest.append({
+                            "execution_id": record_metadata["execution_id"],
+                            "label": record_metadata.get("label", ""),
+                            "execution_status": record_metadata.get(
+                                "execution_status", "unknown"
+                            ),
+                            "record": f"records/{digest}",
+                            "summary": f"records/{digest[:-5]}.summary.json",
+                            "source_bytes": item["projected_reclaimed_bytes"],
+                        })
+                    manifest_bytes = json.dumps(
+                        {"schema_version": 1, "executions": manifest},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                    info = tarfile.TarInfo("manifest.json")
+                    info.size = len(manifest_bytes)
+                    info.mode = 0o600
+                    info.mtime = 0
+                    archive.addfile(info, io.BytesIO(manifest_bytes))
+                stream.flush()
+                os.fsync(stream.fileno())
+            return temporary
+        except BaseException:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+
+    def retire(
+        self,
+        execution_ids: List[str],
+        *,
+        archive_path: Optional[str] = None,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Preview or archive and retire explicit, inactive execution records."""
+        if not isinstance(execution_ids, list) or not execution_ids:
+            raise ValueError("execution_ids must be a non-empty list")
+        if len(execution_ids) > MAX_EXECUTION_RETIRE_BATCH:
+            raise ValueError(f"execution_ids may contain at most {MAX_EXECUTION_RETIRE_BATCH} items")
+        normalized_ids = []
+        for execution_id in execution_ids:
+            normalized_ids.append(
+                _validate_text(execution_id, "execution_id", MAX_EXECUTION_ID_BYTES)
+            )
+        if len(normalized_ids) != len(set(normalized_ids)):
+            raise ValueError("execution_ids must not contain duplicates")
+        if not isinstance(dry_run, bool):
+            raise ValueError("dry_run must be a boolean")
+
+        initial = [self._retirement_snapshot(execution_id) for execution_id in normalized_ids]
+        initial_items = [entry[0] for entry in initial]
+        projected = sum(
+            item["projected_reclaimed_bytes"] for item in initial_items if item["eligible"]
+        )
+        if dry_run:
+            return {
+                "status": "ok",
+                "dry_run": True,
+                "archive_required_for_retirement": True,
+                "items": initial_items,
+                "eligible_count": sum(item["eligible"] for item in initial_items),
+                "blocked_count": sum(not item["eligible"] for item in initial_items),
+                "projected_reclaimed_bytes": projected,
+            }
+        if archive_path is None:
+            raise ValueError("archive_path is required when dry_run is false")
+        archive_target = self._validate_archive_path(archive_path)
+        if any(not item["eligible"] for item in initial_items):
+            return {
+                "status": "refused",
+                "dry_run": False,
+                "reason": "one or more selected executions are not eligible",
+                "items": initial_items,
+                "projected_reclaimed_bytes": projected,
+            }
+
+        snapshots: List[Tuple[Dict[str, Any], Dict[str, Any], Path, Path]] = []
+        temporary_archive = None
+        with ExitStack() as leases:
+            try:
+                for execution_id in sorted(normalized_ids):
+                    leases.enter_context(self.lease(execution_id))
+            except ExecutionBusyError:
+                leases.close()
+                refreshed = [self._retirement_snapshot(item) for item in normalized_ids]
+                return {
+                    "status": "refused",
+                    "dry_run": False,
+                    "reason": "one or more selected executions became active",
+                    "items": [entry[0] for entry in refreshed],
+                    "projected_reclaimed_bytes": sum(
+                        entry[0]["projected_reclaimed_bytes"]
+                        for entry in refreshed
+                        if entry[0]["eligible"]
+                    ),
+                }
+            try:
+                refreshed = [
+                    self._retirement_snapshot(execution_id, ignore_active_lease=True)
+                    for execution_id in normalized_ids
+                ]
+                blocked_items = [entry[0] for entry in refreshed if not entry[0]["eligible"]]
+                if blocked_items:
+                    return {
+                        "status": "refused",
+                        "dry_run": False,
+                        "reason": "one or more selected executions are no longer eligible",
+                        "items": [entry[0] for entry in refreshed],
+                        "projected_reclaimed_bytes": sum(
+                            entry[0]["projected_reclaimed_bytes"]
+                            for entry in refreshed
+                            if entry[0]["eligible"]
+                        ),
+                    }
+                for item, record, record_path, summary_path in refreshed:
+                    snapshots.append((item, record, record_path, summary_path))
+
+                archive_digests: Dict[str, str] = {}
+                temporary_archive = self._write_archive_temp(
+                    archive_target,
+                    snapshots,
+                    source_digests=archive_digests,
+                )
+                with self._record_lease():
+                    # The per-record leases keep these pairs stable. Confirm
+                    # their contents under the writer lock without reacquiring the
+                    # store's thread lock in the opposite order from save().
+                    for item, _, record_path, summary_path in snapshots:
+                        self._reject_symlink(record_path, "record file")
+                        self._reject_symlink(summary_path, "summary file")
+                        record_member = f"records/{record_path.name}"
+                        summary_member = f"records/{summary_path.name}"
+                        if (
+                            record_path.stat(follow_symlinks=False).st_size != item["record_bytes"]
+                            or summary_path.stat(follow_symlinks=False).st_size != item["summary_bytes"]
+                            or archive_digests.get(record_member) != self._file_digest(record_path)
+                            or archive_digests.get(summary_member) != self._file_digest(summary_path)
+                        ):
+                            raise ValueError("selected execution state changed during retirement")
+                        reservation = self._reservation_path(item["execution_id"])
+                        self._reject_symlink(reservation, "checkpoint reservation")
+                        try:
+                            reservation_info = reservation.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            if not stat.S_ISREG(reservation_info.st_mode):
+                                raise ValueError(
+                                    "checkpoint reservation is not a regular file"
+                                )
+                    os.link(temporary_archive, archive_target)
+                    temporary_archive.unlink()
+                    temporary_archive = None
+                    self._fsync_directory(archive_target.parent)
+                    retired = []
+                    removal_errors = []
+                    for item, _, record_path, summary_path in snapshots:
+                        try:
+                            summary_path.unlink()
+                            record_path.unlink()
+                        except (OSError, ValueError) as exc:
+                            removal_errors.append({
+                                "execution_id": item["execution_id"],
+                                "error": type(exc).__name__,
+                            })
+                            continue
+                        retired.append(item)
+                        reservation = self._reservation_path(item["execution_id"])
+                        try:
+                            self._reject_symlink(reservation, "checkpoint reservation")
+                            try:
+                                reservation.unlink()
+                            except FileNotFoundError:
+                                pass
+                        except (OSError, ValueError) as exc:
+                            removal_errors.append({
+                                "execution_id": item["execution_id"],
+                                "error": type(exc).__name__,
+                            })
+                    try:
+                        self._fsync_directory(self.state_dir)
+                    except OSError as exc:
+                        removal_errors.append({"execution_id": None, "error": type(exc).__name__})
+                return {
+                    "status": "partial" if removal_errors else "ok",
+                    "dry_run": False,
+                    "archive_path": str(archive_target),
+                    "archive_bytes": archive_target.stat().st_size,
+                    "retired_count": len(retired),
+                    "retired": retired,
+                    "removal_errors": removal_errors,
+                    "archive_is_durable": True,
+                    "projected_reclaimed_bytes": sum(
+                        item["projected_reclaimed_bytes"] for item in retired
+                    ),
+                }
+            finally:
+                if temporary_archive is not None:
+                    try:
+                        temporary_archive.unlink()
+                    except FileNotFoundError:
+                        pass
 
     def _read_record(self, execution_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -1179,6 +1992,8 @@ class PhaseExecutionManager:
         cwd: Optional[str],
         timeout_seconds: Optional[float],
         max_output_bytes: Optional[int],
+        *,
+        reserve_first_phase: bool = False,
     ):
         """Create a record and retain its lease through the caller's work."""
         self._ensure_runner_capabilities()
@@ -1190,7 +2005,17 @@ class PhaseExecutionManager:
             try:
                 self.store.load(record["execution_id"], recover=False)
             except KeyError:
-                self.store.save(record)
+                if reserve_first_phase:
+                    self.store.reserve_checkpoint(
+                        record["execution_id"],
+                        self._checkpoint_reservation_size(record["phases"][0]),
+                    )
+                try:
+                    self.store.save(record)
+                except Exception:
+                    if reserve_first_phase:
+                        self.store.release_checkpoint(record["execution_id"])
+                    raise
                 yield record
                 return
             raise ValueError(f"Execution '{record['execution_id']}' already exists")
@@ -1204,6 +2029,14 @@ class PhaseExecutionManager:
     @staticmethod
     def _first_incomplete(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return next((phase for phase in record["phases"] if phase["status"] != "completed"), None)
+
+    @staticmethod
+    def _checkpoint_reservation_size(phase: Dict[str, Any]) -> int:
+        return min(
+            MAX_EXECUTION_STATE_BYTES,
+            phase["max_output_bytes"] * JSON_OUTPUT_EXPANSION_BOUND
+            + EXECUTION_METADATA_RESERVE_BYTES,
+        )
 
     @staticmethod
     def _attempt_snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1317,6 +2150,8 @@ class PhaseExecutionManager:
                 self.store.save(record)
                 return record
 
+            checkpoint_reservation = self._checkpoint_reservation_size(phase)
+            self.store.reserve_checkpoint(record["execution_id"], checkpoint_reservation)
             phase["attempts"] += 1
             phase["status"] = "started"
             phase["error"] = None
@@ -1336,7 +2171,11 @@ class PhaseExecutionManager:
             _phase_event(phase, "started")
             self._refresh_overall_status(record)
             record["updated_at"] = _now()
-            self.store.save(record)
+            try:
+                self.store.save(record)
+            except Exception:
+                self.store.release_checkpoint(record["execution_id"])
+                raise
             started = time.perf_counter()
             cleanup_confirmed = True
             try:
@@ -1376,7 +2215,10 @@ class PhaseExecutionManager:
                 _phase_event(phase, "interrupted", reason="runner interruption")
                 self._refresh_overall_status(record)
                 record["updated_at"] = _now()
-                self.store.save(record)
+                try:
+                    self.store.save(record, consume_checkpoint_reservation=True)
+                finally:
+                    self.store.release_checkpoint(record["execution_id"])
                 raise
             except Exception as exc:
                 if self.command_runner is run_command_bounded:
@@ -1397,7 +2239,10 @@ class PhaseExecutionManager:
                 _phase_event(phase, "failed", error_type=type(exc).__name__)
                 self._refresh_overall_status(record)
                 record["updated_at"] = _now()
-                self.store.save(record)
+                try:
+                    self.store.save(record, consume_checkpoint_reservation=True)
+                finally:
+                    self.store.release_checkpoint(record["execution_id"])
                 return record
 
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -1435,7 +2280,10 @@ class PhaseExecutionManager:
             _phase_event(phase, event_status, exit_code=exit_code)
             self._refresh_overall_status(record)
             record["updated_at"] = _now()
-            self.store.save(record)
+            try:
+                self.store.save(record, consume_checkpoint_reservation=True)
+            finally:
+                self.store.release_checkpoint(record["execution_id"])
             if phase["status"] != "completed":
                 return record
 
@@ -1453,7 +2301,7 @@ class PhaseExecutionManager:
     ) -> Dict[str, Any]:
         with self._create_and_lease(
             phases, execution_id, label, resume_policy, cwd,
-            timeout_seconds, max_output_bytes,
+            timeout_seconds, max_output_bytes, reserve_first_phase=True,
         ) as record:
             record = self.store.load(record["execution_id"], recover=False)
             completed = self._run(
@@ -1587,3 +2435,21 @@ class PhaseExecutionManager:
                 )
                 for record in records
             ]
+
+    def capacity(self) -> Dict[str, Any]:
+        """Return read-only durable execution capacity diagnostics."""
+        return self.store.capacity()
+
+    def retire(
+        self,
+        execution_ids: List[str],
+        *,
+        archive_path: Optional[str] = None,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Preview or archive and retire explicit durable execution records."""
+        return self.store.retire(
+            execution_ids,
+            archive_path=archive_path,
+            dry_run=dry_run,
+        )
