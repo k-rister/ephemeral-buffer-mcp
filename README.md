@@ -1603,6 +1603,11 @@ regression. Non-success runs appear with their status and errors.
 candidate each select a single run, those two runs pair even though their ids
 differ, which compares two configurations recorded in the same document:
 
+For semantic-prefetch timing, run `benchmark_prefetch.py` once. It measures
+prefetch off and on with the same synthetic 256-line workload and five fresh
+engines per mode, then reports median ingest, first-search, and subsequent
+search times. First-search time includes any wait for background indexing.
+
 ```bash
 # Agent configurations: control versus MCP in one A/B summary, or two
 # agent-run documents recorded under different models or policies.
@@ -1611,10 +1616,10 @@ differ, which compares two configurations recorded in the same document:
 .venv/bin/python compare_workload_results.py codex-gpt5.result.json codex-candidate.result.json \
   --select mode=mcp --metric input_tokens --metric output_tokens --metric wall_time_seconds --metric tool_calls
 
-# Tool-output policies: the same latency workload under two server settings.
-EPHEMERAL_SEMANTIC_PREFETCH=0 .venv/bin/python benchmark_latency.py --result lazy.result.json
-.venv/bin/python benchmark_latency.py --result prefetch.result.json
-.venv/bin/python compare_workload_results.py lazy.result.json prefetch.result.json --metric wall_time_seconds
+# Semantic-prefetch policies: compare phase medians for the same synthetic workload.
+.venv/bin/python benchmark_prefetch.py --line-count 256 --samples 5 --result semantic-prefetch.result.json
+.venv/bin/python compare_workload_results.py semantic-prefetch.result.json#prefetch-off semantic-prefetch.result.json#prefetch-on \
+  --metric ingest --metric first_search --metric subsequent_search --statistic median
 
 # Summarization strategies: retained-summary size and prompt-token proxies per
 # task; the reduction ratios need an explicit direction.
