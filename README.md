@@ -505,8 +505,8 @@ The agent has access to the following tools:
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded regular file from disk and returns the same compact summary schema; symlinks are followed, but pipes and devices are rejected. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
-| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns matching chunks with surrounding context lines, exact numeric context boundaries, raw context, line numbers, and whether the match came from the lexical or semantic chunk grid. Search snippets bound each formatted line to 8 KiB of UTF-8 and the complete response to 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
-| `get_capture_slice(start_line, end_line)` | Retrieves exact line ranges to inspect full stack traces, logs, or specific diff files. |
+| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns bounded match snippets, exact numeric context boundaries, bounded raw-context previews, line numbers, and whether the match came from the lexical or semantic chunk grid. `top_k` is limited to 20 and `context_lines` to 100. The complete structured MCP result is capped at 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
+| `get_capture_slice(start_line, end_line, capture_id='latest', max_bytes=65536, cursor=None)` | Retrieves one byte-bounded page from a 1-indexed line range. A long line can continue across pages; repeat the original range and pass back `next_cursor` until it is null. `max_bytes` bounds the serialized MCP result and must be between 4 KiB and 64 KiB. The cursor is opaque; each segment reports a zero-based UTF-8 byte offset within its line, and pages never split a Unicode character. Joining `structuredContent.data.content` from successive pages reconstructs the retained newline-joined text exactly. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, semantic memory limits, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode and path, active log file and level, buffer limits, embedding readiness, and process memory. |
@@ -528,6 +528,24 @@ useful, and use `get_capture_slice` or `search_capture` for complete or
 targeted content. Diff file maps are also bounded and report omitted entries;
 use `get_capture_slice` for the complete diff. Raw retained captures are
 unchanged by summary generation.
+
+Capture, search, retrieval, and clear tools return a versioned MCP result
+envelope with `schema_version`, `status`, `data`, optional `error` (`code` and
+`message`), and truncation or continuation metadata. MCP clients continue to
+receive readable text in `content[0].text`; the same result data is also
+available in `structuredContent`. The envelope's `status` is `ok` or `error`.
+Stable retrieval and search error codes include `capture_not_found`,
+`invalid_range`, `invalid_cursor`, `invalid_byte_budget`,
+`response_budget_too_small`, `invalid_query`, `query_too_large`, and
+`unsupported_search_mode`.
+
+The Python text helpers `search_capture` and `get_capture_slice` retain their
+string return values. Python callers that need the structured form can use
+`search_capture_result` and `get_capture_slice_result`; these return the same
+typed envelope and readable `.text` value. For retrieval, concatenate each
+page's `data["content"]` value to reconstruct the retained content. Cursor
+offsets count UTF-8 bytes from the start of the current line; treat the cursor
+itself as opaque and pass it back unchanged.
 
 The deterministic summary benchmark measures the initial agent-prompt
 reduction for representative successful, failed, noisy, truncated, and

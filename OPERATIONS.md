@@ -267,6 +267,16 @@ preview is capped at 4 KiB of UTF-8 data. Use `search_capture` or
 summary and report omitted entries; retrieve the underlying diff slices for a
 complete file map.
 
+Capture, search, retrieval, and clear MCP tools also publish a versioned
+structured result alongside their readable text. Applications should read the
+stable `status`, `data`, and optional `error.code` fields from
+`structuredContent`; text-oriented callers continue to receive the existing
+human-readable response. Retrieval pages are bounded to 64 KiB by default.
+For a long line or range, pass the returned opaque `next_cursor` back with the
+same capture ID and line range. Cursor offsets are zero-based UTF-8 byte
+positions within a retained line, and concatenating page `data.content` values
+reconstructs the retained newline-joined text.
+
 Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 `ephbuf` when a command might block or run indefinitely. A timed-out command is
 terminated as a process group, including descendants that outlive the shell

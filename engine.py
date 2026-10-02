@@ -10,11 +10,15 @@ import logging
 import re
 import math
 import hashlib
+import hmac
 import sqlite3
 import threading
 import json
 import uuid
 import unicodedata
+import base64
+import binascii
+import secrets
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import Counter, OrderedDict
 import numpy as np
@@ -56,6 +60,12 @@ PREVIEW_MAX_BYTES = 4 * 1024
 PREVIEW_TRUNCATION_MARKER = "\n... [preview truncated; use get_capture_slice for full content] ..."
 SEARCH_SNIPPET_MAX_BYTES = 8 * 1024
 SEARCH_SNIPPET_TRUNCATION_MARKER = "... [search line truncated; use get_capture_slice for full content] ..."
+SEARCH_MATCH_CONTEXT_MAX_BYTES = 4 * 1024
+SEARCH_MATCH_SNIPPET_MAX_BYTES = 16 * 1024
+MAX_SEARCH_TOP_K = 20
+MAX_SEARCH_CONTEXT_LINES = 100
+MAX_CAPTURE_SLICE_CONTENT_BYTES = 64 * 1024
+CAPTURE_SLICE_SEGMENT_MAX_BYTES = 4 * 1024
 SUMMARY_SCHEMA_VERSION = 1
 TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
 
@@ -103,19 +113,76 @@ def _bounded_preview(
     max_bytes: int = PREVIEW_MAX_BYTES,
     marker: str = PREVIEW_TRUNCATION_MARKER,
 ) -> str:
-    """Return a UTF-8 bounded preview with an explicit truncation marker."""
-    encoded = content.encode("utf-8")
-    if len(encoded) <= max_bytes:
+    """Return a UTF-8 bounded preview without encoding a potentially huge line."""
+    if max_bytes <= 0:
+        return ""
+
+    total_bytes = 0
+    is_truncated = False
+    for char in content:
+        total_bytes += len(char.encode("utf-8"))
+        if total_bytes > max_bytes:
+            is_truncated = True
+            break
+    if not is_truncated:
         return content
 
     marker_bytes = marker.encode("utf-8")
     if len(marker_bytes) >= max_bytes:
-        return marker_bytes[:max_bytes].decode("utf-8", errors="ignore")
+        kept = []
+        kept_bytes = 0
+        for char in marker:
+            char_bytes = len(char.encode("utf-8"))
+            if kept_bytes + char_bytes > max_bytes:
+                break
+            kept.append(char)
+            kept_bytes += char_bytes
+        return "".join(kept)
 
-    prefix = encoded[: max_bytes - len(marker_bytes)].decode("utf-8", errors="ignore")
-    return prefix + marker
+    prefix_budget = max_bytes - len(marker_bytes)
+    prefix = []
+    prefix_bytes = 0
+    for char in content:
+        char_bytes = len(char.encode("utf-8"))
+        if prefix_bytes + char_bytes > prefix_budget:
+            break
+        prefix.append(char)
+        prefix_bytes += char_bytes
+    return "".join(prefix) + marker
 
 
+def _bounded_join_lines(
+    lines: List[str],
+    max_bytes: int,
+    marker: str,
+) -> Tuple[str, bool]:
+    """Join lines with newlines while bounding work and retained UTF-8 bytes."""
+    marker_bytes = marker.encode("utf-8")
+    if max_bytes <= 0:
+        return "", bool(lines)
+    if len(marker_bytes) >= max_bytes:
+        bounded_marker = _bounded_preview(marker, max_bytes=max_bytes, marker="")
+        return bounded_marker, bool(lines)
+
+    content_budget = max_bytes - len(marker_bytes)
+    pieces: List[str] = []
+    used_bytes = 0
+    for line_index, line in enumerate(lines):
+        if line_index:
+            if used_bytes + 1 > content_budget:
+                return "".join(pieces) + marker, True
+            pieces.append("\n")
+            used_bytes += 1
+        line_prefix: List[str] = []
+        for char in line:
+            char_bytes = len(char.encode("utf-8"))
+            if used_bytes + char_bytes > content_budget:
+                pieces.append("".join(line_prefix))
+                return "".join(pieces) + marker, True
+            line_prefix.append(char)
+            used_bytes += char_bytes
+        pieces.append("".join(line_prefix))
+    return "".join(pieces), False
 def estimate_tokens(text: str) -> int:
     """Return a deterministic approximate token count for retained text.
 
@@ -805,6 +872,7 @@ class EphemeralEngine:
         semantic_wait_seconds: Optional[float] = None,
     ):
         self._lock = threading.RLock()
+        self._slice_cursor_secret = secrets.token_bytes(32)
         if max_captures < 1:
             raise ValueError("max_captures must be at least 1")
         if max_buffer_bytes < 1:
@@ -2024,17 +2092,35 @@ class EphemeralEngine:
         if mode not in SEARCH_MODES:
             return {
                 "status": "error",
+                "error_code": "unsupported_search_mode",
                 "message": f"Unsupported search mode '{mode}'. Choose one of: {', '.join(SEARCH_MODES)}.",
             }
-        if top_k < 1:
-            return {"status": "error", "message": "top_k must be at least 1."}
-        if context_lines < 0:
-            return {"status": "error", "message": "context_lines must be non-negative."}
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            return {"status": "error", "error_code": "invalid_top_k", "message": "top_k must be at least 1."}
+        if top_k > MAX_SEARCH_TOP_K:
+            return {
+                "status": "error",
+                "error_code": "top_k_limit_exceeded",
+                "message": f"top_k must not exceed {MAX_SEARCH_TOP_K}.",
+            }
+        if isinstance(context_lines, bool) or not isinstance(context_lines, int) or context_lines < 0:
+            return {
+                "status": "error",
+                "error_code": "invalid_context_lines",
+                "message": "context_lines must be non-negative.",
+            }
+        if context_lines > MAX_SEARCH_CONTEXT_LINES:
+            return {
+                "status": "error",
+                "error_code": "context_limit_exceeded",
+                "message": f"context_lines must not exceed {MAX_SEARCH_CONTEXT_LINES}.",
+            }
 
         capture = self._acquire_capture_reader(capture_id)
         if not capture:
             return {
                 "status": "error",
+                "error_code": "capture_not_found",
                 "message": f"No capture found for ID '{capture_id}'. Buffer is currently empty."
             }
 
@@ -2207,8 +2293,16 @@ class EphemeralEngine:
                     max_bytes=SEARCH_SNIPPET_MAX_BYTES,
                     marker=SEARCH_SNIPPET_TRUNCATION_MARKER,
                 ))
-
-            snippet = "\n".join(lines_with_numbers)
+            snippet, snippet_truncated = _bounded_join_lines(
+                lines_with_numbers,
+                SEARCH_MATCH_SNIPPET_MAX_BYTES,
+                "... [snippet truncated; use get_capture_slice for full content] ...",
+            )
+            raw_context, context_truncated = _bounded_join_lines(
+                capture.raw_lines[ctx_start - 1:ctx_end],
+                SEARCH_MATCH_CONTEXT_MAX_BYTES,
+                "... [raw context truncated; use get_capture_slice for full content] ...",
+            )
             matches.append({
                 "chunk_id": chunk.chunk_id,
                 "chunk_index": entry["index"],
@@ -2217,8 +2311,10 @@ class EphemeralEngine:
                 "context_range": f"L{ctx_start}-L{ctx_end}",
                 "context_start_line": ctx_start,
                 "context_end_line": ctx_end,
-                "context": "\n".join(capture.raw_lines[ctx_start - 1:ctx_end]),
-                "snippet": snippet
+                "context": raw_context,
+                "context_truncated": context_truncated,
+                "snippet": snippet,
+                "snippet_truncated": snippet_truncated,
             })
             if len(matches) >= top_k:
                 break
@@ -2248,40 +2344,323 @@ class EphemeralEngine:
             )
         return result
 
-    @synchronized
-    def get_slice(self, start_line: int, end_line: int, capture_id: str = "latest") -> Dict[str, Any]:
+    def _encode_slice_cursor(
+        self,
+        *,
+        capture_id: str,
+        start_line: int,
+        end_line: int,
+        line: int,
+        character_offset: int,
+        utf8_byte_offset: int,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "v": 1,
+                "capture_id": capture_id,
+                "start_line": start_line,
+                "end_line": end_line,
+                "line": line,
+                "character_offset": character_offset,
+                "utf8_byte_offset": utf8_byte_offset,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        signature = hmac.new(self._slice_cursor_secret, payload, hashlib.sha256).digest()[:16]
+        token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        token += "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+        return token
+
+    def _decode_slice_cursor(
+        self,
+        cursor: str,
+        *,
+        capture_id: str,
+        start_line: int,
+        end_line: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(cursor, str) or len(cursor) > 2048:
+            return None
+        try:
+            payload_part, signature_part = cursor.split(".", 1)
+            payload_bytes = base64.urlsafe_b64decode(payload_part + "=" * (-len(payload_part) % 4))
+            signature = base64.urlsafe_b64decode(signature_part + "=" * (-len(signature_part) % 4))
+            expected = hmac.new(self._slice_cursor_secret, payload_bytes, hashlib.sha256).digest()[:16]
+            if not hmac.compare_digest(signature, expected):
+                return None
+            payload = json.loads(payload_bytes.decode("utf-8"))
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        if (
+            payload.get("v") != 1
+            or payload.get("capture_id") != capture_id
+            or payload.get("start_line") != start_line
+            or payload.get("end_line") != end_line
+        ):
+            return None
+        line = payload.get("line")
+        character_offset = payload.get("character_offset")
+        utf8_byte_offset = payload.get("utf8_byte_offset")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (
+            line, character_offset, utf8_byte_offset
+        )):
+            return None
+        return payload
+
+    def get_slice_page(
+        self,
+        start_line: int,
+        end_line: int,
+        capture_id: str = "latest",
+        max_content_bytes: int = MAX_CAPTURE_SLICE_CONTENT_BYTES,
+        cursor: Optional[str] = None,
+        max_segment_bytes: int = CAPTURE_SLICE_SEGMENT_MAX_BYTES,
+    ) -> Dict[str, Any]:
+        """Build one bounded, lossless page from the retained line representation.
+
+        Cursor offsets are zero-based UTF-8 byte offsets within a line. The token
+        also carries a character offset so continuation can seek without copying or
+        re-encoding a very long retained line.
         """
-        Retrieves an exact slice of lines from a capture.
-        """
+        if isinstance(max_content_bytes, bool) or not isinstance(max_content_bytes, int):
+            return {
+                "status": "error",
+                "error_code": "invalid_byte_budget",
+                "message": "max_content_bytes must be an integer.",
+            }
+        if max_content_bytes < 4 or max_content_bytes > MAX_CAPTURE_SLICE_CONTENT_BYTES:
+            return {
+                "status": "error",
+                "error_code": "invalid_byte_budget",
+                "message": (
+                    f"max_content_bytes must be between 4 and "
+                    f"{MAX_CAPTURE_SLICE_CONTENT_BYTES:,}."
+                ),
+            }
+        if (
+            isinstance(max_segment_bytes, bool)
+            or not isinstance(max_segment_bytes, int)
+            or max_segment_bytes < 4
+            or max_segment_bytes > CAPTURE_SLICE_SEGMENT_MAX_BYTES
+        ):
+            return {
+                "status": "error",
+                "error_code": "invalid_byte_budget",
+                "message": (
+                    f"max_segment_bytes must be between 4 and "
+                    f"{CAPTURE_SLICE_SEGMENT_MAX_BYTES:,}."
+                ),
+            }
+
+        # get_capture holds the engine lock only while resolving the reference.
+        # The retained raw lines are immutable, so page construction can run
+        # outside that lock without blocking ingestion or other retrievals.
         capture = self.get_capture(capture_id)
         if not capture:
-            return {"status": "error", "message": f"Capture '{capture_id}' not found."}
-
-        self.metrics.record_retrieval(capture.capture_id)
+            return {
+                "status": "error",
+                "error_code": "capture_not_found",
+                "message": f"Capture '{capture_id}' not found.",
+            }
 
         start = max(1, start_line)
         end = min(capture.line_count, end_line)
-
         if start > end or start > capture.line_count:
             return {
                 "status": "error",
-                "message": f"Invalid range {start_line}-{end_line} for capture with {capture.line_count} lines."
+                "error_code": "invalid_range",
+                "message": f"Invalid range {start_line}-{end_line} for capture with {capture.line_count} lines.",
             }
 
-        lines_with_numbers = [
-            f"  {line_no:5d} | {capture.raw_lines[line_no - 1]}"
-            for line_no in range(start, end + 1)
-        ]
+        if cursor is None:
+            line_number = start
+            character_offset = 0
+            utf8_byte_offset = 0
+        else:
+            cursor_data = self._decode_slice_cursor(
+                cursor,
+                capture_id=capture.capture_id,
+                start_line=start,
+                end_line=end,
+            )
+            if cursor_data is None:
+                return {
+                    "status": "error",
+                    "error_code": "invalid_cursor",
+                    "message": "The continuation cursor is invalid or belongs to another capture range.",
+                }
+            line_number = cursor_data["line"]
+            character_offset = cursor_data["character_offset"]
+            utf8_byte_offset = cursor_data["utf8_byte_offset"]
+            if (
+                line_number < start
+                or line_number > end
+                or character_offset < 0
+                or utf8_byte_offset < 0
+                or character_offset > len(capture.raw_lines[line_number - 1])
+            ):
+                return {
+                    "status": "error",
+                    "error_code": "invalid_cursor",
+                    "message": "The continuation cursor points outside the requested capture range.",
+                }
 
+        segments: List[Dict[str, Any]] = []
+        used_bytes = 0
+        has_more = False
+        while line_number <= end:
+            raw = capture.raw_lines[line_number - 1]
+            starts_at = character_offset
+            remaining_bytes = max_content_bytes - used_bytes
+            needs_separator = line_number < end
+            # Reserve the line separator before consuming the last character of a
+            # non-final line so concatenated page content exactly recreates the
+            # retained newline-joined representation.
+            text_budget = min(max_segment_bytes, remaining_bytes)
+            if needs_separator:
+                text_budget -= 1
+
+            text_chars: List[str] = []
+            text_bytes = 0
+            next_character_offset = starts_at
+            while next_character_offset < len(raw):
+                char = raw[next_character_offset]
+                char_bytes = len(char.encode("utf-8"))
+                if text_bytes + char_bytes > text_budget:
+                    break
+                text_chars.append(char)
+                text_bytes += char_bytes
+                next_character_offset += 1
+
+            line_complete = next_character_offset == len(raw)
+            made_progress = next_character_offset > starts_at or line_complete
+            if not made_progress:
+                has_more = True
+                if not segments:
+                    return {
+                        "status": "error",
+                        "error_code": "response_budget_too_small",
+                        "message": "The byte budget is too small to return the next Unicode character and its line metadata.",
+                    }
+                break
+
+            separator_after = line_complete and needs_separator
+            piece = "".join(text_chars) + ("\n" if separator_after else "")
+            next_byte_offset = utf8_byte_offset + text_bytes
+            if line_complete and needs_separator:
+                next_line = line_number + 1
+                next_character_offset = 0
+                next_byte_offset = 0
+            elif line_complete:
+                next_line = end + 1
+                next_character_offset = 0
+                next_byte_offset = 0
+            else:
+                next_line = line_number
+
+            cursor_after = None
+            if next_line <= end:
+                cursor_after = self._encode_slice_cursor(
+                    capture_id=capture.capture_id,
+                    start_line=start,
+                    end_line=end,
+                    line=next_line,
+                    character_offset=next_character_offset,
+                    utf8_byte_offset=next_byte_offset,
+                )
+
+            segments.append({
+                "line": line_number,
+                "text": "".join(text_chars),
+                "byte_offset": utf8_byte_offset,
+                "byte_length": text_bytes,
+                "line_complete": line_complete,
+                "separator_after": separator_after,
+                "content_piece": piece,
+                "cursor_after": cursor_after,
+            })
+            used_bytes += text_bytes + (1 if separator_after else 0)
+            if not line_complete:
+                has_more = True
+                line_number = next_line
+                character_offset = next_character_offset
+                utf8_byte_offset = next_byte_offset
+                if used_bytes >= max_content_bytes:
+                    break
+                continue
+            if line_complete and needs_separator and used_bytes >= max_content_bytes:
+                has_more = True
+                break
+            line_number = next_line
+            character_offset = next_character_offset
+            utf8_byte_offset = next_byte_offset
+
+        self.metrics.record_retrieval(capture.capture_id)
+        last_segment = segments[-1]
+        next_cursor = last_segment["cursor_after"] if has_more else None
+        content = "".join(segment["content_piece"] for segment in segments)
         return {
             "status": "ok",
             "capture_id": capture.capture_id,
             "label": capture.label,
-            "start_line": start,
-            "end_line": end,
+            "requested_start_line": start,
+            "requested_end_line": end,
+            "start_line": segments[0]["line"],
+            "end_line": segments[-1]["line"],
             "total_lines": capture.line_count,
-            "content": "\n".join(lines_with_numbers)
+            "content": content,
+            "content_bytes": used_bytes,
+            "segments": segments,
+            "truncated": next_cursor is not None,
+            "next_cursor": next_cursor,
         }
+
+    def get_slice(
+        self,
+        start_line: int,
+        end_line: int,
+        capture_id: str = "latest",
+        max_bytes: int = MAX_CAPTURE_SLICE_CONTENT_BYTES,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return a readable, byte-bounded page of numbered capture lines."""
+        page = self.get_slice_page(
+            start_line,
+            end_line,
+            capture_id=capture_id,
+            max_content_bytes=max_bytes,
+            cursor=cursor,
+        )
+        if page.get("status") != "ok":
+            return page
+
+        lines_with_numbers = []
+        current_line = None
+        current_text: List[str] = []
+        current_complete = False
+        for segment in page["segments"]:
+            if current_line is not None and segment["line"] != current_line:
+                suffix = "" if current_complete else " [continued]"
+                lines_with_numbers.append(
+                    f"  {current_line:5d} | {''.join(current_text)}{suffix}"
+                )
+                current_text = []
+            current_line = segment["line"]
+            current_text.append(segment["text"])
+            current_complete = segment["line_complete"]
+        if current_line is not None:
+            suffix = "" if current_complete else " [continued]"
+            lines_with_numbers.append(
+                f"  {current_line:5d} | {''.join(current_text)}{suffix}"
+            )
+        content = "\n".join(lines_with_numbers)
+        if page["truncated"]:
+            content += "\n... [slice truncated; continue with next_cursor]"
+        return {**page, "content": content, "raw_content": page["content"]}
 
     def _build_summary(self, capture: Capture, include_previews: bool = True) -> Dict[str, Any]:
         """Build a summary from a captured object without looking it up by ID."""
@@ -2354,7 +2733,11 @@ class EphemeralEngine:
         """Generate a quick diagnostic summary for an active capture."""
         capture = self.get_capture(capture_id)
         if not capture:
-            return {"status": "error", "message": f"Capture '{capture_id}' not found."}
+            return {
+                "status": "error",
+                "error_code": "capture_not_found",
+                "message": f"Capture '{capture_id}' not found.",
+            }
         return self._build_summary(capture, include_previews=include_previews)
 
     def get_summary_for_capture(
