@@ -20,9 +20,55 @@ import socket_protocol
 import cli
 
 CLI_PATH = Path(__file__).with_name("cli.py")
+TEST_ENV_WRAPPER = Path(__file__).with_name("scripts") / "with-test-env.sh"
 
 
 class TestCliConfiguration(unittest.TestCase):
+    def test_test_environment_wrapper_overrides_active_session_paths(self):
+        probe = (
+            "import cli, json, os, server; "
+            "from config import execution_state_dir, socket_path; "
+            "print(json.dumps({"
+            "'session_id': os.environ['EPHEMERAL_SESSION_ID'], "
+            "'socket_path': socket_path(), 'cli_socket_path': cli.SOCKET_PATH, "
+            "'server_socket_path': server.SOCKET_PATH, "
+            "'execution_state_dir': execution_state_dir(), "
+            "'server_execution_state_dir': str(server.execution_manager.store.state_dir), "
+            "'metrics_file': os.environ['EPHEMERAL_METRICS_FILE'], "
+            "'log_file': os.environ['EPHEMERAL_LOG_FILE'], "
+            "'require_isolation': os.environ['EPHEMERAL_REQUIRE_ISOLATION']}))"
+        )
+        environment = {
+            **os.environ,
+            "EPHEMERAL_SESSION_ID": "active-session",
+            "EPHEMERAL_SOCKET_PATH": "/tmp/active-session.sock",
+            "EPHEMERAL_EXECUTION_STATE_DIR": "/tmp/active-session-executions",
+            "EPHEMERAL_METRICS_FILE": "/tmp/active-session-metrics.json",
+            "EPHEMERAL_LOG_FILE": "/tmp/active-session.jsonl",
+            "EPHEMERAL_REQUIRE_ISOLATION": "0",
+        }
+        result = subprocess.run(
+            [str(TEST_ENV_WRAPPER), sys.executable, "-c", probe],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = json.loads(result.stdout)
+        runtime_dir = Path(paths["socket_path"]).parent
+        self.assertEqual(paths["socket_path"], paths["cli_socket_path"])
+        self.assertEqual(paths["socket_path"], paths["server_socket_path"])
+        self.assertTrue(runtime_dir.name.startswith("ephemeral-buffer-test."))
+        self.assertTrue(paths["session_id"].startswith("test-"))
+        self.assertEqual(Path(paths["execution_state_dir"]).parent, runtime_dir)
+        self.assertEqual(Path(paths["server_execution_state_dir"]).parent, runtime_dir)
+        self.assertEqual(Path(paths["metrics_file"]).parent, runtime_dir)
+        self.assertEqual(Path(paths["log_file"]).parent, runtime_dir)
+        self.assertEqual(paths["require_isolation"], "1")
+        self.assertFalse(runtime_dir.exists())
+
     def test_recv_exact_rejects_truncated_response(self):
         class EmptySocket:
             def recv(self, _size):

@@ -146,11 +146,21 @@ class TestBoundedCommandCapture(unittest.TestCase):
                 f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)} "
                 f"{shlex.quote(str(pid_path))}"
             )
+
+            def wait_for_detached_child(_pid, _process_group_id):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if pid_path.exists():
+                        return
+                    time.sleep(0.01)
+                self.fail("detached descendant did not become ready before timeout")
+
             result = run_command_bounded(
                 command,
                 None,
                 1024,
                 timeout_seconds=0.1,
+                process_started=wait_for_detached_child,
                 process_marker="detached-timeout-handshake",
             )
             detached_pid = int(pid_path.read_text(encoding="ascii"))
