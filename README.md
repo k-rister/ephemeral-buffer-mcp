@@ -910,13 +910,13 @@ session.
 
 Run the test suite:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_benchmark_warmup.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_benchmark_warmup.py test_benchmark_semantic_memory.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
 Measure focused-test coverage locally:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_benchmark_semantic_memory.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
 .venv/bin/python -m coverage report
 ```
 CI requires 100% coverage for application runtime modules and excludes test,
@@ -1069,6 +1069,12 @@ it also checks that semantic and hybrid searches report the fallback and retriev
 a fixed BM25 sentinel. The defaults reproduce a 256 KiB synthetic capture using
 the configured model. Run it on the deployment host with the same model, thread,
 arena, and batch settings; it is a diagnostic measurement, not a CI gate.
+It also accepts `--result PATH` or `--result -` to emit the shared versioned
+workload format. The export includes separate model-load and semantic-index
+runs with timing and RSS measurements, and preserves the native record under
+`details`. With `--result PATH`, the common document is written to that path and
+the existing native JSON stays on stdout. With `--result -`, stdout contains
+the workload JSON and a concise human-readable report moves to stderr.
 
 For a release comparison, record the same workload under each model and compare
 the selected run with the versioned result tool:
@@ -1450,7 +1456,8 @@ JSON:
 EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
   --samples 3 --result benchmark-latency.result.json
 .venv/bin/python benchmark_semantic_index.py --samples 3 --result - > semantic-index.result.json
-.venv/bin/python workload_results.py benchmark-latency.result.json semantic-index.result.json
+.venv/bin/python benchmark_semantic_memory.py --threads 1 --result semantic-memory.result.json
+.venv/bin/python workload_results.py benchmark-latency.result.json semantic-index.result.json semantic-memory.result.json
 ```
 
 The document is a `coding-agent-workload-result` (format version 1). It is

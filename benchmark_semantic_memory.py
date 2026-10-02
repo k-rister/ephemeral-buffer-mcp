@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import platform
 import threading
@@ -14,6 +15,7 @@ from typing import Any, Callable
 
 from config import DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES
 from engine import EphemeralEngine, SemanticIndexBudgetExceeded, process_rss_bytes
+import workload_results as wr
 
 
 DEFAULT_LINE_COUNT = 4096
@@ -88,7 +90,122 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-index-input-bytes", type=int, default=DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES)
     parser.add_argument("--cpu-mem-arena", choices=("on", "off"), default="off")
     parser.add_argument("--sample-interval", type=float, default=DEFAULT_SAMPLE_INTERVAL_SECONDS)
+    wr.add_result_argument(parser)
     return parser.parse_args()
+
+
+def workload_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Convert the native memory record into the shared workload format."""
+    rss = result["rss_bytes"]
+    timing = result["timing_seconds"]
+    input_data = result["input"]
+    fallback = result["budget_fallback_validation"]
+    index_status = result["semantic_index_status"]
+    index_success = index_status in {"ready", "budget_exceeded"} and fallback["status"] != "failed"
+    if index_success:
+        errors = []
+    elif fallback["status"] == "failed":
+        errors = ["semantic-index fallback validation failed"]
+    else:
+        errors = [f"unexpected semantic-index status: {index_status}"]
+
+    runs = [
+        wr.run(
+            "model-load",
+            labels={"cache_state": "cold", "stage": "model_load"},
+            measurements={
+                "wall_time_seconds": wr.measurement(
+                    "seconds", value=timing["model_load"], samples=1
+                ),
+                "peak_rss_bytes": wr.measurement(
+                    "bytes", value=rss["model_load_sampled_peak"], samples=1
+                ),
+                "rss_delta_bytes": wr.measurement(
+                    "bytes",
+                    value=(
+                        rss["after_model_load"] - rss["before_model_load"]
+                        if rss["after_model_load"] is not None and rss["before_model_load"] is not None
+                        else None
+                    ),
+                    samples=1,
+                ),
+            },
+            phases=[wr.phase("model_load", median=timing["model_load"], samples=1)],
+        ),
+        wr.run(
+            "semantic-index",
+            labels={
+                "line_count": input_data["line_count"],
+                "stage": "semantic_index",
+                "index_status": index_status,
+                "fallback_validation": fallback["status"],
+            },
+            status="success" if index_success else "failure",
+            measurements={
+                "wall_time_seconds": wr.measurement(
+                    "seconds", value=timing["semantic_index"], samples=1
+                ),
+                "input_bytes": wr.measurement("bytes", value=input_data["capture_bytes"]),
+                "semantic_input_bytes": wr.measurement(
+                    "bytes", value=input_data["semantic_input_bytes"]
+                ),
+                "semantic_chunk_count": wr.measurement(
+                    "count", value=input_data["semantic_chunk_count"]
+                ),
+                "retained_embedding_bytes": wr.measurement(
+                    "bytes", value=result["retained_embedding_bytes"]
+                ),
+                "peak_rss_bytes": wr.measurement(
+                    "bytes", value=rss["semantic_index_sampled_peak"], samples=1
+                ),
+                "rss_delta_bytes": wr.measurement(
+                    "bytes",
+                    value=(
+                        rss["after_semantic_index"] - rss["before_semantic_index"]
+                        if rss["after_semantic_index"] is not None and rss["before_semantic_index"] is not None
+                        else None
+                    ),
+                    samples=1,
+                ),
+                "rss_after_clear_bytes": wr.measurement(
+                    "bytes", value=rss["after_capture_clear_and_gc"], samples=1
+                ),
+            },
+            phases=[wr.phase("semantic_index", median=timing["semantic_index"], samples=1)],
+            errors=errors,
+        ),
+    ]
+    return wr.build_result(
+        workload="semantic-memory",
+        kind="benchmark",
+        producer="benchmark_semantic_memory.py",
+        producer_schema_version=result["schema_version"],
+        parameters={"configuration": result["configuration"], "input": input_data},
+        environment=wr.environment(
+            embedding_model=result["configuration"]["embedding_model"],
+            embedding_threads=result["configuration"]["embedding_threads"],
+        ),
+        runs=runs,
+        status="success" if index_success else "failure",
+        errors=errors,
+        details=result,
+    )
+
+
+def format_report(result: dict[str, Any]) -> str:
+    """Return a concise report for --result -, which reserves stdout for JSON."""
+    rss = result["rss_bytes"]
+    timing = result["timing_seconds"]
+    configuration = result["configuration"]
+    return (
+        f"model={configuration['embedding_model']} lines={result['input']['line_count']} "
+        f"semantic_index={result['semantic_index_status']} "
+        f"fallback_validation={result['budget_fallback_validation']['status']} "
+        f"model_load={timing['model_load']:.3f}s semantic_index_time={timing['semantic_index']:.3f}s "
+        f"model_load_peak_rss_bytes={rss['model_load_sampled_peak']} "
+        f"semantic_index_peak_rss_bytes={rss['semantic_index_sampled_peak']} "
+        f"retained_embedding_bytes={result['retained_embedding_bytes']}"
+    )
 
 
 def main() -> int:
@@ -97,7 +214,7 @@ def main() -> int:
            args.semantic_chunk_bytes, args.threads, args.batch_size,
            args.max_batch_tokens, args.max_index_input_bytes) < 1:
         raise SystemExit("counts, byte limits, thread count, and batch limits must be positive")
-    if args.sample_interval <= 0:
+    if not math.isfinite(args.sample_interval) or args.sample_interval <= 0:
         raise SystemExit("--sample-interval must be positive")
 
     text = synthetic_capture(args.line_count, args.line_bytes)
@@ -229,7 +346,13 @@ def main() -> int:
             },
             "retained_embedding_bytes": embedding_bytes,
         }
-        print(json.dumps(result, indent=2, sort_keys=True))
+        common_result = workload_result(result) if args.result is not None else None
+        if wr.result_to_stdout(args.result):
+            print(format_report(result), file=wr.report_stream(args.result))
+        else:
+            print(json.dumps(result, indent=2, sort_keys=True), file=wr.report_stream(args.result))
+        if common_result is not None:
+            wr.write_result(common_result, args.result, experiment=wr.experiment_from_args(args))
     finally:
         engine.shutdown()
     return 0
