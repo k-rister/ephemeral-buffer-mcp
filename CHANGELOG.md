@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add byte-bounded, resumable capture-slice pages and a versioned structured
+  MCP result envelope for capture, search, retrieval, and clear tools while
+  retaining their readable text responses.
 - Validate optional workload-result environment fields against the published
   schema so malformed tool, machine, CPU-count, and source-revision metadata is
   rejected before listing or comparison consumers inspect it.

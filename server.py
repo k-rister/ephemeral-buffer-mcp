@@ -8,6 +8,7 @@ import atexit
 import sys
 import json
 import asyncio
+import inspect
 from contextvars import ContextVar
 import socket
 import stat
@@ -49,17 +50,22 @@ from config import (
 )
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+from mcp.types import CallToolResult, TextContent
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
+    MAX_CAPTURE_SLICE_CONTENT_BYTES,
+    CAPTURE_SLICE_SEGMENT_MAX_BYTES,
+    MAX_SEARCH_CONTEXT_LINES,
+    MAX_SEARCH_TOP_K,
     EphemeralEngine,
     normalize_structured_metrics,
 )
 from capture_utils import read_file_bounded, run_command_bounded
 from execution import (
-    MAX_EXECUTION_ID_BYTES,
+MAX_EXECUTION_ID_BYTES,
     MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
-    MAX_EXECUTION_PHASES,
+MAX_EXECUTION_PHASES,
     MAX_STRUCTURED_METRICS_BYTES,
     MAX_PHASE_NAME_BYTES,
     PhaseExecutionManager,
@@ -80,6 +86,10 @@ SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SOCKET_JSON_MAX_EXPANSION = 6
 EXECUTION_OUTPUT_RESPONSE_MAX_BYTES = 64 * 1024
 SEARCH_RESPONSE_MAX_BYTES = 64 * 1024
+MCP_TOOL_RESPONSE_MAX_BYTES = 64 * 1024
+MCP_JSONRPC_ENVELOPE_RESERVE_BYTES = 1024
+SEARCH_STRUCTURED_MATCH_MAX_BYTES = 2 * 1024
+SEARCH_STRUCTURED_CONTEXT_MAX_BYTES = 1024
 SEARCH_SNIPPET_TRUNCATION_MARKER = (
     "... [snippet truncated; use the Context range above with get_capture_slice for full content]"
 )
@@ -128,6 +138,25 @@ _SOCKET_FAILURE = None
 _SOCKET_STARTUP_EVENT = threading.Event()
 _SOCKET_PATH_LOCKS = {}
 _SOCKET_PATH_LOCKS_GUARD = threading.Lock()
+
+
+class ToolErrorEnvelope(BaseModel):
+    """Stable machine-readable error information for public tool results."""
+
+    code: str
+    message: str
+
+
+class ToolResponseEnvelope(BaseModel):
+    """Versioned structured result paired with readable MCP text content."""
+
+    schema_version: Literal[1] = 1
+    status: Literal["ok", "error"]
+    data: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[ToolErrorEnvelope] = None
+    text: Optional[str] = None
+    truncated: bool = False
+    next_cursor: Optional[str] = None
 _SOCKET_PATH_LOCK_DEPTH = threading.local()
 _MCP_SESSION_SCOPE_LOCK = threading.Lock()
 _MCP_SESSION_SCOPES: weakref.WeakKeyDictionary[Any, tuple[str, dict[str, str]]] = (
@@ -287,6 +316,10 @@ def _classify_tool_exception(tool: str, exc: Exception, kwargs: dict[str, Any]) 
 
 def _classify_tool_result(tool: str, result: Any) -> str | None:
     """Classify structured or textual tool errors without retaining payloads."""
+    if isinstance(result, ToolResponseEnvelope):
+        if result.status == "error" and result.error is not None:
+            return _classify_failure_text(f"{result.error.code} {result.error.message}")
+        return None
     if isinstance(result, str):
         try:
             payload = json.loads(result)
@@ -481,8 +514,9 @@ def _instrument_tool(name):
                             name, exc, kwargs
                         )
                         raise
-                    if isinstance(result, str):
-                        response_bytes = len(result.encode("utf-8"))
+                    response_text = result.text if isinstance(result, ToolResponseEnvelope) else result
+                    if isinstance(response_text, str):
+                        response_bytes = len(response_text.encode("utf-8"))
                         METRICS.record_bytes("tool_response_bytes", response_bytes)
                         if name == "search_capture":
                             METRICS.record_bytes("search_response_bytes", response_bytes)
@@ -516,7 +550,100 @@ def _instrument_tool(name):
     return decorator
 
 
-def _mcp_tool(name, category):
+def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
+    """Create an MCP result with readable text and its structured envelope."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=envelope.text or "")],
+        structuredContent=envelope.model_dump(mode="json", exclude={"text"}),
+    )
+
+
+def _call_tool_result_bytes(envelope: ToolResponseEnvelope) -> int:
+    """Measure the JSON-encoded MCP result body, including both result channels."""
+    return len(_call_tool_result(envelope).model_dump_json(by_alias=True).encode("utf-8"))
+
+
+def _legacy_tool_envelope(tool: str, result: Any) -> ToolResponseEnvelope:
+    """Wrap an existing Python text result in the versioned MCP result shape."""
+    text = result if isinstance(result, str) else str(result)
+    data: Dict[str, Any] = {}
+    error = None
+    status: Literal["ok", "error"] = "ok"
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        payload = None
+
+    if isinstance(payload, dict):
+        if payload.get("status") == "error":
+            status = "error"
+            if payload.get("error_code"):
+                error_code = str(payload["error_code"])
+            elif tool in {"get_capture_summary", "clear_captures"}:
+                error_code = "capture_not_found"
+            elif tool in {"capture_text", "capture_file", "execute_and_capture"}:
+                error_code = "capture_failed"
+            else:
+                error_code = f"{tool}_failed"
+            error = ToolErrorEnvelope(
+                code=error_code,
+                message=str(payload.get("message") or "The operation failed."),
+            )
+        else:
+            data = payload
+    elif text.startswith(("Error", "Search Error")) or (
+        tool == "clear_captures" and "not found" in text.lower()
+    ):
+        status = "error"
+        if tool == "get_capture_summary":
+            code = "capture_not_found" if "not found" in text.lower() else "retrieval_failed"
+        elif tool == "search_capture":
+            code = "invalid_search_request" if any(
+                marker in text.lower()
+                for marker in ("query must", "query exceeds", "unsupported", "top_k", "context_lines")
+            ) else "search_failed"
+        elif tool.startswith("capture_") or tool == "execute_and_capture":
+            code = "capture_failed"
+        elif tool == "clear_captures" and "not found" in text.lower():
+            code = "capture_not_found"
+        else:
+            code = "operation_failed"
+        error = ToolErrorEnvelope(code=code, message=text)
+    else:
+        data = {"message": text}
+
+    envelope = ToolResponseEnvelope(status=status, data=data, error=error, text=text)
+    return _fit_tool_envelope(envelope)
+
+
+def _fit_tool_envelope(
+    envelope: ToolResponseEnvelope,
+    max_bytes: int = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+) -> ToolResponseEnvelope:
+    """Keep the complete structured MCP result within the configured byte budget."""
+    if _call_tool_result_bytes(envelope) <= max_bytes:
+        return envelope
+
+    marker = "\n... [response truncated; use the structured status and follow-up tools]"
+    shortened = envelope.model_copy(update={"data": {}, "truncated": True})
+    low = 0
+    high = max_bytes
+    best = shortened.model_copy(update={"text": marker[:max(0, max_bytes // 4)]})
+    while low <= high:
+        middle = (low + high) // 2
+        candidate_text = _truncate_utf8_with_marker(envelope.text, middle, marker)
+        if candidate_text is None:
+            candidate_text = ""
+        candidate = shortened.model_copy(update={"text": candidate_text})
+        if _call_tool_result_bytes(candidate) <= max_bytes:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _mcp_tool(name, category, *, structured_result_factory=None):
     """Register a synchronous tool implementation behind an async MCP adapter.
 
     The synchronous function remains the public Python API, while FastMCP sees
@@ -532,7 +659,24 @@ def _mcp_tool(name, category):
         @wraps(function)
         async def adapter(*args, **kwargs):
             with _bind_mcp_metrics_scope():
-                return await to_thread(function, *args, **kwargs)
+                if structured_result_factory is not None:
+                    response = await to_thread(structured_result_factory, *args, **kwargs)
+                    if not isinstance(response, ToolResponseEnvelope):
+                        raise TypeError("structured_result_factory must return ToolResponseEnvelope")
+                else:
+                    result = await to_thread(function, *args, **kwargs)
+                    if category not in {"capture", "retrieval", "search", "lifecycle"}:
+                        return result
+                    response = _legacy_tool_envelope(name, result)
+                return _call_tool_result(_fit_tool_envelope(response))
+
+        if structured_result_factory is not None or category in {"capture", "retrieval", "search", "lifecycle"}:
+            signature = inspect.signature(function)
+            adapter.__signature__ = signature.replace(return_annotation=ToolResponseEnvelope)
+            adapter.__annotations__ = {
+                **getattr(function, "__annotations__", {}),
+                "return": ToolResponseEnvelope,
+            }
 
         mcp.add_tool(adapter, name=name)
         registered_tool = mcp._tool_manager._tools.get(name)
@@ -1205,14 +1349,42 @@ def _bounded_summary_text(value: str, max_bytes: int, marker: str) -> tuple[str,
     return prefix + marker, True
 
 
+def _bounded_json_text(value: str, max_bytes: int, marker: str) -> tuple[str, bool]:
+    """Bound the escaped JSON representation of metadata strings."""
+    escaped_bytes = lambda text: len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+    if escaped_bytes(value) <= max_bytes:
+        return value, False
+
+    marker_bytes = escaped_bytes(marker)
+    if marker_bytes > max_bytes:
+        return "", True
+    prefix_budget = max_bytes - marker_bytes
+    prefix = []
+    prefix_bytes = 0
+    for char in value:
+        char_bytes = escaped_bytes(char)
+        if prefix_bytes + char_bytes > prefix_budget:
+            break
+        prefix.append(char)
+        prefix_bytes += char_bytes
+    return "".join(prefix) + marker, True
+
+
 def _truncate_utf8_with_marker(value: str, max_bytes: int, marker: str) -> Optional[str]:
     """Truncate UTF-8 text to a byte limit while retaining a visible marker."""
     marker_bytes = marker.encode("utf-8")
     if max_bytes < len(marker_bytes):
         return None
-    prefix_bytes = value.encode("utf-8")[: max_bytes - len(marker_bytes)]
-    prefix = prefix_bytes.decode("utf-8", errors="ignore")
-    return prefix + marker
+    prefix_budget = max_bytes - len(marker_bytes)
+    prefix = []
+    prefix_bytes = 0
+    for char in value:
+        char_bytes = len(char.encode("utf-8"))
+        if prefix_bytes + char_bytes > prefix_budget:
+            break
+        prefix.append(char)
+        prefix_bytes += char_bytes
+    return "".join(prefix) + marker
 
 
 def _bounded_command(command: str) -> tuple[str, bool]:
@@ -1590,180 +1762,379 @@ def consolidate_captures(
         return f"Error consolidating captures: {message}"
 
 
-@_mcp_tool("search_capture", "search")
+def _render_search_text(
+    result: Dict[str, Any],
+    matches: List[Dict[str, Any]],
+    *,
+    omitted: bool,
+    query: Optional[str] = None,
+) -> str:
+    query = str(result.get("query", "") if query is None else query)
+    display_query, _ = _bounded_summary_text(
+        query,
+        SEARCH_QUERY_MAX_BYTES,
+        SEARCH_QUERY_TRUNCATION_MARKER,
+    )
+    label, _ = _bounded_summary_text(
+        str(result.get("label", "")),
+        SUMMARY_LABEL_MAX_BYTES,
+        SUMMARY_LABEL_TRUNCATION_MARKER,
+    )
+    fallback_note = (
+        f"Semantic fallback active ({result['semantic_fallback']})."
+        if result.get("semantic_fallback")
+        else None
+    )
+    pending_note = (
+        "Semantic index still building; results are lexical (BM25) only. Repeat the search for hybrid ranking."
+        if result.get("semantic_coverage") == "pending"
+        else None
+    )
+    if not matches:
+        if omitted:
+            return (
+                "Matches were found but omitted to stay within the structured search response budget. "
+                "Use search_capture with a smaller top_k or get_capture_slice for full content."
+            )
+        return (
+            f"No matches found for '{display_query}' in capture '{result.get('capture_id')}' ({label})."
+            + (f" {fallback_note}" if fallback_note else "")
+            + (f" {pending_note}" if pending_note else "")
+        )
+
+    mode_label = str(result.get("mode", "unknown"))
+    if result.get("semantic_fallback"):
+        mode_label += f"; lexical fallback ({result['semantic_fallback']})"
+    elif result.get("semantic_coverage") == "pending":
+        mode_label += "; semantic pending (lexical only)"
+    out = [
+        f'Search Results for: "{display_query}" [Mode: {mode_label}]',
+        f"Capture: `{result.get('capture_id')}` ({label}, {result.get('total_lines', 0)} total lines)",
+        f"Found {len(matches)} relevant section(s):\n",
+    ]
+    if fallback_note:
+        out.insert(1, fallback_note)
+    elif pending_note:
+        out.insert(1, pending_note)
+
+    for index, match in enumerate(matches, start=1):
+        out.extend([
+            f"### Match #{index} (Score: {match.get('score', 0)}, Range: {match.get('matched_range', 'unknown')}, Context: {match.get('context_range', 'unknown')})",
+            "```text",
+            str(match.get("snippet", "")),
+            "```\n",
+        ])
+    if omitted:
+        out.append(
+            "Additional matches omitted because the structured search response reached "
+            f"its {SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. Use get_capture_slice for full content."
+        )
+    return "\n".join(out)
+
+
 @_instrument_tool("search_capture")
-def search_capture(
+def _search_capture_response(
     query: str,
     mode: str = "hybrid",
     capture_id: str = "latest",
     top_k: int = 5,
-    context_lines: int = 3
-) -> str:
-    """
-    Searches the captured command output using BM25, Semantic embedding, or Hybrid (RRF) ranking.
-    Semantic prefetch is on by default. Hybrid search waits at most the configured
-    semantic wait budget for an active index job and may return BM25 results marked
-    pending while that job continues. Semantic indexing is bounded by a per-capture
-    input-byte budget and token-budgeted inference batches. Captures over the input
-    budget use immediate BM25 fallback for semantic and hybrid searches; semantic
-    mode waits for indexing unless the capture exceeds that budget.
-    
-    Args:
-        query: Search keywords or natural language question (e.g. 'auth failure', 'ECONNREFUSED', 'why did the build fail?').
-        mode: Search mode - 'hybrid' (recommended, lexically weighted BM25 + Semantic), 'bm25' (keyword terms), or 'semantic' (vector concepts).
-        capture_id: The capture ID to query (defaults to 'latest').
-        top_k: Number of matching snippets to return (default: 5).
-        context_lines: Number of surrounding lines of context to include with each match (default: 3; must be non-negative).
-    """
+    context_lines: int = 3,
+) -> ToolResponseEnvelope:
     if not isinstance(query, str):
-        return "Search Error: query must be a string"
+        message = "Search Error: query must be a string"
+        return ToolResponseEnvelope(
+            status="error", error=ToolErrorEnvelope(code="invalid_query", message=message), text=message
+        )
     if len(query.encode("utf-8")) > SEARCH_QUERY_MAX_BYTES:
-        return f"Search Error: query exceeds the {SEARCH_QUERY_MAX_BYTES:,}-byte limit"
+        message = f"Search Error: query exceeds the {SEARCH_QUERY_MAX_BYTES:,}-byte limit"
+        return ToolResponseEnvelope(
+            status="error", error=ToolErrorEnvelope(code="query_too_large", message=message), text=message
+        )
     res = _active_engine().search(
         query=query,
         mode=mode,
         capture_id=capture_id,
         top_k=top_k,
-        context_lines=context_lines
+        context_lines=context_lines,
     )
-    
     if res.get("status") == "error":
         message, _ = _bounded_summary_text(
             str(res.get("message", "search failed")),
             SUMMARY_LABEL_MAX_BYTES,
             "... [error truncated]",
         )
-        return f"Search Error: {message}"
-        
-    matches = res.get("matches", [])
-    METRICS.record_result_count("search_capture", len(matches))
-    fallback_note = (
-        f" Semantic fallback active ({res['semantic_fallback']})."
-        if res.get("semantic_fallback")
-        else ""
+        text = f"Search Error: {message}"
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(
+                code=str(res.get("error_code") or "search_failed"),
+                message=message,
+            ),
+            text=text,
+        )
+
+    engine_matches = res.get("matches", [])
+    METRICS.record_result_count("search_capture", len(engine_matches))
+    metadata = {
+        key: res[key]
+        for key in (
+            "capture_id", "label", "total_lines", "mode", "query", "semantic_coverage",
+            "semantic_fallback", "semantic_index_state", "semantic_wait_seconds", "message",
+        )
+        if key in res
+    }
+    metadata.setdefault("query", query)
+    text_result = dict(res)
+    text_result.setdefault("query", query)
+    structured_matches = []
+    for match in engine_matches:
+        snippet, snippet_truncated = _bounded_summary_text(
+            str(match.get("snippet", "")),
+            SEARCH_STRUCTURED_MATCH_MAX_BYTES,
+            SEARCH_SNIPPET_TRUNCATION_MARKER,
+        )
+        context, context_truncated = _bounded_summary_text(
+            str(match.get("context", "")),
+            SEARCH_STRUCTURED_CONTEXT_MAX_BYTES,
+            "... [raw context truncated; use get_capture_slice for full content] ...",
+        )
+        structured_matches.append({
+            key: match[key]
+            for key in (
+                "chunk_id", "chunk_index", "score", "matched_range", "context_range",
+                "context_start_line", "context_end_line",
+            )
+            if key in match
+        } | {
+            "snippet": snippet,
+            "snippet_truncated": snippet_truncated or bool(match.get("snippet_truncated")),
+            "context": context,
+            "context_truncated": context_truncated or bool(match.get("context_truncated")),
+        })
+
+    selected: List[Dict[str, Any]] = []
+    best: Optional[ToolResponseEnvelope] = None
+    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+    for index, match in enumerate(structured_matches):
+        candidate_matches = selected + [match]
+        omitted = index < len(structured_matches) - 1
+        data = {
+            **metadata,
+            "matches": candidate_matches,
+            "match_count": len(candidate_matches),
+            "available_match_count": len(structured_matches),
+        }
+        candidate = ToolResponseEnvelope(
+            status="ok",
+            data=data,
+            text=_render_search_text(text_result, candidate_matches, omitted=omitted, query=query),
+            truncated=omitted,
+        )
+        if _call_tool_result_bytes(candidate) > response_budget:
+            break
+        selected.append(match)
+        best = candidate
+
+    if best is None and engine_matches:
+        # The normal per-match caps leave room for the first match, but retain a
+        # stable bounded response if a future metadata field changes that.
+        data = {**metadata, "matches": [], "match_count": 0, "available_match_count": len(engine_matches)}
+        text = _render_search_text(text_result, [], omitted=True, query=query)
+        best = ToolResponseEnvelope(status="ok", data=data, text=text, truncated=True)
+    if best is None:
+        text = _render_search_text(text_result, [], omitted=False, query=query)
+        best = ToolResponseEnvelope(status="ok", data={**metadata, "matches": [], "match_count": 0}, text=text)
+    return best
+
+
+@_mcp_tool("search_capture", "search", structured_result_factory=_search_capture_response)
+def search_capture(
+    query: str,
+    mode: str = "hybrid",
+    capture_id: str = "latest",
+    top_k: int = 5,
+    context_lines: int = 3,
+) -> str:
+    """Search a capture and return the compatibility text from a typed result."""
+    return search_capture_result(query, mode, capture_id, top_k, context_lines).text or ""
+
+
+def search_capture_result(
+    query: str,
+    mode: str = "hybrid",
+    capture_id: str = "latest",
+    top_k: int = 5,
+    context_lines: int = 3,
+) -> ToolResponseEnvelope:
+    """Return a typed search result while preserving ``search_capture`` text callers."""
+    return _search_capture_response(query, mode, capture_id, top_k, context_lines)
+
+
+@_instrument_tool("get_capture_slice")
+def _capture_slice_response(
+    start_line: int,
+    end_line: int,
+    capture_id: str = "latest",
+    max_bytes: int = MAX_CAPTURE_SLICE_CONTENT_BYTES,
+    cursor: Optional[str] = None,
+) -> ToolResponseEnvelope:
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 4096 <= max_bytes <= MCP_TOOL_RESPONSE_MAX_BYTES:
+        message = f"max_bytes must be between 4,096 and {MCP_TOOL_RESPONSE_MAX_BYTES:,}."
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(code="invalid_byte_budget", message=message),
+            text=f"Error: {message}",
+        )
+
+    response_budget = min(max_bytes, MCP_TOOL_RESPONSE_MAX_BYTES) - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+    active_engine = _active_engine()
+    capture = active_engine.get_capture(capture_id)
+    label_wire_budget = min(
+        SUMMARY_LABEL_MAX_BYTES,
+        max(128, response_budget // 12),
     )
-    pending_note = (
-        " Semantic index still building; results are lexical (BM25) only. "
-        "Repeat the search for hybrid ranking."
-        if res.get("semantic_coverage") == "pending"
-        else ""
-    )
-    display_query, _ = _bounded_summary_text(
-        query,
-        SEARCH_QUERY_MAX_BYTES,
-        SEARCH_QUERY_TRUNCATION_MARKER,
-    )
-    if not matches:
-        label, _ = _bounded_summary_text(
-            res.get("label", ""),
-            SUMMARY_LABEL_MAX_BYTES,
+    label_bytes = 0
+    if capture is not None:
+        safe_label, _ = _bounded_json_text(
+            str(capture.label),
+            label_wire_budget,
             SUMMARY_LABEL_TRUNCATION_MARKER,
         )
-        return (
-            f"No matches found for '{display_query}' in capture '{res.get('capture_id')}' ({label})."
-            f"{fallback_note}{pending_note}"
-        )
-        
-    mode_label = res["mode"]
-    if res.get("semantic_fallback"):
-        mode_label += f"; lexical fallback ({res['semantic_fallback']})"
-    elif res.get("semantic_coverage") == "pending":
-        mode_label += "; semantic pending (lexical only)"
-    label, _ = _bounded_summary_text(
-        res["label"],
-        SUMMARY_LABEL_MAX_BYTES,
-        SUMMARY_LABEL_TRUNCATION_MARKER,
+        label_bytes = len(json.dumps(safe_label, ensure_ascii=False).encode("utf-8")) - 2
+    # The wire result repeats returned text in both channels. Limit individual
+    # segments conservatively so even JSON-escaped control characters can fit
+    # in the smallest accepted response budget.
+    max_segment_bytes = max(
+        4,
+        min(
+            CAPTURE_SLICE_SEGMENT_MAX_BYTES,
+            max(4, response_budget - 1536 - (2 * label_bytes)) // 12,
+        ),
     )
-    out = [
-        f"Search Results for: \"{display_query}\" [Mode: {mode_label}]",
-        f"Capture: `{res['capture_id']}` ({label}, {res['total_lines']} total lines)",
-        f"Found {len(matches)} relevant section(s):\n"
-    ]
-    if res.get("semantic_fallback"):
-        out.insert(1, fallback_note.strip())
-    elif pending_note:
-        out.insert(1, pending_note.strip())
-    
-    omission_note = (
-        "Additional matches omitted because the search response reached "
-        f"its {SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. Use get_capture_slice for full content."
+    page = active_engine.get_slice_page(
+        start_line,
+        end_line,
+        capture_id=capture_id,
+        max_content_bytes=min(MAX_CAPTURE_SLICE_CONTENT_BYTES, max_bytes // 2),
+        cursor=cursor,
+        max_segment_bytes=max_segment_bytes,
     )
-    for index, m in enumerate(matches):
-        i = index + 1
-        match_output = [
-            f"### Match #{i} (Score: {m['score']}, Range: {m['matched_range']}, Context: {m['context_range']})",
-            "```text",
-            m["snippet"],
-            "```\n",
-        ]
-        has_more_matches = index < len(matches) - 1
-        candidate = "\n".join(out + match_output)
-        if len(candidate.encode("utf-8")) <= SEARCH_RESPONSE_MAX_BYTES:
-            if not has_more_matches:
-                out.extend(match_output)
-                continue
-            candidate_with_omission_note = "\n".join(out + match_output + [omission_note])
-            if len(candidate_with_omission_note.encode("utf-8")) <= SEARCH_RESPONSE_MAX_BYTES:
-                out.extend(match_output)
-                continue
-
-        marker = (
-            SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER
-            if has_more_matches
-            else SEARCH_SNIPPET_TRUNCATION_MARKER
+    if page.get("status") != "ok":
+        message = str(page.get("message", "capture slice unavailable"))
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(
+                code=str(page.get("error_code") or "retrieval_failed"),
+                message=message,
+            ),
+            text=f"Error: {message}",
         )
-        prefix = "\n".join(out + [match_output[0], match_output[1]])
-        closing_fence = "\n```\n"
-        snippet_budget = (
-            SEARCH_RESPONSE_MAX_BYTES
-            - len(prefix.encode("utf-8"))
-            - 1  # newline between the opening fence and the snippet
-            - len(closing_fence.encode("utf-8"))
+
+    selected: List[Dict[str, Any]] = []
+    best: Optional[ToolResponseEnvelope] = None
+    segments = page["segments"]
+    for index, segment in enumerate(segments):
+        candidate_segments = selected + [segment]
+        candidate_cursor = segment["cursor_after"]
+        content = "".join(item["content_piece"] for item in candidate_segments)
+        rendered_segments = []
+        current_line = None
+        current_text: List[str] = []
+        current_complete = False
+        for item in candidate_segments:
+            if current_line is not None and item["line"] != current_line:
+                suffix = "" if current_complete else " [continued]"
+                rendered_segments.append(f"  {current_line:5d} | {''.join(current_text)}{suffix}")
+                current_text = []
+            current_line = item["line"]
+            current_text.append(item["text"])
+            current_complete = item["line_complete"]
+        if current_line is not None:
+            suffix = "" if current_complete else " [continued]"
+            rendered_segments.append(f"  {current_line:5d} | {''.join(current_text)}{suffix}")
+        is_truncated = candidate_cursor is not None
+        display_content = "\n".join(rendered_segments)
+        if is_truncated:
+            display_content += (
+                "\n... [slice truncated; continue with next_cursor='"
+                + str(candidate_cursor)
+                + "']"
+            )
+        label, _ = _bounded_json_text(
+            str(page["label"]),
+            label_wire_budget,
+            SUMMARY_LABEL_TRUNCATION_MARKER,
         )
-        snippet = m["snippet"]
-        if has_more_matches and (
-            len(snippet.encode("utf-8"))
-            + len(SEARCH_MATCHES_OMITTED_MARKER.encode("utf-8"))
-            <= snippet_budget
-        ):
-            bounded_snippet = snippet + SEARCH_MATCHES_OMITTED_MARKER
-        else:
-            bounded_snippet = _truncate_utf8_with_marker(snippet, snippet_budget, marker)
-        if bounded_snippet is not None:
-            out.extend([match_output[0], match_output[1], bounded_snippet, match_output[3]])
-        else:
-            note_candidate = "\n".join(out + [omission_note])
-            if len(note_candidate.encode("utf-8")) <= SEARCH_RESPONSE_MAX_BYTES:
-                out.append(omission_note)
-        break
-        
-    return "\n".join(out)
+        text = (
+            f"Capture: `{page['capture_id']}` ({label}) | Lines {page['start_line']} to "
+            f"{segment['line']} of {page['total_lines']}\n```text\n{display_content}\n```"
+        )
+        data = {
+            "capture_id": page["capture_id"],
+            "label": label,
+            "requested_start_line": page["requested_start_line"],
+            "requested_end_line": page["requested_end_line"],
+            "start_line": candidate_segments[0]["line"],
+            "end_line": segment["line"],
+            "total_lines": page["total_lines"],
+            "content": content,
+            "content_bytes": len(content.encode("utf-8")),
+            "segments": [
+                {
+                    key: item[key]
+                    for key in ("line", "byte_offset", "byte_length", "line_complete", "separator_after")
+                }
+                for item in candidate_segments
+            ],
+        }
+        candidate = ToolResponseEnvelope(
+            status="ok",
+            data=data,
+            text=text,
+            truncated=is_truncated,
+            next_cursor=candidate_cursor,
+        )
+        if _call_tool_result_bytes(candidate) > response_budget:
+            break
+        selected.append(segment)
+        best = candidate
+
+    if best is None:
+        message = "The response byte budget is too small to include capture content and its continuation metadata."
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(code="response_budget_too_small", message=message),
+            text=f"Error: {message}",
+        )
+    return best
 
 
-@_mcp_tool("get_capture_slice", "retrieval")
-@_instrument_tool("get_capture_slice")
-def get_capture_slice(start_line: int, end_line: int, capture_id: str = "latest") -> str:
+@_mcp_tool("get_capture_slice", "retrieval", structured_result_factory=_capture_slice_response)
+def get_capture_slice(
+    start_line: int,
+    end_line: int,
+    capture_id: str = "latest",
+    max_bytes: Annotated[int, Field(ge=4096, le=MCP_TOOL_RESPONSE_MAX_BYTES)] = MCP_TOOL_RESPONSE_MAX_BYTES,
+    cursor: Optional[str] = None,
+) -> str:
+    """Fetch a byte-bounded page of 1-indexed capture lines.
+
+    Repeat the range and capture ID from the first call, then pass the returned
+    opaque ``next_cursor`` to continue. Pages never split a Unicode character;
+    the cursor's line offset is a zero-based UTF-8 byte offset.
     """
-    Fetches an exact range of lines (1-indexed) from a capture to inspect full context around a match.
-    """
-    res = _active_engine().get_slice(start_line, end_line, capture_id=capture_id)
-    if res.get("status") == "error":
-        message, _ = _bounded_summary_text(
-            str(res.get("message", "capture slice unavailable")),
-            SUMMARY_LABEL_MAX_BYTES,
-            "... [error truncated]",
-        )
-        return f"Error: {message}"
-        
-    label, _ = _bounded_summary_text(
-        res["label"],
-        SUMMARY_LABEL_MAX_BYTES,
-        SUMMARY_LABEL_TRUNCATION_MARKER,
-    )
-    return (
-        f"Capture: `{res['capture_id']}` ({label}) | Lines {res['start_line']} to {res['end_line']} of {res['total_lines']}\n"
-        f"```text\n{res['content']}\n```"
-    )
+    return get_capture_slice_result(start_line, end_line, capture_id, max_bytes, cursor).text or ""
+
+
+def get_capture_slice_result(
+    start_line: int,
+    end_line: int,
+    capture_id: str = "latest",
+    max_bytes: int = MAX_CAPTURE_SLICE_CONTENT_BYTES,
+    cursor: Optional[str] = None,
+) -> ToolResponseEnvelope:
+    """Return a typed paged retrieval result for Python callers."""
+    return _capture_slice_response(start_line, end_line, capture_id, max_bytes, cursor)
 
 
 @_mcp_tool("get_capture_summary", "retrieval")
@@ -1777,25 +2148,48 @@ def get_capture_summary(capture_id: str = "latest", include_previews: bool = Fal
     return _summary_json(capture_id, include_previews=include_previews)
 
 
-@_mcp_tool("list_captures", "retrieval")
 @_instrument_tool("list_captures")
-def list_captures() -> str:
-    """
-    Lists all captures currently retained in the ephemeral ring buffer.
-    """
-    caps = engine.list_captures()
-    if not caps:
-        return "Ephemeral buffer is empty. No captures currently stored."
-        
-    out = ["Active Captures in Ephemeral Buffer:"]
-    for c in caps:
-        label, _ = _bounded_summary_text(
-            c["label"],
+def _list_captures_response() -> ToolResponseEnvelope:
+    captures = []
+    text_lines = ["Active Captures in Ephemeral Buffer:"]
+    for capture in _active_engine().list_captures():
+        label, label_truncated = _bounded_summary_text(
+            capture["label"],
             SUMMARY_LABEL_MAX_BYTES,
             SUMMARY_LABEL_TRUNCATION_MARKER,
         )
-        out.append(f"- `{c['capture_id']}`: \"{label}\" | {c['total_lines']:,} lines | {c['byte_size']:,} bytes | {c['timestamp']}")
-    return "\n".join(out)
+        captures.append({
+            "capture_id": capture["capture_id"],
+            "label": label,
+            "label_truncated": label_truncated,
+            "total_lines": capture["total_lines"],
+            "byte_size": capture["byte_size"],
+            "timestamp": capture["timestamp"],
+        })
+        text_lines.append(
+            f"- `{capture['capture_id']}`: \"{label}\" | {capture['total_lines']:,} lines | "
+            f"{capture['byte_size']:,} bytes | {capture['timestamp']}"
+        )
+    if not captures:
+        text = "Ephemeral buffer is empty. No captures currently stored."
+    else:
+        text = "\n".join(text_lines)
+    return ToolResponseEnvelope(
+        status="ok",
+        data={"captures": captures, "capture_count": len(captures)},
+        text=text,
+    )
+
+
+@_mcp_tool("list_captures", "retrieval", structured_result_factory=_list_captures_response)
+def list_captures() -> str:
+    """List active captures and return the compatibility text rendering."""
+    return list_captures_result().text or ""
+
+
+def list_captures_result() -> ToolResponseEnvelope:
+    """Return a typed list of active captures for Python callers."""
+    return _list_captures_response()
 
 
 @_mcp_tool("clear_captures", "lifecycle")

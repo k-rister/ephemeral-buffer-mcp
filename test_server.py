@@ -1293,10 +1293,16 @@ class TestServerTools(unittest.TestCase):
 
         with patch.object(
             server.engine,
-            "get_slice",
+            "get_slice_page",
             return_value={
                 "status": "ok", "capture_id": "cap", "label": "label",
-                "start_line": 1, "end_line": 1, "total_lines": 1, "content": "line",
+                "requested_start_line": 1, "requested_end_line": 1,
+                "start_line": 1, "end_line": 1, "total_lines": 1,
+                "segments": [{
+                    "line": 1, "text": "line", "byte_offset": 0, "byte_length": 4,
+                    "line_complete": True, "separator_after": False,
+                    "content_piece": "line", "cursor_after": None,
+                }],
             },
         ):
             self.assertIn("Lines 1 to 1", server.get_capture_slice(1, 1))
@@ -1567,6 +1573,228 @@ class TestServerTools(unittest.TestCase):
         server.capture_text("one line", label="listed")
         self.assertIn("listed", server.list_captures())
 
+    def test_capture_search_and_retrieval_mcp_results_include_typed_data(self):
+        captured = json.loads(server.capture_text("needle αβ\nsecond line", label="typed-result"))
+        capture_id = captured["capture_id"]
+
+        capture_response = asyncio.run(server.mcp._tool_manager.call_tool(
+            "capture_text",
+            {"content": "another capture", "label": "mcp-envelope"},
+            convert_result=True,
+        ))
+        self.assertEqual(capture_response.structuredContent["schema_version"], 1)
+        self.assertEqual(capture_response.structuredContent["status"], "ok")
+        self.assertIn("capture_id", capture_response.structuredContent["data"])
+
+        search_response = asyncio.run(server.mcp._tool_manager.call_tool(
+            "search_capture",
+            {"query": "needle", "mode": "bm25", "capture_id": capture_id},
+            convert_result=True,
+        ))
+        self.assertEqual(search_response.structuredContent["schema_version"], 1)
+        self.assertEqual(search_response.structuredContent["status"], "ok")
+        expected_match = server.engine.search(
+            "needle", mode="bm25", capture_id=capture_id
+        )["matches"][0]
+        self.assertEqual(
+            search_response.structuredContent["data"]["matches"][0]["matched_range"],
+            expected_match["matched_range"],
+        )
+        self.assertEqual(search_response.content[0].text, server.search_capture_result(
+            "needle", mode="bm25", capture_id=capture_id
+        ).text)
+        self.assertLessEqual(
+            len(search_response.model_dump_json(by_alias=True).encode("utf-8")),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES,
+        )
+
+        slice_response = asyncio.run(server.mcp._tool_manager.call_tool(
+            "get_capture_slice",
+            {
+                "start_line": 1,
+                "end_line": 2,
+                "capture_id": capture_id,
+                "max_bytes": 8192,
+            },
+            convert_result=True,
+        ))
+        self.assertEqual(slice_response.structuredContent["schema_version"], 1)
+        self.assertEqual(slice_response.structuredContent["data"]["content"], "needle αβ\nsecond line")
+        self.assertEqual(slice_response.content[0].text, server.get_capture_slice_result(
+            1, 2, capture_id=capture_id, max_bytes=8192
+        ).text)
+        self.assertLessEqual(
+            len(slice_response.model_dump_json(by_alias=True).encode("utf-8")),
+            8192,
+        )
+
+    def test_server_slice_pages_reconstruct_long_unicode_line_with_bounded_wire_results(self):
+        content = "λ" * 5_000 + "\nsecond line"
+        capture = json.loads(server.capture_text(content, label="paged-server-slice"))
+        capture_id = capture["capture_id"]
+        cursor = None
+        pages = []
+        page_count = 0
+        while True:
+            response = server.get_capture_slice_result(
+                1,
+                2,
+                capture_id=capture_id,
+                max_bytes=8192,
+                cursor=cursor,
+            )
+            self.assertEqual(response.status, "ok", response.text)
+            self.assertLessEqual(
+                server._call_tool_result_bytes(response),
+                8192 - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+            )
+            pages.append(response.data["content"])
+            page_count += 1
+            cursor = response.next_cursor
+            if cursor is None:
+                break
+        self.assertGreater(page_count, 2)
+        self.assertEqual("".join(pages), content)
+
+    def test_slice_wire_budget_handles_escaped_content_and_long_labels(self):
+        content = "\x00" * 512 + "\n最後"
+        label = "long-label-" + ("x" * 5_000)
+        capture = json.loads(server.capture_text(content, label=label))
+        capture_id = capture["capture_id"]
+
+        pages = []
+        cursor = None
+        while True:
+            response = server.get_capture_slice_result(
+                1,
+                2,
+                capture_id=capture_id,
+                max_bytes=4096,
+                cursor=cursor,
+            )
+            self.assertEqual(response.status, "ok", response.text)
+            self.assertLessEqual(
+                server._call_tool_result_bytes(response),
+                4096 - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+            )
+            pages.append(response.data["content"])
+            cursor = response.next_cursor
+            if cursor is None:
+                break
+
+        self.assertEqual("".join(pages), content)
+
+    def test_retrieval_errors_have_stable_codes_and_legacy_text(self):
+        capture = json.loads(server.capture_text("one line", label="error-codes"))
+        capture_id = capture["capture_id"]
+        missing = server.get_capture_slice_result(1, 1, capture_id="missing")
+        invalid_range = server.get_capture_slice_result(3, 3, capture_id=capture_id)
+        invalid_budget = server.get_capture_slice_result(1, 1, capture_id=capture_id, max_bytes=3)
+        invalid_cursor = server.get_capture_slice_result(
+            1, 1, capture_id=capture_id, cursor="invalid"
+        )
+        missing_search = server.search_capture_result("query", mode="bm25", capture_id="missing")
+        with patch.object(server, "_call_tool_result_bytes", return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2):
+            too_small = server.get_capture_slice_result(
+                1, 1, capture_id=capture_id, max_bytes=4096
+            )
+
+        self.assertEqual(missing.error.code, "capture_not_found")
+        self.assertIn("Error:", missing.text)
+        self.assertEqual(invalid_range.error.code, "invalid_range")
+        self.assertEqual(invalid_budget.error.code, "invalid_byte_budget")
+        self.assertEqual(invalid_cursor.error.code, "invalid_cursor")
+        self.assertEqual(missing_search.error.code, "capture_not_found")
+        self.assertEqual(too_small.error.code, "response_budget_too_small")
+
+    def test_legacy_mcp_envelopes_keep_text_and_assign_stable_errors(self):
+        plain_text = server._legacy_tool_envelope("get_buffer_stats", "not JSON")
+        parsed_json = server._legacy_tool_envelope(
+            "capture_text", '{"schema_version":1,"capture_id":"cap-test"}'
+        )
+        self.assertEqual(plain_text.status, "ok")
+        self.assertEqual(plain_text.text, "not JSON")
+        self.assertEqual(plain_text.data["message"], "not JSON")
+        self.assertEqual(parsed_json.data["capture_id"], "cap-test")
+
+        json_errors = [
+            ("get_capture_summary", '{"status":"error","message":"missing"}', "capture_not_found"),
+            ("capture_text", '{"status":"error","message":"failed"}', "capture_failed"),
+            ("list_captures", '{"status":"error","message":"failed"}', "list_captures_failed"),
+            ("capture_text", '{"status":"error","error_code":"specific","message":"failed"}', "specific"),
+        ]
+        for tool, result, code in json_errors:
+            with self.subTest(tool=tool, code=code):
+                envelope = server._legacy_tool_envelope(tool, result)
+                self.assertEqual(envelope.status, "error")
+                self.assertEqual(envelope.error.code, code)
+
+        text_errors = [
+            ("get_capture_summary", "Error: capture not found", "capture_not_found"),
+            ("get_capture_summary", "Error: storage failed", "retrieval_failed"),
+            ("search_capture", "Search Error: query must be a string", "invalid_search_request"),
+            ("search_capture", "Search Error: index failed", "search_failed"),
+            ("capture_file", "Error: file unavailable", "capture_failed"),
+            ("clear_captures", "Capture not found", "capture_not_found"),
+            ("get_capture_slice", "Error: retrieval failed", "operation_failed"),
+        ]
+        for tool, result, code in text_errors:
+            with self.subTest(tool=tool, result=result):
+                envelope = server._legacy_tool_envelope(tool, result)
+                self.assertEqual(envelope.status, "error")
+                self.assertEqual(envelope.error.code, code)
+
+        oversized = server.ToolResponseEnvelope(
+            status="ok",
+            data={"payload": "x" * 5_000},
+            text="legacy text " * 500,
+        )
+        fitted = server._fit_tool_envelope(oversized, max_bytes=256)
+        self.assertTrue(fitted.truncated)
+        self.assertLessEqual(server._call_tool_result_bytes(fitted), 256)
+        self.assertEqual(server._bounded_json_text("value", 1, "long marker"), ("", True))
+        self.assertIsNone(server._truncate_utf8_with_marker("value", 1, "long marker"))
+
+    def test_mcp_adapter_rejects_non_envelope_factory_results(self):
+        with (
+            patch.object(server.mcp, "add_tool") as add_tool,
+            patch.object(server, "_REGISTERED_MCP_TOOL_NAMES", []),
+            patch.object(server, "_REGISTERED_MCP_TOOL_CATEGORIES", {}),
+        ):
+            server._mcp_tool(
+                "coverage_invalid_result_factory",
+                "retrieval",
+                structured_result_factory=lambda: "not an envelope",
+            )(lambda: "unused")
+            adapter = add_tool.call_args.args[0]
+            with self.assertRaisesRegex(TypeError, "must return ToolResponseEnvelope"):
+                asyncio.run(adapter())
+
+    def test_search_response_uses_bounded_fallback_when_first_match_cannot_fit(self):
+        result = {
+            "status": "ok",
+            "query": "needle",
+            "capture_id": "cap-search-fallback",
+            "label": "label",
+            "total_lines": 1,
+            "mode": "bm25",
+            "matches": [{
+                "score": 1.0,
+                "matched_range": "L1-L1",
+                "context_range": "L1-L1",
+                "snippet": "needle",
+            }],
+        }
+        with (
+            patch.object(server.engine, "search", return_value=result),
+            patch.object(server, "_call_tool_result_bytes", return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2),
+        ):
+            response = server.search_capture_result("needle", mode="bm25")
+
+        self.assertTrue(response.truncated)
+        self.assertEqual(response.data["matches"], [])
+        self.assertIn("Matches were found but omitted", response.text)
+
     def test_search_response_has_a_utf8_budget(self):
         matches = [
             {
@@ -1575,7 +1803,7 @@ class TestServerTools(unittest.TestCase):
                 "context_range": "1-1",
                 "snippet": "x" * (server.SEARCH_RESPONSE_MAX_BYTES // 4),
             }
-            for _ in range(8)
+            for _ in range(20)
         ]
         with patch.object(
             server.engine,
@@ -1607,10 +1835,11 @@ class TestServerTools(unittest.TestCase):
             context_lines=3,
         )
         match = search_result["matches"][0]
-        self.assertGreater(
+        self.assertLessEqual(
             len(match["snippet"].encode("utf-8")),
-            server.SEARCH_RESPONSE_MAX_BYTES,
+            16 * 1024,
         )
+        self.assertLessEqual(len(match["context"].encode("utf-8")), 4 * 1024)
 
         with patch.object(server.engine, "search", return_value=search_result):
             response = server.search_capture(
@@ -1632,42 +1861,33 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("snippet truncated", response)
         self.assertIn("get_capture_slice", response)
 
-        retrieved = server.get_capture_slice(
-            match["context_start_line"],
-            match["context_end_line"],
-            capture_id=capture_id,
+        retrieved_content = []
+        cursor = None
+        while True:
+            retrieved = server.get_capture_slice_result(
+                match["context_start_line"],
+                match["context_end_line"],
+                capture_id=capture_id,
+                cursor=cursor,
+            )
+            self.assertEqual(retrieved.status, "ok")
+            self.assertLessEqual(
+                server._call_tool_result_bytes(retrieved),
+                server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+            )
+            retrieved_content.append(retrieved.data["content"])
+            cursor = retrieved.next_cursor
+            if cursor is None:
+                break
+        retrieved_text = "".join(retrieved_content)
+        expected_text = "\n".join(
+            content.splitlines()[match["context_start_line"] - 1:match["context_end_line"]]
         )
-        self.assertIn(
-            f"Lines {match['context_start_line']} to {match['context_end_line']}",
-            retrieved,
-        )
-        self.assertIn("needle", retrieved)
+        self.assertEqual(retrieved_text, expected_text)
+        self.assertIn("needle", retrieved_text)
 
     def test_search_response_reports_final_match_omitted_at_budget_boundary(self):
-        omission_note = (
-            "Additional matches omitted because the search response reached "
-            f"its {server.SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. "
-            "Use get_capture_slice for full content."
-        )
-        first_header = "### Match #1 (Score: 1.0, Range: L1-L1, Context: L1-L1)"
-        empty_first_response = "\n".join([
-            'Search Results for: "query" [Mode: bm25]',
-            "Capture: `cap` (label, 1 total lines)",
-            "Found 2 relevant section(s):\n",
-            first_header,
-            "```text",
-            "",
-            "```\n",
-        ])
-        # Leave room for the omission note but less than the second match's
-        # header and truncation marker, forcing the final match to be skipped.
-        first_snippet_size = (
-            server.SEARCH_RESPONSE_MAX_BYTES
-            - len(empty_first_response.encode("utf-8"))
-            - 1
-            - len(omission_note.encode("utf-8"))
-            - 5
-        )
+        first_snippet_size = 28 * 1024
         matches = [
             {
                 "score": 1.0,
@@ -1679,63 +1899,42 @@ class TestServerTools(unittest.TestCase):
                 "score": 1.0,
                 "matched_range": "L2-L2",
                 "context_range": "L1-L2",
-                "snippet": "y" * 1_000,
+                "snippet": "y" * 5_000,
             },
         ]
-        with patch.object(
-            server.engine,
-            "search",
-            return_value={
-                "status": "ok",
-                "mode": "bm25",
-                "capture_id": "cap",
-                "label": "label",
-                "total_lines": 1,
-                "matches": matches,
-            },
+        with (
+            patch.object(server, "SEARCH_STRUCTURED_MATCH_MAX_BYTES", first_snippet_size),
+            patch.object(
+                server.engine,
+                "search",
+                return_value={
+                    "status": "ok",
+                    "mode": "bm25",
+                    "capture_id": "cap",
+                    "label": "label",
+                    "total_lines": 2,
+                    "matches": matches,
+                },
+            ),
         ):
-            response = server.search_capture("query", mode="bm25")
+            result = server.search_capture_result("query", mode="bm25")
 
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["match_count"], 1)
+        self.assertTrue(result.truncated)
+        self.assertIn("Found 1 relevant section(s)", result.text)
+        self.assertIn("Range: L1-L1, Context: L1-L1", result.text)
+        self.assertNotIn("Range: L2-L2, Context: L1-L2", result.text)
+        self.assertIn("Additional matches omitted", result.text)
+        self.assertNotIn("snippet truncated", result.text)
         self.assertLessEqual(
-            len(response.encode("utf-8")),
-            server.SEARCH_RESPONSE_MAX_BYTES,
+            server._call_tool_result_bytes(result),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
         )
-        self.assertIn("Found 2 relevant section(s)", response)
-        self.assertIn("Range: L1-L1, Context: L1-L1", response)
-        self.assertNotIn("Range: L2-L2, Context: L1-L2", response)
-        self.assertIn("Additional matches omitted", response)
 
     def test_search_response_does_not_claim_snippet_truncated_when_it_fits(self):
-        omission_note = (
-            "Additional matches omitted because the search response reached "
-            f"its {server.SEARCH_RESPONSE_MAX_BYTES:,}-byte budget. "
-            "Use get_capture_slice for full content."
-        )
-        first_header = "### Match #1 (Score: 1.0, Range: L1-L1, Context: L1-L1)"
-        empty_first_response = "\n".join([
-            'Search Results for: "query" [Mode: bm25]',
-            "Capture: `cap` (label, 1 total lines)",
-            "Found 2 relevant section(s):\n",
-            first_header,
-            "```text",
-            "",
-            "```\n",
-        ])
-        combined_marker_bytes = len(
-            server.SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER.encode("utf-8")
-        )
-        omission_marker_bytes = len(server.SEARCH_MATCHES_OMITTED_MARKER.encode("utf-8"))
-        note_with_separator_bytes = len(omission_note.encode("utf-8")) + 1
-        response_slack = combined_marker_bytes + 3
-        self.assertLess(response_slack, note_with_separator_bytes)
-        self.assertLessEqual(omission_marker_bytes, response_slack)
-
+        first_snippet_size = 28 * 1024
         unique_suffix = "UNIQUE_END"
-        first_snippet_size = (
-            server.SEARCH_RESPONSE_MAX_BYTES
-            - len(empty_first_response.encode("utf-8"))
-            - response_slack
-        )
         first_snippet = "x" * (first_snippet_size - len(unique_suffix)) + unique_suffix
         matches = [
             {
@@ -1748,20 +1947,23 @@ class TestServerTools(unittest.TestCase):
                 "score": 1.0,
                 "matched_range": "L2-L2",
                 "context_range": "L1-L2",
-                "snippet": "y" * 1_000,
+                "snippet": "y" * 5_000,
             },
         ]
-        with patch.object(
-            server.engine,
-            "search",
-            return_value={
-                "status": "ok",
-                "mode": "bm25",
-                "capture_id": "cap",
-                "label": "label",
-                "total_lines": 1,
-                "matches": matches,
-            },
+        with (
+            patch.object(server, "SEARCH_STRUCTURED_MATCH_MAX_BYTES", first_snippet_size),
+            patch.object(
+                server.engine,
+                "search",
+                return_value={
+                    "status": "ok",
+                    "mode": "bm25",
+                    "capture_id": "cap",
+                    "label": "label",
+                    "total_lines": 2,
+                    "matches": matches,
+                },
+            ),
         ):
             response = server.search_capture("query", mode="bm25")
 
@@ -1772,7 +1974,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn(unique_suffix, response)
         self.assertNotIn("snippet truncated", response)
         self.assertIn("Additional matches omitted", response)
-        self.assertNotIn("get_capture_slice", response)
+        self.assertIn("get_capture_slice", response)
 
     def test_clear_capture_delegates_success_and_missing_results(self):
         with patch.object(server.engine, "clear", return_value="Cleared capture 'cap'.") as clear:

@@ -262,20 +262,27 @@ def run_summary_benchmark() -> Dict[str, Any]:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        retrieval = server.get_capture_slice(
-            1,
-            compact_summary["total_lines"],
-            capture_id=capture_id,
-        )
-        retrieval_body = retrieval.split("```text\n", 1)[1].rsplit("\n```", 1)[0]
-        retrieved_lines = [
-            line.split(" | ", 1)[1]
-            for line in retrieval_body.splitlines()
-            if " | " in line
-        ]
-        retrieval_verified = (
-            retrieved_lines == scenario["text"].splitlines()
-        )
+        retrieval_content = []
+        retrieval_bytes = 0
+        retrieval_ok = True
+        cursor = None
+        while True:
+            page = server.get_capture_slice_result(
+                1,
+                compact_summary["total_lines"],
+                capture_id=capture_id,
+                cursor=cursor,
+            )
+            retrieval_bytes += server._call_tool_result_bytes(page)
+            if page.status != "ok":
+                retrieval_ok = False
+                break
+            retrieval_content.append(page.data["content"])
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        expected_retained_text = "\n".join(scenario["text"].splitlines())
+        retrieval_verified = retrieval_ok and "".join(retrieval_content) == expected_retained_text
         compact_tokens = math.ceil(len(compact) / 4)
         detailed_tokens = math.ceil(len(detailed) / 4)
         legacy_prompt_tokens = math.ceil(len(legacy_prompt) / 4)
@@ -295,7 +302,7 @@ def run_summary_benchmark() -> Dict[str, Any]:
             "summary_prompt_token_proxy": summary_prompt_tokens,
             "prompt_byte_reduction": 1 - (len(summary_prompt) / len(legacy_prompt)),
             "prompt_token_proxy_reduction": 1 - (summary_prompt_tokens / legacy_prompt_tokens),
-            "retrieval_bytes": len(retrieval.encode("utf-8")),
+            "retrieval_bytes": retrieval_bytes,
             "full_output_available_for_retrieval": retrieval_verified,
             "retrieval_verified": retrieval_verified,
             "payload_shapes_aligned": payload_shapes_aligned,

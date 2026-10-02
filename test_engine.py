@@ -2,7 +2,11 @@
 Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 """
 
+import base64
+import hashlib
+import hmac
 import io
+import json
 import sqlite3
 import subprocess
 import sys
@@ -22,9 +26,14 @@ from engine import (
     register_bundled_embedding_models,
     Capture,
     EphemeralEngine,
+    MAX_SEARCH_TOP_K,
     PREVIEW_MAX_BYTES,
     SEARCH_SNIPPET_MAX_BYTES,
+    MAX_SEARCH_CONTEXT_LINES,
+    SEARCH_MATCH_CONTEXT_MAX_BYTES,
+    SEARCH_MATCH_SNIPPET_MAX_BYTES,
     _bounded_preview,
+    _bounded_join_lines,
     _decode_git_path,
     _parse_git_diff_paths,
     _parse_unified_file_path,
@@ -581,6 +590,37 @@ STEP 3: Summary
 
         self.assertEqual(engine.search("MATCH", context_lines=-1)["status"], "error")
         self.assertEqual(engine.search("MATCH", top_k=0)["status"], "error")
+        self.assertEqual(
+            engine.search("MATCH", top_k=MAX_SEARCH_TOP_K + 1)["error_code"],
+            "top_k_limit_exceeded",
+        )
+        self.assertEqual(
+            engine.search("MATCH", context_lines=MAX_SEARCH_CONTEXT_LINES + 1)["error_code"],
+            "context_limit_exceeded",
+        )
+
+    def test_search_context_and_snippet_are_bounded_for_wide_ranges(self):
+        engine = EphemeralEngine(max_captures=1)
+        content = "\n".join(["needle", *("x" * 20_000 for _ in range(80))])
+        capture = engine.ingest(content, label="wide-context")
+
+        result = engine.search(
+            "needle",
+            mode="bm25",
+            capture_id=capture.capture_id,
+            top_k=1,
+            context_lines=MAX_SEARCH_CONTEXT_LINES,
+        )
+
+        match = result["matches"][0]
+        self.assertLessEqual(len(match["context"].encode("utf-8")), SEARCH_MATCH_CONTEXT_MAX_BYTES)
+        self.assertLessEqual(len(match["snippet"].encode("utf-8")), SEARCH_MATCH_SNIPPET_MAX_BYTES)
+        self.assertTrue(match["context_truncated"])
+        self.assertTrue(match["snippet_truncated"])
+        self.assertEqual(
+            engine.search("needle", context_lines=MAX_SEARCH_CONTEXT_LINES + 1)["error_code"],
+            "context_limit_exceeded",
+        )
 
     def test_search_deduplicates_overlapping_contexts_before_top_k(self):
         engine = EphemeralEngine(max_captures=1)
@@ -747,10 +787,175 @@ STEP 3: Summary
         self.assertIn("preview truncated", summary["head_preview"])
         self.assertIn("preview truncated", summary["tail_preview"])
         self.assertEqual(cap.raw_lines, [long_line])
-        self.assertEqual(
-            self.engine.get_slice(1, 1, capture_id=cap.capture_id)["content"],
-            f"      1 | {long_line}",
+        page = self.engine.get_slice_page(
+            1,
+            1,
+            capture_id=cap.capture_id,
+            max_content_bytes=1024,
         )
+        self.assertEqual(page["status"], "ok")
+        self.assertLessEqual(page["content_bytes"], 1024)
+        self.assertTrue(page["truncated"])
+        self.assertEqual(page["content"], long_line[:len(page["content"])])
+
+    def test_slice_pages_reconstruct_long_unicode_lines_and_line_boundaries(self):
+        long_line = "λ" * 180
+        source = long_line + "\nsecond line\n最後"
+        capture = self.engine.ingest(source, label="paged-unicode")
+
+        page_contents = []
+        cursor = None
+        page_count = 0
+        while True:
+            page = self.engine.get_slice_page(
+                1,
+                3,
+                capture_id=capture.capture_id,
+                max_content_bytes=64,
+                cursor=cursor,
+            )
+            self.assertEqual(page["status"], "ok")
+            self.assertLessEqual(page["content_bytes"], 64)
+            self.assertLessEqual(len(page["content"].encode("utf-8")), 64)
+            page_contents.append(page["content"])
+            page_count += 1
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+            self.assertLessEqual(len(cursor), 2048)
+
+        self.assertGreater(page_count, 3)
+        self.assertEqual("".join(page_contents), source)
+
+    def test_slice_page_returns_stable_errors_for_ranges_and_cursors(self):
+        capture = self.engine.ingest("first\nsecond", label="paged-errors")
+        missing = self.engine.get_slice_page(1, 1, capture_id="missing")
+        invalid_range = self.engine.get_slice_page(3, 3, capture_id=capture.capture_id)
+        first_page = self.engine.get_slice_page(
+            1, 2, capture_id=capture.capture_id, max_content_bytes=4
+        )
+        invalid_cursor = self.engine.get_slice_page(
+            1,
+            2,
+            capture_id=capture.capture_id,
+            max_content_bytes=4,
+            cursor="not-a-valid-cursor",
+        )
+
+        self.assertEqual(missing["error_code"], "capture_not_found")
+        self.assertEqual(invalid_range["error_code"], "invalid_range")
+        self.assertEqual(first_page["status"], "ok")
+        self.assertEqual(invalid_cursor["error_code"], "invalid_cursor")
+
+    def test_slice_page_validates_cursor_signatures_and_fields(self):
+        capture = self.engine.ingest("abcdefgh\nsecond", label="cursor-validation")
+        first = self.engine.get_slice_page(
+            1, 2, capture_id=capture.capture_id, max_content_bytes=8, max_segment_bytes=4
+        )
+        cursor = first["next_cursor"]
+        payload_part, signature_part = cursor.split(".", 1)
+        replacement = "A" if signature_part[0] != "A" else "B"
+        tampered = payload_part + "." + replacement + signature_part[1:]
+
+        def signed_payload(payload):
+            payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            signature = hmac.new(
+                self.engine._slice_cursor_secret,
+                payload_bytes,
+                hashlib.sha256,
+            ).digest()[:16]
+            encoded_payload = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
+            encoded_signature = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+            return encoded_payload + "." + encoded_signature
+
+        wrong_shape = signed_payload([])
+        wrong_types = self.engine._encode_slice_cursor(
+            capture_id=capture.capture_id,
+            start_line=1,
+            end_line=2,
+            line=1,
+            character_offset=True,
+            utf8_byte_offset=0,
+        )
+        mismatched_range = self.engine._encode_slice_cursor(
+            capture_id=capture.capture_id,
+            start_line=1,
+            end_line=1,
+            line=1,
+            character_offset=0,
+            utf8_byte_offset=0,
+        )
+        out_of_range = self.engine._encode_slice_cursor(
+            capture_id=capture.capture_id,
+            start_line=1,
+            end_line=2,
+            line=3,
+            character_offset=0,
+            utf8_byte_offset=0,
+        )
+
+        invalid_tokens = [
+            "x" * 2049,
+            tampered,
+            wrong_shape,
+            wrong_types,
+            mismatched_range,
+            out_of_range,
+        ]
+        results = [
+            self.engine.get_slice_page(
+                1, 2, capture_id=capture.capture_id, cursor=token
+            )
+            for token in invalid_tokens
+        ]
+        self.assertTrue(all(result["error_code"] == "invalid_cursor" for result in results))
+
+    def test_slice_page_budget_boundaries_and_legacy_truncation_text(self):
+        capture = self.engine.ingest("abc\ndef", label="page-boundaries")
+        errors = [
+            self.engine.get_slice_page(1, 1, capture.capture_id, max_content_bytes=False),
+            self.engine.get_slice_page(1, 1, capture.capture_id, max_content_bytes=3),
+            self.engine.get_slice_page(
+                1, 1, capture.capture_id, max_content_bytes=4, max_segment_bytes=True
+            ),
+            self.engine.get_slice_page(1, 1, capture.capture_id, max_content_bytes=4, max_segment_bytes=4097),
+        ]
+        self.assertTrue(all(result["error_code"] == "invalid_byte_budget" for result in errors))
+
+        separator_boundary = self.engine.get_slice_page(
+            1, 2, capture.capture_id, max_content_bytes=4, max_segment_bytes=4
+        )
+        self.assertEqual(separator_boundary["content"], "abc\n")
+        self.assertIsNotNone(separator_boundary["next_cursor"])
+
+        long_capture = self.engine.ingest("abcdefghijkl", label="partial-boundary")
+        full_page = self.engine.get_slice_page(
+            1, 1, long_capture.capture_id, max_content_bytes=8, max_segment_bytes=4
+        )
+        self.assertEqual(full_page["content"], "abcdefgh")
+        self.assertIsNotNone(full_page["next_cursor"])
+        legacy_page = self.engine.get_slice(
+            1, 1, capture_id=long_capture.capture_id, max_bytes=8
+        )
+        self.assertIn("slice truncated", legacy_page["content"])
+
+        four_byte_capture = self.engine.ingest("🙂\nsecond", label="minimum-page")
+        too_small = self.engine.get_slice_page(
+            1, 2, four_byte_capture.capture_id, max_content_bytes=4, max_segment_bytes=4
+        )
+        self.assertEqual(too_small["error_code"], "response_budget_too_small")
+
+    def test_bounded_helpers_handle_empty_and_tiny_budgets(self):
+        self.assertEqual(_bounded_preview("value", max_bytes=0), "")
+        self.assertEqual(_bounded_preview("value", max_bytes=2, marker="..."), "..")
+        self.assertEqual(_bounded_join_lines(["line"], 0, "..."), ("", True))
+        self.assertEqual(_bounded_join_lines(["line"], 2, "..."), ("..", True))
+        self.assertEqual(_bounded_join_lines(["ab", "c"], 5, "..."), ("ab...", True))
+
+    def test_bounded_preview_does_not_truncate_text_that_fits_with_marker_reserve(self):
+        marker = "..."
+        content = "x" * 90
+        self.assertEqual(_bounded_preview(content, max_bytes=100, marker=marker), content)
 
     def test_ingest_validates_and_preserves_structured_metrics(self):
         engine = EphemeralEngine(max_captures=2)
