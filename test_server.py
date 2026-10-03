@@ -20,6 +20,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from metrics import LocalMetrics
 from socket_protocol import FRAME_HEADER_SIZE, FRAME_MAGIC, decode_header, encode_frame
+import config
+from config import load_settings
+
+
+def settings_with_environment(**overrides):
+    environment = os.environ.copy()
+    environment.update(overrides)
+    return load_settings(environment, warn_on_legacy_state_transition=False)
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import server
@@ -774,10 +782,10 @@ class TestServerTools(unittest.TestCase):
     def test_runtime_diagnostics_reports_content_free_metadata(self):
         server.capture_text("secret command output", label="private-label")
 
-        with patch.dict(
-            os.environ,
-            {"EPHEMERAL_SESSION_ID": "diagnostic-session"},
-            clear=True,
+        with patch.object(
+            server,
+            "SETTINGS",
+            load_settings({"EPHEMERAL_SESSION_ID": "diagnostic-session"}, warn_on_legacy_state_transition=False),
         ):
             result = server.get_runtime_diagnostics()
 
@@ -787,6 +795,10 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Socket mode: session-derived path", result)
         self.assertIn("Socket lifecycle:", result)
         self.assertIn("Session ID configured: yes", result)
+        self.assertIn("Execution state directory:", result)
+        self.assertIn("Execution state durability:", result)
+        self.assertIn("Startup settings snapshot:", result)
+        self.assertNotIn("diagnostic-session", result)
         self.assertIn("Captures: 1/", result)
         self.assertIn("Embedding model:", result)
         self.assertIn("Embedding warm-up:", result)
@@ -839,9 +851,17 @@ class TestServerTools(unittest.TestCase):
             self.assertIn("Error adjusting semantic-index budget", server.set_semantic_index_budget("4"))
 
     def test_runtime_diagnostics_reports_explicit_and_default_socket_modes(self):
-        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/diagnostic.sock"}, clear=True):
+        with patch.object(
+            server,
+            "SETTINGS",
+            load_settings({"EPHEMERAL_SOCKET_PATH": "/tmp/diagnostic.sock"}, warn_on_legacy_state_transition=False),
+        ):
             explicit = server.get_runtime_diagnostics()
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.object(
+            server,
+            "SETTINGS",
+            load_settings({}, warn_on_legacy_state_transition=False),
+        ):
             default = server.get_runtime_diagnostics()
 
         self.assertIn("Socket mode: explicit path", explicit)
@@ -1158,10 +1178,10 @@ class TestServerTools(unittest.TestCase):
         isolated_engine = EphemeralEngine(metrics=metrics, semantic_prefetch=False)
         engine_token = server._ENGINE_OVERRIDE.set(isolated_engine)
         try:
-            with tempfile.TemporaryDirectory() as directory, patch.dict(
-                os.environ,
-                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
-                clear=False,
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                server,
+                "SETTINGS",
+                settings_with_environment(EPHEMERAL_METRICS_FILE=os.path.join(directory, "metrics.json")),
             ):
                 server.capture_text("private snapshot content", label="private snapshot label")
                 server._write_metrics_snapshot()
@@ -1205,10 +1225,10 @@ class TestServerTools(unittest.TestCase):
 
         engine.set_metrics_snapshot_callback(write_snapshot)
         try:
-            with tempfile.TemporaryDirectory() as directory, patch.dict(
-                os.environ,
-                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
-                clear=False,
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                server,
+                "SETTINGS",
+                settings_with_environment(EPHEMERAL_METRICS_FILE=os.path.join(directory, "metrics.json")),
             ):
                 capture = engine.ingest("async snapshot content", label="private")
                 self.assertTrue(started.wait(timeout=2))
@@ -1228,10 +1248,10 @@ class TestServerTools(unittest.TestCase):
         original_metrics = server.METRICS
         server.METRICS = LocalMetrics(enabled=False)
         try:
-            with tempfile.TemporaryDirectory() as directory, patch.dict(
-                os.environ,
-                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
-                clear=False,
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                server,
+                "SETTINGS",
+                settings_with_environment(EPHEMERAL_METRICS_FILE=os.path.join(directory, "metrics.json")),
             ):
                 server._write_metrics_snapshot()
                 self.assertFalse(Path(directory, "metrics.json").exists())
@@ -1242,7 +1262,11 @@ class TestServerTools(unittest.TestCase):
         original_metrics = server.METRICS
         server.METRICS = LocalMetrics(enabled=True)
         try:
-            with patch.dict(os.environ, {"EPHEMERAL_METRICS_FILE": "/tmp/metrics.json"}, clear=False), \
+            with patch.object(
+                server,
+                "SETTINGS",
+                settings_with_environment(EPHEMERAL_METRICS_FILE="/tmp/metrics.json"),
+            ), \
                     patch.object(server.os, "replace", side_effect=OSError("read-only")), \
                     self.assertLogs("ephemeral_buffer.server", level="WARNING") as logs:
                 server._write_metrics_snapshot()
@@ -1254,10 +1278,10 @@ class TestServerTools(unittest.TestCase):
         original_metrics = server.METRICS
         server.METRICS = LocalMetrics(enabled=True)
         try:
-            with tempfile.TemporaryDirectory() as directory, patch.dict(
-                os.environ,
-                {"EPHEMERAL_METRICS_FILE": os.path.join(directory, "metrics.json")},
-                clear=False,
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                server,
+                "SETTINGS",
+                settings_with_environment(EPHEMERAL_METRICS_FILE=os.path.join(directory, "metrics.json")),
             ), patch.object(server.os, "replace", side_effect=OSError("read-only")), \
                     patch.object(Path, "unlink", side_effect=OSError("cleanup failed")), \
                     self.assertLogs("ephemeral_buffer.server", level="WARNING"):
@@ -2626,7 +2650,8 @@ class TestSocketServerStartup(unittest.TestCase):
         )
 
     def test_disabled_socket_import_marks_startup_event_ready(self):
-        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}):
+        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}), \
+                patch.object(config, "_STARTUP_SETTINGS", None):
             namespace = runpy.run_path(server.__file__, run_name="server_disabled_import")
 
         self.assertTrue(namespace["_SOCKET_STARTUP_EVENT"].is_set())
@@ -2636,20 +2661,25 @@ class TestSocketServerStartup(unittest.TestCase):
                 "EPHEMERAL_DISABLE_SOCKET_SERVER": "0",
                 "EPHEMERAL_EMBEDDING_WARMUP": "0",
         }), \
+                patch.object(config, "_STARTUP_SETTINGS", None), \
                 patch.object(server.threading, "Thread") as thread:
             runpy.run_path(server.__file__, run_name="server_import")
 
         thread.assert_not_called()
 
     def test_explicit_socket_startup_honors_disabled_mode(self):
-        with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}):
+        with patch.object(
+            server,
+            "SETTINGS",
+            settings_with_environment(EPHEMERAL_DISABLE_SOCKET_SERVER="1"),
+        ):
             self.assertIsNone(server.start_socket_server())
 
         self.assertEqual(server._socket_lifecycle()[0], "disabled")
 
     def test_socket_startup_timeout_is_reported(self):
         event = SimpleNamespace(wait=lambda timeout: False)
-        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "0"}), \
+        with patch.object(server, "_allow_stdio_without_socket", return_value=False), \
                 patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
                 patch.object(server, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
             with self.assertRaisesRegex(SystemExit, "did not become ready within 3 seconds"):
@@ -2657,14 +2687,14 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_socket_startup_timeout_can_continue_stdio_only(self):
         event = SimpleNamespace(wait=lambda timeout: False)
-        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "1"}), \
+        with patch.object(server, "_allow_stdio_without_socket", return_value=True), \
                 patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
                 patch.object(server, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
             server._require_socket_ready()
 
     def test_socket_startup_failure_is_reported_to_entrypoint(self):
         event = SimpleNamespace(wait=lambda timeout: True)
-        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "0"}), \
+        with patch.object(server, "_allow_stdio_without_socket", return_value=False), \
                 patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
                 patch.object(server, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
             with self.assertRaisesRegex(SystemExit, "failed to start: RuntimeError: unavailable"):
@@ -2672,7 +2702,7 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_socket_startup_failure_can_continue_stdio_only(self):
         event = SimpleNamespace(wait=lambda timeout: True)
-        with patch.dict(os.environ, {"EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET": "true"}), \
+        with patch.object(server, "_allow_stdio_without_socket", return_value=True), \
                 patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
                 patch.object(server, "_socket_lifecycle", return_value=("failed", "PermissionError: denied")):
             server._require_socket_ready()
@@ -3286,6 +3316,7 @@ class TestSocketServerStartup(unittest.TestCase):
 
         fake_thread = FakeThread()
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
+                patch.object(config, "_STARTUP_SETTINGS", None), \
                 patch.object(server.threading, "Thread", return_value=fake_thread), \
                 patch.object(server.threading, "Event", return_value=ReadyEvent()), \
                 patch("mcp.server.fastmcp.FastMCP", return_value=server.mcp), \
@@ -3300,7 +3331,8 @@ class TestSocketServerStartup(unittest.TestCase):
             os.environ,
             {"EPHEMERAL_REQUIRE_ISOLATION": "1"},
             clear=True,
-        ), self.assertRaisesRegex(SystemExit, "Socket isolation is required"):
+        ), patch.object(config, "_STARTUP_SETTINGS", None), \
+                self.assertRaisesRegex(SystemExit, "Socket isolation is required"):
             runpy.run_path(server.__file__, run_name="__main__")
 
 

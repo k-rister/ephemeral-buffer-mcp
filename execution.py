@@ -1719,12 +1719,18 @@ class PhaseExecutionManager:
         state_dir: str | os.PathLike[str],
         *,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        quota_bytes: Optional[int] = None,
+        checkpoint_reserve_bytes: Optional[int] = None,
         command_runner: Optional[CommandRunner] = None,
         process_cleanup: Optional[ProcessCleanup] = None,
     ):
         if max_output_bytes < 512:
             raise ValueError("max_output_bytes must be at least 512")
-        self.store = ExecutionStore(state_dir)
+        self.store = ExecutionStore(
+            state_dir,
+            quota_bytes=quota_bytes,
+            checkpoint_reserve_bytes=checkpoint_reserve_bytes,
+        )
         self.max_output_bytes = max_output_bytes
         self.command_runner = command_runner or run_command_bounded
         self.process_cleanup = process_cleanup

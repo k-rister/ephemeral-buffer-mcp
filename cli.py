@@ -22,17 +22,14 @@ import argparse
 import shlex
 import time
 import selectors
-from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
+from capture_utils import bound_chunks, run_command_bounded
 from config import (
-    positive_int_env,
-    socket_isolation_configured,
-    socket_isolation_required,
-    socket_path,
-    socket_timeout_seconds,
+    startup_settings,
 )
 from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 
-SOCKET_PATH = socket_path()
+SETTINGS = startup_settings()
+SOCKET_PATH = SETTINGS.identity.socket_path
 
 
 def send_to_mcp(
@@ -45,7 +42,7 @@ def send_to_mcp(
     timed_out: bool = False,
     duration_ms: float | None = None,
 ) -> dict:
-    if socket_isolation_required() and not socket_isolation_configured():
+    if SETTINGS.socket_require_isolation.value and not SETTINGS.identity.isolation_configured:
         return {
             "status": "error",
             "message": "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH",
@@ -59,7 +56,7 @@ def send_to_mcp(
     sock = None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(socket_timeout_seconds())
+        sock.settimeout(SETTINGS.socket_timeout_seconds.value)
         sock.connect(SOCKET_PATH)
         
         payload = json.dumps({
@@ -82,7 +79,7 @@ def send_to_mcp(
             "status": "error",
             "message": (
                 "Timed out communicating with MCP server after "
-                f"{socket_timeout_seconds():g}s"
+                f"{SETTINGS.socket_timeout_seconds.value:g}s"
             ),
         }
     except Exception as e:
@@ -114,7 +111,7 @@ def _recv_response(sock: socket.socket) -> dict:
 
 def _send_large_frame_with_early_response(sock: socket.socket, frame: bytes) -> dict:
     """Send large socket requests while listening for an early busy response."""
-    timeout = socket_timeout_seconds()
+    timeout = SETTINGS.socket_timeout_seconds.value
     deadline = time.monotonic() + timeout
     sent = 0
     received = bytearray()
@@ -187,7 +184,7 @@ def main():
     parser.add_argument(
         "--max-output-bytes",
         type=int,
-        default=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_OUTPUT_BYTES),
+        default=SETTINGS.max_buffer_bytes.value,
         help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)",
     )
     parser.add_argument(

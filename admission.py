@@ -9,17 +9,13 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict
 
-from config import (
-    max_active_socket_clients,
-    max_active_tool_work,
-    max_queued_socket_clients,
-    max_queued_tool_work,
-)
+from config import startup_settings
 
-MAX_ACTIVE_TOOL_WORK = max_active_tool_work()
-MAX_QUEUED_TOOL_WORK = max_queued_tool_work()
-MAX_ACTIVE_SOCKET_CLIENTS = max_active_socket_clients()
-MAX_QUEUED_SOCKET_CLIENTS = max_queued_socket_clients()
+_SETTINGS = startup_settings()
+MAX_ACTIVE_TOOL_WORK = _SETTINGS.max_active_tool_work.value
+MAX_QUEUED_TOOL_WORK = _SETTINGS.max_queued_tool_work.value
+MAX_ACTIVE_SOCKET_CLIENTS = _SETTINGS.max_active_socket_clients.value
+MAX_QUEUED_SOCKET_CLIENTS = _SETTINGS.max_queued_socket_clients.value
 MAX_ACTIVE_DIAGNOSTIC_WORK = 1
 
 

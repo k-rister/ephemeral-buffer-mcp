@@ -115,10 +115,11 @@ frames, so fragmented reads do not depend on half-closing the connection.
 
 When using the global Codex MCP configuration, start Codex through the
 installed `codex-ephemeral` launcher. From a source checkout, use
-`./codex-ephemeral`. The launcher creates a unique
-`EPHEMERAL_SESSION_ID` and exports it to Codex, the MCP server, and `ephbuf`.
-It also passes the ID explicitly through Codex's MCP configuration so it is
-available even when Codex sanitizes the MCP child environment.
+`./codex-ephemeral`. The launcher creates a unique `EPHEMERAL_SESSION_ID`
+when no session ID or explicit socket path was supplied. It forwards the
+session or explicit socket and state paths, along with supported EB settings,
+through Codex's MCP configuration so they remain available when Codex
+sanitizes the child environment.
 The global configuration requires this identity, so starting Codex directly
 will fail closed instead of attaching to another session's socket.
 
@@ -141,6 +142,27 @@ launching to choose another level, such as `WARNING` or `DEBUG`, or pass
 ```
 
 Set `EPHEMERAL_LOG_FILE` to override the log path.
+
+Socket and durable-state identity follow one precedence rule. An explicit
+`EPHEMERAL_EXECUTION_STATE_DIR` selects the state directory. Otherwise an
+explicit `EPHEMERAL_SOCKET_PATH` identifies both the socket and the derived
+state directory. Without an explicit socket, `EPHEMERAL_SESSION_ID` derives
+both paths. With neither identity value, EB keeps the legacy shared socket and
+uses a private process state directory that is removed on normal shutdown
+where secure cleanup is available. The session helper does not create an
+unrelated session ID when an explicit socket path is supplied.
+Use absolute paths for explicit socket and state directories in manually
+configured MCP clients; the supplied shell launchers normalize them before
+starting child processes.
+
+EB parses its supported startup settings once per process. Invalid numeric and
+boolean values are reported to stderr and fall back to the documented default;
+empty optional values remain unset. `get_runtime_diagnostics()` includes the
+effective paths, identity sources, durability mode, and a typed settings
+snapshot with value, origin, validation status, and invalid-value behavior. It
+reports a short session fingerprint instead of the raw session ID. The runtime
+semantic-index budget permission is sampled for each adjustment request; other
+settings use their startup snapshot.
 
 ### Configure other coding agents
 
@@ -176,10 +198,10 @@ export EPHEMERAL_REQUIRE_ISOLATION=1
 export EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1
 ```
 
-The MCP server and `ephbuf` CLI must inherit the same ID. An MCP client that
-does not pass environment variables to child processes can still use the MCP
-tools, but its separate `ephbuf` shell commands will need an equivalent
-session environment configured independently.
+The MCP server and `ephbuf` CLI must inherit the same session ID or explicit
+socket path. An MCP client that does not pass environment variables to child
+processes can still use the MCP tools, but its separate `ephbuf` shell
+commands will need the same identity configured independently.
 
 For other shell-launched agents, use the installed generic launcher. From a
 source checkout, use `./ephemeral-agent`:
@@ -241,7 +263,7 @@ CLI is a separate convenience client for shell output.
 ### Isolate concurrent agent sessions
 
 For a coding agent that may run alongside another agent, configure the same
-session identity for the MCP server and the `ephbuf` CLI:
+session ID or explicit socket path for the MCP server and the `ephbuf` CLI:
 
 ```json
 "env": {
@@ -250,11 +272,12 @@ session identity for the MCP server and the `ephbuf` CLI:
 }
 ```
 
-The server and CLI then derive the same session-specific socket, while a
-missing identity fails closed instead of falling back to the shared legacy
-socket. `EPHEMERAL_SOCKET_PATH` may be used instead when the launcher assigns
-the socket path directly. The MCP initialization instructions describe this
-policy to the client, but the environment checks enforce it independently.
+The server and CLI resolve the same socket and state identity. A missing
+session ID and explicit socket path fails closed instead of falling back to
+the shared legacy socket. An explicit state directory overrides derived state;
+otherwise an explicit socket path derives state before a session ID does. The
+MCP initialization instructions describe this policy to the client, and the
+environment checks enforce isolation independently.
 
 The CLI bounds each socket connect, send, and receive operation to 10 seconds
 by default. The server uses the same setting to bound how long an admitted
@@ -514,7 +537,7 @@ The agent has access to the following tools:
 | `get_capture_slice(start_line, end_line, capture_id='latest', max_bytes=65536, cursor=None)` | Retrieves one byte-bounded page from a 1-indexed line range. A long line can continue across pages; repeat the original range and pass back `next_cursor` until it is null. `max_bytes` bounds the serialized MCP result and must be between 4 KiB and 64 KiB. The cursor is opaque; each segment reports a zero-based UTF-8 byte offset within its line, and pages never split a Unicode character. Joining `structuredContent.data.content` from successive pages reconstructs the retained newline-joined text exactly. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, semantic memory limits, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
-| `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket mode and path, active log file and level, buffer limits, embedding readiness, and process memory. |
+| `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket and durable-state identity, durability, startup setting values and origins, active log file and level, buffer limits, embedding readiness, and process memory. |
 | `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and scope- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
 | `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
 | `list_captures()` | Lists active captures in the ring buffer. |
@@ -648,14 +671,21 @@ Execution responses include a human-readable `summary`, machine-readable
 next resumable phase. If detailed metadata would exceed the 64 KiB tool
 response budget, the server returns a compact response with the durable
 `execution_id` and `response_truncated: true`; call `get_execution` or the
-bounded output tool to retrieve details. Durable JSON state defaults to a temporary local
-process-local directory created securely with owner-only permissions; set
-`EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
-`EPHEMERAL_EXECUTION_STATE_DIR` to persist and share state across server
-restarts. State can otherwise be placed elsewhere with
-`EPHEMERAL_EXECUTION_STATE_DIR`. State contains the commands and bounded
-outputs, so keep any explicitly configured directory protected when commands
-or results are sensitive.
+bounded output tool to retrieve details. Durable JSON state defaults to a
+temporary local process-private directory created securely with owner-only
+permissions. An explicit `EPHEMERAL_EXECUTION_STATE_DIR` takes precedence for
+storage; otherwise an explicit `EPHEMERAL_SOCKET_PATH` identifies the derived
+state directory, followed by `EPHEMERAL_SESSION_ID` when no socket path is
+explicit. Identity-derived state is retained across normal server shutdowns;
+the private process directory is removed on normal shutdown where secure
+cleanup is available. State contains commands and bounded output, so protect
+explicitly configured directories when those contents are sensitive.
+
+When both an explicit socket and session ID are set, the socket path now
+selects the derived state namespace. If an existing session-derived directory
+is detected, startup reports its location. Set
+`EPHEMERAL_EXECUTION_STATE_DIR` to that exact directory to continue using its
+records. EB never moves state automatically.
 
 Execution metadata is bounded to 64 MiB per record, 64 phases, 32 attempts per
 phase, 16 KiB of structured metrics, and 1,000 records per state directory;
@@ -674,12 +704,12 @@ automatic expiry. Use `get_execution_capacity()` to inspect usage, then call
 `retire_executions(execution_ids)` to preview which records can be retired and
 how many bytes their record/summary pairs occupy. Actual retirement requires
 `dry_run=False` and a new `archive_path` outside the state directory. Active,
-started, or fence-pending records are refused. State and execution leases are
-isolated by the explicit execution-state directory, session ID, or socket path;
-without one, each server process receives a fresh private state directory that
-is removed during normal shutdown on POSIX platforms. Windows may retain that
-temporary directory because secure owner-identity cleanup is not available
-there.
+started, or fence-pending records are refused. State records and execution
+leases use the same namespace precedence documented above: explicit state
+directory, explicit socket path, then session ID. Without an identity, each
+server process receives a fresh private state directory that is removed during
+normal shutdown on POSIX platforms. Windows may retain that temporary
+directory because secure owner-identity cleanup is not available there.
 
 Before any repository-sensitive command or file capture, verify the intended
 working directory and target path. Prefer an explicit `cwd`, confirm the

@@ -79,9 +79,9 @@ MAX_SCOPE_STATES = 128
 
 def metrics_enabled() -> bool:
     """Return whether local metrics were explicitly enabled."""
-    return os.environ.get("EPHEMERAL_METRICS", "").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
+    from config import boolean_env
+
+    return boolean_env("EPHEMERAL_METRICS", False)
 
 
 class LocalMetrics:

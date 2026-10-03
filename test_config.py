@@ -21,6 +21,7 @@ from config import (
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     DEFAULT_SEMANTIC_WAIT_SECONDS,
     cleanup_default_execution_state_dir,
+    codex_mcp_env_config,
     embedding_batch_size,
     embedding_cache_dir,
     embedding_cpu_mem_arena_enabled,
@@ -46,6 +47,7 @@ from config import (
     max_active_tool_work,
     max_queued_socket_clients,
     max_queued_tool_work,
+    load_settings,
     non_negative_int_env,
     semantic_chunk_bytes,
     semantic_chunk_lines,
@@ -199,6 +201,85 @@ class TestPositiveIntEnv(unittest.TestCase):
         ):
             self.assertEqual(socket_path(), "/tmp/explicit.sock")
         self.assertTrue(DEFAULT_SOCKET_PATH)
+
+    def test_explicit_socket_path_is_the_default_state_identity(self):
+        environment = {
+            "EPHEMERAL_SOCKET_PATH": "/tmp/explicit.sock",
+            "EPHEMERAL_SESSION_ID": "agent-session-1",
+        }
+        with patch.object(config.tempfile, "gettempdir", return_value="/tmp"):
+            descriptor = config.resolve_session_descriptor(environment)
+            self.assertEqual(descriptor.socket_path, "/tmp/explicit.sock")
+            self.assertEqual(descriptor.state_source, "socket:EPHEMERAL_SOCKET_PATH")
+            self.assertIn("ephemeral_buffer_executions-socket-", descriptor.state_dir)
+            self.assertIn("ephemeral_buffer_executions-", descriptor.legacy_state_dir)
+
+    def test_explicit_state_directory_overrides_resolved_identity(self):
+        descriptor = config.resolve_session_descriptor({
+            "EPHEMERAL_SOCKET_PATH": "/tmp/explicit.sock",
+            "EPHEMERAL_SESSION_ID": "agent-session-1",
+            "EPHEMERAL_EXECUTION_STATE_DIR": "/var/tmp/continued-state",
+        })
+        self.assertEqual(descriptor.state_dir, "/var/tmp/continued-state")
+        self.assertEqual(descriptor.state_source, "environment:EPHEMERAL_EXECUTION_STATE_DIR")
+        self.assertIsNone(descriptor.legacy_state_dir)
+
+    def test_existing_session_state_reports_explicit_continuation_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "EPHEMERAL_SOCKET_PATH": os.path.join(directory, "agent.sock"),
+                "EPHEMERAL_SESSION_ID": "legacy-session-1",
+            }
+            with patch.object(config.tempfile, "gettempdir", return_value=directory):
+                legacy_state = config.resolve_session_descriptor(environment).legacy_state_dir
+                os.mkdir(legacy_state)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    settings = load_settings(environment)
+            self.assertTrue(settings.identity.legacy_state_transition)
+            self.assertIn(legacy_state, stderr.getvalue())
+            self.assertIn(settings.identity.state_dir, stderr.getvalue())
+            self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", stderr.getvalue())
+
+    def test_settings_snapshot_records_origins_and_invalid_boolean_fallback(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            settings = load_settings({
+                "EPHEMERAL_MAX_ACTIVE_TOOL_WORK": "3",
+                "EPHEMERAL_SEMANTIC_PREFETCH": "perhaps",
+            }, warn_on_legacy_state_transition=False)
+
+        self.assertEqual(settings.max_active_tool_work.value, 3)
+        self.assertEqual(settings.max_active_tool_work.source, "environment")
+        self.assertEqual(settings.semantic_prefetch_enabled.value, True)
+        self.assertEqual(settings.semantic_prefetch_enabled.status, "invalid-fallback")
+        self.assertIn("Ignoring invalid EPHEMERAL_SEMANTIC_PREFETCH", stderr.getvalue())
+        diagnostics = settings.diagnostics()
+        self.assertEqual(
+            diagnostics["settings"]["runtime_index_budget_adjustment_enabled"]["sampling_policy"],
+            "each MCP request; environment value is re-read; reported value is from startup",
+        )
+
+    def test_codex_environment_config_forwards_identity_and_escapes_strings(self):
+        rendered = codex_mcp_env_config({
+            "EPHEMERAL_SESSION_ID": "session-1",
+            "EPHEMERAL_SOCKET_PATH": '/tmp/a"b.sock',
+            "EPHEMERAL_EXECUTION_STATE_DIR": "/tmp/state",
+            "EPHEMERAL_SEMANTIC_PREFETCH": "0",
+        })
+        self.assertIn('EPHEMERAL_SESSION_ID="session-1"', rendered)
+        self.assertIn('EPHEMERAL_SOCKET_PATH="/tmp/a\\"b.sock"', rendered)
+        self.assertIn('EPHEMERAL_EXECUTION_STATE_DIR="/tmp/state"', rendered)
+        self.assertIn('EPHEMERAL_SEMANTIC_PREFETCH="0"', rendered)
+        relative_rendered = codex_mcp_env_config({
+            "EPHEMERAL_SOCKET_PATH": "relative.sock",
+            "EPHEMERAL_EXECUTION_STATE_DIR": "relative-state",
+        })
+        self.assertIn(f'EPHEMERAL_SOCKET_PATH="{os.path.abspath("relative.sock")}"', relative_rendered)
+        self.assertIn(
+            f'EPHEMERAL_EXECUTION_STATE_DIR="{os.path.abspath("relative-state")}"',
+            relative_rendered,
+        )
 
     def test_socket_isolation_defaults_to_optional(self):
         with patch.dict(os.environ, {}, clear=True):
