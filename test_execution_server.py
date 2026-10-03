@@ -407,6 +407,29 @@ class TestExecutionTools(unittest.TestCase):
                 )
             )
 
+    def test_get_execution_returns_read_only_diagnostics_for_unsupported_schema(self):
+        self.manager.create([self.phase("future", "future")], execution_id="future-schema")
+        path = self.manager.store._path("future-schema")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["schema_version"] = 999
+        path.write_text(json.dumps(record), encoding="utf-8")
+        before = path.read_bytes()
+
+        response = json.loads(server.get_execution("future-schema"))
+
+        self.assertEqual(response["status"], "unsupported_record")
+        self.assertTrue(response["read_only"])
+        self.assertEqual(response["reason_code"], "UNSUPPORTED_SCHEMA_VERSION")
+        self.assertEqual(response["schema_version"], 999)
+        self.assertTrue(response["record_preview"])
+        self.assertEqual(path.read_bytes(), before)
+
+        listed = json.loads(server.list_executions())["executions"]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["status"], "unsupported_record")
+        self.assertEqual(listed[0]["reason_code"], "UNSUPPORTED_SCHEMA_VERSION")
+        self.assertEqual(path.read_bytes(), before)
+
     def test_oversized_execution_response_keeps_recoverable_id(self):
         phases = [
             self.phase(

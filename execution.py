@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import select
 import signal
@@ -23,6 +24,7 @@ import threading
 import time
 import uuid
 import errno
+from dataclasses import dataclass
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -40,7 +42,8 @@ except ImportError:  # pragma: no cover - durable execution requires Linux.
     fcntl = None
 
 
-EXECUTION_SCHEMA_VERSION = 1
+EXECUTION_SCHEMA_VERSION = 2
+LEGACY_EXECUTION_SCHEMA_VERSION = 1
 PHASE_STATUSES = ("pending", "started", "completed", "failed", "interrupted", "timed_out")
 RESUME_POLICIES = ("safe", "allow-unsafe")
 MAX_EXECUTION_ID_BYTES = 256
@@ -49,12 +52,15 @@ MAX_ERROR_BYTES = 4096
 MAX_STRUCTURED_METRICS_BYTES = 16 * 1024
 MAX_EXECUTION_PHASES = 64
 MAX_PHASE_ATTEMPTS = 32
+# Durable execution recovery is supported on Linux, where pid_t is signed 32-bit.
+MAX_PROCESS_ID = (1 << 31) - 1
 MAX_EXECUTION_STATE_BYTES = 64 * 1024 * 1024
 EXECUTION_METADATA_RESERVE_BYTES = 4 * 1024 * 1024
 MAX_EXECUTION_RECORDS = 1000
 DEFAULT_EXECUTION_LIST_LIMIT = 20
 MAX_EXECUTION_LIST_LIMIT = 100
 MAX_EXECUTION_OUTPUT_CHUNK_BYTES = 8 * 1024
+MAX_EXECUTION_RECORD_PREVIEW_BYTES = 8 * 1024
 MAX_EXECUTION_RETIRE_BATCH = 20
 JSON_OUTPUT_EXPANSION_BOUND = 6
 PROCESS_MARKER_ENV = "EPHEMERAL_EXECUTION_PROCESS_MARKER"
@@ -68,6 +74,311 @@ OutputHandler = Callable[[Dict[str, Any], str, Dict[str, Any]], Optional[str]]
 
 class ExecutionBusyError(RuntimeError):
     """Raised when another process currently owns an execution lease."""
+
+
+class ExecutionRecordError(ValueError):
+    """A durable record cannot safely enter normal execution or recovery."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "MALFORMED_RECORD",
+        schema_version: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.schema_version = schema_version
+
+
+@dataclass(frozen=True)
+class CleanupOutcome:
+    """Whether process cleanup was confirmed and why a fence remains."""
+
+    confirmed: bool
+    blocked_reason_code: Optional[str] = None
+
+
+class ExecutionListDiagnostic(dict):
+    """A diagnostic mapping that remains compatible with dict consumers."""
+
+    def __init__(self, response: Dict[str, Any]) -> None:
+        super().__init__(response)
+
+    @property
+    def response(self) -> Dict[str, Any]:
+        return self
+
+
+BLOCKED_REASON_REMEDIES = {
+    "PROCESS_IDENTITY_INCOMPLETE": (
+        "Inspect the saved process identity and host state; keep the execution fenced "
+        "until the process group is proven stopped."
+    ),
+    "PROCESS_STATE_UNVERIFIABLE": (
+        "Restore process visibility or inspect the host process state, then request "
+        "recovery again."
+    ),
+    "PROCESS_NOT_CONFIRMED_GONE": (
+        "Confirm that no process from this execution remains, then request recovery "
+        "again."
+    ),
+    "PROCESS_CLEANUP_UNCONFIRMED": (
+        "Check process recovery permissions and the execution process group before "
+        "requesting recovery again."
+    ),
+    "CLEANUP_HOOK_UNAVAILABLE": (
+        "Configure the runner cleanup hook and confirm that it stops all child "
+        "processes before resuming."
+    ),
+    "CLEANUP_HOOK_FAILED": (
+        "Repair the runner cleanup hook and confirm that it stops all child processes "
+        "before resuming."
+    ),
+}
+
+
+def _blocked_reason(code: Optional[str]) -> Optional[Dict[str, str]]:
+    if code is None:
+        return None
+    return {
+        "code": code,
+        "remedy": BLOCKED_REASON_REMEDIES.get(
+            code,
+            "Inspect the execution record and host process state before requesting recovery again.",
+        ),
+    }
+
+
+def _record_error(
+    execution_id: str,
+    detail: str,
+    *,
+    reason_code: str = "MALFORMED_RECORD",
+    schema_version: Any = None,
+) -> ExecutionRecordError:
+    return ExecutionRecordError(
+        f"Execution '{execution_id}' has invalid state: {detail}",
+        reason_code=reason_code,
+        schema_version=schema_version,
+    )
+
+
+def _max_phase_output_bytes(phase_count: int) -> int:
+    state_output_budget = max(
+        512,
+        (MAX_EXECUTION_STATE_BYTES - EXECUTION_METADATA_RESERVE_BYTES)
+        // JSON_OUTPUT_EXPANSION_BOUND,
+    )
+    return state_output_budget // phase_count
+
+
+def _normalize_v1_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize the known v1 layout into the current in-memory v2 shape."""
+    normalized = dict(record)
+    phases = normalized.get("phases")
+    if isinstance(phases, list):
+        normalized_phases = []
+        for phase in phases:
+            if not isinstance(phase, dict):
+                normalized_phases.append(phase)
+                continue
+            item = dict(phase)
+            unsafe_side_effects = item.get("unsafe_side_effects", False)
+            item.setdefault(
+                "side_effects",
+                "unsafe" if unsafe_side_effects is True else "none",
+            )
+            item.setdefault(
+                "unsafe_side_effects",
+                item.get("side_effects") == "unsafe",
+            )
+            item.setdefault("timeout_seconds", None)
+            for key in (
+                "structured_metrics", "events", "attempt_results", "output",
+                "result", "error", "process_id", "process_group_id",
+                "process_start_time", "process_boot_id", "process_launch_token",
+                "process_containment",
+            ):
+                default = {} if key == "structured_metrics" else [] if key in {
+                    "events", "attempt_results"
+                } else "" if key == "output" else None
+                item.setdefault(key, default)
+            item.setdefault(
+                "process_fence_pending",
+                item.get("status") == "started",
+            )
+            item.setdefault("blocked_reason_code", None)
+            normalized_phases.append(item)
+        normalized["phases"] = normalized_phases
+    normalized["schema_version"] = EXECUTION_SCHEMA_VERSION
+    return normalized
+
+
+def _validate_execution_record(
+    record: Any,
+    execution_id: str,
+) -> Dict[str, Any]:
+    """Validate and normalize a record before public interpretation or recovery."""
+    if not isinstance(record, dict):
+        raise _record_error(execution_id, "record must be an object")
+    version = record.get("schema_version")
+    if type(version) is not int:
+        raise _record_error(
+            execution_id,
+            "schema_version must be an integer",
+            schema_version=version,
+        )
+    if version == LEGACY_EXECUTION_SCHEMA_VERSION:
+        record = _normalize_v1_record(record)
+    elif version != EXECUTION_SCHEMA_VERSION:
+        raise _record_error(
+            execution_id,
+            f"unsupported schema version {version}",
+            reason_code="UNSUPPORTED_SCHEMA_VERSION",
+            schema_version=version,
+        )
+
+    def require_text(value: Any, field: str, max_bytes: int) -> None:
+        if not isinstance(value, str) or not value:
+            raise _record_error(execution_id, f"{field} must be a bounded non-empty string")
+        try:
+            too_long = len(value.encode("utf-8")) > max_bytes
+        except UnicodeEncodeError:
+            too_long = True
+        if too_long:
+            raise _record_error(execution_id, f"{field} must be a bounded non-empty string")
+
+    if record.get("execution_id") != execution_id:
+        raise _record_error(execution_id, "execution_id does not match its record path")
+    require_text(record.get("execution_id"), "execution_id", MAX_EXECUTION_ID_BYTES)
+    require_text(record.get("label"), "label", 1024)
+    require_text(record.get("created_at"), "created_at", 64)
+    require_text(record.get("updated_at"), "updated_at", 64)
+    if record.get("execution_status") not in (
+        "pending", "running", "completed", "partial", "interrupted"
+    ):
+        raise _record_error(execution_id, "execution_status is invalid")
+    if not isinstance(record.get("partial"), bool):
+        raise _record_error(execution_id, "partial must be a boolean")
+    if record.get("resume_policy") not in RESUME_POLICIES:
+        raise _record_error(execution_id, "resume_policy is invalid")
+    phases = record.get("phases")
+    if not isinstance(phases, list) or not phases or len(phases) > MAX_EXECUTION_PHASES:
+        raise _record_error(execution_id, "phases must be a non-empty bounded list")
+    max_phase_output_bytes = _max_phase_output_bytes(len(phases))
+
+    phase_names = set()
+    for index, phase in enumerate(phases):
+        prefix = f"phases[{index}]"
+        if not isinstance(phase, dict):
+            raise _record_error(execution_id, f"{prefix} must be an object")
+        require_text(phase.get("name"), f"{prefix}.name", MAX_PHASE_NAME_BYTES)
+        require_text(phase.get("command"), f"{prefix}.command", 16 * 1024)
+        require_text(phase.get("cwd"), f"{prefix}.cwd", 4096)
+        if phase["name"] in phase_names:
+            raise _record_error(execution_id, "phase names must be unique")
+        phase_names.add(phase["name"])
+        if phase.get("status") not in PHASE_STATUSES:
+            raise _record_error(execution_id, f"{prefix}.status is invalid")
+        attempts = phase.get("attempts")
+        if (
+            isinstance(attempts, bool)
+            or not isinstance(attempts, int)
+            or attempts < 0
+            or attempts > MAX_PHASE_ATTEMPTS
+        ):
+            raise _record_error(execution_id, f"{prefix}.attempts is invalid")
+        if not isinstance(phase.get("process_fence_pending"), bool):
+            raise _record_error(execution_id, f"{prefix}.process_fence_pending must be a boolean")
+        if phase.get("side_effects") not in ("none", "unsafe"):
+            raise _record_error(execution_id, f"{prefix}.side_effects is invalid")
+        if not isinstance(phase.get("unsafe_side_effects"), bool):
+            raise _record_error(execution_id, f"{prefix}.unsafe_side_effects must be a boolean")
+        if phase["unsafe_side_effects"] != (phase["side_effects"] == "unsafe"):
+            raise _record_error(execution_id, f"{prefix} side-effect fields disagree")
+        if not isinstance(phase.get("events"), list) or not all(
+            isinstance(event, dict) for event in phase["events"]
+        ):
+            raise _record_error(execution_id, f"{prefix}.events must be a list of objects")
+        if not isinstance(phase.get("attempt_results"), list) or not all(
+            isinstance(result, dict) for result in phase["attempt_results"]
+        ):
+            raise _record_error(
+                execution_id,
+                f"{prefix}.attempt_results must be a list of objects",
+            )
+        if phase.get("result") is not None and not isinstance(phase.get("result"), dict):
+            raise _record_error(execution_id, f"{prefix}.result must be an object or null")
+        if phase.get("output") is not None and not isinstance(phase.get("output"), str):
+            raise _record_error(execution_id, f"{prefix}.output must be a string or null")
+        if phase.get("error") is not None and not isinstance(phase.get("error"), str):
+            raise _record_error(execution_id, f"{prefix}.error must be a string or null")
+        if not isinstance(phase.get("structured_metrics"), dict):
+            raise _record_error(execution_id, f"{prefix}.structured_metrics must be an object")
+        try:
+            _json_copy(phase["structured_metrics"], f"{prefix}.structured_metrics")
+        except ValueError as exc:
+            raise _record_error(
+                execution_id,
+                f"{prefix}.structured_metrics is invalid",
+            ) from exc
+        try:
+            if "timeout_seconds" not in phase:
+                raise ValueError("timeout_seconds is missing")
+            _validate_positive_number(phase["timeout_seconds"], f"{prefix}.timeout_seconds")
+        except ValueError as exc:
+            raise _record_error(execution_id, f"{prefix}.timeout_seconds is invalid") from exc
+        max_output_bytes = phase.get("max_output_bytes")
+        if (
+            isinstance(max_output_bytes, bool)
+            or not isinstance(max_output_bytes, int)
+            or max_output_bytes < 512
+            or max_output_bytes > max_phase_output_bytes
+        ):
+            raise _record_error(execution_id, f"{prefix}.max_output_bytes is invalid")
+        idempotency_key = phase.get("idempotency_key")
+        if idempotency_key is not None:
+            require_text(idempotency_key, f"{prefix}.idempotency_key", MAX_PHASE_NAME_BYTES)
+        for key in ("process_id", "process_group_id"):
+            value = phase.get(key)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+                or value > MAX_PROCESS_ID
+            ):
+                raise _record_error(execution_id, f"{prefix}.{key} is invalid")
+        for key in ("process_start_time", "process_boot_id", "process_launch_token"):
+            value = phase.get(key)
+            if value is not None:
+                require_text(value, f"{prefix}.{key}", 256)
+                if key == "process_launch_token":
+                    try:
+                        value.encode("ascii")
+                    except UnicodeEncodeError as exc:
+                        raise _record_error(
+                            execution_id,
+                            f"{prefix}.process_launch_token must contain only ASCII characters",
+                        ) from exc
+        containment = phase.get("process_containment")
+        if containment is not None:
+            require_text(containment, f"{prefix}.process_containment", 128)
+        blocked_code = phase.get("blocked_reason_code")
+        if blocked_code is not None:
+            require_text(blocked_code, f"{prefix}.blocked_reason_code", 64)
+
+    try:
+        encoded = json.dumps(
+            record,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise _record_error(execution_id, "record contains invalid JSON values") from exc
+    if len(encoded) > MAX_EXECUTION_STATE_BYTES:
+        raise _record_error(execution_id, "record exceeds the size limit")
+    return record
 
 
 def _now() -> str:
@@ -102,7 +413,10 @@ def _validate_positive_number(value: Any, field_name: str) -> Optional[float]:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field_name} must be a positive number or null")
-    parsed = float(value)
+    try:
+        parsed = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a positive number or null") from exc
     if parsed <= 0 or parsed != parsed or parsed in {float("inf"), float("-inf")}:
         raise ValueError(f"{field_name} must be a positive number or null")
     return parsed
@@ -508,8 +822,12 @@ def _terminate_marker_processes_or_confirm_group_absent(
     )
 
 
-def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
-    """Stop a command left behind by a process that died during execution."""
+def _terminate_stale_process_outcome(phase: Dict[str, Any]) -> CleanupOutcome:
+    """Stop a stale command and retain a stable reason if its fence remains."""
+
+    def result(confirmed: bool, reason_code: str) -> CleanupOutcome:
+        return CleanupOutcome(confirmed, None if confirmed else reason_code)
+
     process_id = phase.get("process_id")
     process_group_id = phase.get("process_group_id")
     valid_process_id = (
@@ -529,16 +847,25 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
             # metadata is written. Pin marker-bearing PIDs individually; a
             # numeric process group is not safe to signal in that window.
             if valid_process_group_id:
-                return _terminate_marker_processes_or_confirm_group_absent(
-                    marker, process_group_id
+                return result(
+                    _terminate_marker_processes_or_confirm_group_absent(
+                        marker, process_group_id
+                    ),
+                    "PROCESS_STATE_UNVERIFIABLE",
                 )
-            return _terminate_marker_processes(marker)
-        if valid_process_group_id and _process_group_is_absent(process_group_id):
-            return True
+            return result(
+                _terminate_marker_processes(marker),
+                "PROCESS_STATE_UNVERIFIABLE",
+            )
+        if valid_process_group_id:
+            return result(
+                _process_group_is_absent(process_group_id),
+                "PROCESS_IDENTITY_INCOMPLETE",
+            )
         # Never treat incomplete identity metadata as proof that an unknown
         # process group is gone. Legacy records without a launch marker remain
         # fenced until an operator resolves them.
-        return False
+        return CleanupOutcome(False, "PROCESS_IDENTITY_INCOMPLETE")
     expected_start = phase.get("process_start_time")
     expected_boot = phase.get("process_boot_id")
     if (
@@ -548,10 +875,16 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
         or not expected_boot
     ):
         if isinstance(marker, str) and marker:
-            return _terminate_marker_processes_or_confirm_group_absent(
-                marker, process_group_id
+            return result(
+                _terminate_marker_processes_or_confirm_group_absent(
+                    marker, process_group_id
+                ),
+                "PROCESS_STATE_UNVERIFIABLE",
             )
-        return _process_group_is_absent(process_group_id)
+        return result(
+            _process_group_is_absent(process_group_id),
+            "PROCESS_IDENTITY_INCOMPLETE",
+        )
     current_start, current_boot = _proc_identity(process_id)
     if (
         not isinstance(current_start, str)
@@ -565,16 +898,25 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
         # inactive, unless the kernel also proves the whole persisted group
         # has no live members.
         if isinstance(marker, str) and marker:
-            return _terminate_marker_processes_or_confirm_group_absent(
-                marker,
-                process_group_id,
-                expected_leader=(process_id, (expected_start, expected_boot)),
+            return result(
+                _terminate_marker_processes_or_confirm_group_absent(
+                    marker,
+                    process_group_id,
+                    expected_leader=(process_id, (expected_start, expected_boot)),
+                ),
+                "PROCESS_STATE_UNVERIFIABLE",
             )
-        return _process_group_is_absent(process_group_id)
+        return result(
+            _process_group_is_absent(process_group_id),
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
     if phase.get("process_containment") != PROCESS_CONTAINMENT_SUBREAPER:
         # Legacy records have no pinned supervisor.  Never signal a numeric
         # group whose membership can have changed since the checkpoint.
-        return _process_group_is_absent(process_group_id)
+        return result(
+            _process_group_is_absent(process_group_id),
+            "PROCESS_IDENTITY_INCOMPLETE",
+        )
     if isinstance(marker, str) and marker:
         # Stop the pinned supervisor, clean its marked descendants, and then
         # require the original process group to have no live members.
@@ -582,10 +924,13 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
             process_id,
             expected_identity=(expected_start, expected_boot),
         ):
-            return False
-        return _terminate_marker_processes(marker) and _process_group_is_absent(
-            process_group_id,
-            expected_leader=(process_id, (expected_start, expected_boot)),
+            return CleanupOutcome(False, "PROCESS_CLEANUP_UNCONFIRMED")
+        return result(
+            _terminate_marker_processes(marker) and _process_group_is_absent(
+                process_group_id,
+                expected_leader=(process_id, (expected_start, expected_boot)),
+            ),
+            "PROCESS_NOT_CONFIRMED_GONE",
         )
     terminated = _terminate_pidfd(
         process_id,
@@ -593,8 +938,13 @@ def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
         expected_group=process_group_id,
     )
     if not terminated:
-        return False
-    return True
+        return CleanupOutcome(False, "PROCESS_CLEANUP_UNCONFIRMED")
+    return CleanupOutcome(True)
+
+
+def _terminate_stale_process(phase: Dict[str, Any]) -> bool:
+    """Backward-compatible boolean wrapper for stale process cleanup."""
+    return _terminate_stale_process_outcome(phase).confirmed
 
 
 class ExecutionStore:
@@ -640,6 +990,17 @@ class ExecutionStore:
         digest = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()
         return f"{digest}.json"
 
+    @staticmethod
+    def _is_record_digest(value: str) -> bool:
+        return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+    @classmethod
+    def _matches_record_filename(cls, execution_id: str, filename: str) -> bool:
+        try:
+            return cls._filename(execution_id) == filename
+        except UnicodeEncodeError:
+            return False
+
     def _path(self, execution_id: str) -> Path:
         return self.state_dir / self._filename(execution_id)
 
@@ -648,6 +1009,66 @@ class ExecutionStore:
 
     def _summary_path(self, execution_id: str) -> Path:
         return self.state_dir / f"{self._filename(execution_id)[:-5]}.summary.json"
+
+    @staticmethod
+    def _compact_listing_record(record: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only fields needed to build a compact public list entry."""
+        compact = {
+            key: record.get(key)
+            for key in (
+                "schema_version", "execution_id", "label", "created_at",
+                "updated_at", "execution_status", "partial", "resume_policy",
+            )
+        }
+        compact["phases"] = [
+            {
+                key: phase.get(key)
+                for key in (
+                    "name", "status", "side_effects", "unsafe_side_effects",
+                    "attempts", "error", "process_fence_pending",
+                    "blocked_reason_code",
+                )
+            }
+            for phase in record.get("phases", [])
+        ]
+        return compact
+
+    @staticmethod
+    def _listing_file_diagnostic(
+        path: Path,
+        *,
+        execution_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Describe an unreadable record without returning any stored contents."""
+        try:
+            info = path.stat(follow_symlinks=False)
+            record_bytes = info.st_size if stat.S_ISREG(info.st_mode) else 0
+        except OSError:
+            record_bytes = 0
+        return {
+            "status": "invalid_record",
+            "execution_id": execution_id,
+            "record_file_id": path.name.removesuffix(".json"),
+            "schema_version": None,
+            "read_only": True,
+            "reason_code": "MALFORMED_RECORD",
+            "message": "Execution record file is unreadable or malformed",
+            "record_bytes": record_bytes,
+            "record_preview": "[preview omitted because it could not be safely sanitized]",
+            "record_preview_sanitized": True,
+            "record_preview_redacted": False,
+            "record_preview_truncated": True,
+        }
+
+    @staticmethod
+    def _listing_file_sort_time(path: Path) -> str:
+        try:
+            return time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(path.stat(follow_symlinks=False).st_mtime),
+            )
+        except OSError:
+            return ""
 
     def _reservation_path(self, execution_id: str) -> Path:
         digest = self._filename(execution_id)[:-5]
@@ -979,6 +1400,7 @@ class ExecutionStore:
                         for key in (
                             "name", "status", "side_effects", "unsafe_side_effects",
                             "attempts", "error", "process_fence_pending",
+                            "blocked_reason_code",
                         )
                     }
                     for phase in summary_record.get("phases", [])
@@ -1234,11 +1656,6 @@ class ExecutionStore:
             self._reject_symlink(record_path, "record file")
             self._reject_symlink(summary_path, "summary file")
             record = self._read_record(execution_id)
-            if (
-                not isinstance(record.get("phases"), list)
-                or not all(isinstance(phase, dict) for phase in record["phases"])
-            ):
-                raise ValueError(f"Execution '{execution_id}' has invalid state")
             with summary_path.open("r", encoding="utf-8") as stream:
                 summary = json.load(stream)
             if (
@@ -1254,23 +1671,13 @@ class ExecutionStore:
             item["reason"] = "record or matching summary is missing"
             return item, None, None, None
         except (KeyError, OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            item["reason"] = f"record pair is unreadable: {type(exc).__name__}"
+            error_type = "ValueError" if isinstance(exc, ValueError) else type(exc).__name__
+            item["reason"] = f"record pair is unreadable: {error_type}"
             return item, None, None, None
 
-        status = record.get("execution_status", "unknown")
-        if not isinstance(status, str) or status not in {
-            "pending", "running", "completed", "interrupted", "failed", "partial",
-        }:
-            status = "unknown"
-        label = record.get("label")
-        if not isinstance(label, str):
-            label = ""
-        label = label[:1024]
-        updated_at = record.get("updated_at")
-        if not isinstance(updated_at, str):
-            updated_at = None
-        else:
-            updated_at = updated_at[:128]
+        status = record["execution_status"]
+        label = record["label"]
+        updated_at = record["updated_at"]
         record_metadata = {
             "execution_id": execution_id,
             "label": label,
@@ -1595,20 +2002,185 @@ class ExecutionStore:
             path = self._path(execution_id)
             self._reject_symlink(path, "record file")
             try:
-                with path.open("r", encoding="utf-8") as stream:
-                    record = json.load(stream)
+                info = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ExecutionRecordError(
+                        f"Execution '{execution_id}' has invalid state: record is not a regular file"
+                    )
+                if info.st_size > MAX_EXECUTION_STATE_BYTES:
+                    raise ExecutionRecordError(
+                        f"Execution '{execution_id}' has invalid state: record exceeds the size limit"
+                    )
+                with path.open("rb") as stream:
+                    raw = stream.read(MAX_EXECUTION_STATE_BYTES + 1)
+                if len(raw) > MAX_EXECUTION_STATE_BYTES:
+                    raise ExecutionRecordError(
+                        f"Execution '{execution_id}' has invalid state: record exceeds the size limit"
+                    )
+                record = json.loads(raw.decode("utf-8"))
             except FileNotFoundError as exc:
                 raise KeyError(f"Execution '{execution_id}' was not found") from exc
-            except (OSError, json.JSONDecodeError) as exc:
+            except ExecutionRecordError:
+                raise
+            except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+                raise ExecutionRecordError(
+                    f"Execution '{execution_id}' has unreadable state",
+                    reason_code="MALFORMED_RECORD",
+                ) from exc
+            return _validate_execution_record(record, execution_id)
+
+    def inspect_record(
+        self,
+        execution_id: str,
+        error: ExecutionRecordError,
+    ) -> Dict[str, Any]:
+        """Return a bounded sanitized preview without recovery or writes."""
+        with self._lock:
+            self._validate_state_dir(require_exists=False)
+            path = self._path(execution_id)
+            self._reject_symlink(path, "record file")
+            try:
+                info = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("record is not a regular file")
+                with path.open("rb") as stream:
+                    raw_preview = stream.read(MAX_EXECUTION_RECORD_PREVIEW_BYTES + 1)
+            except FileNotFoundError as exc:
+                raise KeyError(f"Execution '{execution_id}' was not found") from exc
+            except OSError as exc:
                 raise ValueError(f"Execution '{execution_id}' has unreadable state") from exc
-            if not isinstance(record, dict) or record.get("execution_id") != execution_id:
-                raise ValueError(f"Execution '{execution_id}' has invalid state")
-            return record
+            truncated = len(raw_preview) > MAX_EXECUTION_RECORD_PREVIEW_BYTES
+            raw_preview = raw_preview[:MAX_EXECUTION_RECORD_PREVIEW_BYTES]
+            preview_text = "[preview omitted because it could not be safely sanitized]"
+            preview_redacted = False
+            preview_omitted = True
+            if not truncated and info.st_size == len(raw_preview):
+                try:
+                    parsed_preview = json.loads(raw_preview.decode("utf-8"))
+
+                    def allowlisted_phase(value: Any) -> Optional[Dict[str, Any]]:
+                        nonlocal preview_redacted
+                        if not isinstance(value, dict):
+                            preview_redacted = True
+                            return None
+                        safe_phase: Dict[str, Any] = {}
+                        status = value.get("status")
+                        if status in PHASE_STATUSES:
+                            safe_phase["status"] = status
+                        elif "status" in value:
+                            preview_redacted = True
+                        attempts = value.get("attempts")
+                        if (
+                            not isinstance(attempts, bool)
+                            and isinstance(attempts, int)
+                            and 0 <= attempts <= MAX_PHASE_ATTEMPTS
+                        ):
+                            safe_phase["attempts"] = attempts
+                        elif "attempts" in value:
+                            preview_redacted = True
+                        side_effects = value.get("side_effects")
+                        if side_effects in ("none", "unsafe"):
+                            safe_phase["side_effects"] = side_effects
+                        elif "side_effects" in value:
+                            preview_redacted = True
+                        for key in (
+                            "unsafe_side_effects", "process_fence_pending",
+                        ):
+                            if isinstance(value.get(key), bool):
+                                safe_phase[key] = value[key]
+                            elif key in value:
+                                preview_redacted = True
+                        if set(value) - {
+                            "status", "attempts", "side_effects",
+                            "unsafe_side_effects", "process_fence_pending",
+                        }:
+                            preview_redacted = True
+                        return safe_phase
+
+                    safe_preview: Dict[str, Any] = {}
+                    if isinstance(parsed_preview, dict):
+                        version = parsed_preview.get("schema_version")
+                        if type(version) is int:
+                            safe_preview["schema_version"] = version
+                        elif "schema_version" in parsed_preview:
+                            preview_redacted = True
+                        status = parsed_preview.get("execution_status")
+                        if status in (
+                            "pending", "running", "completed", "partial", "interrupted"
+                        ):
+                            safe_preview["execution_status"] = status
+                        elif "execution_status" in parsed_preview:
+                            preview_redacted = True
+                        partial = parsed_preview.get("partial")
+                        if isinstance(partial, bool):
+                            safe_preview["partial"] = partial
+                        elif "partial" in parsed_preview:
+                            preview_redacted = True
+                        phases = parsed_preview.get("phases")
+                        if isinstance(phases, list):
+                            safe_preview["phases"] = [
+                                phase_preview
+                                for phase in phases
+                                if (phase_preview := allowlisted_phase(phase)) is not None
+                            ]
+                        elif "phases" in parsed_preview:
+                            preview_redacted = True
+                        if set(parsed_preview) - {
+                            "schema_version", "execution_status", "partial", "phases",
+                        }:
+                            preview_redacted = True
+                    else:
+                        preview_redacted = True
+
+                    if safe_preview:
+                        sanitized = json.dumps(
+                            safe_preview,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ).encode("utf-8")
+                        if len(sanitized) <= MAX_EXECUTION_RECORD_PREVIEW_BYTES:
+                            preview_text = sanitized.decode("utf-8")
+                            preview_omitted = False
+                except (UnicodeError, ValueError, RecursionError):
+                    pass
+            schema_version = error.schema_version
+            if (
+                not isinstance(schema_version, (str, int, float, bool))
+                or isinstance(schema_version, float) and not math.isfinite(schema_version)
+            ):
+                schema_version = None
+            if isinstance(schema_version, str):
+                schema_version = schema_version.encode("utf-8", errors="replace")[:64].decode(
+                    "utf-8", errors="ignore"
+                )
+            return {
+                "status": (
+                    "unsupported_record"
+                    if error.reason_code == "UNSUPPORTED_SCHEMA_VERSION"
+                    else "invalid_record"
+                ),
+                "execution_id": execution_id,
+                "schema_version": schema_version,
+                "read_only": True,
+                "reason_code": error.reason_code,
+                "message": _bounded_error(error),
+                "record_bytes": info.st_size,
+                "record_preview": preview_text,
+                "record_preview_sanitized": True,
+                "record_preview_redacted": preview_redacted,
+                "record_preview_truncated": (
+                    truncated
+                    or info.st_size > len(raw_preview)
+                    or preview_omitted
+                ),
+            }
 
     def load(self, execution_id: str, recover: bool = True) -> Dict[str, Any]:
         record = self._read_record(execution_id)
         if not recover or not any(
-            phase.get("status") == "started" for phase in record.get("phases", [])
+            phase.get("status") == "started"
+            or phase.get("process_fence_pending") is True
+            for phase in record.get("phases", [])
         ):
             return record
         try:
@@ -1624,32 +2196,84 @@ class ExecutionStore:
     @staticmethod
     def _recover_started(record: Dict[str, Any]) -> bool:
         changed = False
+        recovery_candidate = False
         for phase in record.get("phases", []):
             status = phase.get("status")
             if status != "started" and not phase.get("process_fence_pending"):
                 continue
-            if status == "started" and "process_fence_pending" not in phase:
-                phase["process_fence_pending"] = True
+            recovery_candidate = True
+            prior_state = (
+                phase.get("status"),
+                phase.get("error"),
+                phase.get("process_fence_pending"),
+                phase.get("blocked_reason_code"),
+            )
             already_pending = (
                 status == "interrupted"
                 and phase.get("process_fence_pending") is True
             )
-            fenced = _terminate_stale_process(phase)
-            phase["process_fence_pending"] = not fenced
+            previous_reason_code = phase.get("blocked_reason_code")
+            outcome = _terminate_stale_process_outcome(phase)
+            blocked_reason_code = outcome.blocked_reason_code
+            if (
+                not outcome.confirmed
+                and previous_reason_code in {
+                    "CLEANUP_HOOK_UNAVAILABLE",
+                    "CLEANUP_HOOK_FAILED",
+                }
+            ):
+                # The runner's cleanup hook is the actionable blocker for an
+                # injected runner; generic process inspection cannot replace it.
+                blocked_reason_code = previous_reason_code
+            phase["process_fence_pending"] = not outcome.confirmed
+            phase["blocked_reason_code"] = blocked_reason_code
             if status == "started" or status == "interrupted":
                 phase["status"] = "interrupted"
                 phase["error"] = (
                     "process termination is pending before the phase can resume"
-                    if not fenced
+                    if not outcome.confirmed
                     else "process terminated before the phase completed"
                 )
-                if not already_pending:
-                    _phase_event(phase, "interrupted", reason="process restart recovery")
-            elif not fenced:
-                phase["error"] = "process termination is pending before the phase can resume"
-            changed = True
-        if changed:
+                if not already_pending or previous_reason_code != blocked_reason_code:
+                    _phase_event(
+                        phase,
+                        "interrupted",
+                        reason="process restart recovery",
+                        blocked_reason_code=blocked_reason_code,
+                    )
+                    changed = True
+            elif previous_reason_code != blocked_reason_code:
+                if not outcome.confirmed and not phase.get("error"):
+                    phase["error"] = "process termination is pending before the phase can resume"
+                elif outcome.confirmed and phase.get("error") == (
+                    "process termination is pending before the phase can resume"
+                ):
+                    phase["error"] = None
+                _phase_event(
+                    phase,
+                    "blocked" if not outcome.confirmed else "recovered",
+                    reason="process restart recovery",
+                    blocked_reason_code=blocked_reason_code,
+                )
+                changed = True
+            current_state = (
+                phase.get("status"),
+                phase.get("error"),
+                phase.get("process_fence_pending"),
+                phase.get("blocked_reason_code"),
+            )
+            changed = changed or current_state != prior_state
+        if recovery_candidate:
+            previous_overall_state = (
+                record.get("execution_status"),
+                record.get("partial"),
+            )
             PhaseExecutionManager._refresh_overall_status(record)
+            current_overall_state = (
+                record.get("execution_status"),
+                record.get("partial"),
+            )
+            changed = changed or current_overall_state != previous_overall_state
         return changed
 
     def list(
@@ -1657,21 +2281,30 @@ class ExecutionStore:
         *,
         limit: Optional[int] = None,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Any]:
         with self._lock:
             if not self._validate_state_dir(require_exists=False):
                 return []
             main_paths = {
                 path.name: path
                 for path in self.state_dir.glob("*.json")
-                if not path.name.endswith(".summary.json") and not path.is_symlink()
+                if (
+                    not path.name.endswith(".summary.json")
+                    and self._is_record_digest(path.name.removesuffix(".json"))
+                    and not path.is_symlink()
+                )
             }
             summary_paths = {
                 path.name.removesuffix(".summary.json") + ".json": path
                 for path in self.state_dir.glob("*.summary.json")
-                if not path.is_symlink()
+                if (
+                    self._is_record_digest(
+                        path.name.removesuffix(".summary.json")
+                    )
+                    and not path.is_symlink()
+                )
             }
-            paths = []
+            entries: List[Tuple[str, Any]] = []
             for name in sorted(set(main_paths) | set(summary_paths)):
                 main_path = main_paths.get(name)
                 summary_path = summary_paths.get(name)
@@ -1679,33 +2312,114 @@ class ExecutionStore:
                     main_path is None
                     or summary_path.stat().st_mtime_ns >= main_path.stat().st_mtime_ns
                 ):
-                    paths.append(summary_path)
+                    candidates = [summary_path]
+                    if main_path is not None:
+                        candidates.append(main_path)
                 elif main_path is not None:
-                    paths.append(main_path)
-            records = []
-            for path in paths:
-                try:
-                    with path.open("r", encoding="utf-8") as stream:
-                        record = json.load(stream)
-                    if (
-                        isinstance(record, dict)
-                        and isinstance(record.get("execution_id"), str)
-                        and isinstance(record.get("phases"), list)
-                    ):
-                        records.append(record)
-                except (KeyError, ValueError, OSError, json.JSONDecodeError):
+                    candidates = [main_path]
+                else:
                     continue
-            records = sorted(records, key=lambda item: item.get("updated_at", ""), reverse=True)
+
+                discovered = None
+                for candidate in candidates:
+                    try:
+                        with candidate.open("r", encoding="utf-8") as stream:
+                            parsed = json.load(stream)
+                    except (OSError, UnicodeError, ValueError, RecursionError):
+                        continue
+                    if (
+                        isinstance(parsed, dict)
+                        and isinstance(parsed.get("execution_id"), str)
+                        and self._matches_record_filename(
+                            parsed["execution_id"], name
+                        )
+                    ):
+                        discovered = parsed
+                        break
+
+                if discovered is not None:
+                    execution_id = discovered["execution_id"]
+                    updated_at = discovered.get("updated_at")
+                    entries.append((
+                        updated_at
+                        if isinstance(updated_at, str)
+                        else self._listing_file_sort_time(
+                            main_path or summary_path
+                        ),
+                        {"execution_id": execution_id},
+                    ))
+                    continue
+
+                # The full record is the authoritative source. If it cannot be
+                # parsed, use a matching summary only to recover its ID for the
+                # sanitized read-only diagnostic.
+                if main_path is None:
+                    continue
+                execution_id = None
+                updated_at = self._listing_file_sort_time(main_path)
+                if summary_path is not None:
+                    try:
+                        with summary_path.open("r", encoding="utf-8") as stream:
+                            summary = json.load(stream)
+                        candidate_id = (
+                            summary.get("execution_id")
+                            if isinstance(summary, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(candidate_id, str)
+                            and self._matches_record_filename(candidate_id, name)
+                        ):
+                            execution_id = candidate_id
+                            candidate_updated_at = summary.get("updated_at")
+                            if isinstance(candidate_updated_at, str):
+                                updated_at = candidate_updated_at
+                    except (OSError, UnicodeError, ValueError, RecursionError):
+                        pass
+                if execution_id is not None:
+                    error = ExecutionRecordError(
+                        f"Execution '{execution_id}' has unreadable state"
+                    )
+                    try:
+                        diagnostic = self.inspect_record(execution_id, error)
+                    except (KeyError, ValueError, OSError, json.JSONDecodeError):
+                        diagnostic = self._listing_file_diagnostic(
+                            main_path,
+                            execution_id=execution_id,
+                        )
+                else:
+                    diagnostic = self._listing_file_diagnostic(main_path)
+                entries.append((updated_at, ExecutionListDiagnostic(diagnostic)))
+
+            entries.sort(key=lambda item: item[0], reverse=True)
             if limit is not None:
-                records = records[offset:offset + limit]
+                entries = entries[offset:offset + limit]
             elif offset:
-                records = records[offset:]
+                entries = entries[offset:]
             selected = []
-            for record in records:
+            for _updated_at, summary in entries:
+                if isinstance(summary, ExecutionListDiagnostic):
+                    selected.append(summary)
+                    continue
                 try:
-                    if any(phase.get("status") == "started" for phase in record.get("phases", [])):
-                        record = self.load(record["execution_id"])
-                    selected.append(record)
+                    execution_id = summary["execution_id"]
+                    record = self._read_record(execution_id)
+                    if any(
+                        phase.get("status") == "started"
+                        or phase.get("process_fence_pending") is True
+                        for phase in record.get("phases", [])
+                    ):
+                        record = self.load(execution_id)
+                    selected.append(self._compact_listing_record(record))
+                except ExecutionRecordError as exc:
+                    try:
+                        selected.append(
+                            ExecutionListDiagnostic(
+                                self.inspect_record(execution_id, exc)
+                            )
+                        )
+                    except (KeyError, ValueError, OSError, json.JSONDecodeError):
+                        continue
                 except (KeyError, ValueError, OSError, json.JSONDecodeError):
                     continue
             return selected
@@ -1819,6 +2533,7 @@ class PhaseExecutionManager:
             "process_launch_token": None,
             "process_containment": None,
             "process_fence_pending": False,
+            "blocked_reason_code": None,
         }
 
     def _new_record(
@@ -1844,12 +2559,10 @@ class PhaseExecutionManager:
             raise ValueError("phases must be a non-empty list")
         if len(phases) > MAX_EXECUTION_PHASES:
             raise ValueError(f"phases must contain at most {MAX_EXECUTION_PHASES} items")
-        state_output_budget = max(
-            512,
-            (MAX_EXECUTION_STATE_BYTES - EXECUTION_METADATA_RESERVE_BYTES)
-            // JSON_OUTPUT_EXPANSION_BOUND,
+        phase_output_limit = min(
+            default_output,
+            _max_phase_output_bytes(len(phases)),
         )
-        phase_output_limit = min(default_output, state_output_budget // len(phases))
         normalized = [
             self._validate_phase(item, index, default_cwd, default_timeout, phase_output_limit)
             for index, item in enumerate(phases)
@@ -1882,19 +2595,29 @@ class PhaseExecutionManager:
         phases = []
         for phase in record["phases"]:
             keys = (
-                ("name", "status", "side_effects", "unsafe_side_effects", "attempts", "error")
+                (
+                    "name", "status", "side_effects", "unsafe_side_effects",
+                    "attempts", "error", "blocked_reason_code",
+                )
                 if compact
                 else (
                     "name", "status", "cwd", "timeout_seconds", "max_output_bytes",
                     "side_effects", "unsafe_side_effects", "idempotency_key",
                     "structured_metrics", "attempts", "events", "attempt_results",
-                    "result", "error",
+                    "result", "error", "blocked_reason_code",
                 )
             )
             item = {
                 key: phase.get(key)
                 for key in keys
             }
+            blocked_code = (
+                phase.get("blocked_reason_code")
+                if phase.get("process_fence_pending") is True
+                else None
+            )
+            item["blocked_reason_code"] = blocked_code
+            item["blocked_reason"] = _blocked_reason(blocked_code)
             if include_output and not compact:
                 item["output"] = phase.get("output", "")
             elif not compact:
@@ -1964,6 +2687,11 @@ class PhaseExecutionManager:
                 "attempt_limit_reached": attempt_limit_reached,
                 "next_phase": next_phase,
                 "policy": record["resume_policy"],
+                "blocked_reason": (
+                    _blocked_reason(next_record.get("blocked_reason_code"))
+                    if next_record and next_record.get("process_fence_pending") is True
+                    else None
+                ),
             },
             "completed_phase_count": completed,
             "phase_count": len(record["phases"]),
@@ -2078,26 +2806,34 @@ class PhaseExecutionManager:
         phase["process_launch_token"] = None
         phase["process_containment"] = None
         phase["process_fence_pending"] = False
+        phase["blocked_reason_code"] = None
 
-    def _cleanup_injected_runner(self) -> bool:
+    def _cleanup_injected_runner(self) -> CleanupOutcome:
         """Fence an injected runner, whose child processes are opaque here."""
         if self.process_cleanup is None:
             # An injected runner may have spawned descendants that the manager
             # cannot discover.  Block resume rather than repeating side
             # effects until the runner supplies a successful cleanup hook.
-            return False
+            return CleanupOutcome(False, "CLEANUP_HOOK_UNAVAILABLE")
         try:
             self.process_cleanup()
         except BaseException:
-            return False
-        return True
+            return CleanupOutcome(False, "CLEANUP_HOOK_FAILED")
+        return CleanupOutcome(True)
 
-    def _fence_interrupted_runner(self, cleanup_confirmed: Optional[bool] = None) -> bool:
+    def _fence_interrupted_runner(
+        self,
+        cleanup_confirmed: Optional[bool] = None,
+    ) -> CleanupOutcome:
         """Fence an interrupted runner before allowing a retry."""
         if self.command_runner is run_command_bounded:
             # The built-in runner owns its process group and cleans it up
             # before propagating an interruption.
-            return cleanup_confirmed is True
+            return (
+                CleanupOutcome(True)
+                if cleanup_confirmed is True
+                else CleanupOutcome(False, "PROCESS_CLEANUP_UNCONFIRMED")
+            )
         return self._cleanup_injected_runner()
 
     def _run(
@@ -2117,13 +2853,30 @@ class PhaseExecutionManager:
                 return record
             self._ensure_runner_capabilities()
             if phase.get("process_fence_pending"):
-                if (
-                    self.command_runner is not run_command_bounded
-                    and self._cleanup_injected_runner()
-                ):
+                if self.command_runner is not run_command_bounded:
+                    cleanup_outcome = self._cleanup_injected_runner()
+                else:
+                    cleanup_outcome = CleanupOutcome(
+                        False,
+                        phase.get("blocked_reason_code") or "PROCESS_STATE_UNVERIFIABLE",
+                    )
+                if cleanup_outcome.confirmed:
                     self._clear_process_identity(phase)
                     record["updated_at"] = _now()
                 else:
+                    previous_reason_code = phase.get("blocked_reason_code")
+                    phase["blocked_reason_code"] = (
+                        cleanup_outcome.blocked_reason_code
+                        or "PROCESS_STATE_UNVERIFIABLE"
+                    )
+                    phase["error"] = "process termination is pending before the phase can resume"
+                    if previous_reason_code != phase["blocked_reason_code"]:
+                        _phase_event(
+                            phase,
+                            "blocked",
+                            reason="runner cleanup",
+                            blocked_reason_code=phase["blocked_reason_code"],
+                        )
                     self._refresh_overall_status(record)
                     record["updated_at"] = _now()
                     self.store.save(record)
@@ -2161,6 +2914,7 @@ class PhaseExecutionManager:
             phase["attempts"] += 1
             phase["status"] = "started"
             phase["error"] = None
+            phase["blocked_reason_code"] = None
             phase["output"] = ""
             phase["result"] = None
             phase["process_id"] = None
@@ -2183,7 +2937,7 @@ class PhaseExecutionManager:
                 self.store.release_checkpoint(record["execution_id"])
                 raise
             started = time.perf_counter()
-            cleanup_confirmed = True
+            cleanup_outcome = CleanupOutcome(True)
             try:
                 if self.command_runner is run_command_bounded:
                     command_result = run_command_bounded(
@@ -2204,21 +2958,33 @@ class PhaseExecutionManager:
                         phase["timeout_seconds"],
                     )
                 output, exit_code, truncated, original_byte_size, timed_out = command_result
-                cleanup_confirmed = getattr(command_result, "cleanup_confirmed", True)
+                runner_cleanup_confirmed = getattr(command_result, "cleanup_confirmed", True)
                 if timed_out and self.command_runner is not run_command_bounded:
-                    cleanup_confirmed = self._cleanup_injected_runner()
+                    cleanup_outcome = self._cleanup_injected_runner()
+                else:
+                    cleanup_outcome = (
+                        CleanupOutcome(True)
+                        if runner_cleanup_confirmed is True
+                        else CleanupOutcome(False, "PROCESS_CLEANUP_UNCONFIRMED")
+                    )
             except (KeyboardInterrupt, SystemExit) as exc:
                 runner_cleanup_confirmed = getattr(exc, "cleanup_confirmed", None)
-                cleanup_confirmed = self._fence_interrupted_runner(
+                cleanup_outcome = self._fence_interrupted_runner(
                     runner_cleanup_confirmed
                 )
-                if cleanup_confirmed:
+                if cleanup_outcome.confirmed:
                     self._clear_process_identity(phase)
                 else:
                     phase["process_fence_pending"] = True
+                    phase["blocked_reason_code"] = cleanup_outcome.blocked_reason_code
                 phase["status"] = "interrupted"
                 phase["error"] = "phase interrupted before a result was available"
-                _phase_event(phase, "interrupted", reason="runner interruption")
+                _phase_event(
+                    phase,
+                    "interrupted",
+                    reason="runner interruption",
+                    blocked_reason_code=phase.get("blocked_reason_code"),
+                )
                 self._refresh_overall_status(record)
                 record["updated_at"] = _now()
                 try:
@@ -2228,13 +2994,19 @@ class PhaseExecutionManager:
                 raise
             except Exception as exc:
                 if self.command_runner is run_command_bounded:
-                    cleanup_confirmed = getattr(exc, "cleanup_confirmed", True)
+                    runner_cleanup_confirmed = getattr(exc, "cleanup_confirmed", True)
+                    cleanup_outcome = (
+                        CleanupOutcome(True)
+                        if runner_cleanup_confirmed is True
+                        else CleanupOutcome(False, "PROCESS_CLEANUP_UNCONFIRMED")
+                    )
                 else:
-                    cleanup_confirmed = self._cleanup_injected_runner()
-                if cleanup_confirmed:
+                    cleanup_outcome = self._cleanup_injected_runner()
+                if cleanup_outcome.confirmed:
                     self._clear_process_identity(phase)
                 else:
                     phase["process_fence_pending"] = True
+                    phase["blocked_reason_code"] = cleanup_outcome.blocked_reason_code
                 phase["status"] = "failed"
                 phase["error"] = _bounded_error(exc)
                 phase["result"] = {
@@ -2242,7 +3014,12 @@ class PhaseExecutionManager:
                     "error_type": type(exc).__name__,
                 }
                 phase["attempt_results"].append(self._attempt_snapshot(phase["result"]))
-                _phase_event(phase, "failed", error_type=type(exc).__name__)
+                _phase_event(
+                    phase,
+                    "failed",
+                    error_type=type(exc).__name__,
+                    blocked_reason_code=phase.get("blocked_reason_code"),
+                )
                 self._refresh_overall_status(record)
                 record["updated_at"] = _now()
                 try:
@@ -2252,10 +3029,11 @@ class PhaseExecutionManager:
                 return record
 
             duration_ms = round((time.perf_counter() - started) * 1000, 3)
-            if cleanup_confirmed:
+            if cleanup_outcome.confirmed:
                 self._clear_process_identity(phase)
             else:
                 phase["process_fence_pending"] = True
+                phase["blocked_reason_code"] = cleanup_outcome.blocked_reason_code
             phase["output"] = output
             phase["result"] = {
                 "duration_ms": duration_ms,
@@ -2283,7 +3061,12 @@ class PhaseExecutionManager:
                 phase["status"] = "failed"
                 event_status = "failed"
             phase["attempt_results"].append(self._attempt_snapshot(phase["result"]))
-            _phase_event(phase, event_status, exit_code=exit_code)
+            _phase_event(
+                phase,
+                event_status,
+                exit_code=exit_code,
+                blocked_reason_code=phase.get("blocked_reason_code"),
+            )
             self._refresh_overall_status(record)
             record["updated_at"] = _now()
             try:
@@ -2350,7 +3133,15 @@ class PhaseExecutionManager:
 
     def public(self, execution_id: str, *, include_output: bool = False) -> Dict[str, Any]:
         with self._lock:
-            record = self._load(execution_id)
+            execution_id = _validate_text(
+                execution_id,
+                "execution_id",
+                MAX_EXECUTION_ID_BYTES,
+            )
+            try:
+                record = self._load(execution_id)
+            except ExecutionRecordError as exc:
+                return self.store.inspect_record(execution_id, exc)
             return self._public(
                 record,
                 include_output=include_output,
@@ -2433,14 +3224,19 @@ class PhaseExecutionManager:
             if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
                 raise ValueError("offset must be a non-negative integer")
             records = self.store.list(limit=limit, offset=offset)
-            return [
-                self._public(
-                    record,
-                    compact=True,
-                    execution_in_progress=self.store.is_locked(record["execution_id"]),
+            public_records = []
+            for record in records:
+                if isinstance(record, ExecutionListDiagnostic):
+                    public_records.append(record.response)
+                    continue
+                public_records.append(
+                    self._public(
+                        record,
+                        compact=True,
+                        execution_in_progress=self.store.is_locked(record["execution_id"]),
+                    )
                 )
-                for record in records
-            ]
+            return public_records
 
     def capacity(self) -> Dict[str, Any]:
         """Return read-only durable execution capacity diagnostics."""

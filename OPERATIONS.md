@@ -381,6 +381,30 @@ boolean compatibility alias `unsafe_side_effects: true` is normalized to
 optional `idempotency_key` is persisted as an audit identifier, not as a
 claim that the external system deduplicates requests. Keep the state directory
 access-controlled because it contains the stored commands and bounded output.
+
+Execution record schema v2 validates the record version and recovery-critical
+fields before recovery can inspect or signal processes. Known v1 records are
+normalized in memory through the v1 compatibility adapter; reading them does
+not rewrite their files. Unknown schema versions and malformed records stay on
+disk and cannot be resumed. `get_execution` returns a read-only diagnostic
+response with a bounded, sanitized record preview (`status` is
+`unsupported_record` or `invalid_record`, with a stable `reason_code`). Command
+and output fields are redacted; previews that cannot be safely parsed are
+omitted so operators can inspect record metadata without exposing commands,
+captured output, or triggering recovery. `list_executions` validates each
+selected record and returns the same diagnostic for invalid or unsupported
+records instead of presenting them as successful executions.
+
+When recovery cannot confirm a process fence, `get_execution` and
+`list_executions` include a `blocked_reason` with a stable code and operator
+remedy on the phase; `get_execution` also includes it under `resume`. Codes
+include `PROCESS_IDENTITY_INCOMPLETE`,
+`PROCESS_STATE_UNVERIFIABLE`, `PROCESS_NOT_CONFIRMED_GONE`,
+`PROCESS_CLEANUP_UNCONFIRMED`, `CLEANUP_HOOK_UNAVAILABLE`, and
+`CLEANUP_HOOK_FAILED`. The matching phase event records the same code and
+attempt number. A blocked reason does not make resume available; resolve the
+reported process or cleanup condition and request recovery again.
+
 Execution records are capped at 64 MiB, 64 phases, 32 attempts per phase, and
 1,000 records per state directory; `list_executions` is paginated. The aggregate
 state quota defaults to 4 GiB and is configurable with
