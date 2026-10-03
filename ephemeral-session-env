@@ -8,33 +8,52 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 2
 fi
 
-if [[ -z "${EPHEMERAL_SESSION_ID:-}" ]]; then
+if [[ -z "${EPHEMERAL_SESSION_ID:-}" && -z "${EPHEMERAL_SOCKET_PATH:-}" ]]; then
     EPHEMERAL_SESSION_ID="agent-$(date +%s)-${PPID}-$$"
 fi
-export EPHEMERAL_SESSION_ID
+if [[ -n "${EPHEMERAL_SESSION_ID:-}" ]]; then
+    export EPHEMERAL_SESSION_ID
+else
+    unset EPHEMERAL_SESSION_ID
+fi
 export EPHEMERAL_METRICS="${EPHEMERAL_METRICS:-1}"
 export EPHEMERAL_REQUIRE_ISOLATION=1
 export EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1
 
 # Keep each launcher's diagnostic log beside the socket used by this session.
-# Resolve the session socket with the same tempfile and SHA-256 rules as
-# config.py so Codex and other MCP clients receive the exact matching path.
-if [[ -z "${EPHEMERAL_LOG_FILE:-}" ]]; then
-    if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" ]]; then
-        ephemeral_socket_path="$EPHEMERAL_SOCKET_PATH"
+# Resolve the socket through the shared Python configuration resolver.
+ephemeral_helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+_ephemeral_session_config() {
+    if [[ -x "$ephemeral_helper_dir/ephemeral-config" ]]; then
+        "$ephemeral_helper_dir/ephemeral-config" "$@"
     else
-        ephemeral_socket_path="$(python3 -c '
-import hashlib
-import os
-import tempfile
-
-session_id = os.environ["EPHEMERAL_SESSION_ID"]
-digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
-print(os.path.join(tempfile.gettempdir(), f"ephemeral_buffer-{digest}.sock"))
-')"
+        python3 "$ephemeral_helper_dir/config.py" "$@"
     fi
+}
+if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" || -n "${EPHEMERAL_EXECUTION_STATE_DIR:-}" ]]; then
+    ephemeral_paths_json="$(_ephemeral_session_config --normalize-explicit-paths)"
+    if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" ]]; then
+        EPHEMERAL_SOCKET_PATH="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["EPHEMERAL_SOCKET_PATH"], end="")' "$ephemeral_paths_json")"
+        export EPHEMERAL_SOCKET_PATH
+    fi
+    if [[ -n "${EPHEMERAL_EXECUTION_STATE_DIR:-}" ]]; then
+        EPHEMERAL_EXECUTION_STATE_DIR="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["EPHEMERAL_EXECUTION_STATE_DIR"], end="")' "$ephemeral_paths_json")"
+        export EPHEMERAL_EXECUTION_STATE_DIR
+    fi
+    ephemeral_legacy_state_dir="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("EPHEMERAL_LEGACY_STATE_DIR", ""), end="")' "$ephemeral_paths_json")"
+    if [[ -n "$ephemeral_legacy_state_dir" ]]; then
+        EPHEMERAL_LEGACY_STATE_DIR="$ephemeral_legacy_state_dir"
+        export EPHEMERAL_LEGACY_STATE_DIR
+    fi
+    unset ephemeral_legacy_state_dir
+    unset ephemeral_paths_json
+fi
+if [[ -z "${EPHEMERAL_LOG_FILE:-}" ]]; then
+    ephemeral_socket_path="$(_ephemeral_session_config --socket-path)"
     EPHEMERAL_LOG_FILE="${ephemeral_socket_path%.sock}.jsonl"
     unset ephemeral_socket_path
 fi
 export EPHEMERAL_LOG_FILE
 export EPHEMERAL_LOG_LEVEL="${EPHEMERAL_LOG_LEVEL:-INFO}"
+unset -f _ephemeral_session_config
+unset ephemeral_helper_dir

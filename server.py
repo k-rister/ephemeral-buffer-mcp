@@ -41,14 +41,11 @@ from pydantic import (
     model_validator,
 )
 from config import (
-    execution_state_dir,
-    positive_int_env,
     runtime_index_budget_adjustment_enabled,
-    socket_isolation_configured,
-    socket_isolation_required,
-    socket_path,
-    socket_timeout_seconds,
+    startup_settings,
 )
+
+SETTINGS = startup_settings()
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
 from mcp.types import CallToolResult, TextContent
@@ -89,9 +86,21 @@ try:
 except ImportError:  # pragma: no cover - Windows has no Unix socket backend.
     fcntl = None
 
-SOCKET_PATH = socket_path()
+SOCKET_PATH = SETTINGS.identity.socket_path
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
-SOCKET_CLIENT_READ_TIMEOUT_SECONDS = socket_timeout_seconds()
+SOCKET_CLIENT_READ_TIMEOUT_SECONDS = SETTINGS.socket_timeout_seconds.value
+
+
+def socket_isolation_required() -> bool:
+    """Return the startup-snapshotted isolation policy."""
+    return SETTINGS.socket_require_isolation.value
+
+
+def socket_isolation_configured() -> bool:
+    """Return whether the startup descriptor has an isolated identity."""
+    return SETTINGS.identity.isolation_configured
+
+
 # JSON string escaping can expand a UTF-8 capture by at most six bytes per
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
@@ -150,10 +159,10 @@ SEARCH_QUERY_MAX_BYTES = 1024
 SEARCH_QUERY_TRUNCATION_MARKER = "... [query truncated]"
 CONSOLIDATION_MAX_CAPTURES = 25
 CONSOLIDATION_CAPTURE_ID_MAX_BYTES = 256
-SOCKET_STARTUP_TIMEOUT_SECONDS = positive_int_env("EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS", 5)
+SOCKET_STARTUP_TIMEOUT_SECONDS = SETTINGS.socket_startup_timeout_seconds.value
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
-METRICS = LocalMetrics()
+METRICS = LocalMetrics(enabled=SETTINGS.metrics_enabled.value)
 _REGISTERED_MCP_TOOL_NAMES: list[str] = []
 _REGISTERED_MCP_TOOL_CATEGORIES: dict[str, str] = {}
 MCP_TOOL_CATEGORY_NAMES = (
@@ -173,7 +182,7 @@ _TIMEOUT_RESULT_TOOLS = {
     "resume_execution",
 }
 _SOCKET_STATE_LOCK = threading.Lock()
-_SOCKET_STATE = "disabled" if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1" else "not-started"
+_SOCKET_STATE = "disabled" if SETTINGS.disable_socket_server.value else "not-started"
 _SOCKET_FAILURE = None
 _SOCKET_STARTUP_EVENT = threading.Event()
 _SOCKET_PATH_LOCKS = {}
@@ -509,9 +518,7 @@ def _unlink_socket_if_identity_unlocked(path, expected_identity):
 
 def _allow_stdio_without_socket() -> bool:
     """Return whether MCP stdio may continue when the socket cannot start."""
-    return os.environ.get("EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET", "0").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
+    return SETTINGS.allow_stdio_without_socket.value
 
 
 def _require_socket_ready():
@@ -819,14 +826,12 @@ def _runtime_package_version() -> str:
         return "source checkout"
 
 
-engine = EphemeralEngine(
-    max_captures=positive_int_env("EPHEMERAL_MAX_CAPTURES", DEFAULT_MAX_CAPTURES),
-    max_buffer_bytes=positive_int_env("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
-    metrics=METRICS,
-)
+engine = EphemeralEngine(settings=SETTINGS, metrics=METRICS)
 execution_manager = PhaseExecutionManager(
-    execution_state_dir(),
+    SETTINGS.identity.state_dir,
     max_output_bytes=max(512, engine.max_buffer_bytes),
+    quota_bytes=SETTINGS.execution_state_quota_bytes.value,
+    checkpoint_reserve_bytes=SETTINGS.execution_checkpoint_reserve_bytes.value,
 )
 _ENGINE_OVERRIDE: ContextVar[Optional[EphemeralEngine]] = ContextVar(
     "ephemeral_server_engine_override",
@@ -996,7 +1001,7 @@ def _metrics_snapshot(
 
 def _write_metrics_snapshot() -> None:
     """Persist an opt-in, content-free metrics snapshot for benchmark runners."""
-    path = os.environ.get("EPHEMERAL_METRICS_FILE")
+    path = SETTINGS.metrics_file.value
     if not path or not METRICS.enabled:
         return
     with _METRICS_SNAPSHOT_LOCK:
@@ -2418,13 +2423,12 @@ def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""
     stats = engine.get_buffer_stats()
     installed_version = _runtime_package_version()
-
-    if os.environ.get("EPHEMERAL_SOCKET_PATH"):
-        socket_mode = "explicit path"
-    elif os.environ.get("EPHEMERAL_SESSION_ID"):
-        socket_mode = "session-derived path"
-    else:
-        socket_mode = "shared default path"
+    identity = SETTINGS.identity
+    socket_mode = {
+        "environment:EPHEMERAL_SOCKET_PATH": "explicit path",
+        "session:EPHEMERAL_SESSION_ID": "session-derived path",
+        "default:shared legacy socket": "shared default path",
+    }[identity.socket_source]
 
     uptime_seconds = max(0, int(time.time() - SERVER_STARTED_AT))
     socket_state, socket_failure = _socket_lifecycle()
@@ -2449,12 +2453,27 @@ def get_runtime_diagnostics() -> str:
         f"Platform: {platform.platform()}",
         f"Uptime: {uptime_seconds:,} seconds",
         f"Socket mode: {socket_mode}",
-        f"Socket path: {SOCKET_PATH}",
+        f"Socket path: {identity.socket_path}",
+        f"Socket identity source: {identity.socket_source}",
         f"Socket lifecycle: {socket_state}",
         *( [f"Socket failure: {socket_failure}"] if socket_failure else [] ),
         f"Log file: {log_file}",
         f"Log level: {log_level}",
-        f"Session ID configured: {'yes' if os.environ.get('EPHEMERAL_SESSION_ID') else 'no'}",
+        f"Session ID configured: {'yes' if identity.session_id is not None else 'no'}",
+        f"Session ID source: {identity.session_source}",
+        f"Session fingerprint: {identity.session_fingerprint or 'not configured'}",
+        f"Execution state directory: {identity.state_dir}",
+        f"Execution state source: {identity.state_source}",
+        f"Execution state durability: {identity.durability}",
+        *(
+            [
+                "Existing state namespace needs explicit continuation: "
+                f"{identity.legacy_state_dir}; set EPHEMERAL_EXECUTION_STATE_DIR to continue."
+            ]
+            if identity.legacy_state_transition
+            else []
+        ),
+        f"Startup settings snapshot: {json.dumps(SETTINGS.diagnostics(), sort_keys=True)}",
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
         f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",
@@ -2812,7 +2831,7 @@ def run_socket_server():
 
 def start_socket_server():
     """Start the IPC listener explicitly and return its background thread."""
-    if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") == "1":
+    if SETTINGS.disable_socket_server.value:
         _set_socket_state("disabled")
         return None
     _set_socket_state("starting")
@@ -2826,7 +2845,7 @@ if __name__ == "__main__":
         raise SystemExit(
             "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
         )
-    if os.environ.get("EPHEMERAL_DISABLE_SOCKET_SERVER") != "1":
+    if not SETTINGS.disable_socket_server.value:
         start_socket_server()
         _require_socket_ready()
     engine.start_embedding_warmup()

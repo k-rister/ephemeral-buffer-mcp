@@ -43,15 +43,14 @@ fi
 # shellcheck source=/dev/null
 source "$dir/ephemeral-session-env"
 
-# Pass the identity explicitly through Codex's MCP configuration as well as
-# the parent environment. This matters when Codex sanitizes the environment
-# used to launch MCP child processes. JSON escaping is compatible with TOML
-# basic strings here; keep Unicode scalars as UTF-8 instead of JSON's non-BMP
-# surrogate-pair escapes, which TOML does not accept.
-session_id_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_SESSION_ID")"
-metrics_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_METRICS")"
-log_level_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_LEVEL")"
-log_file_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$EPHEMERAL_LOG_FILE")"
-mcp_env_config="mcp_servers.ephemeral-buffer.env={EPHEMERAL_REQUIRE_ISOLATION=\"1\", EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=\"1\", EPHEMERAL_METRICS=${metrics_toml}, EPHEMERAL_SESSION_ID=${session_id_toml}, EPHEMERAL_LOG_LEVEL=${log_level_toml}, EPHEMERAL_LOG_FILE=${log_file_toml}}"
+# Pass identity and startup settings through Codex's MCP configuration as well
+# as the parent environment. This matters when Codex sanitizes child env vars.
+# config.py owns the allowlist and TOML string escaping so the launcher and
+# server use the same configuration vocabulary.
+if [[ -x "$dir/ephemeral-config" ]]; then
+    mcp_env_config="$("$dir/ephemeral-config" --codex-env-config)"
+else
+    mcp_env_config="$(python3 "$dir/config.py" --codex-env-config)"
+fi
 
 exec codex --config "$mcp_env_config" "$@"

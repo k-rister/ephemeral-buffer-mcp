@@ -16,11 +16,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 import socket_protocol
+from config import load_settings
 
 import cli
 
 CLI_PATH = Path(__file__).with_name("cli.py")
 TEST_ENV_WRAPPER = Path(__file__).with_name("scripts") / "with-test-env.sh"
+SESSION_ENV_HELPER = Path(__file__).with_name("ephemeral-session-env")
 
 
 class TestCliConfiguration(unittest.TestCase):
@@ -68,6 +70,32 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(Path(paths["log_file"]).parent, runtime_dir)
         self.assertEqual(paths["require_isolation"], "1")
         self.assertFalse(runtime_dir.exists())
+
+    def test_session_helper_keeps_explicit_socket_identity_without_minting_session(self):
+        environment = os.environ.copy()
+        environment.pop("EPHEMERAL_SESSION_ID", None)
+        environment.pop("EPHEMERAL_EXECUTION_STATE_DIR", None)
+        environment.pop("EPHEMERAL_LOG_FILE", None)
+        environment["EPHEMERAL_SOCKET_PATH"] = "relative/fixed-eb-socket.sock"
+        expected_socket = os.path.abspath(environment["EPHEMERAL_SOCKET_PATH"])
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; printf "%s\\n%s\\n%s\\n" "${EPHEMERAL_SESSION_ID:-<unset>}" "$EPHEMERAL_SOCKET_PATH" "$EPHEMERAL_LOG_FILE"',
+                "bash",
+                str(SESSION_ENV_HELPER),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        session_id, socket_path, log_file = result.stdout.splitlines()
+        self.assertEqual(session_id, "<unset>")
+        self.assertEqual(socket_path, expected_socket)
+        self.assertEqual(log_file, f"{expected_socket.removesuffix('.sock')}.jsonl")
 
     def test_recv_exact_rejects_truncated_response(self):
         class EmptySocket:
@@ -179,7 +207,7 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertIn("socket not found", result["message"])
 
     def test_send_to_mcp_rejects_unisolated_strict_mode(self):
-        with patch.dict(os.environ, {"EPHEMERAL_REQUIRE_ISOLATION": "1"}, clear=True), \
+        with patch.object(cli, "SETTINGS", load_settings({"EPHEMERAL_REQUIRE_ISOLATION": "1"})), \
                 patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"):
             result = cli.send_to_mcp("output")
 
@@ -399,7 +427,9 @@ class TestCliConfiguration(unittest.TestCase):
 
         expired_selector = FakeSelector([cli.selectors.EVENT_WRITE])
         with patch.object(cli.selectors, "DefaultSelector", return_value=expired_selector), \
-                patch.object(cli, "socket_timeout_seconds", return_value=1), \
+                patch.object(
+                    cli, "SETTINGS", load_settings({"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "1"})
+                ), \
                 patch.object(cli.time, "monotonic", side_effect=[10.0, 11.1]):
             with self.assertRaises(socket.timeout):
                 cli._send_large_frame_with_early_response(FakeSocket([]), b"z" * 2048)
@@ -441,7 +471,9 @@ class TestCliConfiguration(unittest.TestCase):
                 self.closed = True
 
         stalled = StalledSocket()
-        with patch.dict(os.environ, {"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "1.5"}, clear=True), \
+        with patch.object(
+                cli, "SETTINGS", load_settings({"EPHEMERAL_SOCKET_TIMEOUT_SECONDS": "1.5"})
+        ), \
                 patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
                 patch.object(cli.os.path, "exists", return_value=True), \
                 patch.object(cli.socket, "socket", return_value=stalled):
@@ -548,7 +580,7 @@ class TestCliConfiguration(unittest.TestCase):
                 cli.main()
 
         self.assertEqual(exit_result.exception.code, 3)
-        run.assert_called_once_with("echo ok", None, cli.DEFAULT_MAX_OUTPUT_BYTES, None)
+        run.assert_called_once_with("echo ok", None, cli.SETTINGS.max_buffer_bytes.value, None)
         self.assertEqual(send.call_args.kwargs["label"], "build")
         self.assertIsInstance(send.call_args.kwargs["duration_ms"], float)
         self.assertIn('"schema_version":1', stderr.getvalue())
@@ -579,7 +611,9 @@ class TestCliConfiguration(unittest.TestCase):
                 cli.main()
 
         self.assertEqual(exit_result.exception.code, 0)
-        run.assert_called_once_with(shlex.join(command), None, cli.DEFAULT_MAX_OUTPUT_BYTES, None)
+        run.assert_called_once_with(
+            shlex.join(command), None, cli.SETTINGS.max_buffer_bytes.value, None
+        )
 
     def test_wrapped_command_does_not_reinterpret_literal_command_substitution(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "build"}

@@ -65,7 +65,10 @@ export EPHEMERAL_REQUIRE_ISOLATION=1
 export EPHEMERAL_SESSION_ID="agent-session-1"
 ```
 
-The same variables must be inherited by the MCP server and the `ephbuf` CLI.
+The same session ID or explicit socket path must be inherited by the MCP server
+and the `ephbuf` CLI. Use an absolute explicit path in manually configured
+clients; the supplied shell launchers normalize explicit paths before starting
+their child processes.
 The server advertises the policy in its MCP initialization instructions and
 also enforces it at startup; the CLI refuses to send when strict mode is
 enabled without an explicit session ID or socket path.
@@ -405,13 +408,20 @@ directory must be current-user-owned and not group/world writable. The archive
 is created with owner-only file permissions and synchronized before the source record and
 summary pair are removed. Keep the archive in an access-controlled location;
 it contains stored commands and bounded output. Active, started, and
-fence-pending executions are refused. There is no automatic expiry. When no
-explicit state directory is set,
-state is isolated by `EPHEMERAL_SESSION_ID` or by the explicit socket path;
-otherwise each server process receives a fresh private directory that is
-removed during normal shutdown on POSIX platforms. Windows may retain that
-temporary directory because secure owner-identity cleanup is not available
-there.
+fence-pending executions are refused. There is no automatic expiry. An
+explicit `EPHEMERAL_EXECUTION_STATE_DIR` always selects the state directory.
+Otherwise an explicit socket path identifies the derived state namespace,
+followed by the session ID when no socket path is explicit. When neither
+identity value is set, each server process receives a fresh private directory
+that is removed during normal shutdown on POSIX platforms. Windows may retain
+that temporary directory because secure owner-identity cleanup is not
+available there.
+
+If both `EPHEMERAL_SOCKET_PATH` and `EPHEMERAL_SESSION_ID` are set, this
+precedence can select a different state directory than older versions. Startup
+reports an existing session-derived directory and gives its path. To continue
+using those records, set `EPHEMERAL_EXECUTION_STATE_DIR` to that exact path;
+the server does not migrate records automatically.
 
 Signal summaries recognize successful test-run markers and avoid treating
 example error text inside a passing test run as an active failure while still
@@ -611,10 +621,17 @@ For the behavior being investigated, record:
 - timeout, readiness, socket, embedding, cleanup, or eviction symptoms
 
 Use `get_runtime_diagnostics()` for a content-free report of the running
-version, Python/platform details, uptime, socket mode and path, active log file
-and level, buffer limits, embedding readiness, and process memory. It reports
-when file logging is not configured or when its configured path could not be
-opened. Use
+version, Python/platform details, uptime, socket and durable-state paths,
+identity sources, durability, active log file and level, buffer limits,
+embedding readiness, process memory, and the typed startup settings snapshot.
+The snapshot reports accepted values, their environment/default/derived
+origins, validation status, and fallback behavior. Invalid numeric and
+boolean settings warn and use their defaults; empty optional values remain
+unset. The runtime semantic-index budget permission is sampled for each
+adjustment request; other settings are fixed at process startup. Diagnostics
+include a short session fingerprint instead of the raw session ID. The report
+also indicates when file logging is not configured or when its configured
+path could not be opened. Use
 `get_buffer_stats` and `get_capture_summary` for more focused aggregate
 diagnostics. The runtime report is opt-in and does not include captured text,
 labels, command arguments, or the session ID value.

@@ -35,21 +35,8 @@ from config import (
     FP32_EMBEDDING_MODEL,
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
-    embedding_cache_dir,
-    embedding_batch_size as configured_embedding_batch_size,
-    embedding_cpu_mem_arena_enabled as configured_embedding_cpu_mem_arena_enabled,
-    embedding_max_batch_tokens as configured_embedding_max_batch_tokens,
-    embedding_model_name as configured_embedding_model_name,
-    embedding_threads as configured_embedding_threads,
-    embedding_warmup_enabled as configured_embedding_warmup_enabled,
-    max_indexed_chunks as configured_max_indexed_chunks,
-    semantic_prefetch_enabled as configured_semantic_prefetch_enabled,
-    semantic_prefetch_workers as configured_semantic_prefetch_workers,
-    semantic_wait_seconds as configured_semantic_wait_seconds,
-    semantic_chunk_lines as configured_semantic_chunk_lines,
-    semantic_chunk_bytes as configured_semantic_chunk_bytes,
-    semantic_chunk_overlap as configured_semantic_chunk_overlap,
-    semantic_max_index_input_bytes as configured_semantic_max_index_input_bytes,
+    SettingsSnapshot,
+    load_settings,
 )
 from admission import admission_snapshot
 
@@ -857,8 +844,8 @@ class _DeterministicTestEmbedding:
 class EphemeralEngine:
     def __init__(
         self,
-        max_captures: int = DEFAULT_MAX_CAPTURES,
-        max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
+        max_captures: Optional[int] = None,
+        max_buffer_bytes: Optional[int] = None,
         max_indexed_chunks: Optional[int] = None,
         embedding_model_name: Optional[str] = None,
         embedding_cache_path: Optional[str] = None,
@@ -875,7 +862,11 @@ class EphemeralEngine:
         semantic_chunk_bytes: Optional[int] = None,
         semantic_chunk_overlap: Optional[int] = None,
         semantic_wait_seconds: Optional[float] = None,
+        settings: Optional[SettingsSnapshot] = None,
     ):
+        settings = settings or load_settings()
+        max_captures = settings.max_captures.value if max_captures is None else max_captures
+        max_buffer_bytes = settings.max_buffer_bytes.value if max_buffer_bytes is None else max_buffer_bytes
         self._lock = threading.RLock()
         self._slice_cursor_secret = secrets.token_bytes(32)
         if max_captures < 1:
@@ -883,7 +874,7 @@ class EphemeralEngine:
         if max_buffer_bytes < 1:
             raise ValueError("max_buffer_bytes must be at least 1")
         self.max_indexed_chunks = (
-            configured_max_indexed_chunks() if max_indexed_chunks is None else max_indexed_chunks
+            settings.max_indexed_chunks.value if max_indexed_chunks is None else max_indexed_chunks
         )
         if self.max_indexed_chunks < 1:
             raise ValueError("max_indexed_chunks must be at least 1")
@@ -907,46 +898,46 @@ class EphemeralEngine:
         self._next_id = 1
         self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
         
-        self.embedding_model_name = embedding_model_name or configured_embedding_model_name()
+        self.embedding_model_name = embedding_model_name or settings.embedding_model_name.value
         self.embedding_threads = (
-            configured_embedding_threads() if embedding_threads is None else embedding_threads
+            settings.embedding_threads.value if embedding_threads is None else embedding_threads
         )
         if self.embedding_threads is not None and self.embedding_threads < 1:
             raise ValueError("embedding_threads must be at least 1")
         self.embedding_batch_size = (
-            configured_embedding_batch_size()
+            settings.embedding_batch_size.value
             if embedding_batch_size is None
             else embedding_batch_size
         )
         if self.embedding_batch_size < 1:
             raise ValueError("embedding_batch_size must be at least 1")
         self.embedding_max_batch_tokens = (
-            configured_embedding_max_batch_tokens()
+            settings.embedding_max_batch_tokens.value
             if embedding_max_batch_tokens is None
             else embedding_max_batch_tokens
         )
         if self.embedding_max_batch_tokens < 1:
             raise ValueError("embedding_max_batch_tokens must be at least 1")
         self.embedding_cpu_mem_arena_enabled = (
-            configured_embedding_cpu_mem_arena_enabled()
+            settings.embedding_cpu_mem_arena_enabled.value
             if embedding_cpu_mem_arena_enabled is None
             else embedding_cpu_mem_arena_enabled
         )
         self.semantic_max_index_input_bytes = (
-            configured_semantic_max_index_input_bytes()
+            settings.semantic_max_index_input_bytes.value
             if semantic_max_index_input_bytes is None
             else semantic_max_index_input_bytes
         )
         if self.semantic_max_index_input_bytes < 1:
             raise ValueError("semantic_max_index_input_bytes must be at least 1")
         self.semantic_chunk_lines = (
-            configured_semantic_chunk_lines() if semantic_chunk_lines is None else semantic_chunk_lines
+            settings.semantic_chunk_lines.value if semantic_chunk_lines is None else semantic_chunk_lines
         )
         self.semantic_chunk_bytes = (
-            configured_semantic_chunk_bytes() if semantic_chunk_bytes is None else semantic_chunk_bytes
+            settings.semantic_chunk_bytes.value if semantic_chunk_bytes is None else semantic_chunk_bytes
         )
         self.semantic_chunk_overlap = (
-            configured_semantic_chunk_overlap()
+            settings.semantic_chunk_overlap.value
             if semantic_chunk_overlap is None
             else semantic_chunk_overlap
         )
@@ -956,10 +947,10 @@ class EphemeralEngine:
             raise ValueError("semantic_chunk_bytes must be at least 1")
         if not 0 <= self.semantic_chunk_overlap < self.semantic_chunk_lines:
             raise ValueError("semantic_chunk_overlap must be non-negative and smaller than semantic_chunk_lines")
-        self.embedding_cache_path = embedding_cache_path or embedding_cache_dir()
+        self.embedding_cache_path = embedding_cache_path or settings.embedding_cache_dir.value
         self.embedding_model = None
         self.embedding_warmup_enabled = (
-            configured_embedding_warmup_enabled()
+            settings.embedding_warmup_enabled.value
             if embedding_warmup is None
             else embedding_warmup
         )
@@ -972,17 +963,17 @@ class EphemeralEngine:
         self._metrics_snapshot_callback: Optional[Callable[[], None]] = None
         self._metrics_snapshot_pending = False
         self.semantic_prefetch_enabled = (
-            configured_semantic_prefetch_enabled() if semantic_prefetch is None else semantic_prefetch
+            settings.semantic_prefetch_enabled.value if semantic_prefetch is None else semantic_prefetch
         )
         self.semantic_prefetch_workers = (
-            configured_semantic_prefetch_workers()
+            settings.semantic_prefetch_workers.value
             if semantic_prefetch_workers is None
             else semantic_prefetch_workers
         )
         if self.semantic_prefetch_workers < 1:
             raise ValueError("semantic_prefetch_workers must be at least 1")
         self.semantic_wait_seconds = (
-            configured_semantic_wait_seconds() if semantic_wait_seconds is None else semantic_wait_seconds
+            settings.semantic_wait_seconds.value if semantic_wait_seconds is None else semantic_wait_seconds
         )
         if math.isnan(self.semantic_wait_seconds) or self.semantic_wait_seconds < 0:
             raise ValueError("semantic_wait_seconds must be non-negative")
