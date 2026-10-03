@@ -2,6 +2,7 @@
 
 import ctypes
 import errno
+import io
 import json
 import os
 import signal
@@ -258,6 +259,394 @@ class TestPhaseExecutionManager(unittest.TestCase):
             resumed = fresh.resume("interrupted-execution")
         self.assertEqual(resumed["execution_status"], "completed")
         self.assertEqual([event["status"] for event in resumed["phases"][0]["events"]], ["interrupted", "started", "completed"])
+
+    def test_v1_records_normalize_in_memory_without_rewriting_the_record(self):
+        manager = self.manager()
+        manager.create([self.phase("legacy", "legacy")], execution_id="schema-v1")
+        path = manager.store._path("schema-v1")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["schema_version"] = execution.LEGACY_EXECUTION_SCHEMA_VERSION
+        raw["future_record_field"] = {"preserved": True}
+        raw["phases"][0].pop("blocked_reason_code")
+        raw["phases"][0]["future_phase_field"] = "preserved"
+        raw["phases"][0].pop("process_fence_pending")
+        raw["phases"][0].pop("events")
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        normalized = manager.store.load("schema-v1", recover=False)
+
+        self.assertEqual(normalized["schema_version"], execution.EXECUTION_SCHEMA_VERSION)
+        self.assertIsNone(normalized["phases"][0]["blocked_reason_code"])
+        self.assertFalse(normalized["phases"][0]["process_fence_pending"])
+        self.assertEqual(normalized["phases"][0]["events"], [])
+        self.assertEqual(normalized["future_record_field"], {"preserved": True})
+        self.assertEqual(normalized["phases"][0]["future_phase_field"], "preserved")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 1)
+        listed = manager.list_public()
+        self.assertEqual(listed[0]["schema_version"], execution.EXECUTION_SCHEMA_VERSION)
+        self.assertIsNone(listed[0]["phases"][0]["blocked_reason_code"])
+
+        malformed_legacy = json.loads(path.read_text(encoding="utf-8"))
+        malformed_legacy["phases"] = [None]
+        path.write_text(json.dumps(malformed_legacy), encoding="utf-8")
+        with self.assertRaisesRegex(
+            execution.ExecutionRecordError,
+            r"phases\[0\] must be an object",
+        ):
+            manager.store.load("schema-v1", recover=False)
+
+    def test_list_returns_read_only_diagnostic_for_unsupported_schema(self):
+        manager = self.manager()
+        manager.create([self.phase("future", "future")], execution_id="list-future")
+        record = manager.store.load("list-future", recover=False)
+        record["schema_version"] = 999
+        manager.store.save(record)
+
+        listed = manager.list_public()
+
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["status"], "unsupported_record")
+        self.assertEqual(listed[0]["schema_version"], 999)
+        self.assertTrue(listed[0]["read_only"])
+        with patch.object(manager.store, "inspect_record", side_effect=ValueError("unreadable")):
+            self.assertEqual(manager.store.list(), [])
+
+    def test_unsupported_record_is_inspectable_and_never_recovered(self):
+        runner = Runner()
+        manager = self.manager(runner)
+        manager.create([self.phase("future", "future")], execution_id="schema-future")
+        path = manager.store._path("schema-future")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["schema_version"] = 999
+        raw["phases"][0]["status"] = "started"
+        raw["phases"][0]["attempts"] = 1
+        raw["phases"][0]["process_fence_pending"] = True
+        raw["phases"][0]["command"] = (
+            "curl --user alice:sensitive-command-secret https://example.invalid"
+        )
+        raw["phases"][0]["output"] = "private phase output"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        original = path.read_bytes()
+
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            side_effect=AssertionError("unsupported record reached recovery"),
+        ):
+            inspected = manager.public("schema-future")
+
+        self.assertEqual(inspected["status"], "unsupported_record")
+        self.assertEqual(inspected["reason_code"], "UNSUPPORTED_SCHEMA_VERSION")
+        self.assertEqual(inspected["schema_version"], 999)
+        self.assertTrue(inspected["read_only"])
+        self.assertIn('"schema_version": 999', inspected["record_preview"])
+        self.assertTrue(inspected["record_preview_redacted"])
+        self.assertNotIn("sensitive-command-secret", inspected["record_preview"])
+        self.assertNotIn("private phase output", inspected["record_preview"])
+        self.assertEqual(path.read_bytes(), original)
+        with self.assertRaisesRegex(execution.ExecutionRecordError, "unsupported schema version"):
+            manager.resume("schema-future")
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_malformed_recovery_fields_are_inspectable_without_side_effects(self):
+        runner = Runner()
+        manager = self.manager(runner)
+        manager.create([self.phase("malformed", "malformed")], execution_id="bad-record")
+        path = manager.store._path("bad-record")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["phases"][0]["status"] = "started"
+        raw["phases"][0]["attempts"] = 1
+        raw["phases"][0]["process_fence_pending"] = True
+        raw["phases"][0]["process_id"] = "123"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        original = path.read_bytes()
+
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            side_effect=AssertionError("malformed record reached recovery"),
+        ):
+            inspected = manager.public("bad-record")
+
+        self.assertEqual(inspected["status"], "invalid_record")
+        self.assertEqual(inspected["reason_code"], "MALFORMED_RECORD")
+        self.assertTrue(inspected["read_only"])
+        with self.assertRaisesRegex(execution.ExecutionRecordError, "process_id is invalid"):
+            manager.resume("bad-record")
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_record_validation_rejects_malformed_versions_and_fields(self):
+        manager = self.manager()
+        manager.create([self.phase("valid", "valid")], execution_id="validation-cases")
+        path = manager.store._path("validation-cases")
+        base = json.loads(path.read_text(encoding="utf-8"))
+
+        def phase_value(key, value):
+            return lambda record: record["phases"][0].__setitem__(key, value)
+
+        def record_value(key, value):
+            return lambda record: record.__setitem__(key, value)
+
+        cases = [
+            ("schema version type", record_value("schema_version", True)),
+            ("record identity", record_value("execution_id", "different")),
+            ("missing label", record_value("label", None)),
+            ("unencodable label", record_value("label", "\ud800")),
+            ("oversized label", record_value("label", "x" * 1025)),
+            ("overall status", record_value("execution_status", "unknown")),
+            ("partial flag", record_value("partial", 1)),
+            ("resume policy", record_value("resume_policy", "always")),
+            ("empty phases", record_value("phases", [])),
+            ("phase object", record_value("phases", [None])),
+            ("duplicate phase name", record_value("phases", [base["phases"][0], base["phases"][0]])),
+            ("phase status", phase_value("status", "unknown")),
+            ("attempt count", phase_value("attempts", True)),
+            ("fence flag", phase_value("process_fence_pending", 1)),
+            ("side effects", phase_value("side_effects", "maybe")),
+            ("unsafe flag", phase_value("unsafe_side_effects", "yes")),
+            ("side effect mismatch", phase_value("unsafe_side_effects", True)),
+            ("events", phase_value("events", [None])),
+            ("attempt results", phase_value("attempt_results", [None])),
+            ("result", phase_value("result", [])),
+            ("output", phase_value("output", {})),
+            ("error", phase_value("error", {})),
+            ("metrics object", phase_value("structured_metrics", [])),
+            (
+                "metrics limit",
+                phase_value(
+                    "structured_metrics",
+                    {"large": "x" * execution.MAX_STRUCTURED_METRICS_BYTES},
+                ),
+            ),
+            ("timeout", phase_value("timeout_seconds", 0)),
+            ("overflowing timeout", phase_value("timeout_seconds", 10**400)),
+            ("output limit", phase_value("max_output_bytes", 511)),
+            ("process id", phase_value("process_id", True)),
+            ("process identity", phase_value("process_start_time", "")),
+            ("non-ASCII launch token", phase_value("process_launch_token", "é")),
+            ("containment", phase_value("process_containment", 1)),
+            ("blocked reason", phase_value("blocked_reason_code", "x" * 65)),
+            ("non-finite additive field", record_value("future_field", float("nan"))),
+        ]
+
+        with self.assertRaisesRegex(execution.ExecutionRecordError, "record must be an object"):
+            path.write_text("[]", encoding="utf-8")
+            manager.store.load("validation-cases", recover=False)
+
+        for name, update in cases:
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(base))
+                update(candidate)
+                path.write_text(json.dumps(candidate), encoding="utf-8")
+                with self.assertRaises(execution.ExecutionRecordError) as raised:
+                    manager.store.load("validation-cases", recover=False)
+                self.assertEqual(raised.exception.reason_code, "MALFORMED_RECORD")
+
+    def test_record_size_limits_are_checked_before_and_after_normalization(self):
+        manager = self.manager()
+        manager.create([self.phase("size", "size")], execution_id="size-limits")
+        path = manager.store._path("size-limits")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["phases"][0]["max_output_bytes"] = 512
+        compact = json.dumps(record, separators=(",", ":"))
+        path.write_text(compact, encoding="utf-8")
+
+        with patch.object(execution, "MAX_EXECUTION_STATE_BYTES", len(compact) + 1):
+            with self.assertRaisesRegex(execution.ExecutionRecordError, "record exceeds the size limit"):
+                manager.store.load("size-limits", recover=False)
+
+        with patch.object(execution, "MAX_EXECUTION_STATE_BYTES", 16):
+            with self.assertRaisesRegex(execution.ExecutionRecordError, "record exceeds the size limit"):
+                manager.store.load("size-limits", recover=False)
+
+        original_open = Path.open
+
+        def overlong_open(target, mode="r", *args, **kwargs):
+            if target == path and mode == "rb":
+                return io.BytesIO(b"x" * 33)
+            return original_open(target, mode, *args, **kwargs)
+
+        path.write_bytes(b"{}")
+        with patch.object(execution, "MAX_EXECUTION_STATE_BYTES", 32), \
+                patch.object(Path, "open", new=overlong_open):
+            with self.assertRaisesRegex(execution.ExecutionRecordError, "record exceeds the size limit"):
+                manager.store.load("size-limits", recover=False)
+
+    def test_record_reader_rejects_non_regular_file_and_inspector_is_bounded(self):
+        manager = self.manager()
+        manager.create([self.phase("inspect", "inspect")], execution_id="inspection-cases")
+        path = manager.store._path("inspection-cases")
+        error = execution.ExecutionRecordError("invalid", schema_version="v" * 80)
+
+        missing_error = execution.ExecutionRecordError("missing")
+        with self.assertRaises(KeyError):
+            manager.store.inspect_record("does-not-exist", missing_error)
+
+        path.unlink()
+        os.mkfifo(path, 0o600)
+        with self.assertRaisesRegex(execution.ExecutionRecordError, "not a regular file"):
+            manager.store.load("inspection-cases", recover=False)
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            manager.store.inspect_record("inspection-cases", error)
+        path.unlink()
+
+        path.write_bytes(b"x" * (execution.MAX_EXECUTION_RECORD_PREVIEW_BYTES + 32))
+        inspected = manager.store.inspect_record("inspection-cases", error)
+        self.assertEqual(
+            inspected["record_preview"],
+            "[preview omitted because it could not be safely sanitized]",
+        )
+        self.assertTrue(inspected["record_preview_sanitized"])
+        self.assertTrue(inspected["record_preview_truncated"])
+        self.assertEqual(len(inspected["schema_version"]), 64)
+
+        malformed_version = execution.ExecutionRecordError(
+            "malformed",
+            schema_version={"not": "a scalar"},
+        )
+        self.assertIsNone(
+            manager.store.inspect_record("inspection-cases", malformed_version)[
+                "schema_version"
+            ]
+        )
+
+        original_open = Path.open
+
+        def unavailable_open(target, mode="r", *args, **kwargs):
+            if target == path and mode == "rb":
+                raise OSError("read unavailable")
+            return original_open(target, mode, *args, **kwargs)
+
+        with patch.object(Path, "open", new=unavailable_open):
+            with self.assertRaisesRegex(ValueError, "unreadable state"):
+                manager.store.inspect_record("inspection-cases", error)
+
+    def test_read_only_inspection_handles_unparseable_integer_schema_version(self):
+        manager = self.manager()
+        manager.create([self.phase("large-version", "large-version")], execution_id="large-version")
+        path = manager.store._path("large-version")
+        path.write_text(
+            '{"execution_id":"large-version","schema_version":' + "9" * 5000 + "}",
+            encoding="utf-8",
+        )
+
+        inspected = manager.public("large-version")
+
+        self.assertEqual(inspected["status"], "invalid_record")
+        self.assertEqual(inspected["reason_code"], "MALFORMED_RECORD")
+        self.assertTrue(inspected["read_only"])
+
+        path.write_text(
+            '{"execution_id":"large-version","schema_version":1e10000}',
+            encoding="utf-8",
+        )
+        non_finite = manager.public("large-version")
+        self.assertEqual(non_finite["status"], "invalid_record")
+        self.assertIsNone(non_finite["schema_version"])
+        json.dumps(non_finite, allow_nan=False)
+
+    def test_blocked_recovery_reason_is_stable_public_and_correlated_to_event(self):
+        manager = self.manager()
+        manager.create([self.phase("blocked", "blocked")], execution_id="reason-code")
+        record = manager.get("reason-code")
+        phase = record["phases"][0]
+        phase["status"] = "started"
+        phase["attempts"] = 1
+        phase["process_fence_pending"] = True
+        manager.store.save(record)
+        outcome = execution.CleanupOutcome(
+            False,
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
+
+        with patch.object(execution, "_terminate_stale_process_outcome", return_value=outcome):
+            blocked = manager.public("reason-code")
+        self.assertFalse(blocked["resume"]["available"])
+        self.assertEqual(
+            blocked["resume"]["blocked_reason"]["code"],
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
+        self.assertTrue(blocked["resume"]["blocked_reason"]["remedy"])
+        event_count = len(blocked["phases"][0]["events"])
+        persisted_record = manager.store._path("reason-code").read_bytes()
+        persisted_summary = json.loads(
+            manager.store._summary_path("reason-code").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            persisted_summary["phases"][0]["blocked_reason_code"],
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
+        self.assertEqual(
+            blocked["phases"][0]["events"][-1]["blocked_reason_code"],
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
+        with patch.object(execution, "_terminate_stale_process_outcome", return_value=outcome):
+            listed = manager.list_public()
+        self.assertEqual(
+            listed[0]["phases"][0]["blocked_reason_code"],
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
+        self.assertEqual(
+            listed[0]["phases"][0]["blocked_reason"],
+            blocked["phases"][0]["blocked_reason"],
+        )
+        with patch.object(execution, "_terminate_stale_process_outcome", return_value=outcome):
+            manager.public("reason-code")
+        self.assertEqual(
+            manager.store._path("reason-code").read_bytes(),
+            persisted_record,
+        )
+        self.assertEqual(
+            len(manager.store.load("reason-code", recover=False)["phases"][0]["events"]),
+            event_count,
+        )
+
+        manager.create([self.phase("failed", "failed")], execution_id="failed-recovery-block")
+        failed_record = manager.get("failed-recovery-block")
+        failed_phase = failed_record["phases"][0]
+        failed_phase["status"] = "failed"
+        failed_phase["attempts"] = 1
+        failed_phase["process_fence_pending"] = True
+        manager.store.save(failed_record)
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=execution.CleanupOutcome(
+                False,
+                "PROCESS_NOT_CONFIRMED_GONE",
+            ),
+        ):
+            failed_block = manager.public("failed-recovery-block")
+        self.assertEqual(failed_block["phases"][0]["status"], "failed")
+        self.assertEqual(
+            failed_block["phases"][0]["events"][-1]["status"],
+            "blocked",
+        )
+        self.assertEqual(
+            failed_block["phases"][0]["events"][-1]["blocked_reason_code"],
+            "PROCESS_NOT_CONFIRMED_GONE",
+        )
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=execution.CleanupOutcome(True),
+        ):
+            recovered_failed = manager.public("failed-recovery-block")
+        self.assertFalse(
+            manager.store.load(
+                "failed-recovery-block",
+                recover=False,
+            )["phases"][0]["process_fence_pending"]
+        )
+        self.assertIsNone(recovered_failed["resume"]["blocked_reason"])
+        self.assertIsNone(recovered_failed["phases"][0]["error"])
+
+    def test_stale_process_cleanup_reports_incomplete_identity(self):
+        outcome = execution._terminate_stale_process_outcome({})
+        self.assertFalse(outcome.confirmed)
+        self.assertEqual(outcome.blocked_reason_code, "PROCESS_IDENTITY_INCOMPLETE")
 
     def test_recovery_terminates_stale_process_group_before_resume(self):
         manager = self.manager()
@@ -1050,8 +1439,14 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with patch.object(execution, "_marker_process_identities", return_value=None):
             recovered = manager.public("marker-gone")
         self.assertEqual(recovered["phases"][0]["status"], "interrupted")
-        self.assertTrue(manager.get("marker-gone")["phases"][0]["process_fence_pending"])
         self.assertFalse(recovered["resume"]["available"])
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=execution.CleanupOutcome(True),
+        ):
+            retried = manager.get("marker-gone")
+        self.assertFalse(retried["phases"][0]["process_fence_pending"])
 
     def test_recovery_reports_unconfirmed_group_fence(self):
         stale = {
@@ -1107,6 +1502,8 @@ class TestPhaseExecutionManager(unittest.TestCase):
         phase["status"] = "started"
         phase["attempts"] = 1
         phase.pop("process_fence_pending", None)
+        record["schema_version"] = execution.LEGACY_EXECUTION_SCHEMA_VERSION
+        phase.pop("blocked_reason_code", None)
         manager.store.save(record)
         recovered = manager.public("legacy-started")
         self.assertFalse(recovered["resume"]["available"])
@@ -1123,16 +1520,34 @@ class TestPhaseExecutionManager(unittest.TestCase):
         phase["process_group_id"] = 456
         phase["process_fence_pending"] = True
         manager.store.save(record)
-        with patch.object(execution, "_terminate_stale_process", return_value=False):
+        blocked_outcome = execution.CleanupOutcome(
+            False,
+            "PROCESS_STATE_UNVERIFIABLE",
+        )
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=blocked_outcome,
+        ):
             recovered = manager.resume("pending-fence")
         self.assertFalse(recovered["resume"]["available"])
-        self.assertTrue(manager.get("pending-fence")["phases"][0]["process_fence_pending"])
+        self.assertTrue(
+            manager.store.load("pending-fence", recover=False)["phases"][0][
+                "process_fence_pending"
+            ]
+        )
         self.assertEqual(manager.command_runner.calls, [])
-        event_count = len(manager.get("pending-fence")["phases"][0]["events"])
-        with patch.object(execution, "_terminate_stale_process", return_value=False):
+        event_count = len(
+            manager.store.load("pending-fence", recover=False)["phases"][0]["events"]
+        )
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=blocked_outcome,
+        ):
             manager.resume("pending-fence")
         self.assertEqual(
-            len(manager.get("pending-fence")["phases"][0]["events"]),
+            len(manager.store.load("pending-fence", recover=False)["phases"][0]["events"]),
             event_count,
         )
 
@@ -1151,7 +1566,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertIsNone(persisted["phases"][0]["process_id"])
         self.assertIsNone(persisted["phases"][0]["process_group_id"])
 
-    def test_default_runner_cleanup_failure_keeps_interruption_fenced(self):
+    def test_default_runner_cleanup_failure_retries_interruption_fence_on_read(self):
         base = self.manager()
         interrupted = KeyboardInterrupt("interrupted")
         interrupted.cleanup_confirmed = False
@@ -1170,16 +1585,27 @@ class TestPhaseExecutionManager(unittest.TestCase):
             )
             with self.assertRaises(KeyboardInterrupt):
                 manager.start([self.phase("unsafe", "unsafe")], execution_id="default-fence")
-        record = manager.get("default-fence")
+        record = manager.store.load("default-fence", recover=False)
         phase = record["phases"][0]
         self.assertTrue(phase["process_fence_pending"])
         self.assertEqual(
             (phase["process_id"], phase["process_group_id"], phase["process_start_time"], phase["process_boot_id"]),
             (123, 456, "start", "boot"),
         )
-        self.assertFalse(manager.public("default-fence")["resume"]["available"])
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=execution.CleanupOutcome(True),
+        ):
+            recovered = manager.public("default-fence")
+        self.assertFalse(
+            manager.store.load("default-fence", recover=False)["phases"][0][
+                "process_fence_pending"
+            ]
+        )
+        self.assertTrue(recovered["resume"]["available"])
 
-    def test_default_runner_exception_cleanup_failure_keeps_phase_fenced(self):
+    def test_default_runner_exception_cleanup_failure_retries_fence_on_read(self):
         base = self.manager()
         failure = RuntimeError("runner failed")
         failure.cleanup_confirmed = False
@@ -1198,14 +1624,21 @@ class TestPhaseExecutionManager(unittest.TestCase):
             )
             result = manager.start([self.phase("failed", "failed")], execution_id="default-error-fence")
         self.assertEqual(result["phases"][0]["status"], "failed")
-        phase = manager.get("default-error-fence")["phases"][0]
+        phase = manager.store.load("default-error-fence", recover=False)["phases"][0]
         self.assertTrue(phase["process_fence_pending"])
         self.assertEqual(
             (phase["process_id"], phase["process_group_id"], phase["process_start_time"], phase["process_boot_id"]),
             (123, 456, "start", "boot"),
         )
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=execution.CleanupOutcome(True),
+        ):
+            recovered = manager.get("default-error-fence")
+        self.assertFalse(recovered["phases"][0]["process_fence_pending"])
 
-    def test_default_runner_non_timeout_cleanup_failure_keeps_phase_fenced(self):
+    def test_default_runner_non_timeout_cleanup_failure_retries_fence_on_read(self):
         base = self.manager()
         result = BoundedCommandResult(
             "partial",
@@ -1235,9 +1668,13 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 "default-non-timeout-fence",
                 retry_failed=True,
             )
-        self.assertTrue(
-            manager.get("default-non-timeout-fence")["phases"][0]["process_fence_pending"]
-        )
+        with patch.object(
+            execution,
+            "_terminate_stale_process_outcome",
+            return_value=execution.CleanupOutcome(True),
+        ):
+            recovered = manager.get("default-non-timeout-fence")
+        self.assertFalse(recovered["phases"][0]["process_fence_pending"])
         self.assertEqual(runner.call_count, 1)
 
     def test_unsafe_started_phase_is_recovered_before_resume_confirmation(self):
@@ -1357,7 +1794,11 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 phase["process_fence_pending"] = True
                 manager.store.save(record)
 
-                with patch.object(execution, "_terminate_stale_process", return_value=True):
+                with patch.object(
+                    execution,
+                    "_terminate_stale_process_outcome",
+                    return_value=execution.CleanupOutcome(True),
+                ):
                     recovered = manager.resume(execution_id)
 
                 self.assertEqual(recovered["phases"][0]["status"], status)
@@ -1369,8 +1810,8 @@ class TestPhaseExecutionManager(unittest.TestCase):
             base.store.state_dir,
             command_runner=execution.run_command_bounded,
         )
-        self.assertTrue(default._fence_interrupted_runner(True))
-        self.assertFalse(default._fence_interrupted_runner(False))
+        self.assertTrue(default._fence_interrupted_runner(True).confirmed)
+        self.assertFalse(default._fence_interrupted_runner(False).confirmed)
 
         def failing_cleanup():
             raise RuntimeError("cleanup unavailable")
@@ -1380,7 +1821,20 @@ class TestPhaseExecutionManager(unittest.TestCase):
             command_runner=Runner(),
             process_cleanup=failing_cleanup,
         )
-        self.assertFalse(custom._fence_interrupted_runner())
+        self.assertFalse(custom._fence_interrupted_runner().confirmed)
+        self.assertEqual(
+            custom._fence_interrupted_runner().blocked_reason_code,
+            "CLEANUP_HOOK_FAILED",
+        )
+
+        no_hook = PhaseExecutionManager(
+            base.store.state_dir,
+            command_runner=Runner(),
+        )
+        self.assertEqual(
+            no_hook._fence_interrupted_runner().blocked_reason_code,
+            "CLEANUP_HOOK_UNAVAILABLE",
+        )
 
     def test_output_handler_and_structured_metrics_are_retained(self):
         runner = Runner()
@@ -2294,17 +2748,11 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertIn("unreadable", invalid_summary["reason"])
 
         metadata_id = "retirement-metadata"
-        store.save({
-            "execution_id": metadata_id,
-            "execution_status": None,
-            "label": None,
-            "updated_at": 123,
-            "phases": [],
-        })
+        manager.create([self.phase("metadata", "metadata")], execution_id=metadata_id)
         metadata, *_ = store._retirement_snapshot(metadata_id)
-        self.assertEqual(metadata["execution_status"], "unknown")
-        self.assertEqual(metadata["label"], "")
-        self.assertIsNone(metadata["updated_at"])
+        self.assertEqual(metadata["execution_status"], "pending")
+        self.assertEqual(metadata["label"], metadata_id)
+        self.assertIsInstance(metadata["updated_at"], str)
 
         with patch.object(store, "is_locked", side_effect=OSError("uncertain lease")):
             uncertain = store._retirement_snapshot(metadata_id)[0]
