@@ -2315,10 +2315,11 @@ class ExecutionStore:
                     candidates = [summary_path]
                     if main_path is not None:
                         candidates.append(main_path)
-                elif main_path is not None:
-                    candidates = [main_path]
                 else:
-                    continue
+                    # Every name comes from the union of these two mappings;
+                    # if the summary is not preferred, the main record exists.
+                    assert main_path is not None
+                    candidates = [main_path]
 
                 discovered = None
                 for candidate in candidates:
