@@ -1,10 +1,13 @@
 """Tests for environment-backed configuration."""
 
 import io
+import math
 import os
+import runpy
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import config
@@ -214,6 +217,18 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertIn("ephemeral_buffer_executions-socket-", descriptor.state_dir)
             self.assertIn("ephemeral_buffer_executions-", descriptor.legacy_state_dir)
 
+            relative_descriptor = config.resolve_session_descriptor({
+                "EPHEMERAL_SOCKET_PATH": "relative.sock",
+            })
+            self.assertEqual(
+                relative_descriptor.legacy_state_dir,
+                os.path.join(
+                    "/tmp",
+                    f"{config.EXECUTION_STATE_SOCKET_PREFIX}"
+                    f"{config._identity_digest('relative.sock')}",
+                ),
+            )
+
     def test_explicit_state_directory_overrides_resolved_identity(self):
         descriptor = config.resolve_session_descriptor({
             "EPHEMERAL_SOCKET_PATH": "/tmp/explicit.sock",
@@ -254,11 +269,83 @@ class TestPositiveIntEnv(unittest.TestCase):
         self.assertEqual(settings.semantic_prefetch_enabled.value, True)
         self.assertEqual(settings.semantic_prefetch_enabled.status, "invalid-fallback")
         self.assertIn("Ignoring invalid EPHEMERAL_SEMANTIC_PREFETCH", stderr.getvalue())
+        empty_boolean = load_settings(
+            {"EPHEMERAL_SEMANTIC_PREFETCH": ""},
+            warn_on_legacy_state_transition=False,
+        ).semantic_prefetch_enabled
+        self.assertTrue(empty_boolean.value)
+        self.assertEqual(empty_boolean.status, "empty-default")
         diagnostics = settings.diagnostics()
         self.assertEqual(
             diagnostics["settings"]["runtime_index_budget_adjustment_enabled"]["sampling_policy"],
             "each MCP request; environment value is re-read; reported value is from startup",
         )
+
+    def test_setting_diagnostics_encode_nonfinite_float_values(self):
+        for value, expected in (
+            (math.inf, "inf"),
+            (-math.inf, "-inf"),
+            (math.nan, "nan"),
+        ):
+            with self.subTest(value=expected):
+                setting = config.ConfigSetting("TEST_FLOAT", value, "environment", "accepted")
+                self.assertEqual(setting.diagnostics()["value"], expected)
+
+    def test_normalized_relative_socket_preserves_existing_legacy_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw_socket = "relative.sock"
+            legacy_state = os.path.join(
+                directory,
+                f"{config.EXECUTION_STATE_SOCKET_PREFIX}{config._identity_digest(raw_socket)}",
+            )
+            os.mkdir(legacy_state)
+            with patch.object(config.tempfile, "gettempdir", return_value=directory):
+                paths = config.normalized_explicit_identity_paths({
+                    "EPHEMERAL_SOCKET_PATH": raw_socket,
+                })
+
+        self.assertEqual(paths["EPHEMERAL_SOCKET_PATH"], os.path.abspath(raw_socket))
+        self.assertEqual(paths["EPHEMERAL_LEGACY_STATE_DIR"], legacy_state)
+
+    def test_launcher_configuration_main_dispatches_and_rejects_unknown_arguments(self):
+        output = io.StringIO()
+        with patch.object(config.sys, "argv", ["config.py", "--socket-path"]), \
+                patch.object(
+                    config, "resolve_session_descriptor",
+                    return_value=SimpleNamespace(socket_path="/tmp/config.sock"),
+                ), redirect_stdout(output):
+            config.main()
+        self.assertEqual(output.getvalue(), "/tmp/config.sock\n")
+
+        output = io.StringIO()
+        with patch.object(config.sys, "argv", ["config.py", "--codex-env-config"]), \
+                patch.object(config, "codex_mcp_env_config", return_value="mcp config"), \
+                redirect_stdout(output):
+            config.main()
+        self.assertEqual(output.getvalue(), "mcp config\n")
+
+        output = io.StringIO()
+        with patch.object(config.sys, "argv", ["config.py", "--normalize-explicit-paths"]), \
+                patch.object(
+                    config, "normalized_explicit_identity_paths",
+                    return_value={"EPHEMERAL_SOCKET_PATH": "/tmp/config.sock"},
+                ), redirect_stdout(output):
+            config.main()
+        self.assertEqual(
+            output.getvalue(),
+            '{"EPHEMERAL_SOCKET_PATH": "/tmp/config.sock"}\n',
+        )
+
+        with patch.object(config.sys, "argv", ["config.py", "--unknown"]):
+            with self.assertRaisesRegex(SystemExit, "Usage: config.py"):
+                config.main()
+
+    def test_config_script_entrypoint_calls_main(self):
+        output = io.StringIO()
+        with patch.object(config.sys, "argv", [config.__file__, "--socket-path"]), \
+                redirect_stdout(output):
+            runpy.run_path(config.__file__, run_name="__main__")
+        self.assertTrue(output.getvalue().strip().endswith(".sock"))
 
     def test_codex_environment_config_forwards_identity_and_escapes_strings(self):
         rendered = codex_mcp_env_config({
