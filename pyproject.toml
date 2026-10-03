@@ -37,4 +37,4 @@ Issues = "https://github.com/k-rister/ephemeral-buffer-mcp/issues"
 ephbuf = "cli:main"
 
 [tool.setuptools]
-py-modules = ["capture_utils", "cli", "config", "engine", "execution", "logging_utils", "metrics", "server", "socket_protocol"]
+py-modules = ["admission", "capture_utils", "cli", "config", "engine", "execution", "logging_utils", "metrics", "server", "socket_protocol"]

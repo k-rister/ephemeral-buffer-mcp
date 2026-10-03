@@ -21,6 +21,7 @@ import json
 import argparse
 import shlex
 import time
+import selectors
 from capture_utils import DEFAULT_MAX_OUTPUT_BYTES, bound_chunks, run_command_bounded
 from config import (
     positive_int_env,
@@ -71,12 +72,11 @@ def send_to_mcp(
             "timed_out": timed_out,
             "duration_ms": duration_ms,
         }).encode("utf-8")
-        sock.sendall(encode_frame(payload))
-        header = _recv_exact(sock, FRAME_HEADER_SIZE)
-        response_length = decode_header(header)
-        resp_data = _recv_exact(sock, response_length)
-            
-        return json.loads(resp_data.decode("utf-8"))
+        frame = encode_frame(payload)
+        if len(frame) <= 1024:
+            sock.sendall(frame)
+            return _recv_response(sock)
+        return _send_large_frame_with_early_response(sock, frame)
     except socket.timeout:
         return {
             "status": "error",
@@ -103,6 +103,63 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _recv_response(sock: socket.socket) -> dict:
+    header = _recv_exact(sock, FRAME_HEADER_SIZE)
+    response_length = decode_header(header)
+    resp_data = _recv_exact(sock, response_length)
+    return json.loads(resp_data.decode("utf-8"))
+
+
+def _send_large_frame_with_early_response(sock: socket.socket, frame: bytes) -> dict:
+    """Send large socket requests while listening for an early busy response."""
+    timeout = socket_timeout_seconds()
+    deadline = time.monotonic() + timeout
+    sent = 0
+    received = bytearray()
+    sock.setblocking(False)
+    with selectors.DefaultSelector() as selector:
+        selector.register(sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout
+            events = selector.select(remaining)
+            if not events:
+                raise socket.timeout
+            for _, mask in events:
+                # Read first so an admission error can stop a large upload before
+                # the client attempts to send the rest of its frame.
+                if mask & selectors.EVENT_READ:
+                    try:
+                        chunk = sock.recv(64 * 1024)
+                    except BlockingIOError:
+                        chunk = None
+                    if chunk == b"":
+                        raise ValueError("truncated socket response")
+                    if chunk:
+                        received.extend(chunk)
+                        response = _decode_available_response(received)
+                        if response is not None:
+                            return response
+                if mask & selectors.EVENT_WRITE and sent < len(frame):
+                    try:
+                        sent += sock.send(frame[sent:sent + 64 * 1024])
+                    except BlockingIOError:
+                        pass
+                    if sent == len(frame):
+                        selector.modify(sock, selectors.EVENT_READ)
+
+
+def _decode_available_response(buffer: bytearray) -> dict | None:
+    if len(buffer) < FRAME_HEADER_SIZE:
+        return None
+    response_length = decode_header(bytes(buffer[:FRAME_HEADER_SIZE]))
+    frame_length = FRAME_HEADER_SIZE + response_length
+    if len(buffer) < frame_length:
+        return None
+    return json.loads(bytes(buffer[FRAME_HEADER_SIZE:frame_length]).decode("utf-8"))
 
 
 def _report_success(response: dict) -> None:

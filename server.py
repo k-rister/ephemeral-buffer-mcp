@@ -9,7 +9,7 @@ import sys
 import json
 import asyncio
 import inspect
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 import socket
 import stat
 import threading
@@ -26,9 +26,9 @@ import uuid
 import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
-from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version as package_version
-from asyncio import to_thread
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional
 from pydantic import (
@@ -47,6 +47,7 @@ from config import (
     socket_isolation_configured,
     socket_isolation_required,
     socket_path,
+    socket_timeout_seconds,
 )
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
@@ -74,6 +75,14 @@ from execution import (
 from logging_utils import get_logger, log_event
 from metrics import LocalMetrics
 from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
+from admission import (
+    AdmissionBusy,
+    MAX_ACTIVE_DIAGNOSTIC_WORK,
+    MAX_ACTIVE_SOCKET_CLIENTS,
+    MAX_ACTIVE_TOOL_WORK,
+    MAX_QUEUED_SOCKET_CLIENTS,
+    admission_gate,
+)
 
 try:
     import fcntl
@@ -82,6 +91,7 @@ except ImportError:  # pragma: no cover - Windows has no Unix socket backend.
 
 SOCKET_PATH = socket_path()
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
+SOCKET_CLIENT_READ_TIMEOUT_SECONDS = socket_timeout_seconds()
 # JSON string escaping can expand a UTF-8 capture by at most six bytes per
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
@@ -103,6 +113,35 @@ SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER = (
 )
 SUMMARY_DIFF_FILE_MAP_MAX_BYTES = 8 * 1024
 SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES = 100
+
+# The MCP and socket gates together bound submissions to this process-owned
+# executor, so EB work does not accumulate in asyncio's default executor queue.
+_WORK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=(
+        MAX_ACTIVE_TOOL_WORK
+        + MAX_ACTIVE_SOCKET_CLIENTS
+        + MAX_ACTIVE_DIAGNOSTIC_WORK
+    ),
+    thread_name_prefix="ephemeral-work",
+)
+
+
+async def to_thread(function, /, *args, **kwargs):
+    """Run sync work on EB's bounded worker pool with context propagation."""
+    loop = asyncio.get_running_loop()
+    context = copy_context()
+    call = partial(function, *args, **kwargs)
+    return await loop.run_in_executor(_WORK_EXECUTOR, context.run, call)
+
+
+async def _run_admitted_thread(ticket, function, /, *args, **kwargs):
+    """Keep admission reserved until worker work finishes, including cancellation."""
+    task = asyncio.create_task(to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        ticket.defer_release_until(task)
+        raise
 SUMMARY_COMMAND_MAX_BYTES = 1024
 SUMMARY_COMMAND_TRUNCATION_MARKER = "... [command truncated]"
 SUMMARY_LABEL_MAX_BYTES = 1024
@@ -660,16 +699,57 @@ def _mcp_tool(name, category, *, structured_result_factory=None):
         @wraps(function)
         async def adapter(*args, **kwargs):
             with _bind_mcp_metrics_scope():
-                if structured_result_factory is not None:
-                    response = await to_thread(structured_result_factory, *args, **kwargs)
-                    if not isinstance(response, ToolResponseEnvelope):
-                        raise TypeError("structured_result_factory must return ToolResponseEnvelope")
-                else:
-                    result = await to_thread(function, *args, **kwargs)
-                    if category not in {"capture", "retrieval", "search", "lifecycle"}:
-                        return result
-                    response = _legacy_tool_envelope(name, result)
-                return _call_tool_result(_fit_tool_envelope(response))
+                try:
+                    lane = "diagnostics" if name == "get_buffer_stats" else "mcp"
+                    ticket = await admission_gate(lane).acquire(name)
+                except AdmissionBusy:
+                    message = (
+                        "Foreground work capacity is full; retry this tool call shortly."
+                    )
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "mcp_tool_rejected_busy",
+                        tool=name,
+                    )
+                    if structured_result_factory is not None or category in {
+                        "capture", "retrieval", "search", "lifecycle"
+                    }:
+                        response = ToolResponseEnvelope(
+                            status="error",
+                            error=ToolErrorEnvelope(code="server_busy", message=message),
+                            text=f"Error: {message}",
+                        )
+                        return _call_tool_result(_fit_tool_envelope(response))
+                    if category == "execution":
+                        return json.dumps(
+                            {
+                                "status": "error",
+                                "error": {"code": "server_busy", "message": message},
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    return f"Error: server_busy: {message}"
+
+                try:
+                    if structured_result_factory is not None:
+                        response = await _run_admitted_thread(
+                            ticket,
+                            structured_result_factory, *args, **kwargs
+                        )
+                        if not isinstance(response, ToolResponseEnvelope):
+                            raise TypeError("structured_result_factory must return ToolResponseEnvelope")
+                    else:
+                        result = await _run_admitted_thread(
+                            ticket, function, *args, **kwargs
+                        )
+                        if category not in {"capture", "retrieval", "search", "lifecycle"}:
+                            return result
+                        response = _legacy_tool_envelope(name, result)
+                    return _call_tool_result(_fit_tool_envelope(response))
+                finally:
+                    ticket.release()
 
         if structured_result_factory is not None or category in {"capture", "retrieval", "search", "lifecycle"}:
             signature = inspect.signature(function)
@@ -1889,12 +1969,14 @@ def _search_capture_response(
         return ToolResponseEnvelope(
             status="error", error=ToolErrorEnvelope(code="query_too_large", message=message), text=message
         )
+    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
     res = _active_engine().search(
         query=query,
         mode=mode,
         capture_id=capture_id,
         top_k=top_k,
         context_lines=context_lines,
+        response_budget_bytes=response_budget,
     )
     if res.get("status") == "error":
         message, _ = _bounded_summary_text(
@@ -1913,6 +1995,7 @@ def _search_capture_response(
         )
 
     engine_matches = res.get("matches", [])
+    construction_omitted = bool(res.get("response_matches_omitted", False))
     METRICS.record_result_count("search_capture", len(engine_matches))
     metadata = {
         key: res[key]
@@ -1953,10 +2036,9 @@ def _search_capture_response(
 
     selected: List[Dict[str, Any]] = []
     best: Optional[ToolResponseEnvelope] = None
-    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
     for index, match in enumerate(structured_matches):
         candidate_matches = selected + [match]
-        omitted = index < len(structured_matches) - 1
+        omitted = construction_omitted or index < len(structured_matches) - 1
         data = {
             **metadata,
             "matches": candidate_matches,
@@ -1981,8 +2063,18 @@ def _search_capture_response(
         text = _render_search_text(text_result, [], omitted=True, query=query)
         best = ToolResponseEnvelope(status="ok", data=data, text=text, truncated=True)
     if best is None:
-        text = _render_search_text(text_result, [], omitted=False, query=query)
-        best = ToolResponseEnvelope(status="ok", data={**metadata, "matches": [], "match_count": 0}, text=text)
+        text = _render_search_text(
+            text_result,
+            [],
+            omitted=construction_omitted,
+            query=query,
+        )
+        best = ToolResponseEnvelope(
+            status="ok",
+            data={**metadata, "matches": [], "match_count": 0},
+            text=text,
+            truncated=construction_omitted,
+        )
     return best
 
 
@@ -2243,7 +2335,7 @@ def clear_captures(capture_id: str = "all") -> str:
 @_mcp_tool("get_buffer_stats", "diagnostics")
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
-    """Returns aggregate capture, accounting, prefetch, and process RSS metrics."""
+    """Return aggregate capture, admission, accounting, and process RSS metrics."""
     stats = engine.get_buffer_stats()
     rss = stats["process_rss_bytes"]
     unaccounted = stats["unaccounted_rss_bytes"]
@@ -2266,9 +2358,31 @@ def get_buffer_stats() -> str:
     remaining_indexed_chunks = stats.get(
         "remaining_indexed_chunks", max_indexed_chunks - indexed_chunks
     )
+    admission_active_by_type = json.dumps(
+        stats.get("admission_active_by_type", {}), sort_keys=True
+    )
+    admission_queued_by_type = json.dumps(
+        stats.get("admission_queued_by_type", {}), sort_keys=True
+    )
+    admission_rejected_by_type = json.dumps(
+        stats.get("admission_rejected_by_type", {}), sort_keys=True
+    )
     result = (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
+        f"Foreground work: {stats.get('admission_active', 0)} active, "
+        f"{stats.get('admission_queued', 0)} queued, "
+        f"{stats.get('admission_rejected', 0)} rejected\n"
+        f"Tool capacity: {stats.get('admission_max_active_tool_work', 0)} active, "
+        f"{stats.get('admission_max_queued_tool_work', 0)} queued; reserved stats slot: "
+        f"{stats.get('admission_max_active_diagnostic_work', 0)}\n"
+        f"Socket capacity: {stats.get('admission_max_active_socket_clients', 0)} active, "
+        f"{stats.get('admission_max_queued_socket_clients', 0)} queued\n"
+        f"Foreground work by type: active={admission_active_by_type}, "
+        f"queued={admission_queued_by_type}, rejected={admission_rejected_by_type}\n"
+        f"Deferred storage: {stats.get('deferred_storage_capture_count', 0)} captures, "
+        f"{stats.get('deferred_storage_readers', 0)} readers, "
+        f"{stats.get('deferred_storage_bytes', 0):,} accounted bytes\n"
         f"Lines: {stats['total_lines']:,}\n"
         f"Chunks: {stats['total_chunks']:,}\n"
         f"Indexed chunks: {indexed_chunks:,}/{max_indexed_chunks:,} "
@@ -2435,15 +2549,60 @@ async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) ->
     return await _read_exact(reader, payload_length, "socket_request_bytes")
 
 
+async def _write_socket_error(
+    writer: asyncio.StreamWriter,
+    code: str,
+    message: str,
+) -> None:
+    response_frame = encode_frame(
+        json.dumps(
+            {"status": "error", "code": code, "message": message},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    METRICS.record_bytes("socket_response_bytes", len(response_frame))
+    writer.write(response_frame)
+    await writer.drain()
+
+
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     async def _handle():
+        try:
+            ticket = await admission_gate("socket").acquire("socket")
+        except AdmissionBusy:
+            log_event(LOGGER, logging.WARNING, "socket_client_rejected_busy")
+            try:
+                await _write_socket_error(
+                    writer,
+                    "server_busy",
+                    "Socket work capacity is full; retry this request shortly.",
+                )
+            except Exception:
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            return
+
         try:
             # Read and validate one complete framed payload before decoding it.
             read_limit = (
                 engine.max_buffer_bytes * SOCKET_JSON_MAX_EXPANSION
                 + SOCKET_PAYLOAD_OVERHEAD
             )
-            data = await _read_socket_payload(reader, read_limit)
+            try:
+                data = await asyncio.wait_for(
+                    _read_socket_payload(reader, read_limit),
+                    timeout=SOCKET_CLIENT_READ_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                log_event(LOGGER, logging.WARNING, "socket_client_read_timeout")
+                await _write_socket_error(
+                    writer,
+                    "socket_read_timeout",
+                    "Socket request frame was not completed before the read timeout.",
+                )
+                return
             if not data:
                 return
             try:
@@ -2471,7 +2630,8 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 duration_ms = payload.get("duration_ms")
                 structured_metrics = normalize_structured_metrics(payload.get("structured_metrics"))
 
-            cap = await to_thread(
+            cap = await _run_admitted_thread(
+                ticket,
                 engine.ingest,
                 text,
                 label=label,
@@ -2495,7 +2655,8 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 "line_count": cap.line_count,
                 "byte_size": cap.byte_size
             }
-            summary = await to_thread(
+            summary = await _run_admitted_thread(
+                ticket,
                 engine.get_summary_for_capture,
                 cap,
                 include_previews=False,
@@ -2514,6 +2675,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             writer.write(response_frame)
             await writer.drain()
         finally:
+            ticket.release()
             writer.close()
             await writer.wait_closed()
 
@@ -2592,7 +2754,14 @@ def run_socket_server():
 
         async def _main():
             nonlocal bound_socket_identity
-            server = await asyncio.start_unix_server(handle_socket_client, path=SOCKET_PATH)
+            socket_backlog = (
+                MAX_ACTIVE_SOCKET_CLIENTS + MAX_QUEUED_SOCKET_CLIENTS
+            )
+            server = await asyncio.start_unix_server(
+                handle_socket_client,
+                path=SOCKET_PATH,
+                backlog=socket_backlog,
+            )
             bound_path_stat = os.lstat(SOCKET_PATH)
             if stat.S_ISSOCK(bound_path_stat.st_mode):
                 bound_socket_identity = (

@@ -669,8 +669,9 @@ STEP 3: Summary
         self.assertIn("search line truncated", snippet)
 
     def test_search_reader_defers_storage_close_during_eviction(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
         capture = engine.ingest("target value\nsecond line", label="reader-lifetime")
+        capture.embeddings = np.zeros((1, 384), dtype=np.float32)
         self.assertIs(engine.get_capture(), capture)
         entered = threading.Event()
         proceed = threading.Event()
@@ -695,6 +696,17 @@ STEP 3: Summary
             self.assertNotIn(capture.capture_id, engine.captures)
             self.assertTrue(capture.storage_close_pending)
             self.assertIsNotNone(capture.fts_conn)
+            deferred = engine.get_buffer_stats()
+            self.assertEqual(deferred["deferred_storage_capture_count"], 1)
+            self.assertEqual(deferred["deferred_storage_readers"], 1)
+            self.assertEqual(
+                deferred["deferred_storage_bytes"],
+                capture.retained_byte_size + capture.embeddings.nbytes,
+            )
+            self.assertEqual(
+                deferred["accounted_bytes"],
+                deferred["total_bytes"] + deferred["deferred_storage_bytes"],
+            )
 
             proceed.set()
             search_thread.join(timeout=2)
@@ -703,6 +715,132 @@ STEP 3: Summary
         self.assertEqual(result_holder["result"]["status"], "ok")
         self.assertEqual(result_holder["result"]["matches"][0]["context"], "target value\nsecond line")
         self.assertIsNone(capture.fts_conn)
+        released = engine.get_buffer_stats()
+        self.assertEqual(released["deferred_storage_capture_count"], 0)
+        self.assertEqual(released["deferred_storage_readers"], 0)
+        self.assertEqual(released["deferred_storage_bytes"], 0)
+
+    def test_deferred_storage_accounting_tracks_embeddings_published_by_reader(self):
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine.embedding_model = type(
+            "TestEmbedding",
+            (),
+            {"embed": lambda _self, texts: [[1.0] * 384 for _ in texts]},
+        )()
+        capture = engine.ingest("needle\n" * 24, label="deferred-semantic")
+        entered = threading.Event()
+        proceed = threading.Event()
+        original_search = engine._search_capture
+        snapshots = {}
+
+        def blocked_search(*args, **kwargs):
+            entered.set()
+            self.assertTrue(proceed.wait(timeout=2))
+            result = original_search(*args, **kwargs)
+            snapshots["during"] = engine.get_buffer_stats()
+            return result
+
+        try:
+            with patch.object(engine, "_search_capture", side_effect=blocked_search):
+                result_holder = {}
+                search_thread = threading.Thread(
+                    target=lambda: result_holder.setdefault(
+                        "result",
+                        engine.search(
+                            "needle", mode="semantic", capture_id=capture.capture_id
+                        ),
+                    )
+                )
+                search_thread.start()
+                self.assertTrue(entered.wait(timeout=2))
+                engine.ingest("replacement capture", label="replacement")
+                self.assertEqual(
+                    engine.get_buffer_stats()["deferred_storage_bytes"],
+                    capture.retained_byte_size,
+                )
+
+                proceed.set()
+                search_thread.join(timeout=5)
+
+            self.assertFalse(search_thread.is_alive())
+            self.assertEqual(result_holder["result"]["status"], "ok")
+            during = snapshots["during"]
+            self.assertGreater(capture.embeddings.nbytes, 0)
+            self.assertEqual(
+                during["deferred_storage_bytes"],
+                capture.retained_byte_size + capture.embeddings.nbytes,
+            )
+            self.assertEqual(during["deferred_storage_readers"], 1)
+            self.assertEqual(
+                during["accounted_bytes"],
+                during["total_bytes"] + during["deferred_storage_bytes"],
+            )
+            self.assertEqual(engine.get_buffer_stats()["deferred_storage_bytes"], 0)
+        finally:
+            engine.shutdown()
+
+    def test_search_response_budget_bounds_materialized_matches(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("needle\n" * 32, label="search-response-budget")
+        with patch.object(engine, "search_bm25", return_value=[(0, 1.0), (5, 0.9), (10, 0.8)]):
+            result = engine.search(
+                "needle",
+                mode="bm25",
+                capture_id=capture.capture_id,
+                top_k=5,
+                context_lines=0,
+                response_budget_bytes=300,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertTrue(result["response_matches_omitted"])
+        self.assertLessEqual(len(result["matches"][0]["snippet"].encode("utf-8")), 75)
+        self.assertLessEqual(len(result["matches"][0]["context"].encode("utf-8")), 75)
+
+        with patch.object(engine, "search_bm25", return_value=[(0, 1.0)]):
+            for invalid in (0, -1, True, "260"):
+                invalid_result = engine.search(
+                    "needle",
+                    mode="bm25",
+                    capture_id=capture.capture_id,
+                    response_budget_bytes=invalid,
+                )
+                self.assertEqual(invalid_result["error_code"], "invalid_response_budget")
+
+        with patch.object(engine, "search_bm25", return_value=[(0, 1.0)]), patch(
+            "engine.SEARCH_MATCH_CONTEXT_MAX_BYTES", 10
+        ):
+            too_small = engine.search(
+                "needle",
+                mode="bm25",
+                capture_id=capture.capture_id,
+                context_lines=0,
+                response_budget_bytes=300,
+            )
+        self.assertEqual(too_small["matches"], [])
+        self.assertTrue(too_small["response_matches_omitted"])
+
+    def test_search_response_budget_debits_actual_short_match_bytes(self):
+        engine = EphemeralEngine(max_captures=1)
+        capture = engine.ingest("needle\n" * 40, label="short-search-matches")
+        with patch.object(
+            engine,
+            "search_bm25",
+            return_value=[(0, 1.0), (2, 0.9), (4, 0.8), (6, 0.7), (8, 0.6)],
+        ):
+            result = engine.search(
+                "needle",
+                mode="bm25",
+                capture_id=capture.capture_id,
+                top_k=5,
+                context_lines=0,
+                response_budget_bytes=64 * 1024,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["matches"]), 5)
+        self.assertFalse(result["response_matches_omitted"])
 
     def test_lazy_semantic_search_survives_capture_eviction(self):
         class BlockingEmbedding:

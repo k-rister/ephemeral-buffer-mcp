@@ -236,6 +236,181 @@ class TestCliConfiguration(unittest.TestCase):
             },
         )
 
+    def test_large_socket_frame_stops_upload_when_busy_response_arrives_first(self):
+        client_socket, server_socket = socket.socketpair()
+        busy_frame = encode_frame(
+            b'{"status":"error","code":"server_busy","message":"retry"}'
+        )
+        try:
+            server_socket.sendall(busy_frame)
+
+            class ConnectedSocket:
+                def __init__(self, wrapped):
+                    self.wrapped = wrapped
+                    self.sent = 0
+
+                def __getattr__(self, name):
+                    return getattr(self.wrapped, name)
+
+                def connect(self, _path):
+                    return None
+
+                def send(self, payload):
+                    self.sent += len(payload)
+                    return self.wrapped.send(payload)
+
+            connected_socket = ConnectedSocket(client_socket)
+            with patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
+                    patch.object(cli.os.path, "exists", return_value=True), \
+                    patch.object(cli.socket, "socket", return_value=connected_socket):
+                result = cli.send_to_mcp("x" * 4096)
+
+            self.assertEqual(result["code"], "server_busy")
+            self.assertEqual(connected_socket.sent, 0)
+        finally:
+            client_socket.close()
+            server_socket.close()
+
+    def test_large_frame_selector_handles_partial_io_and_blocking(self):
+        class FakeSelector:
+            def __init__(self):
+                self.events = [
+                    cli.selectors.EVENT_READ | cli.selectors.EVENT_WRITE,
+                    cli.selectors.EVENT_WRITE,
+                    cli.selectors.EVENT_READ,
+                    cli.selectors.EVENT_READ,
+                    cli.selectors.EVENT_READ,
+                ]
+                self.modified = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+            def register(self, *_args):
+                return None
+
+            def modify(self, _fileobj, events):
+                self.modified.append(events)
+
+            def select(self, _timeout):
+                mask = self.events.pop(0)
+                return [(None, mask)]
+
+        response_frame = encode_frame(b'{"status":"ok"}')
+
+        class FakeSocket:
+            def __init__(self):
+                self.recv_chunks = [
+                    BlockingIOError(),
+                    response_frame[:3],
+                    response_frame[3:FRAME_HEADER_SIZE + 2],
+                    response_frame[FRAME_HEADER_SIZE + 2:],
+                ]
+                self.send_calls = 0
+                self.sent = bytearray()
+
+            def setblocking(self, _value):
+                return None
+
+            def recv(self, _size):
+                chunk = self.recv_chunks.pop(0)
+                if isinstance(chunk, Exception):
+                    raise chunk
+                return chunk
+
+            def send(self, payload):
+                self.send_calls += 1
+                if self.send_calls == 1:
+                    raise BlockingIOError
+                self.sent.extend(payload)
+                return len(payload)
+
+        fake_selector = FakeSelector()
+        fake_socket = FakeSocket()
+        with patch.object(cli.selectors, "DefaultSelector", return_value=fake_selector):
+            result = cli._send_large_frame_with_early_response(fake_socket, b"z" * 2048)
+
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(fake_socket.sent, b"z" * 2048)
+        self.assertEqual(fake_selector.modified, [cli.selectors.EVENT_READ])
+
+    def test_large_frame_selector_handles_early_response_eof_and_timeout(self):
+        class FakeSelector:
+            def __init__(self, events):
+                self.events = events
+                self.select_calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+            def register(self, *_args):
+                return None
+
+            def modify(self, *_args):
+                return None
+
+            def select(self, _timeout):
+                self.select_calls += 1
+                if not self.events:
+                    return []
+                return [(None, self.events.pop(0))]
+
+        class FakeSocket:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+                self.sent = 0
+
+            def setblocking(self, _value):
+                return None
+
+            def recv(self, _size):
+                chunk = self.chunks.pop(0)
+                if isinstance(chunk, Exception):
+                    raise chunk
+                return chunk
+
+            def send(self, payload):
+                self.sent += len(payload)
+                return len(payload)
+
+        busy_frame = encode_frame(b'{"status":"error","code":"server_busy"}')
+        selector = FakeSelector([cli.selectors.EVENT_READ | cli.selectors.EVENT_WRITE])
+        early_socket = FakeSocket([busy_frame])
+        with patch.object(cli.selectors, "DefaultSelector", return_value=selector):
+            early = cli._send_large_frame_with_early_response(early_socket, b"z" * 2048)
+        self.assertEqual(early["code"], "server_busy")
+        self.assertEqual(early_socket.sent, 0)
+
+        eof_selector = FakeSelector([cli.selectors.EVENT_READ])
+        with patch.object(cli.selectors, "DefaultSelector", return_value=eof_selector):
+            with self.assertRaisesRegex(ValueError, "truncated socket response"):
+                cli._send_large_frame_with_early_response(FakeSocket([b""]), b"z" * 2048)
+
+        timeout_selector = FakeSelector([])
+        with patch.object(cli.selectors, "DefaultSelector", return_value=timeout_selector):
+            with self.assertRaises(socket.timeout):
+                cli._send_large_frame_with_early_response(FakeSocket([]), b"z" * 2048)
+
+        expired_selector = FakeSelector([cli.selectors.EVENT_WRITE])
+        with patch.object(cli.selectors, "DefaultSelector", return_value=expired_selector), \
+                patch.object(cli, "socket_timeout_seconds", return_value=1), \
+                patch.object(cli.time, "monotonic", side_effect=[10.0, 11.1]):
+            with self.assertRaises(socket.timeout):
+                cli._send_large_frame_with_early_response(FakeSocket([]), b"z" * 2048)
+        self.assertEqual(expired_selector.select_calls, 0)
+
+    def test_large_frame_decoder_waits_for_header_and_complete_payload(self):
+        frame = encode_frame(b'{"status":"ok"}')
+        self.assertIsNone(cli._decode_available_response(bytearray(frame[:3])))
+        self.assertIsNone(cli._decode_available_response(bytearray(frame[:-1])))
+        self.assertEqual(cli._decode_available_response(bytearray(frame)), {"status": "ok"})
+
     def test_send_to_mcp_reports_transport_failure(self):
         with patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
                 patch.object(cli.os.path, "exists", return_value=True), \
