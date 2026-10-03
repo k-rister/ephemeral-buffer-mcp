@@ -13,6 +13,10 @@ from config import (
     DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES,
     DEFAULT_EXECUTION_STATE_DIR,
     DEFAULT_EXECUTION_STATE_QUOTA_BYTES,
+    DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS,
+    DEFAULT_MAX_ACTIVE_TOOL_WORK,
+    DEFAULT_MAX_QUEUED_SOCKET_CLIENTS,
+    DEFAULT_MAX_QUEUED_TOOL_WORK,
     DEFAULT_SOCKET_PATH,
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     DEFAULT_SEMANTIC_WAIT_SECONDS,
@@ -38,6 +42,10 @@ from config import (
     socket_path,
     socket_timeout_seconds,
     max_indexed_chunks,
+    max_active_socket_clients,
+    max_active_tool_work,
+    max_queued_socket_clients,
+    max_queued_tool_work,
     non_negative_int_env,
     semantic_chunk_bytes,
     semantic_chunk_lines,
@@ -47,6 +55,40 @@ from config import (
 
 
 class TestPositiveIntEnv(unittest.TestCase):
+    def test_admission_limits_default_override_and_invalid_fallback(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(max_active_tool_work(), DEFAULT_MAX_ACTIVE_TOOL_WORK)
+            self.assertEqual(max_queued_tool_work(), DEFAULT_MAX_QUEUED_TOOL_WORK)
+            self.assertEqual(max_active_socket_clients(), DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS)
+            self.assertEqual(max_queued_socket_clients(), DEFAULT_MAX_QUEUED_SOCKET_CLIENTS)
+
+        with patch.dict(os.environ, {
+            "EPHEMERAL_MAX_ACTIVE_TOOL_WORK": "3",
+            "EPHEMERAL_MAX_QUEUED_TOOL_WORK": "0",
+            "EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS": "2",
+            "EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS": "5",
+        }, clear=True):
+            self.assertEqual(max_active_tool_work(), 3)
+            self.assertEqual(max_queued_tool_work(), 0)
+            self.assertEqual(max_active_socket_clients(), 2)
+            self.assertEqual(max_queued_socket_clients(), 5)
+
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {
+            "EPHEMERAL_MAX_ACTIVE_TOOL_WORK": "0",
+            "EPHEMERAL_MAX_QUEUED_TOOL_WORK": "-1",
+            "EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS": "invalid",
+            "EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS": "-2",
+        }, clear=True), redirect_stderr(stderr):
+            self.assertEqual(max_active_tool_work(), DEFAULT_MAX_ACTIVE_TOOL_WORK)
+            self.assertEqual(max_queued_tool_work(), DEFAULT_MAX_QUEUED_TOOL_WORK)
+            self.assertEqual(max_active_socket_clients(), DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS)
+            self.assertEqual(max_queued_socket_clients(), DEFAULT_MAX_QUEUED_SOCKET_CLIENTS)
+        self.assertIn("EPHEMERAL_MAX_ACTIVE_TOOL_WORK", stderr.getvalue())
+        self.assertIn("EPHEMERAL_MAX_QUEUED_TOOL_WORK", stderr.getvalue())
+        self.assertIn("EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS", stderr.getvalue())
+        self.assertIn("EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS", stderr.getvalue())
+
     def test_missing_value_uses_default(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(positive_int_env("TEST_LIMIT", 25), 25)

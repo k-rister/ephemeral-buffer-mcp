@@ -1,6 +1,7 @@
 """Unit tests for MCP tool validation, response formatting, and socket IPC."""
 
 import asyncio
+from contextvars import ContextVar
 import io
 import json
 import math
@@ -22,6 +23,12 @@ from socket_protocol import FRAME_HEADER_SIZE, FRAME_MAGIC, decode_header, encod
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import server
+from admission import (
+    AdmissionBusy,
+    AdmissionMetrics,
+    BoundedAdmissionGate,
+    admission_snapshot,
+)
 
 
 class FakeReader:
@@ -48,6 +55,19 @@ class ChunkedReader:
         chunk = bytes(self.pending[:limit])
         del self.pending[:limit]
         return chunk
+
+
+class StalledReader:
+    def __init__(self, payload=b""):
+        self.payload = bytearray(payload)
+        self.stalled = asyncio.Event()
+
+    async def read(self, limit):
+        if self.payload:
+            chunk = bytes(self.payload[:limit])
+            del self.payload[:limit]
+            return chunk
+        await self.stalled.wait()
 
 
 class FakeWriter:
@@ -304,6 +324,96 @@ class TestServerTools(unittest.TestCase):
                 server._REGISTERED_MCP_TOOL_CATEGORIES.pop("blocking_probe")
 
         asyncio.run(exercise())
+
+    def test_admission_busy_responses_match_tool_return_shapes_and_reserved_lane(self):
+        class BusyGate:
+            async def acquire(self, work_type):
+                raise AdmissionBusy(work_type)
+
+        async def exercise():
+            adapters = {}
+            for name, category, structured in (
+                ("busy_retrieval_probe", "retrieval", True),
+                ("busy_execution_probe", "execution", False),
+                ("busy_diagnostics_probe", "diagnostics", False),
+                ("get_buffer_stats", "diagnostics", False),
+            ):
+                factory = (
+                    (lambda: server.ToolResponseEnvelope(status="ok", data={}, text="ok"))
+                    if structured else None
+                )
+                with (
+                    patch.object(server.mcp, "add_tool") as add_tool,
+                    patch.object(server.mcp._tool_manager, "_tools", {}),
+                    patch.object(server, "_REGISTERED_MCP_TOOL_NAMES", []),
+                    patch.object(server, "_REGISTERED_MCP_TOOL_CATEGORIES", {}),
+                ):
+                    server._mcp_tool(
+                        name,
+                        category,
+                        structured_result_factory=factory,
+                    )(lambda: "unused")
+                    adapters[name] = add_tool.call_args.args[0]
+
+            for name, category in (
+                ("busy_retrieval_probe", "mcp"),
+                ("busy_execution_probe", "mcp"),
+                ("busy_diagnostics_probe", "mcp"),
+                ("get_buffer_stats", "diagnostics"),
+            ):
+                with patch.object(server, "admission_gate", return_value=BusyGate()) as gate:
+                    result = await adapters[name]()
+                gate.assert_called_once_with(category)
+                if name == "busy_retrieval_probe":
+                    self.assertEqual(result.content[0].text, "Error: Foreground work capacity is full; retry this tool call shortly.")
+                elif name == "busy_execution_probe":
+                    payload = json.loads(result)
+                    self.assertEqual(payload["error"]["code"], "server_busy")
+                else:
+                    self.assertIn("server_busy", result)
+
+        asyncio.run(exercise())
+
+    def test_worker_adapter_propagates_context_and_retains_admission_after_cancellation(self):
+        async def exercise():
+            context_value = ContextVar("worker_context", default="missing")
+            token = context_value.set("request-scope")
+            try:
+                self.assertEqual(await server.to_thread(context_value.get), "request-scope")
+            finally:
+                context_value.reset(token)
+
+            gate = BoundedAdmissionGate(max_active=1, max_queued=0)
+            ticket = await gate.acquire("blocking_probe")
+            started = threading.Event()
+            finish = threading.Event()
+
+            def blocking_work():
+                started.set()
+                finish.wait(timeout=3)
+                return "finished"
+
+            task = asyncio.create_task(server._run_admitted_thread(ticket, blocking_work))
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(started.is_set())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            ticket.release()
+            self.assertEqual(admission_snapshot()["admission_active"], 1)
+
+            finish.set()
+            for _ in range(100):
+                if admission_snapshot()["admission_active"] == 0:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(admission_snapshot()["admission_active"], 0)
+
+        with patch("admission.ADMISSION_METRICS", AdmissionMetrics()):
+            asyncio.run(exercise())
 
     def test_mcp_tool_requires_known_category(self):
         with self.assertRaisesRegex(ValueError, "unknown MCP tool category"):
@@ -639,6 +749,9 @@ class TestServerTools(unittest.TestCase):
         result = server.get_buffer_stats()
 
         self.assertIn("Captures:", result)
+        self.assertIn("Foreground work:", result)
+        self.assertIn("rejected=", result)
+        self.assertIn("Deferred storage:", result)
         self.assertIn("Embedding bytes:", result)
         self.assertIn("Embedding model:", result)
         self.assertIn("Embedding warm-up:", result)
@@ -1797,6 +1910,31 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(response.data["matches"], [])
         self.assertIn("Matches were found but omitted", response.text)
 
+    def test_search_response_passes_construction_budget_and_reports_omitted_matches(self):
+        with patch.object(
+            server.engine,
+            "search",
+            return_value={
+                "status": "ok",
+                "query": "needle",
+                "capture_id": "cap-budgeted",
+                "label": "label",
+                "total_lines": 0,
+                "mode": "bm25",
+                "matches": [],
+                "response_matches_omitted": True,
+            },
+        ) as search:
+            response = server.search_capture_result("needle", mode="bm25")
+
+        self.assertEqual(
+            search.call_args.kwargs["response_budget_bytes"],
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+        self.assertEqual(response.data["match_count"], 0)
+        self.assertTrue(response.truncated)
+        self.assertIn("Matches were found but omitted", response.text)
+
     def test_search_response_has_a_utf8_budget(self):
         matches = [
             {
@@ -2051,6 +2189,51 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "socket-test")
+        self.assertTrue(writer.closed)
+
+    async def test_socket_rejects_busy_client_before_reading_its_frame(self):
+        gate = BoundedAdmissionGate(max_active=1, max_queued=0)
+        reserved = await gate.acquire("socket_blocker")
+        writer = FakeWriter()
+        reader = FakeReader(encode_frame(b"request that must not be read"))
+        try:
+            with patch.object(server, "admission_gate", return_value=gate):
+                await server.handle_socket_client(reader, writer)
+        finally:
+            reserved.release()
+
+        response = response_json(writer)
+        self.assertEqual(response["code"], "server_busy")
+        self.assertEqual(len(reader.payload), len(encode_frame(b"request that must not be read")))
+        self.assertTrue(writer.closed)
+
+    async def test_socket_busy_response_write_failure_still_closes_client(self):
+        gate = BoundedAdmissionGate(max_active=1, max_queued=0)
+        reserved = await gate.acquire("socket_blocker")
+        writer = FakeWriter()
+        try:
+            with patch.object(server, "admission_gate", return_value=gate), patch.object(
+                server, "_write_socket_error", new=AsyncMock(side_effect=OSError("closed peer"))
+            ):
+                await server.handle_socket_client(FakeReader(b""), writer)
+        finally:
+            reserved.release()
+
+        self.assertTrue(writer.closed)
+
+    async def test_stalled_socket_frame_times_out_and_releases_admission(self):
+        gate = BoundedAdmissionGate(max_active=1, max_queued=0)
+        writer = FakeWriter()
+        reader = StalledReader(FRAME_MAGIC + b"\x01")
+        with patch.object(server, "admission_gate", return_value=gate), patch.object(
+            server, "SOCKET_CLIENT_READ_TIMEOUT_SECONDS", 0.01
+        ):
+            await server.handle_socket_client(reader, writer)
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "socket_read_timeout")
+        self.assertEqual(gate._active, 0)
         self.assertTrue(writer.closed)
 
     async def test_socket_response_includes_compact_summary(self):
@@ -2428,7 +2611,7 @@ class TestSocketServerStartup(unittest.TestCase):
                 patch.object(server.asyncio, "set_event_loop"), \
                 patch.object(server.os.path, "lexists", return_value=False), \
                 patch.object(server.os, "lstat", return_value=socket_stat), \
-                patch.object(server.asyncio, "start_unix_server", new=AsyncMock(side_effect=start_server)), \
+                patch.object(server.asyncio, "start_unix_server", new=AsyncMock(side_effect=start_server)) as start_listener, \
                 patch.object(server.os, "chmod"), \
                 patch.object(server, "_socket_path_lock", return_value=Lock()), \
                 patch.object(server, "_unlink_socket_if_identity", return_value=True), \
@@ -2437,6 +2620,10 @@ class TestSocketServerStartup(unittest.TestCase):
 
         self.assertEqual(events[:2], ["enter", "bind"])
         self.assertEqual(events[-1], "exit")
+        self.assertEqual(
+            start_listener.await_args.kwargs["backlog"],
+            server.MAX_ACTIVE_SOCKET_CLIENTS + server.MAX_QUEUED_SOCKET_CLIENTS,
+        )
 
     def test_disabled_socket_import_marks_startup_event_ready(self):
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}):
@@ -2903,7 +3090,11 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 server.run_socket_server()
 
-        start.assert_awaited_once_with(server.handle_socket_client, path=socket_path)
+        start.assert_awaited_once_with(
+            server.handle_socket_client,
+            path=socket_path,
+            backlog=server.MAX_ACTIVE_SOCKET_CLIENTS + server.MAX_QUEUED_SOCKET_CLIENTS,
+        )
         chmod.assert_called_once_with(socket_path, 0o600)
         self.assertIn("listener stopped", stderr.getvalue())
 

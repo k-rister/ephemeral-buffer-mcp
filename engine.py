@@ -51,6 +51,7 @@ from config import (
     semantic_chunk_overlap as configured_semantic_chunk_overlap,
     semantic_max_index_input_bytes as configured_semantic_max_index_input_bytes,
 )
+from admission import admission_snapshot
 
 
 LOGGER = get_logger("engine")
@@ -739,6 +740,10 @@ class Capture:
     # so embedding cost is bounded by line and byte caps rather than tied to
     # the overlap BM25 uses for exact line ranges.
     semantic_chunks: List[Chunk] = field(default_factory=list)
+    # Internal reader-lease accounting is appended to preserve positional
+    # construction compatibility for the public capture record.
+    deferred_storage_tracked: bool = False
+    deferred_storage_accounted_bytes: int = 0
 
     @property
     def line_count(self) -> int:
@@ -890,6 +895,9 @@ class EphemeralEngine:
         self.session_id = uuid.uuid4().hex
         self._total_bytes = 0
         self._indexed_chunks = 0
+        self._deferred_storage_capture_count = 0
+        self._deferred_storage_readers = 0
+        self._deferred_storage_bytes = 0
         self._last_index_budget_adjustment = {
             "status": "startup",
             "previous": self.max_indexed_chunks,
@@ -1769,6 +1777,14 @@ class EphemeralEngine:
     def _close_capture_storage(self, capture: Capture) -> None:
         """Close per-capture search storage and report cleanup failures."""
         if capture.active_readers:
+            if not capture.deferred_storage_tracked:
+                capture.deferred_storage_tracked = True
+                self._deferred_storage_capture_count += 1
+                self._deferred_storage_readers += capture.active_readers
+                capture.deferred_storage_accounted_bytes = capture.retained_byte_size
+                if capture.embeddings is not None:
+                    capture.deferred_storage_accounted_bytes += int(capture.embeddings.nbytes)
+                self._deferred_storage_bytes += capture.deferred_storage_accounted_bytes
             capture.storage_close_pending = True
             return
         if not capture.fts_conn:
@@ -1803,6 +1819,19 @@ class EphemeralEngine:
         """Release a search reader and finish deferred storage cleanup."""
         with self._lock:
             capture.active_readers = max(0, capture.active_readers - 1)
+            if capture.deferred_storage_tracked:
+                self._deferred_storage_readers = max(0, self._deferred_storage_readers - 1)
+                if capture.active_readers == 0:
+                    self._deferred_storage_capture_count = max(
+                        0, self._deferred_storage_capture_count - 1
+                    )
+                    self._deferred_storage_bytes = max(
+                        0,
+                        self._deferred_storage_bytes
+                        - capture.deferred_storage_accounted_bytes,
+                    )
+                    capture.deferred_storage_tracked = False
+                    capture.deferred_storage_accounted_bytes = 0
             if capture.active_readers == 0 and capture.storage_close_pending:
                 capture.storage_close_pending = False
                 self._close_capture_storage(capture)
@@ -2077,6 +2106,10 @@ class EphemeralEngine:
                 ):
                     capture.embeddings = embeddings
                     capture.semantic_index_state = "ready"
+                    if capture.deferred_storage_tracked:
+                        embedding_bytes = int(embeddings.nbytes)
+                        self._deferred_storage_bytes += embedding_bytes
+                        capture.deferred_storage_accounted_bytes += embedding_bytes
 
     def search(
         self,
@@ -2084,7 +2117,8 @@ class EphemeralEngine:
         mode: str = "hybrid",
         capture_id: str = "latest",
         top_k: int = 5,
-        context_lines: int = 3
+        context_lines: int = 3,
+        response_budget_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Performs BM25, Semantic, or Hybrid (Reciprocal Rank Fusion) search across the capture.
@@ -2115,6 +2149,16 @@ class EphemeralEngine:
                 "error_code": "context_limit_exceeded",
                 "message": f"context_lines must not exceed {MAX_SEARCH_CONTEXT_LINES}.",
             }
+        if response_budget_bytes is not None and (
+            isinstance(response_budget_bytes, bool)
+            or not isinstance(response_budget_bytes, int)
+            or response_budget_bytes < 1
+        ):
+            return {
+                "status": "error",
+                "error_code": "invalid_response_budget",
+                "message": "response_budget_bytes must be a positive integer or null.",
+            }
 
         capture = self._acquire_capture_reader(capture_id)
         if not capture:
@@ -2125,7 +2169,14 @@ class EphemeralEngine:
             }
 
         try:
-            return self._search_capture(capture, query, mode, top_k, context_lines)
+            return self._search_capture(
+                capture,
+                query,
+                mode,
+                top_k,
+                context_lines,
+                response_budget_bytes,
+            )
         finally:
             self._release_capture_reader(capture)
 
@@ -2136,6 +2187,7 @@ class EphemeralEngine:
         mode: str,
         top_k: int,
         context_lines: int,
+        response_budget_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Run search while the caller retains the capture storage lease."""
 
@@ -2266,6 +2318,10 @@ class EphemeralEngine:
 
         matches = []
         seen_line_ranges = []
+        materialization_budget = (
+            None if response_budget_bytes is None else response_budget_bytes // 2
+        )
+        response_matches_omitted = False
 
         for entry in ranked:
             chunk = entry["chunk"]
@@ -2281,7 +2337,31 @@ class EphemeralEngine:
             if redundant:
                 continue
 
-            seen_line_ranges.append((chunk.start_line, chunk.end_line, ctx_start, ctx_end))
+            line_count = ctx_end - ctx_start + 1
+            if materialization_budget is None:
+                snippet_budget = SEARCH_MATCH_SNIPPET_MAX_BYTES
+                context_budget = SEARCH_MATCH_CONTEXT_MAX_BYTES
+                per_line_budget = SEARCH_SNIPPET_MAX_BYTES
+            else:
+                # The MCP response contains structured data and rendered text.
+                # Reserve half of the wire budget for those two copies plus
+                # metadata, and stop before constructing another raw context
+                # when the remaining construction allowance is too small.
+                if materialization_budget < 2 * line_count + 128:
+                    response_matches_omitted = True
+                    break
+                snippet_budget = min(
+                    SEARCH_MATCH_SNIPPET_MAX_BYTES,
+                    materialization_budget // 2,
+                )
+                context_budget = min(
+                    SEARCH_MATCH_CONTEXT_MAX_BYTES,
+                    materialization_budget - snippet_budget,
+                )
+                if snippet_budget < 2 * line_count or context_budget < 64:
+                    response_matches_omitted = True
+                    break
+                per_line_budget = max(1, (snippet_budget - line_count) // line_count)
 
             lines_with_numbers = []
             for line_no in range(ctx_start, ctx_end + 1):
@@ -2290,19 +2370,20 @@ class EphemeralEngine:
                 prefix = ">" if is_match_core else " "
                 lines_with_numbers.append(_bounded_preview(
                     f"{prefix} {line_no:5d} | {raw}",
-                    max_bytes=SEARCH_SNIPPET_MAX_BYTES,
+                    max_bytes=per_line_budget,
                     marker=SEARCH_SNIPPET_TRUNCATION_MARKER,
                 ))
             snippet, snippet_truncated = _bounded_join_lines(
                 lines_with_numbers,
-                SEARCH_MATCH_SNIPPET_MAX_BYTES,
+                snippet_budget,
                 "... [snippet truncated; use get_capture_slice for full content] ...",
             )
             raw_context, context_truncated = _bounded_join_lines(
                 capture.raw_lines[ctx_start - 1:ctx_end],
-                SEARCH_MATCH_CONTEXT_MAX_BYTES,
+                context_budget,
                 "... [raw context truncated; use get_capture_slice for full content] ...",
             )
+            seen_line_ranges.append((chunk.start_line, chunk.end_line, ctx_start, ctx_end))
             matches.append({
                 "chunk_id": chunk.chunk_id,
                 "chunk_index": entry["index"],
@@ -2316,6 +2397,14 @@ class EphemeralEngine:
                 "snippet": snippet,
                 "snippet_truncated": snippet_truncated,
             })
+            if materialization_budget is not None:
+                # Debit the materialized strings rather than their maximum
+                # allowances so short matches do not consume unused budget.
+                materialization_budget -= (
+                    len(snippet.encode("utf-8"))
+                    + len(raw_context.encode("utf-8"))
+                    + 256
+                )
             if len(matches) >= top_k:
                 break
 
@@ -2330,6 +2419,7 @@ class EphemeralEngine:
             "match_count": len(matches),
             "matches": matches,
             "semantic_coverage": semantic_coverage,
+            "response_matches_omitted": response_matches_omitted,
         }
         if semantic_fallback:
             result["semantic_fallback"] = semantic_fallback
@@ -2909,8 +2999,9 @@ class EphemeralEngine:
             int(cap.embeddings.nbytes) for cap in self.captures.values()
             if cap.embeddings is not None
         )
-        accounted_bytes = self._total_bytes + embedding_bytes
+        accounted_bytes = self._total_bytes + self._deferred_storage_bytes + embedding_bytes
         rss_bytes = process_rss_bytes()
+        admission = admission_snapshot()
         return {
             "capture_count": len(self.captures),
             "max_captures": self.max_captures,
@@ -2926,6 +3017,9 @@ class EphemeralEngine:
             "remaining_indexed_chunks": self.max_indexed_chunks - self._indexed_chunks,
             "total_bytes": self._total_bytes,
             "max_buffer_bytes": self.max_buffer_bytes,
+            "deferred_storage_capture_count": self._deferred_storage_capture_count,
+            "deferred_storage_readers": self._deferred_storage_readers,
+            "deferred_storage_bytes": self._deferred_storage_bytes,
             "embedding_bytes": embedding_bytes,
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
@@ -2963,6 +3057,7 @@ class EphemeralEngine:
                 if cap.semantic_index_state == "budget-exceeded"
             ),
             "accounted_bytes": accounted_bytes,
+            **admission,
             "process_rss_bytes": rss_bytes,
             "unaccounted_rss_bytes": (
                 max(0, rss_bytes - accounted_bytes) if rss_bytes is not None else None

@@ -34,6 +34,10 @@ DEFAULT_SEMANTIC_CHUNK_BYTES = 1024
 DEFAULT_SEMANTIC_CHUNK_OVERLAP = 0
 DEFAULT_SOCKET_PATH = os.path.join(tempfile.gettempdir(), "ephemeral_buffer.sock")
 DEFAULT_SOCKET_TIMEOUT_SECONDS = 10.0
+DEFAULT_MAX_ACTIVE_TOOL_WORK = 8
+DEFAULT_MAX_QUEUED_TOOL_WORK = 16
+DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS = 4
+DEFAULT_MAX_QUEUED_SOCKET_CLIENTS = 8
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
 DEFAULT_EXECUTION_STATE_QUOTA_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES = 128 * 1024 * 1024
@@ -85,7 +89,7 @@ def socket_isolation_required() -> bool:
 
 
 def socket_timeout_seconds() -> float:
-    """Return the bounded CLI socket operation timeout in seconds."""
+    """Return the bounded CLI operation and server request-read timeout."""
     name = "EPHEMERAL_SOCKET_TIMEOUT_SECONDS"
     value = os.environ.get(name)
     if value is None:
@@ -101,6 +105,34 @@ def socket_timeout_seconds() -> float:
             file=sys.stderr,
         )
         return DEFAULT_SOCKET_TIMEOUT_SECONDS
+
+
+def max_active_tool_work() -> int:
+    """Return the maximum MCP tool calls admitted to worker threads."""
+    return positive_int_env(
+        "EPHEMERAL_MAX_ACTIVE_TOOL_WORK", DEFAULT_MAX_ACTIVE_TOOL_WORK
+    )
+
+
+def max_queued_tool_work() -> int:
+    """Return the bounded number of MCP tool calls waiting for worker capacity."""
+    return non_negative_int_env(
+        "EPHEMERAL_MAX_QUEUED_TOOL_WORK", DEFAULT_MAX_QUEUED_TOOL_WORK
+    )
+
+
+def max_active_socket_clients() -> int:
+    """Return the maximum socket clients admitted to request processing."""
+    return positive_int_env(
+        "EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS", DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS
+    )
+
+
+def max_queued_socket_clients() -> int:
+    """Return the bounded number of socket clients waiting for request capacity."""
+    return non_negative_int_env(
+        "EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS", DEFAULT_MAX_QUEUED_SOCKET_CLIENTS
+    )
 
 
 def socket_path() -> str:

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound MCP and socket foreground work with configurable active slots and
+  queues, return explicit busy errors on saturation, let the CLI stop a large
+  socket upload when rejected, report admission and reader-pinned storage
+  counters, and apply search response budgets while constructing match context.
 - Add byte-bounded, resumable capture-slice pages and a versioned structured
   MCP result envelope for capture, search, retrieval, and clear tools while
   retaining their readable text responses.

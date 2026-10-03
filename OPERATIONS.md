@@ -107,9 +107,11 @@ positive value when needed:
 export EPHEMERAL_SOCKET_TIMEOUT_SECONDS=30
 ```
 
-The timeout applies to connecting, sending the capture, and receiving the
-server response. A timeout produces a nonzero CLI result rather than leaving
-a shell pipeline blocked indefinitely.
+The CLI timeout applies to connecting, sending the capture, and receiving the
+server response. The server uses the same setting to bound receipt of each
+complete request frame after admission; stalled reads return
+`socket_read_timeout` and release their admission slot. A CLI timeout produces
+a nonzero result rather than leaving a shell pipeline blocked indefinitely.
 
 ## Capture limits and eviction
 
@@ -137,6 +139,33 @@ The byte budget covers each capture's retained UTF-8 content and label.
 Embedding storage, the search index, Python objects, and process RSS are
 reported separately by `get_buffer_stats`; process RSS is an approximate
 operational metric rather than an allocation limit.
+
+## Foreground work admission
+
+The server bounds MCP tool work and CLI socket clients before dispatching
+blocking work or reading a complete socket payload. Defaults allow 8 active MCP
+tool calls with 16 queued calls, and 4 active socket clients with 8 queued
+clients. When a lane and its queue are full, MCP tools and socket clients
+receive a `server_busy` error and can retry shortly. Socket listen backlog is
+bounded by the configured active and queued socket-client limits.
+`get_buffer_stats` has a reserved worker slot so admission pressure remains
+observable when the regular MCP queue is full.
+
+Tune these positive active limits and non-negative queue limits when starting
+the server:
+
+```bash
+export EPHEMERAL_MAX_ACTIVE_TOOL_WORK=8
+export EPHEMERAL_MAX_QUEUED_TOOL_WORK=16
+export EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS=4
+export EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS=8
+```
+
+`get_buffer_stats` reports active, queued, and rejected work by tool or socket
+lane. It also reports captures and readers whose storage remains alive after
+eviction, with accounted capture-content, label, and materialized embedding
+bytes. These controls bound the number of concurrent working sets; they do not
+make the retained-byte budget a process RSS cap.
 
 FastEmbed is warmed in a background thread after socket startup succeeds, so
 the MCP handshake and BM25 search remain available while model loading and one

@@ -257,9 +257,12 @@ the socket path directly. The MCP initialization instructions describe this
 policy to the client, but the environment checks enforce it independently.
 
 The CLI bounds each socket connect, send, and receive operation to 10 seconds
-by default. Set `EPHEMERAL_SOCKET_TIMEOUT_SECONDS` to a positive number of
-seconds when a different limit is appropriate; timeout failures return a
-nonzero CLI result.
+by default. The server uses the same setting to bound how long an admitted
+client can take to send a complete request frame. Set
+`EPHEMERAL_SOCKET_TIMEOUT_SECONDS` to a positive number of seconds when a
+different limit is appropriate; CLI timeout failures return a nonzero result,
+and stalled server-side reads return `socket_read_timeout` and release their
+admission slot.
 
 ### Background model warm-up
 
@@ -742,6 +745,19 @@ limit accounts for captured UTF-8 content plus its label; a capture is rejected
 when their combined size exceeds the limit. `get_buffer_stats` also reports
 embedding model readiness, embedding/cache settings, and process memory
 separately.
+
+Foreground MCP work and CLI socket clients have bounded active and queued
+capacity. Defaults are 8 active and 16 queued MCP calls, plus 4 active and 8
+queued socket clients. When a lane is full, the server returns a `server_busy`
+error that can be retried. Configure these limits with
+`EPHEMERAL_MAX_ACTIVE_TOOL_WORK`, `EPHEMERAL_MAX_QUEUED_TOOL_WORK`,
+`EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS`, and
+`EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS`. `get_buffer_stats` reports active,
+queued, and rejected work and reader-pinned storage that remains after capture
+eviction, and has a reserved worker slot so it remains available under load.
+The CLI can receive a busy response while uploading a large socket frame. These
+concurrency limits make foreground work predictable; they do not cap process
+RSS.
 
 Indexed chunks are bounded separately by `EPHEMERAL_MAX_INDEXED_CHUNKS`, which
 defaults to 32,768 total chunks across retained captures. LRU eviction makes
