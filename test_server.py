@@ -2677,6 +2677,14 @@ class TestSocketServerStartup(unittest.TestCase):
 
         self.assertEqual(server._socket_lifecycle()[0], "disabled")
 
+    def test_allow_stdio_without_socket_uses_startup_snapshot(self):
+        with patch.object(
+            server,
+            "SETTINGS",
+            settings_with_environment(EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET="1"),
+        ):
+            self.assertTrue(server._allow_stdio_without_socket())
+
     def test_socket_startup_timeout_is_reported(self):
         event = SimpleNamespace(wait=lambda timeout: False)
         with patch.object(server, "_allow_stdio_without_socket", return_value=False), \
