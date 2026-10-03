@@ -421,6 +421,10 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 ),
             ),
             ("timeout", phase_value("timeout_seconds", 0)),
+            (
+                "missing timeout",
+                lambda record: record["phases"][0].pop("timeout_seconds"),
+            ),
             ("overflowing timeout", phase_value("timeout_seconds", 10**400)),
             ("output limit", phase_value("max_output_bytes", 511)),
             ("process id", phase_value("process_id", True)),
@@ -546,6 +550,127 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertEqual(non_finite["status"], "invalid_record")
         self.assertIsNone(non_finite["schema_version"])
         json.dumps(non_finite, allow_nan=False)
+
+    def test_invalid_record_previews_allowlist_fields_and_omit_unknown_shapes(self):
+        manager = self.manager()
+        manager.create([self.phase("preview", "preview")], execution_id="preview-shapes")
+        path = manager.store._path("preview-shapes")
+        malformed = {
+            "execution_id": "preview-shapes",
+            "schema_version": True,
+            "execution_status": "unknown",
+            "partial": 1,
+            "phases": [
+                None,
+                {
+                    "status": "unknown",
+                    "attempts": -1,
+                    "side_effects": "maybe",
+                    "unsafe_side_effects": "yes",
+                    "process_fence_pending": 1,
+                    "credential": "private phase value",
+                },
+            ],
+            "credential": "private record value",
+        }
+        path.write_text(json.dumps(malformed), encoding="utf-8")
+
+        inspected = manager.public("preview-shapes")
+
+        self.assertEqual(inspected["status"], "invalid_record")
+        self.assertTrue(inspected["record_preview_sanitized"])
+        self.assertTrue(inspected["record_preview_redacted"])
+        self.assertNotIn("private phase value", inspected["record_preview"])
+        self.assertNotIn("private record value", inspected["record_preview"])
+        self.assertEqual(json.loads(inspected["record_preview"])["phases"], [{}])
+
+        malformed["phases"] = {}
+        path.write_text(json.dumps(malformed), encoding="utf-8")
+        wrong_phases_shape = manager.public("preview-shapes")
+        self.assertTrue(wrong_phases_shape["record_preview_truncated"])
+
+        path.write_text("[]", encoding="utf-8")
+        non_object = manager.public("preview-shapes")
+        self.assertTrue(non_object["record_preview_truncated"])
+
+    def test_record_listing_helpers_handle_unencodable_ids_and_stat_errors(self):
+        manager = self.manager()
+        store = manager.store
+        self.assertFalse(
+            store._matches_record_filename("\ud800", "0" * 64 + ".json")
+        )
+
+        path = store.state_dir / ("0" * 64 + ".json")
+        with patch.object(Path, "stat", side_effect=OSError("stat unavailable")):
+            diagnostic = store._listing_file_diagnostic(path)
+            sort_time = store._listing_file_sort_time(path)
+
+        self.assertEqual(diagnostic["record_bytes"], 0)
+        self.assertEqual(sort_time, "")
+
+    def test_list_surfaces_unreadable_record_diagnostics_across_summary_races(self):
+        manager = self.manager()
+        store = manager.store
+        store._ensure_state_dir()
+
+        retry_behaviors = {
+            "list-summary-recovered": "valid",
+            "list-summary-unreadable": "raise",
+            "list-summary-nonobject": "nonobject",
+        }
+        summary_paths = {}
+        for execution_id in retry_behaviors:
+            main_path = store._path(execution_id)
+            main_path.write_text("not json", encoding="utf-8")
+            summary_path = store._summary_path(execution_id)
+            summary_path.write_text(
+                json.dumps({
+                    "execution_id": execution_id,
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }),
+                encoding="utf-8",
+            )
+            newer_time_ns = main_path.stat().st_mtime_ns + 1_000_000
+            os.utime(summary_path, ns=(newer_time_ns, newer_time_ns))
+            summary_paths[summary_path] = retry_behaviors[execution_id]
+
+        orphan_summary = store._summary_path("list-orphan-summary")
+        orphan_summary.write_text("not json", encoding="utf-8")
+        unpaired_main = store._path("list-unpaired-main")
+        unpaired_main.write_text("not json", encoding="utf-8")
+
+        original_open = Path.open
+        summary_reads = {path: 0 for path in summary_paths}
+
+        def change_summary_between_reads(path, mode="r", *args, **kwargs):
+            if path in summary_paths and mode == "r":
+                summary_reads[path] += 1
+                if summary_reads[path] == 1:
+                    return io.StringIO("not json")
+                behavior = summary_paths[path]
+                if behavior == "raise":
+                    raise OSError("summary became unreadable")
+                if behavior == "nonobject":
+                    return io.StringIO("[]")
+            return original_open(path, mode, *args, **kwargs)
+
+        with patch.object(Path, "open", new=change_summary_between_reads), patch.object(
+            store,
+            "inspect_record",
+            side_effect=ValueError("record cannot be inspected"),
+        ):
+            listed = store.list()
+
+        diagnostics = {item.get("execution_id"): item for item in listed}
+        self.assertEqual(len(listed), 4)
+        self.assertEqual(
+            diagnostics["list-summary-recovered"]["status"],
+            "invalid_record",
+        )
+        self.assertTrue(
+            diagnostics["list-summary-recovered"]["record_preview_truncated"]
+        )
+        self.assertEqual(sum(item.get("execution_id") is None for item in listed), 3)
 
     def test_blocked_recovery_reason_is_stable_public_and_correlated_to_event(self):
         manager = self.manager()
