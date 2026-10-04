@@ -120,6 +120,55 @@ class TestServerTools(unittest.TestCase):
         server.engine.embedding_model = self.original_model
         server.engine.clear("all")
 
+    def test_service_contexts_isolate_engines_metrics_and_snapshot_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_metrics = Path(directory) / "first-metrics.json"
+            second_metrics = Path(directory) / "second-metrics.json"
+            first_state = Path(directory) / "first-state"
+            second_state = Path(directory) / "second-state"
+            settings = settings_with_environment(EPHEMERAL_METRICS="1")
+            first = server.create_service_context(
+                settings,
+                state_dir=str(first_state),
+                metrics_file=str(first_metrics),
+                engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+            )
+            second = server.create_service_context(
+                settings,
+                state_dir=str(second_state),
+                metrics_file=str(second_metrics),
+                engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+            )
+            try:
+                self.assertIsNot(first.engine, second.engine)
+                self.assertIsNot(first.metrics, second.metrics)
+                self.assertIsNone(first._execution_manager)
+                self.assertIsNone(second._execution_manager)
+
+                with server._activate_service_context(first):
+                    first_response = json.loads(server.capture_text("first context output"))
+                with server._activate_service_context(second):
+                    second_response = json.loads(server.capture_text("second context output"))
+
+                first_capture_id = first_response["capture_id"]
+                second_capture_id = second_response["capture_id"]
+                self.assertIsNotNone(first.engine.get_capture(first_capture_id))
+                self.assertIsNone(second.engine.get_capture(first_capture_id))
+                self.assertIsNotNone(second.engine.get_capture(second_capture_id))
+                self.assertIsNone(first.engine.get_capture(second_capture_id))
+                self.assertIsNone(server.engine.get_capture(first_capture_id))
+
+                app = server.create_mcp_server(first)
+                self.assertIn("capture_text", app._tool_manager._tools)
+            finally:
+                first.close()
+                second.close()
+
+            self.assertTrue(first_metrics.is_file())
+            self.assertTrue(second_metrics.is_file())
+            self.assertFalse(first_state.exists())
+            self.assertFalse(second_state.exists())
+
     def test_tool_instrumentation_logs_content_free_lifecycle(self):
         with patch.object(server, "log_event") as log:
             @server._instrument_tool("probe_tool")

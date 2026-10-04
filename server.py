@@ -5,6 +5,7 @@ Supports stdio MCP protocol and Unix Domain Socket IPC for CLI piping.
 
 import os
 import atexit
+import dataclasses
 import sys
 import json
 import asyncio
@@ -41,6 +42,9 @@ from pydantic import (
     model_validator,
 )
 from config import (
+    cleanup_execution_state_dir,
+    load_settings,
+    new_default_execution_state_dir,
     runtime_index_budget_adjustment_enabled,
     startup_settings,
 )
@@ -165,6 +169,7 @@ LOGGER = get_logger("server")
 METRICS = LocalMetrics(enabled=SETTINGS.metrics_enabled.value)
 _REGISTERED_MCP_TOOL_NAMES: list[str] = []
 _REGISTERED_MCP_TOOL_CATEGORIES: dict[str, str] = {}
+_MCP_TOOL_REGISTRATIONS: list[tuple[Any, str, str, Any]] = []
 MCP_TOOL_CATEGORY_NAMES = (
     "capture",
     "configuration",
@@ -175,7 +180,6 @@ MCP_TOOL_CATEGORY_NAMES = (
     "search",
 )
 _TOOL_CALL_IDS = itertools.count(1)
-_METRICS_SNAPSHOT_LOCK = threading.Lock()
 _TIMEOUT_RESULT_TOOLS = {
     "execute_and_capture",
     "start_execution",
@@ -220,10 +224,10 @@ if _SOCKET_STATE == "disabled":
 
 
 @contextmanager
-def _bind_mcp_metrics_scope() -> Any:
+def _bind_mcp_metrics_scope(app=None, service_context: "ServiceContext | None" = None) -> Any:
     """Bind metrics to the current MCP transport session without exposing it."""
     try:
-        request_context = mcp.get_context().request_context
+        request_context = (app or mcp).get_context().request_context
         session = request_context.session
     except (AttributeError, LookupError, ValueError):
         yield
@@ -256,7 +260,12 @@ def _bind_mcp_metrics_scope() -> Any:
                 while len(_MCP_SESSION_SCOPE_FALLBACK) > MAX_MCP_SESSION_SCOPE_FALLBACK:
                     _MCP_SESSION_SCOPE_FALLBACK.popitem(last=False)
 
-    with METRICS.bind_scope(scope[0], attribution=scope[1]):
+    metrics = (
+        service_context.metrics
+        if service_context is not None and service_context is not DEFAULT_SERVICES
+        else _active_metrics()
+    )
+    with metrics.bind_scope(scope[0], attribution=scope[1]):
         yield
 
 
@@ -264,11 +273,21 @@ class _MetricsFuncMetadata(FuncMetadata):
     """FastMCP argument metadata that records rejected input schemas."""
 
     _metrics_tool_name: str = PrivateAttr()
+    _service_context: Any = PrivateAttr()
+    _app: Any = PrivateAttr()
 
     @classmethod
-    def for_tool(cls, metadata: FuncMetadata, tool_name: str) -> "_MetricsFuncMetadata":
+    def for_tool(
+        cls,
+        metadata: FuncMetadata,
+        tool_name: str,
+        service_context: "ServiceContext",
+        app,
+    ) -> "_MetricsFuncMetadata":
         instrumented = cls.model_validate(metadata.model_dump())
         instrumented._metrics_tool_name = tool_name
+        instrumented._service_context = service_context
+        instrumented._app = app
         return instrumented
 
     async def call_fn_with_arg_validation(
@@ -278,26 +297,27 @@ class _MetricsFuncMetadata(FuncMetadata):
         arguments_to_validate,
         arguments_to_pass_directly,
     ):
-        with _bind_mcp_metrics_scope():
-            try:
-                with METRICS.measure(self._metrics_tool_name) as state:
-                    try:
-                        arguments_pre_parsed = self.pre_parse_json(arguments_to_validate)
-                        arguments_parsed_model = self.arg_model.model_validate(arguments_pre_parsed)
-                        arguments_parsed_dict = arguments_parsed_model.model_dump_one_level()
-                    except ValidationError:
-                        state["success"] = False
-                        state["failure_category"] = "validation"
-                        raise
-                    state["record"] = False
-            except ValidationError:
-                _write_metrics_snapshot()
-                raise
+        with _activate_service_context(self._service_context):
+            with _bind_mcp_metrics_scope(self._app, self._service_context):
+                try:
+                    with _active_metrics().measure(self._metrics_tool_name) as state:
+                        try:
+                            arguments_pre_parsed = self.pre_parse_json(arguments_to_validate)
+                            arguments_parsed_model = self.arg_model.model_validate(arguments_pre_parsed)
+                            arguments_parsed_dict = arguments_parsed_model.model_dump_one_level()
+                        except ValidationError:
+                            state["success"] = False
+                            state["failure_category"] = "validation"
+                            raise
+                        state["record"] = False
+                except ValidationError:
+                    _write_metrics_snapshot(self._service_context)
+                    raise
 
-            arguments_parsed_dict |= arguments_to_pass_directly or {}
-            if fn_is_async:
-                return await fn(**arguments_parsed_dict)
-            return fn(**arguments_parsed_dict)
+                arguments_parsed_dict |= arguments_to_pass_directly or {}
+                if fn_is_async:
+                    return await fn(**arguments_parsed_dict)
+                return fn(**arguments_parsed_dict)
 
 
 def _classify_failure_text(text: str) -> str:
@@ -553,7 +573,8 @@ def _instrument_tool(name):
             started = time.perf_counter()
             log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
             try:
-                with METRICS.measure(name) as state:
+                metrics = _active_metrics()
+                with metrics.measure(name) as state:
                     try:
                         result = function(*args, **kwargs)
                     except Exception as exc:
@@ -564,11 +585,11 @@ def _instrument_tool(name):
                     response_text = result.text if isinstance(result, ToolResponseEnvelope) else result
                     if isinstance(response_text, str):
                         response_bytes = len(response_text.encode("utf-8"))
-                        METRICS.record_bytes("tool_response_bytes", response_bytes)
+                        metrics.record_bytes("tool_response_bytes", response_bytes)
                         if name == "search_capture":
-                            METRICS.record_bytes("search_response_bytes", response_bytes)
+                            metrics.record_bytes("search_response_bytes", response_bytes)
                         elif name in {"get_capture_slice", "get_capture_summary"}:
-                            METRICS.record_bytes("retrieval_response_bytes", response_bytes)
+                            metrics.record_bytes("retrieval_response_bytes", response_bytes)
                     failure_category = _classify_tool_result(name, result)
                     if failure_category is not None:
                         state["success"] = False
@@ -703,76 +724,17 @@ def _mcp_tool(name, category, *, structured_result_factory=None):
         raise ValueError(f"unknown MCP tool category: {category}")
 
     def decorator(function):
-        @wraps(function)
-        async def adapter(*args, **kwargs):
-            with _bind_mcp_metrics_scope():
-                try:
-                    lane = "diagnostics" if name == "get_buffer_stats" else "mcp"
-                    ticket = await admission_gate(lane).acquire(name)
-                except AdmissionBusy:
-                    message = (
-                        "Foreground work capacity is full; retry this tool call shortly."
-                    )
-                    log_event(
-                        LOGGER,
-                        logging.WARNING,
-                        "mcp_tool_rejected_busy",
-                        tool=name,
-                    )
-                    if structured_result_factory is not None or category in {
-                        "capture", "retrieval", "search", "lifecycle"
-                    }:
-                        response = ToolResponseEnvelope(
-                            status="error",
-                            error=ToolErrorEnvelope(code="server_busy", message=message),
-                            text=f"Error: {message}",
-                        )
-                        return _call_tool_result(_fit_tool_envelope(response))
-                    if category == "execution":
-                        return json.dumps(
-                            {
-                                "status": "error",
-                                "error": {"code": "server_busy", "message": message},
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                    return f"Error: server_busy: {message}"
-
-                try:
-                    if structured_result_factory is not None:
-                        response = await _run_admitted_thread(
-                            ticket,
-                            structured_result_factory, *args, **kwargs
-                        )
-                        if not isinstance(response, ToolResponseEnvelope):
-                            raise TypeError("structured_result_factory must return ToolResponseEnvelope")
-                    else:
-                        result = await _run_admitted_thread(
-                            ticket, function, *args, **kwargs
-                        )
-                        if category not in {"capture", "retrieval", "search", "lifecycle"}:
-                            return result
-                        response = _legacy_tool_envelope(name, result)
-                    return _call_tool_result(_fit_tool_envelope(response))
-                finally:
-                    ticket.release()
-
-        if structured_result_factory is not None or category in {"capture", "retrieval", "search", "lifecycle"}:
-            signature = inspect.signature(function)
-            adapter.__signature__ = signature.replace(return_annotation=ToolResponseEnvelope)
-            adapter.__annotations__ = {
-                **getattr(function, "__annotations__", {}),
-                "return": ToolResponseEnvelope,
-            }
-
-        mcp.add_tool(adapter, name=name)
-        registered_tool = mcp._tool_manager._tools.get(name)
-        if registered_tool is not None:
-            registered_tool.fn_metadata = _MetricsFuncMetadata.for_tool(
-                registered_tool.fn_metadata,
-                name,
-            )
+        _MCP_TOOL_REGISTRATIONS.append(
+            (function, name, category, structured_result_factory)
+        )
+        _register_mcp_tool_for_app(
+            mcp,
+            function,
+            name,
+            category,
+            structured_result_factory,
+            DEFAULT_SERVICES,
+        )
         if name not in _REGISTERED_MCP_TOOL_NAMES:
             _REGISTERED_MCP_TOOL_NAMES.append(name)
         _REGISTERED_MCP_TOOL_CATEGORIES[name] = category
@@ -780,11 +742,104 @@ def _mcp_tool(name, category, *, structured_result_factory=None):
 
     return decorator
 
-def _mcp_instructions() -> str:
+
+def create_mcp_server(context: "ServiceContext | None" = None):
+    """Build an MCP application whose tools use the supplied service context."""
+    service_context = context or DEFAULT_SERVICES
+    app = FastMCP(
+        "ephemeral-buffer",
+        instructions=_mcp_instructions(service_context),
+    )
+    for function, name, category, structured_result_factory in _MCP_TOOL_REGISTRATIONS:
+        _register_mcp_tool_for_app(
+            app,
+            function,
+            name,
+            category,
+            structured_result_factory,
+            service_context,
+        )
+    return app
+
+
+def _register_mcp_tool_for_app(
+    app,
+    function,
+    name,
+    category,
+    structured_result_factory,
+    service_context,
+):
+    """Register one shared tool implementation with context-bound adapters."""
+    # Reuse the registration behavior installed by the decorator factory.
+    @wraps(function)
+    async def adapter(*args, **kwargs):
+        with _activate_service_context(service_context), _bind_mcp_metrics_scope(
+            app, service_context
+        ):
+            try:
+                lane = "diagnostics" if name == "get_buffer_stats" else "mcp"
+                ticket = await admission_gate(lane).acquire(name)
+            except AdmissionBusy:
+                message = "Foreground work capacity is full; retry this tool call shortly."
+                log_event(LOGGER, logging.WARNING, "mcp_tool_rejected_busy", tool=name)
+                if structured_result_factory is not None or category in {
+                    "capture", "retrieval", "search", "lifecycle"
+                }:
+                    response = ToolResponseEnvelope(
+                        status="error",
+                        error=ToolErrorEnvelope(code="server_busy", message=message),
+                        text=f"Error: {message}",
+                    )
+                    return _call_tool_result(_fit_tool_envelope(response))
+                if category == "execution":
+                    return json.dumps(
+                        {"status": "error", "error": {"code": "server_busy", "message": message}},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                return f"Error: server_busy: {message}"
+
+            try:
+                if structured_result_factory is not None:
+                    response = await _run_admitted_thread(
+                        ticket, structured_result_factory, *args, **kwargs
+                    )
+                    if not isinstance(response, ToolResponseEnvelope):
+                        raise TypeError("structured_result_factory must return ToolResponseEnvelope")
+                else:
+                    result = await _run_admitted_thread(ticket, function, *args, **kwargs)
+                    if category not in {"capture", "retrieval", "search", "lifecycle"}:
+                        return result
+                    response = _legacy_tool_envelope(name, result)
+                return _call_tool_result(_fit_tool_envelope(response))
+            finally:
+                ticket.release()
+
+    if structured_result_factory is not None or category in {
+        "capture", "retrieval", "search", "lifecycle"
+    }:
+        signature = inspect.signature(function)
+        adapter.__signature__ = signature.replace(return_annotation=ToolResponseEnvelope)
+        adapter.__annotations__ = {
+            **getattr(function, "__annotations__", {}),
+            "return": ToolResponseEnvelope,
+        }
+    app.add_tool(adapter, name=name)
+    registered_tool = app._tool_manager._tools.get(name)
+    if registered_tool is not None:
+        registered_tool.fn_metadata = _MetricsFuncMetadata.for_tool(
+            registered_tool.fn_metadata, name, service_context, app
+        )
+
+def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
     """Return client-visible operating guidance for this server instance."""
-    if socket_isolation_required() and not socket_isolation_configured():
+    settings = context.settings if context is not None else SETTINGS
+    isolation_required = settings.socket_require_isolation.value
+    isolation_configured = settings.identity.isolation_configured
+    if isolation_required and not isolation_configured:
         isolation = "Socket isolation is required but not configured; startup must fail."
-    elif socket_isolation_configured():
+    elif isolation_configured:
         isolation = "Socket isolation is configured for this session."
     else:
         isolation = "This is legacy single-session mode; configure EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH for concurrency."
@@ -804,9 +859,10 @@ def _mcp_instructions() -> str:
 mcp = FastMCP("ephemeral-buffer", instructions=_mcp_instructions())
 
 
-def _refresh_mcp_instructions() -> None:
+def _refresh_mcp_instructions(app=None, context: "ServiceContext | None" = None) -> None:
     """Refresh client guidance immediately before MCP request serving."""
-    mcp._mcp_server.instructions = _mcp_instructions()
+    target = app or mcp
+    target._mcp_server.instructions = _mcp_instructions(context)
 
 
 def _runtime_package_version() -> str:
@@ -826,22 +882,183 @@ def _runtime_package_version() -> str:
         return "source checkout"
 
 
-engine = EphemeralEngine(settings=SETTINGS, metrics=METRICS)
-execution_manager = PhaseExecutionManager(
-    SETTINGS.identity.state_dir,
-    max_output_bytes=max(512, engine.max_buffer_bytes),
-    quota_bytes=SETTINGS.execution_state_quota_bytes.value,
-    checkpoint_reserve_bytes=SETTINGS.execution_checkpoint_reserve_bytes.value,
+_UNSET = object()
+
+
+class ServiceContext:
+    """Own the mutable resources for one embedded or server service instance."""
+
+    def __init__(
+        self,
+        settings,
+        *,
+        metrics: LocalMetrics | None = None,
+        engine: EphemeralEngine | None = None,
+        engine_options: dict[str, Any] | None = None,
+        metrics_file: str | None | object = _UNSET,
+    ) -> None:
+        if metrics_file is _UNSET:
+            self.metrics_file = settings.metrics_file.value
+        else:
+            self.metrics_file = metrics_file
+            metrics_file_setting = dataclasses.replace(
+                settings.metrics_file,
+                value=metrics_file,
+                source="context",
+                status="accepted" if metrics_file else "disabled",
+                invalid_value_behavior="not applicable",
+            )
+            settings = dataclasses.replace(settings, metrics_file=metrics_file_setting)
+        self.settings = settings
+        self.metrics = metrics or LocalMetrics(enabled=settings.metrics_enabled.value)
+        self.engine = engine or EphemeralEngine(
+            settings=settings,
+            metrics=self.metrics,
+            **(engine_options or {}),
+        )
+        self._execution_manager: PhaseExecutionManager | None = None
+        self._execution_manager_lock = threading.Lock()
+        self._metrics_snapshot_lock = threading.Lock()
+        self._closed = False
+        self._close_lock = threading.Lock()
+        self.engine.set_metrics_snapshot_callback(lambda: _write_metrics_snapshot(self))
+
+    @property
+    def execution_manager(self) -> PhaseExecutionManager:
+        """Construct durable execution storage machinery only when requested."""
+        if self._execution_manager is None:
+            with self._execution_manager_lock:
+                if self._execution_manager is None:
+                    self._execution_manager = PhaseExecutionManager(
+                        self.settings.identity.state_dir,
+                        max_output_bytes=max(512, self.engine.max_buffer_bytes),
+                        quota_bytes=self.settings.execution_state_quota_bytes.value,
+                        checkpoint_reserve_bytes=(
+                            self.settings.execution_checkpoint_reserve_bytes.value
+                        ),
+                    )
+        return self._execution_manager
+
+    def start(self) -> None:
+        """Start optional background engine work owned by this context."""
+        self.engine.start_embedding_warmup()
+
+    def close(self) -> None:
+        """Persist this context's metrics and release its owned resources."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                _write_metrics_snapshot(self)
+            finally:
+                try:
+                    self.engine.shutdown()
+                finally:
+                    if self.settings.identity.state_source == "process:private temporary directory":
+                        cleanup_execution_state_dir(self.settings.identity.state_dir)
+
+
+_SERVICE_CONTEXT_OVERRIDE: ContextVar[ServiceContext | None] = ContextVar(
+    "ephemeral_server_service_context", default=None
 )
+
+
+@contextmanager
+def _activate_service_context(context: ServiceContext) -> Any:
+    token = _SERVICE_CONTEXT_OVERRIDE.set(context)
+    try:
+        yield context
+    finally:
+        _SERVICE_CONTEXT_OVERRIDE.reset(token)
+
+
+def create_service_context(
+    settings=None,
+    *,
+    metrics_file: str | None = None,
+    state_dir: str | None = None,
+    engine_options: dict[str, Any] | None = None,
+) -> ServiceContext:
+    """Create an independently owned service context for embedding or benchmarks.
+
+    When settings are resolved here, the process-private default state path is
+    unique to this context and is only created by the first durable execution.
+    Pass ``metrics_file=None`` to keep metrics in memory without persistence.
+    """
+    if settings is None:
+        settings = load_settings(
+            default_state_dir=state_dir or new_default_execution_state_dir()
+        )
+    elif (
+        state_dir is None
+        and settings.identity.state_source == "process:private temporary directory"
+    ):
+        identity = dataclasses.replace(
+            settings.identity,
+            state_dir=new_default_execution_state_dir(),
+        )
+        settings = dataclasses.replace(settings, identity=identity)
+    if state_dir is not None:
+        identity = dataclasses.replace(settings.identity, state_dir=os.path.abspath(state_dir))
+        identity = dataclasses.replace(
+            identity,
+            state_source="context:state_dir",
+            durability="on-disk; retained across normal shutdowns until explicitly retired",
+            legacy_state_dir=None,
+        )
+        settings = dataclasses.replace(settings, identity=identity)
+    return ServiceContext(
+        settings,
+        metrics_file=metrics_file,
+        engine_options=engine_options,
+    )
+
+
+DEFAULT_SERVICES = ServiceContext(SETTINGS, metrics=METRICS)
+engine = DEFAULT_SERVICES.engine
+
+
+class _LazyExecutionManagerProxy:
+    """Keep the module-level compatibility API lazy until execution is used."""
+
+    def __getattr__(self, name):
+        return getattr(DEFAULT_SERVICES.execution_manager, name)
+
+
+execution_manager = _LazyExecutionManagerProxy()
 _ENGINE_OVERRIDE: ContextVar[Optional[EphemeralEngine]] = ContextVar(
     "ephemeral_server_engine_override",
     default=None,
 )
 
 
+def _active_service_context() -> ServiceContext:
+    return _SERVICE_CONTEXT_OVERRIDE.get() or DEFAULT_SERVICES
+
+
+def _active_settings():
+    context = _SERVICE_CONTEXT_OVERRIDE.get()
+    return SETTINGS if context is None or context is DEFAULT_SERVICES else context.settings
+
+
+def _active_metrics() -> LocalMetrics:
+    context = _SERVICE_CONTEXT_OVERRIDE.get()
+    return METRICS if context is None or context is DEFAULT_SERVICES else context.metrics
+
+
 def _active_engine() -> EphemeralEngine:
-    """Return the request-local engine override or the process engine."""
-    return _ENGINE_OVERRIDE.get() or engine
+    """Return the active context engine or the process engine."""
+    override = _ENGINE_OVERRIDE.get()
+    if override is not None:
+        return override
+    context = _SERVICE_CONTEXT_OVERRIDE.get()
+    return engine if context is None or context is DEFAULT_SERVICES else context.engine
+
+
+def _active_execution_manager():
+    context = _SERVICE_CONTEXT_OVERRIDE.get()
+    return execution_manager if context is None or context is DEFAULT_SERVICES else context.execution_manager
 
 
 def _capture_execution_phase(
@@ -969,7 +1186,7 @@ def _execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str, Any]:
     """Avoid copying large durable output before the response budget is known."""
-    metadata = execution_manager.public(execution_id, include_output=False)
+    metadata = _active_execution_manager().public(execution_id, include_output=False)
     if not include_output:
         return metadata
     output_bytes = sum(
@@ -980,17 +1197,23 @@ def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str,
     if output_bytes > EXECUTION_OUTPUT_RESPONSE_MAX_BYTES:
         metadata["response_truncated"] = True
         return metadata
-    return execution_manager.public(execution_id, include_output=True)
+    return _active_execution_manager().public(execution_id, include_output=True)
 
 
 def _metrics_snapshot(
     *,
+    service_context: ServiceContext | None = None,
     since_snapshot: Optional[str] = None,
     include_snapshot_token: bool = False,
     scope_key: str | None = None,
 ) -> Dict[str, Any]:
     """Return metrics using the live EB MCP registration inventory."""
-    return METRICS.snapshot(
+    metrics = (
+        service_context.metrics
+        if service_context is not None and service_context is not DEFAULT_SERVICES
+        else _active_metrics()
+    )
+    return metrics.snapshot(
         available_tools=_REGISTERED_MCP_TOOL_NAMES,
         tool_categories=_REGISTERED_MCP_TOOL_CATEGORIES,
         since_snapshot=since_snapshot,
@@ -999,12 +1222,18 @@ def _metrics_snapshot(
     )
 
 
-def _write_metrics_snapshot() -> None:
+def _write_metrics_snapshot(service_context: ServiceContext | None = None) -> None:
     """Persist an opt-in, content-free metrics snapshot for benchmark runners."""
-    path = SETTINGS.metrics_file.value
-    if not path or not METRICS.enabled:
+    context = service_context or _active_service_context()
+    path = (
+        _active_settings().metrics_file.value
+        if context is DEFAULT_SERVICES
+        else context.metrics_file
+    )
+    metrics = _active_metrics() if context is DEFAULT_SERVICES else context.metrics
+    if not path or not metrics.enabled:
         return
-    with _METRICS_SNAPSHOT_LOCK:
+    with context._metrics_snapshot_lock:
         temporary_path = None
         try:
             destination = Path(path)
@@ -1018,7 +1247,10 @@ def _write_metrics_snapshot() -> None:
                 delete=False,
             ) as temporary:
                 temporary_path = Path(temporary.name)
-                temporary.write(json.dumps(_metrics_snapshot(scope_key="process"), sort_keys=True))
+                temporary.write(json.dumps(
+                    _metrics_snapshot(service_context=context, scope_key="process"),
+                    sort_keys=True,
+                ))
                 temporary.flush()
                 os.fsync(temporary.fileno())
             os.replace(temporary_path, destination)
@@ -1033,9 +1265,7 @@ def _write_metrics_snapshot() -> None:
                     pass
 
 
-engine.set_metrics_snapshot_callback(_write_metrics_snapshot)
-atexit.register(_write_metrics_snapshot)
-atexit.register(engine.shutdown)
+atexit.register(DEFAULT_SERVICES.close)
 
 
 # --- MCP Tools ---
@@ -1096,9 +1326,9 @@ class ExecutionPhaseInput(BaseModel):
     @field_validator("max_output_bytes")
     @classmethod
     def validate_output_limit(cls, value):
-        if value is not None and value > engine.max_buffer_bytes:
+        if value is not None and value > _active_engine().max_buffer_bytes:
             raise ValueError(
-                f"max_output_bytes cannot exceed the configured {engine.max_buffer_bytes:,}-byte limit"
+                f"max_output_bytes cannot exceed the configured {_active_engine().max_buffer_bytes:,}-byte limit"
             )
         return value
 
@@ -1264,7 +1494,7 @@ def start_execution(
     ]
     return _execution_json(
         lambda: _execution_public_payload(
-            execution_manager.start(
+            _active_execution_manager().start(
                 phase_payloads,
                 execution_id=execution_id,
                 label=label,
@@ -1298,7 +1528,7 @@ def resume_execution(
     """
     return _execution_json(
         lambda: _execution_public_payload(
-            execution_manager.resume(
+            _active_execution_manager().resume(
                 execution_id,
                 retry_failed=retry_failed,
                 confirm_unsafe=confirm_unsafe,
@@ -1341,7 +1571,7 @@ def get_execution_output(
     """Retrieve one bounded output chunk for all phases or one named phase."""
     return _execution_json(
         lambda: _execution_public_payload(
-            execution_manager.output(
+            _active_execution_manager().output(
                 execution_id,
                 phase_name,
                 offset=offset,
@@ -1364,7 +1594,7 @@ def list_executions(
             "status": "ok",
             "limit": limit,
             "offset": offset,
-            "executions": execution_manager.list_public(limit=limit, offset=offset),
+            "executions": _active_execution_manager().list_public(limit=limit, offset=offset),
         },
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
     )
@@ -1375,7 +1605,7 @@ def list_executions(
 def get_execution_capacity() -> str:
     """Report durable execution storage, quota, checkpoint headroom, and anomalies."""
     return _execution_json(
-        lambda: execution_manager.capacity(),
+        lambda: _active_execution_manager().capacity(),
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
     )
 
@@ -1399,7 +1629,7 @@ def retire_executions(
     Active and fence-pending executions are never retired.
     """
     return _execution_json(
-        lambda: execution_manager.retire(
+        lambda: _active_execution_manager().retire(
             execution_ids,
             archive_path=archive_path,
             dry_run=dry_run,
@@ -2001,7 +2231,7 @@ def _search_capture_response(
 
     engine_matches = res.get("matches", [])
     construction_omitted = bool(res.get("response_matches_omitted", False))
-    METRICS.record_result_count("search_capture", len(engine_matches))
+    _active_metrics().record_result_count("search_capture", len(engine_matches))
     metadata = {
         key: res[key]
         for key in (
@@ -2334,14 +2564,14 @@ def clear_captures(capture_id: str = "all") -> str:
     """
     Clears all or a specific capture from the ephemeral buffer to free memory.
     """
-    return engine.clear(capture_id)
+    return _active_engine().clear(capture_id)
 
 
 @_mcp_tool("get_buffer_stats", "diagnostics")
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
     """Return aggregate capture, admission, accounting, and process RSS metrics."""
-    stats = engine.get_buffer_stats()
+    stats = _active_engine().get_buffer_stats()
     rss = stats["process_rss_bytes"]
     unaccounted = stats["unaccounted_rss_bytes"]
     rss_line = "Process RSS: unavailable" if rss is None else f"Process RSS: {rss:,} bytes"
@@ -2410,7 +2640,7 @@ def get_buffer_stats() -> str:
         f"{rss_line}\n"
         f"{unaccounted_line}"
     )
-    if METRICS.enabled:
+    if _active_metrics().enabled:
         snapshot = _metrics_snapshot()
         result += f"\nData-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}"
         result += f"\nLocal metrics: {json.dumps(snapshot, sort_keys=True)}"
@@ -2421,9 +2651,10 @@ def get_buffer_stats() -> str:
 @_instrument_tool("get_runtime_diagnostics")
 def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""
-    stats = engine.get_buffer_stats()
+    stats = _active_engine().get_buffer_stats()
     installed_version = _runtime_package_version()
-    identity = SETTINGS.identity
+    settings = _active_settings()
+    identity = settings.identity
     socket_mode = {
         "environment:EPHEMERAL_SOCKET_PATH": "explicit path",
         "session:EPHEMERAL_SESSION_ID": "session-derived path",
@@ -2473,7 +2704,7 @@ def get_runtime_diagnostics() -> str:
             if identity.legacy_state_transition
             else []
         ),
-        f"Startup settings snapshot: {json.dumps(SETTINGS.diagnostics(), sort_keys=True)}",
+        f"Startup settings snapshot: {json.dumps(settings.diagnostics(), sort_keys=True)}",
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
         f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",
@@ -2490,10 +2721,10 @@ def get_runtime_diagnostics() -> str:
         f"CPU arena {'enabled' if stats['embedding_cpu_mem_arena_enabled'] else 'disabled'}",
         f"Process RSS: {'unavailable' if rss is None else f'{rss:,} bytes'}",
         f"Unaccounted RSS: {'unavailable' if unaccounted is None else f'{unaccounted:,} bytes'}",
-        f"Local metrics: {'enabled' if METRICS.enabled else 'disabled'}",
+        f"Local metrics: {'enabled' if _active_metrics().enabled else 'disabled'}",
         "Captured content, labels, and command arguments are not included.",
     ]
-    if METRICS.enabled:
+    if _active_metrics().enabled:
         snapshot = _metrics_snapshot()
         lines.append(f"Data-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}")
         lines.append(f"Metrics summary: {json.dumps(snapshot, sort_keys=True)}")
@@ -2526,7 +2757,7 @@ def set_semantic_index_budget(max_indexed_chunks: int) -> str:
             "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it."
         )
     try:
-        return json.dumps(engine.set_max_indexed_chunks(max_indexed_chunks), sort_keys=True)
+        return json.dumps(_active_engine().set_max_indexed_chunks(max_indexed_chunks), sort_keys=True)
     except (TypeError, ValueError) as exc:
         return f"Error adjusting semantic-index budget: {exc}"
 
@@ -2848,6 +3079,9 @@ if __name__ == "__main__":
     if not SETTINGS.disable_socket_server.value:
         start_socket_server()
         _require_socket_ready()
-    engine.start_embedding_warmup()
-    _refresh_mcp_instructions()
-    mcp.run()
+    try:
+        DEFAULT_SERVICES.start()
+        _refresh_mcp_instructions()
+        mcp.run()
+    finally:
+        DEFAULT_SERVICES.close()

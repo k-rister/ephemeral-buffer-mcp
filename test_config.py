@@ -129,6 +129,18 @@ class TestPositiveIntEnv(unittest.TestCase):
         self.assertIn("ephemeral_buffer_executions-socket-", first)
         self.assertNotEqual(first, second)
 
+    def test_loading_settings_does_not_allocate_execution_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = os.path.join(directory, "ephemeral_buffer_executions-lazy")
+            with patch("config.tempfile.mkdtemp", side_effect=AssertionError("eager allocation")):
+                settings = load_settings(
+                    {},
+                    warn_on_legacy_state_transition=False,
+                    default_state_dir=state_dir,
+                )
+            self.assertEqual(settings.identity.state_dir, state_dir)
+            self.assertFalse(os.path.exists(state_dir))
+
     def test_execution_storage_limits_default_and_can_be_overridden(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(execution_state_quota_bytes(), DEFAULT_EXECUTION_STATE_QUOTA_BYTES)

@@ -24,24 +24,28 @@ import server
 
 class TestEffectivenessBenchmark(unittest.TestCase):
     def test_benchmark_engine_disables_prefetch_and_shuts_down_after_failure(self):
-        with patch("benchmark_effectiveness.EphemeralEngine") as engine_type:
+        with patch("benchmark_effectiveness.server.EphemeralEngine") as engine_type:
             engine = engine_type.return_value
             with self.assertRaisesRegex(RuntimeError, "benchmark failure"):
                 with benchmark_effectiveness._benchmark_engine(3):
                     raise RuntimeError("benchmark failure")
 
-        engine_type.assert_called_once_with(max_captures=3, semantic_prefetch=False)
+        engine_type.assert_called_once()
+        self.assertEqual(engine_type.call_args.kwargs["max_captures"], 3)
+        self.assertFalse(engine_type.call_args.kwargs["semantic_prefetch"])
         engine.shutdown.assert_called_once_with()
 
     def test_summary_engine_disables_prefetch_and_shuts_down(self):
-        with patch("benchmark_effectiveness.EphemeralEngine") as engine_type:
+        with patch("benchmark_effectiveness.server.EphemeralEngine") as engine_type:
             with benchmark_effectiveness._IsolatedSummaryEngine():
                 pass
 
-        engine_type.assert_called_once_with(
-            max_captures=len(benchmark_effectiveness.summary_scenarios()),
-            semantic_prefetch=False,
+        engine_type.assert_called_once()
+        self.assertEqual(
+            engine_type.call_args.kwargs["max_captures"],
+            len(benchmark_effectiveness.summary_scenarios()),
         )
+        self.assertFalse(engine_type.call_args.kwargs["semantic_prefetch"])
         engine_type.return_value.shutdown.assert_called_once_with()
 
     def test_fixtures_are_reproducible_and_content_free(self):

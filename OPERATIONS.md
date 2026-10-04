@@ -335,7 +335,8 @@ restart-safe backends are unavailable.
 Long workflows can be represented as sequential phases with
 `start_execution`. The server persists each phase transition and its bounded
 output in `EPHEMERAL_EXECUTION_STATE_DIR` (by default, a local temporary
-process-local directory created securely with owner-only permissions; use
+process-local directory allocated on first durable use and created securely
+with owner-only permissions; use
 `EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
 `EPHEMERAL_EXECUTION_STATE_DIR` when state must survive a server restart; state files are also
 owner-readable. `get_execution` exposes a human-readable summary plus structured
