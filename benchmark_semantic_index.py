@@ -176,7 +176,7 @@ def measure_once(
             NEEDLES[first_index]["query"], mode=mode, capture_id=capture.capture_id, top_k=top_k
         )
         first_search_seconds = time.perf_counter() - started
-        index_state = engine.wait_for_semantic_index(capture)
+        index_state = engine.wait_for_capture_index(capture.capture_id)
     if index_state != "ready":
         raise RuntimeError(f"semantic index did not become ready: {index_state}")
 
@@ -190,11 +190,15 @@ def measure_once(
         subsequent_times.append(time.perf_counter() - started)
         needle_ranks[NEEDLES[needle_index]["id"]] = _needle_rank(result, line_number)
 
+    diagnostics = engine.get_capture_diagnostics(capture.capture_id)
+    if diagnostics is None:
+        raise RuntimeError("capture diagnostics unavailable after semantic indexing")
+
     return {
         "line_count": line_count,
         "output_bytes": len(text.encode("utf-8")),
-        "chunk_count": len(capture.chunks),
-        "semantic_chunk_count": len(capture.semantic_chunks),
+        "chunk_count": diagnostics.lexical_chunk_count,
+        "semantic_chunk_count": diagnostics.semantic_chunk_count,
         "ingest_seconds": ingest_seconds,
         "semantic_index_seconds": timing["semantic_index_seconds"],
         "first_search_seconds": first_search_seconds,
@@ -286,7 +290,8 @@ def run_benchmark(
     try:
         started = time.perf_counter()
         warmup = engine.ingest("semantic index benchmark warmup", label="semantic-index-warmup")
-        engine._ensure_embeddings(warmup)
+        if engine.index_capture(warmup.capture_id) != "ready":
+            raise RuntimeError("semantic index warmup did not become ready")
         model_load_seconds = time.perf_counter() - started
 
         by_size = []

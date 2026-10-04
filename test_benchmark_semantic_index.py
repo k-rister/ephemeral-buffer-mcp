@@ -82,13 +82,16 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
     def test_measure_once_rejects_an_index_that_never_becomes_ready(self):
         class BrokenEngine:
             def ingest(self, text, label):
-                return type("Capture", (), {"capture_id": "cap", "chunks": [], "semantic_chunks": []})()
+                return type("Capture", (), {"capture_id": "cap"})()
 
             def search(self, *args, **kwargs):
                 return {"matches": [], "semantic_coverage": "unavailable"}
 
-            def wait_for_semantic_index(self, capture):
+            def wait_for_capture_index(self, capture_id):
                 return "failed"
+
+            def get_capture_diagnostics(self, capture_id):
+                return None
 
             _ensure_embeddings = None
 

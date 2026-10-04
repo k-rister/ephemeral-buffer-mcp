@@ -52,21 +52,23 @@ def sample_record(validation_status="not_needed"):
 class FakeEngine:
     def __init__(self, **options):
         self.options = options
-        self.capture = SimpleNamespace(
-            capture_id="capture-1",
-            chunks=[object()],
-            semantic_chunks=[SimpleNamespace(text="synthetic semantic chunk")],
-            embeddings=None,
-        )
+        self.capture = SimpleNamespace(capture_id="capture-1")
 
     def ingest(self, text, label):
         return self.capture
 
-    def _get_embedding_model(self):
-        return object()
+    def load_embedding_model(self):
+        return None
 
-    def _ensure_embeddings(self, capture):
-        capture.embeddings = SimpleNamespace(nbytes=128)
+    def index_capture(self, capture_id):
+        return "ready"
+
+    def get_capture_diagnostics(self, capture_id):
+        return SimpleNamespace(
+            semantic_chunk_count=1,
+            semantic_input_bytes=len("synthetic semantic chunk".encode("utf-8")),
+            retained_embedding_bytes=128,
+        )
 
     def get_buffer_stats(self):
         return {
@@ -107,6 +109,24 @@ class TestSemanticMemoryWorkloadResult(unittest.TestCase):
         self.assertEqual(converted["status"], "failure")
         self.assertEqual(converted["runs"][1]["status"], "failure")
         self.assertIn("fallback validation failed", converted["errors"][0])
+
+    def test_main_rejects_failed_semantic_index_status(self):
+        argv = [
+            "benchmark_semantic_memory.py",
+            "--line-count", "4",
+            "--line-bytes", "32",
+        ]
+        with patch.object(benchmark_semantic_memory, "EphemeralEngine", FakeEngine), patch.object(
+            FakeEngine, "index_capture", return_value="failed"
+        ), patch.object(
+            benchmark_semantic_memory,
+            "measure_rss_stage",
+            side_effect=lambda action, interval: (action(), 0.25, 2048),
+        ), patch.object(benchmark_semantic_memory, "process_rss_bytes", return_value=1024), patch.object(
+            benchmark_semantic_memory.time, "sleep"
+        ), patch("sys.argv", argv):
+            with self.assertRaisesRegex(RuntimeError, "semantic indexing failed with status: failed"):
+                benchmark_semantic_memory.main()
 
     def test_result_stdout_contains_only_shared_json_and_report_goes_to_stderr(self):
         argv = [

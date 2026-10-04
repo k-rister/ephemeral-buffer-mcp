@@ -2129,7 +2129,7 @@ def _capture_text(
         structured_metrics = normalize_structured_metrics(structured_metrics)
     except ValueError as exc:
         return f"Error: invalid structured_metrics: {exc}"
-    cap = _active_engine().ingest(
+    cap, summary = _active_engine().ingest_with_summary(
         content,
         label=label,
         content_type=content_type,
@@ -2137,7 +2137,12 @@ def _capture_text(
         duration_ms=duration_ms,
         structured_metrics=structured_metrics,
     )
-    return _summary_json(cap.capture_id, capture=cap)
+    return json.dumps(
+        _summary_payload(summary),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 @_mcp_tool("capture_text", "capture")
@@ -2292,7 +2297,7 @@ def execute_and_capture(
         output, exit_code, truncated, original_byte_size, timed_out = command_result
         duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
         
-        cap = active_engine.ingest(
+        cap, summary = active_engine.ingest_with_summary(
             output,
             label=f"cmd: {label}",
             content_type=content_type,
@@ -2304,9 +2309,7 @@ def execute_and_capture(
             duration_ms=duration_ms,
             structured_metrics=structured_metrics,
         )
-        payload = _summary_payload(
-            active_engine.get_summary_for_capture(cap, include_previews=False)
-        )
+        payload = _summary_payload(summary)
         bounded_command, command_truncated = _bounded_command(command)
         payload["command"] = bounded_command
         payload["command_truncated"] = command_truncated
@@ -2362,16 +2365,14 @@ def consolidate_captures(
                     return "Error consolidating captures: capture ID exceeds the 256-byte limit"
         active_engine = _active_engine()
         result = active_engine.consolidate(capture_ids, max_captures, max_bytes)
-        capture = active_engine.ingest(
+        capture, summary = active_engine.ingest_with_summary(
             result["content"],
             label=label,
             content_type="text",
             source="consolidated",
             protected_capture_ids=result["source_capture_ids"],
         )
-        payload = _summary_payload(
-            active_engine.get_summary_for_capture(capture, include_previews=False)
-        )
+        payload = _summary_payload(summary)
         payload.update({
             "source_capture_ids": result["source_capture_ids"],
             "requested_capture_count": result["requested_capture_count"],
@@ -3212,9 +3213,9 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 duration_ms = payload.get("duration_ms")
                 structured_metrics = normalize_structured_metrics(payload.get("structured_metrics"))
 
-            cap = await _run_admitted_thread(
+            cap, summary = await _run_admitted_thread(
                 ticket,
-                engine.ingest,
+                engine.ingest_with_summary,
                 text,
                 label=label,
                 content_type=content_type,
@@ -3225,6 +3226,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 source="socket",
                 duration_ms=duration_ms,
                 structured_metrics=structured_metrics,
+                include_previews=False,
                 _service_context=DEFAULT_SERVICES,
                 _call_id=call_id,
             )
@@ -3239,14 +3241,6 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 "line_count": cap.line_count,
                 "byte_size": cap.byte_size
             }
-            summary = await _run_admitted_thread(
-                ticket,
-                engine.get_summary_for_capture,
-                cap,
-                _service_context=DEFAULT_SERVICES,
-                _call_id=call_id,
-                include_previews=False,
-            )
             if summary.get("status") == "ok":
                 resp["summary"] = _summary_payload(summary)
             response_frame = encode_frame(json.dumps(resp).encode("utf-8"))

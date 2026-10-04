@@ -467,7 +467,7 @@ class TestMetrics(unittest.TestCase):
                     original_byte_size="not-an-integer",
                 )
 
-            self.assertEqual(engine.captures, {})
+            self.assertEqual(engine._captures, {})
             self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
             self.assertEqual(metrics.snapshot()["bytes"]["capture_original_bytes"], 0)
         finally:

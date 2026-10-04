@@ -14,7 +14,7 @@ import time
 from typing import Any, Callable
 
 from config import DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES
-from engine import EphemeralEngine, SemanticIndexBudgetExceeded, process_rss_bytes
+from engine import EphemeralEngine, process_rss_bytes
 import workload_results as wr
 
 
@@ -238,28 +238,23 @@ def main() -> int:
         capture = engine.ingest(text, label="semantic-memory-benchmark")
         bytes_before_model = process_rss_bytes()
         _, model_load_seconds, model_load_peak = measure_rss_stage(
-            engine._get_embedding_model, args.sample_interval
+            engine.load_embedding_model, args.sample_interval
         )
         bytes_after_model = process_rss_bytes()
         bytes_before_index = process_rss_bytes()
-        def ensure_embeddings() -> str:
-            try:
-                engine._ensure_embeddings(capture)
-            except SemanticIndexBudgetExceeded:
-                return "budget_exceeded"
-            return "ready"
-
         index_status, index_seconds, index_peak = measure_rss_stage(
-            ensure_embeddings,
+            lambda: engine.index_capture(capture.capture_id),
             args.sample_interval,
         )
         bytes_after_index = process_rss_bytes()
-        embedding_bytes = int(capture.embeddings.nbytes) if capture.embeddings is not None else 0
-        semantic_chunk_count = len(capture.semantic_chunks)
-        semantic_input_bytes = sum(
-            len(chunk.text.encode("utf-8", errors="replace"))
-            for chunk in capture.semantic_chunks
-        )
+        if index_status not in {"ready", "budget_exceeded"}:
+            raise RuntimeError(f"semantic indexing failed with status: {index_status}")
+        capture_diagnostics = engine.get_capture_diagnostics(capture.capture_id)
+        if capture_diagnostics is None:
+            raise RuntimeError("capture diagnostics unavailable after semantic indexing")
+        embedding_bytes = capture_diagnostics.retained_embedding_bytes
+        semantic_chunk_count = capture_diagnostics.semantic_chunk_count
+        semantic_input_bytes = capture_diagnostics.semantic_input_bytes
         if index_status == "budget_exceeded":
             target_line = args.line_count // 2 + 1
             if args.line_bytes < len(BUDGET_SENTINEL_TEXT):
