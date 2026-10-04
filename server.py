@@ -834,9 +834,12 @@ def _register_mcp_tool_for_app(
 
 def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
     """Return client-visible operating guidance for this server instance."""
-    settings = context.settings if context is not None else SETTINGS
-    isolation_required = settings.socket_require_isolation.value
-    isolation_configured = settings.identity.isolation_configured
+    if context is None:
+        isolation_required = socket_isolation_required()
+        isolation_configured = socket_isolation_configured()
+    else:
+        isolation_required = context.settings.socket_require_isolation.value
+        isolation_configured = context.settings.identity.isolation_configured
     if isolation_required and not isolation_configured:
         isolation = "Socket isolation is required but not configured; startup must fail."
     elif isolation_configured:
