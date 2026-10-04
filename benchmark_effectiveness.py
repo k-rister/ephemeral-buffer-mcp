@@ -245,7 +245,7 @@ def run_summary_benchmark() -> Dict[str, Any]:
         compact_core = {
             key: value
             for key, value in compact_summary.items()
-            if key not in {"command", "command_truncated"}
+            if key not in {"command", "command_truncated", "command_cancelled"}
         }
         detailed_core = {
             key: value for key, value in detailed_summary.items() if key != "previews"
