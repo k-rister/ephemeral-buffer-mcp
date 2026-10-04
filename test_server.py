@@ -1836,6 +1836,16 @@ class TestServerTools(unittest.TestCase):
             {"status": "error", "message": "missing"},
         )
 
+    def test_summary_json_accepts_capture_view(self):
+        capture = server.engine.ingest("summary json payload", label="summary-json")
+
+        summary = json.loads(
+            server._summary_json(capture.capture_id, include_previews=False, capture=capture)
+        )
+
+        self.assertEqual(summary["status"], "captured")
+        self.assertEqual(summary["capture_id"], capture.capture_id)
+
     def test_diff_summary_bounds_large_file_maps(self):
         file_map = "\n".join(
             f"  - file-{index:05d}.txt (+1, -0) | Buffer Lines: L1-L2"

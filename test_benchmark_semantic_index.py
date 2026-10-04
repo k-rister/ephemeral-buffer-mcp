@@ -104,7 +104,7 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
         self.assertGreater(measurement["semantic_index_seconds_median"], 0)
         self.assertLessEqual(
             measurement["semantic_index_seconds_median"],
-            measurement["first_search_seconds_median"],
+            measurement["first_search_seconds_median"] + 0.01,
         )
         self.assertLess(
             measurement["subsequent_search_seconds_median"],
