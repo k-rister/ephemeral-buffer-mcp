@@ -32,11 +32,11 @@ def _measure(prefetch: bool, line_count: int) -> dict[str, float | int | bool]:
         ingest_seconds = time.perf_counter() - started
 
         started = time.perf_counter()
-        engine.search_semantic(capture, "semantic benchmark")
+        engine.search("semantic benchmark", mode="semantic", capture_id=capture.capture_id)
         first_search_seconds = time.perf_counter() - started
 
         started = time.perf_counter()
-        engine.search_semantic(capture, "semantic benchmark")
+        engine.search("semantic benchmark", mode="semantic", capture_id=capture.capture_id)
         second_search_seconds = time.perf_counter() - started
         return {
             "prefetch": prefetch,
