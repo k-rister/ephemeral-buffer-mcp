@@ -152,10 +152,14 @@ class TestServerTools(unittest.TestCase):
 
                 first_capture_id = first_response["capture_id"]
                 second_capture_id = second_response["capture_id"]
-                self.assertIsNotNone(first.engine.get_capture(first_capture_id))
-                self.assertIsNone(second.engine.get_capture(first_capture_id))
-                self.assertIsNotNone(second.engine.get_capture(second_capture_id))
-                self.assertIsNone(first.engine.get_capture(second_capture_id))
+                self.assertEqual(
+                    first.engine.get_capture(first_capture_id).raw_lines,
+                    ["first context output"],
+                )
+                self.assertEqual(
+                    second.engine.get_capture(second_capture_id).raw_lines,
+                    ["second context output"],
+                )
                 self.assertIsNone(server.engine.get_capture(first_capture_id))
 
                 app = server.create_mcp_server(first)
