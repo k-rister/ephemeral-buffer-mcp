@@ -2,6 +2,7 @@
 
 import ctypes
 import errno
+from concurrent.futures import Future
 import io
 import json
 import os
@@ -397,6 +398,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
             ("oversized label", record_value("label", "x" * 1025)),
             ("overall status", record_value("execution_status", "unknown")),
             ("partial flag", record_value("partial", 1)),
+            ("background error", record_value("background_error", {})),
             ("resume policy", record_value("resume_policy", "always")),
             ("empty phases", record_value("phases", [])),
             ("phase object", record_value("phases", [None])),
@@ -3067,6 +3069,252 @@ class TestPhaseExecutionManager(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "started save failed"):
                 manager.start([self.phase("started", "started")], execution_id=started_id)
         self.assertFalse(started_reservation.exists())
+
+    def test_cancellation_before_phase_start_releases_checkpoint_reservation(self):
+        manager = self.manager()
+        execution_id = "cancel-before-phase"
+        with manager._create_and_lease(
+            [self.phase("first", "first")],
+            execution_id,
+            "",
+            "safe",
+            None,
+            None,
+            None,
+            reserve_first_phase=True,
+        ):
+            pass
+
+        reservation = manager.store._reservation_path(execution_id)
+        self.assertTrue(reservation.exists())
+        cancellation_event = threading.Event()
+        cancellation_event.set()
+        with manager.store.lease(execution_id):
+            record = manager.store.load(execution_id, recover=False)
+            result = manager._run(
+                record,
+                retry_failed=False,
+                confirm_unsafe=False,
+                output_handler=None,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertEqual(result["execution_status"], "interrupted")
+        self.assertEqual(result["phases"][0]["status"], "interrupted")
+        self.assertFalse(reservation.exists())
+
+    def test_cancelled_command_is_checkpointed_as_interrupted(self):
+        runner = Runner({
+            "cancelled": BoundedCommandResult(
+                "partial output", 130, False, 14, False, cancelled=True
+            )
+        })
+        manager = self.manager(runner)
+
+        result = manager.start(
+            [self.phase("cancelled", "cancelled")],
+            execution_id="cancelled-command",
+        )
+
+        self.assertEqual(result["phases"][0]["status"], "interrupted")
+        self.assertTrue(result["phases"][0]["result"]["cancelled"])
+        self.assertEqual(result["phases"][0]["error"], "phase cancelled by request")
+
+    def test_background_failure_is_persisted_and_exposed_in_public_lists(self):
+        manager = self.manager(Runner({"explode": RuntimeError("runner exploded")}))
+        self.addCleanup(manager.shutdown, 1)
+        manager.create([self.phase("explode", "explode")], execution_id="failed-background")
+
+        manager._record_background_failure("failed-background", RuntimeError("runner exploded"))
+
+        public = manager.public("failed-background")
+        listed = manager.list_public()[0]
+        self.assertIn("RuntimeError: runner exploded", public["background_error"])
+        self.assertEqual(public["execution_status"], "partial")
+        self.assertIn("RuntimeError: runner exploded", listed["background_error"])
+        self.assertEqual(
+            manager.store._compact_listing_record(
+                manager.store.load("failed-background", recover=False)
+            )["background_error"],
+            public["background_error"],
+        )
+
+    def test_unexpected_background_worker_exception_is_persisted(self):
+        manager = self.manager()
+        self.addCleanup(manager.shutdown, 1)
+
+        with patch.object(manager, "_run", side_effect=RuntimeError("unexpected worker failure")):
+            started = manager.start_background(
+                [self.phase("phase", "phase")],
+                execution_id="unexpected-worker-failure",
+            )
+            future = manager._background_futures[started["execution_id"]]
+            with self.assertRaisesRegex(RuntimeError, "unexpected worker failure"):
+                future.result(timeout=2)
+
+        deadline = time.monotonic() + 2
+        while (
+            started["execution_id"] in manager._background_futures
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        result = manager.public(started["execution_id"])
+        self.assertEqual(result["execution_status"], "partial")
+        self.assertIn("RuntimeError: unexpected worker failure", result["background_error"])
+
+    def test_background_failure_falls_back_to_memory_when_persistence_fails(self):
+        manager = self.manager()
+        manager.create([self.phase("phase", "phase")], execution_id="unpersisted-error")
+
+        with patch.object(manager.store, "save", side_effect=OSError("disk unavailable")):
+            manager._record_background_failure(
+                "unpersisted-error", RuntimeError("background failed")
+            )
+
+        self.assertIn(
+            "RuntimeError: background failed",
+            manager._background_failures["unpersisted-error"],
+        )
+
+    def test_background_manager_guards_capacity_and_submission_failures(self):
+        manager = self.manager()
+        manager.create([self.phase("phase", "phase")], execution_id="guarded-background")
+
+        manager._closing = True
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            manager._submit_background("guarded-background", resume=True, options={})
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            manager.resume_background("guarded-background")
+        manager._closing = False
+
+        manager._active_cancellations["guarded-background"] = threading.Event()
+        with self.assertRaises(ExecutionBusyError):
+            manager._submit_background("guarded-background", resume=True, options={})
+        manager._active_cancellations.clear()
+
+        manager._background_futures = {
+            f"queued-{index}": object()
+            for index in range(execution.MAX_BACKGROUND_EXECUTIONS)
+        }
+        with self.assertRaises(ExecutionBusyError):
+            manager._submit_background("guarded-background", resume=True, options={})
+        manager._background_futures.clear()
+
+        with patch.object(
+            manager._background_executor,
+            "submit",
+            side_effect=RuntimeError("executor rejected work"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rejected work"):
+                manager._submit_background("guarded-background", resume=True, options={})
+        self.assertNotIn("guarded-background", manager._active_cancellations)
+
+        manager._closing = True
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            manager.start_background([self.phase("phase", "phase")])
+        manager._closing = False
+        manager._background_futures = {
+            f"queued-{index}": object()
+            for index in range(execution.MAX_BACKGROUND_EXECUTIONS)
+        }
+        with self.assertRaises(ExecutionBusyError):
+            manager.start_background([self.phase("phase", "phase")])
+        manager._background_futures.clear()
+
+        manager.shutdown(0)
+
+    def test_background_worker_clears_old_error_recovers_and_resumes(self):
+        manager = self.manager()
+        self.addCleanup(manager.shutdown, 1)
+        manager.create([self.phase("phase", "phase")], execution_id="resume-background")
+        record = manager.store.load("resume-background", recover=False)
+        record["background_error"] = "old worker failure"
+        manager.store.save(record)
+
+        with patch.object(manager.store, "_recover_started", return_value=True) as recover:
+            manager.resume_background("resume-background")
+            deadline = time.monotonic() + 2
+            while "resume-background" in manager._background_futures and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        recover.assert_called_once()
+        self.assertNotIn("resume-background", manager._background_futures)
+        self.assertEqual(manager.public("resume-background")["execution_status"], "completed")
+        self.assertNotIn("background_error", manager.get("resume-background"))
+
+    def test_background_done_callback_records_unexpected_and_cancelled_failures(self):
+        manager = self.manager()
+        self.addCleanup(manager.shutdown, 1)
+        manager.create([self.phase("phase", "phase")], execution_id="unexpected-background")
+        failed_future = Future()
+        failed_future.set_exception(RuntimeError("callback-only failure"))
+        cancellation_event = threading.Event()
+        manager._background_futures["unexpected-background"] = failed_future
+        manager._active_cancellations["unexpected-background"] = cancellation_event
+
+        manager._finish_background("unexpected-background", failed_future, cancellation_event)
+
+        self.assertIn(
+            "RuntimeError: callback-only failure",
+            manager.public("unexpected-background")["background_error"],
+        )
+        self.assertNotIn("unexpected-background", manager._background_futures)
+
+        manager.create([self.phase("phase", "phase")], execution_id="cancelled-background")
+        with manager.store.lease("cancelled-background"):
+            manager.store.reserve_checkpoint("cancelled-background", 1024)
+        cancelled_future = Future()
+        cancelled_future.cancel()
+        cancellation_event = threading.Event()
+        manager._background_futures["cancelled-background"] = cancelled_future
+        manager._active_cancellations["cancelled-background"] = cancellation_event
+        manager._finish_background("cancelled-background", cancelled_future, cancellation_event)
+
+        cancelled = manager.public("cancelled-background")
+        self.assertEqual(cancelled["execution_status"], "interrupted")
+        self.assertFalse(manager.store._reservation_path("cancelled-background").exists())
+
+        manager.create([self.phase("phase", "phase")], execution_id="cancel-save-failure")
+        cancelled_future = Future()
+        cancelled_future.cancel()
+        with patch.object(
+            manager,
+            "_record_cancelled_before_start",
+            side_effect=OSError("cannot checkpoint cancellation"),
+        ):
+            manager._finish_background(
+                "cancel-save-failure", cancelled_future, threading.Event()
+            )
+        self.assertIn("could not be saved", manager._background_failures["cancel-save-failure"])
+
+    def test_background_shutdown_cancels_active_work_and_reports_unfinished_ids(self):
+        manager = self.manager()
+        cancellation_event = threading.Event()
+        future = Future()
+        manager._active_cancellations["unfinished"] = cancellation_event
+        manager._background_futures["unfinished"] = future
+
+        with patch.object(manager._background_executor, "shutdown") as executor_shutdown:
+            report = manager.shutdown(0)
+
+        self.assertTrue(cancellation_event.is_set())
+        self.assertEqual(report["unfinished_execution_ids"], ["unfinished"])
+        executor_shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    def test_cancel_request_reports_active_and_inactive_executions(self):
+        manager = self.manager()
+        manager.create([self.phase("phase", "phase")], execution_id="cancel-request")
+        cancellation_event = threading.Event()
+        manager._active_cancellations["cancel-request"] = cancellation_event
+
+        active = manager.request_cancel("cancel-request")
+        self.assertTrue(cancellation_event.is_set())
+        self.assertTrue(active["execution_in_progress"])
+        self.assertTrue(active["cancellation_requested"])
+
+        manager._active_cancellations.clear()
+        inactive = manager.request_cancel("cancel-request")
+        self.assertFalse(inactive["cancellation_requested"])
 
 
 if __name__ == "__main__":

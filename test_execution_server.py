@@ -15,7 +15,7 @@ os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 os.environ.setdefault("EPHEMERAL_TEST_EMBEDDINGS", "1")
 
 import server
-from execution import PhaseExecutionManager
+from execution import ExecutionBusyError, PhaseExecutionManager
 
 
 class ToolRunner:
@@ -435,6 +435,13 @@ class TestExecutionTools(unittest.TestCase):
                     "Error managing execution: response exceeds"
                 )
             )
+        with patch.object(
+            self.manager,
+            "request_cancel",
+            side_effect=ExecutionBusyError("execution is already leased"),
+        ):
+            cancellation = json.loads(server.cancel_execution("busy-cancel"))
+        self.assertEqual(cancellation["error"]["code"], "execution_busy")
 
     def test_get_execution_returns_read_only_diagnostics_for_unsupported_schema(self):
         self.manager.create([self.phase("future", "future")], execution_id="future-schema")

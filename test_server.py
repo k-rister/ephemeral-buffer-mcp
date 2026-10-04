@@ -2,6 +2,7 @@
 
 import asyncio
 from contextvars import ContextVar
+from concurrent.futures import Future
 import io
 import json
 import math
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -476,6 +478,13 @@ class TestServerTools(unittest.TestCase):
 
             gate = BoundedAdmissionGate(max_active=1, max_queued=0)
             ticket = await gate.acquire("blocking_probe")
+            context = server.create_service_context(
+                metrics_file=None,
+                engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+            )
+            self.addCleanup(context.close)
+            call_id, cancellation_event = context.register_tool_call("execute_and_capture")
+            cancel_token = server._REQUEST_CANCEL_EVENT.set(cancellation_event)
             started = threading.Event()
             finish = threading.Event()
 
@@ -484,7 +493,12 @@ class TestServerTools(unittest.TestCase):
                 finish.wait(timeout=3)
                 return "finished"
 
-            task = asyncio.create_task(server._run_admitted_thread(ticket, blocking_work))
+            task = asyncio.create_task(server._run_admitted_thread(
+                ticket,
+                blocking_work,
+                _service_context=context,
+                _call_id=call_id,
+            ))
             for _ in range(100):
                 if started.is_set():
                     break
@@ -493,8 +507,10 @@ class TestServerTools(unittest.TestCase):
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
+            self.assertTrue(cancellation_event.is_set())
             ticket.release()
             self.assertEqual(admission_snapshot()["admission_active"], 1)
+            self.assertFalse(context.wait_for_tool_calls(0))
 
             finish.set()
             for _ in range(100):
@@ -502,9 +518,183 @@ class TestServerTools(unittest.TestCase):
                     break
                 await asyncio.sleep(0.01)
             self.assertEqual(admission_snapshot()["admission_active"], 0)
+            self.assertTrue(context.wait_for_tool_calls(0))
+            server._REQUEST_CANCEL_EVENT.reset(cancel_token)
 
         with patch("admission.ADMISSION_METRICS", AdmissionMetrics()):
             asyncio.run(exercise())
+
+    def test_service_context_tracks_deferred_work_and_close_callers(self):
+        settings = settings_with_environment(EPHEMERAL_SHUTDOWN_GRACE_SECONDS="0.01")
+        context = server.create_service_context(
+            settings,
+            metrics_file=None,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        call_id, cancellation_event = context.register_tool_call("execute_and_capture")
+        future = Future()
+        context.defer_tool_call_until(call_id, future)
+        context.finish_tool_call(call_id)
+        self.assertFalse(context.wait_for_tool_calls(0.001))
+        future.set_result(None)
+        self.assertTrue(context.wait_for_tool_calls(0))
+        context.defer_tool_call_until("missing-call", Future())
+
+        with context._lifecycle_lock:
+            context._closing = True
+        self.assertIsNone(context.register_tool_call("probe"))
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            _ = context.execution_manager
+        with context._lifecycle_lock:
+            context._closing = False
+
+        active_call, active_cancel = context.register_tool_call("execute_and_capture")
+        self.assertIsNotNone(active_call)
+        closed = context.close()
+        self.assertTrue(active_cancel.is_set())
+        self.assertEqual(closed, context.last_shutdown_report)
+
+    def test_concurrent_service_context_close_waits_for_first_close(self):
+        context = server.create_service_context(
+            metrics_file=None,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        close_started = threading.Event()
+        finish_close = threading.Event()
+        report = {"closed": True}
+
+        def slow_close():
+            close_started.set()
+            finish_close.wait(timeout=2)
+            context.last_shutdown_report = report
+            return report
+
+        with patch.object(context, "_close_resources", side_effect=slow_close):
+            first_results = []
+            second_results = []
+            first = threading.Thread(target=lambda: first_results.append(context.close()))
+            second = threading.Thread(target=lambda: second_results.append(context.close()))
+            first.start()
+            self.assertTrue(close_started.wait(timeout=1))
+            second.start()
+            time.sleep(0.02)
+            self.assertTrue(second.is_alive())
+            finish_close.set()
+            first.join(timeout=1)
+            second.join(timeout=1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(first_results, [report])
+        self.assertEqual(second_results, [report])
+
+    def test_concurrent_service_context_close_propagates_first_error(self):
+        context = server.create_service_context(
+            metrics_file=None,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        with patch.object(context, "_close_resources", side_effect=RuntimeError("close failed")):
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                context.close()
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                context.close()
+
+    def test_context_bound_mcp_adapters_return_shutdown_and_busy_shapes(self):
+        settings = settings_with_environment(EPHEMERAL_SHUTDOWN_GRACE_SECONDS="0.01")
+        context = server.create_service_context(
+            settings,
+            metrics_file=None,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        app = server.create_mcp_server(context)
+        tools = {
+            name: app._tool_manager._tools[name].fn
+            for name in ("capture_text", "start_execution", "get_buffer_stats")
+        }
+
+        class Ticket:
+            def __init__(self):
+                self.released = False
+
+            def release(self):
+                self.released = True
+
+        class ClosingGate:
+            def __init__(self):
+                self.ticket = Ticket()
+
+            async def acquire(self, _work_type):
+                with context._lifecycle_lock:
+                    context._closing = True
+                return self.ticket
+
+        async def exercise():
+            with context._lifecycle_lock:
+                context._closing = True
+            structured = await tools["capture_text"](content="shutdown probe")
+            execution = await tools["start_execution"](phases=[])
+            diagnostic = await tools["get_buffer_stats"]()
+            self.assertIn("service is shutting down", structured.content[0].text)
+            self.assertEqual(json.loads(execution)["error"]["code"], "server_shutting_down")
+            self.assertIn("server_shutting_down", diagnostic)
+
+            for name, arguments in (
+                ("capture_text", {"content": "closing race"}),
+                ("start_execution", {"phases": []}),
+                ("get_buffer_stats", {}),
+            ):
+                gate = ClosingGate()
+                with context._lifecycle_lock:
+                    context._closing = False
+                with patch.object(server, "admission_gate", return_value=gate):
+                    result = await tools[name](**arguments)
+                self.assertTrue(gate.ticket.released)
+                with context._lifecycle_lock:
+                    context._closing = False
+                if name == "capture_text":
+                    self.assertIn("service is shutting down", result.content[0].text)
+                elif name == "start_execution":
+                    self.assertEqual(json.loads(result)["error"]["code"], "server_shutting_down")
+                else:
+                    self.assertIn("server_shutting_down", result)
+
+            class FailingGate:
+                async def acquire(self, _work_type):
+                    raise RuntimeError("admission failed")
+
+            with patch.object(server, "admission_gate", return_value=FailingGate()):
+                with self.assertRaisesRegex(RuntimeError, "admission failed"):
+                    await tools["get_buffer_stats"]()
+            self.assertEqual(context._active_tool_calls, {})
+
+        try:
+            asyncio.run(exercise())
+        finally:
+            with context._lifecycle_lock:
+                context._closing = False
+            context.close()
+
+    def test_command_mcp_adapter_resets_request_cancellation_context(self):
+        settings = settings_with_environment(EPHEMERAL_SHUTDOWN_GRACE_SECONDS="0.01")
+        context = server.create_service_context(
+            settings,
+            metrics_file=None,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        app = server.create_mcp_server(context)
+        adapter = app._tool_manager._tools["execute_and_capture"].fn
+        from capture_utils import BoundedCommandResult
+
+        with patch.object(
+            server,
+            "run_command_bounded",
+            return_value=BoundedCommandResult("ok\n", 0, False, 3, False),
+        ):
+            result = asyncio.run(adapter(command="echo ok"))
+
+        self.assertEqual(server._REQUEST_CANCEL_EVENT.get(), None)
+        self.assertIn('"command_cancelled":false', result.content[0].text)
+        context.close()
 
     def test_mcp_tool_requires_known_category(self):
         with self.assertRaisesRegex(ValueError, "unknown MCP tool category"):
@@ -2278,6 +2468,68 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         task = server.handle_socket_client(FakeReader(payload), writer)
         await task
         return writer
+
+    async def test_socket_handler_rejects_shutdown_and_admission_failure(self):
+        class Context:
+            def __init__(self, closing=False):
+                self.is_closing = closing
+                self.finished = []
+
+            @property
+            def closing(self):
+                return self.is_closing
+
+            def register_tool_call(self, _name):
+                return None if self.is_closing else ("socket-call", None)
+
+            def finish_tool_call(self, call_id):
+                self.finished.append(call_id)
+
+        shutting_down = Context(closing=True)
+        writer = FakeWriter()
+        with patch.object(server, "DEFAULT_SERVICES", shutting_down):
+            await server.handle_socket_client(FakeReader(b""), writer)
+        self.assertEqual(response_json(writer)["code"], "server_shutting_down")
+        self.assertTrue(writer.closed)
+
+        context = Context()
+
+        class FailingGate:
+            async def acquire(self, _name):
+                raise RuntimeError("admission failed")
+
+        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
+            server, "admission_gate", return_value=FailingGate()
+        ):
+            with self.assertRaisesRegex(RuntimeError, "admission failed"):
+                await server.handle_socket_client(FakeReader(b""), FakeWriter())
+        self.assertEqual(context.finished, ["socket-call"])
+
+        class Ticket:
+            def __init__(self):
+                self.released = False
+
+            def release(self):
+                self.released = True
+
+        class ClosingGate:
+            def __init__(self):
+                self.ticket = Ticket()
+
+            async def acquire(self, _name):
+                context.is_closing = True
+                return self.ticket
+
+        gate = ClosingGate()
+        writer = FakeWriter()
+        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
+            server, "admission_gate", return_value=gate
+        ):
+            await server.handle_socket_client(FakeReader(b""), writer)
+        self.assertEqual(response_json(writer)["code"], "server_shutting_down")
+        self.assertTrue(gate.ticket.released)
+        self.assertEqual(context.finished, ["socket-call", "socket-call"])
+        self.assertTrue(writer.closed)
 
     async def test_json_payload_returns_success_response(self):
         payload = encode_frame(json.dumps({"label": "socket-test", "text": "hello"}).encode())

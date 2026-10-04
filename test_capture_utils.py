@@ -728,6 +728,162 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertFalse(result.cleanup_confirmed)
         terminate.assert_called_once()
 
+    def test_cancellation_during_selector_poll_terminates_the_command(self):
+        stream = Mock()
+        selector = Mock()
+        selector.get_map.return_value = {"stdout": object()}
+        selector.select.return_value = []
+        cancellation_event = Mock()
+        cancellation_event.is_set.side_effect = [False, True]
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        process.wait.return_value = 0
+
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils._terminate_process_group", return_value=True) as terminate:
+            result = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                None,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertTrue(result.cancelled)
+        self.assertFalse(result[4])
+        self.assertEqual(result[1], 130)
+        terminate.assert_called_once_with(process, 123)
+
+    def test_cancellation_aware_selector_honors_expired_deadline(self):
+        stream = Mock()
+        selector = Mock()
+        selector.get_map.return_value = {"stdout": object()}
+        selector.select.return_value = []
+        cancellation_event = Mock()
+        cancellation_event.is_set.return_value = False
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        process.wait.return_value = 0
+
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils.time.monotonic", side_effect=[0, 0, 2]), \
+                patch("capture_utils._terminate_process_group", return_value=True):
+            result = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                timeout_seconds=1,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertTrue(result[4])
+        self.assertFalse(result.cancelled)
+
+    def test_post_eof_wait_honors_cancellation_and_timeout(self):
+        stream = Mock()
+        stream.read1.return_value = b""
+        selector = Mock()
+        selector.get_map.side_effect = [{"stdout": object()}, {}]
+        selector.select.return_value = [(type("Key", (), {"fileobj": stream})(), None)]
+        selector.unregister.return_value = None
+        cancellation_event = Mock()
+        cancellation_event.is_set.side_effect = [False, False, True]
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("ignored", 0.1),
+            0,
+        ]
+
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils._terminate_process_group", return_value=True) as terminate:
+            cancelled = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                None,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertTrue(cancelled.cancelled)
+        self.assertEqual(cancelled[1], 130)
+        terminate.assert_called_once_with(process, 123)
+
+        stream = Mock()
+        stream.read1.return_value = b""
+        selector = Mock()
+        selector.get_map.side_effect = [{"stdout": object()}, {}]
+        selector.select.return_value = [(type("Key", (), {"fileobj": stream})(), None)]
+        selector.unregister.return_value = None
+        cancellation_event = Mock()
+        cancellation_event.is_set.return_value = False
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("ignored", 0.05),
+            0,
+        ]
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils.time.monotonic", side_effect=[0, 0, 0]), \
+                patch("capture_utils._terminate_process_group", return_value=True):
+            timed_out = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                timeout_seconds=0.05,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertTrue(timed_out[4])
+        self.assertFalse(timed_out.cancelled)
+
+        stream = Mock()
+        stream.read1.return_value = b""
+        selector = Mock()
+        selector.get_map.side_effect = [{"stdout": object()}, {}]
+        selector.select.return_value = [(type("Key", (), {"fileobj": stream})(), None)]
+        selector.unregister.return_value = None
+        cancellation_event = Mock()
+        cancellation_event.is_set.return_value = False
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        process.wait.return_value = 0
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils._terminate_process_group", return_value=True):
+            completed = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                None,
+                cancellation_event=cancellation_event,
+            )
+        self.assertFalse(completed[4])
+        self.assertFalse(completed.cancelled)
+
+        stream = Mock()
+        stream.read1.return_value = b""
+        selector = Mock()
+        selector.get_map.side_effect = [{"stdout": object()}, {}]
+        selector.select.return_value = [(type("Key", (), {"fileobj": stream})(), None)]
+        selector.unregister.return_value = None
+        cancellation_event = Mock()
+        cancellation_event.is_set.return_value = False
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        process.wait.return_value = 0
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils.time.monotonic", side_effect=[0, 0, 1]), \
+                patch("capture_utils._terminate_process_group", return_value=True):
+            expired = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                0.05,
+                cancellation_event=cancellation_event,
+            )
+        self.assertTrue(expired[4])
+        self.assertFalse(expired.cancelled)
+
     def test_keyboard_interrupt_terminates_the_process_group(self):
         class InterruptingSelector:
             def register(self, _stream, _event):
