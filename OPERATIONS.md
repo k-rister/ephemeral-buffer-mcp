@@ -991,6 +991,20 @@ Log files are opened without following symlinks and use owner-only `0600`
 permissions. If the configured path is unsafe or cannot be opened, file logging
 is skipped and events remain available on stderr; runtime diagnostics report
 the file as unavailable.
+Exception records are sanitized at the shared logging formatter used by worker
+and server logs. By default they contain the safe event name `exception`, the
+exception class, bounded frame metadata (file basename, function, and line),
+and a correlation ID. They omit exception messages, interpolation arguments,
+structured fields, source lines, and local values.
+
+For a temporary investigation, set `EPHEMERAL_LOG_DIAGNOSTICS=traceback` before
+starting the server and configure `EPHEMERAL_LOG_FILE`. This adds full traceback
+text, including exception messages, only to the securely opened owner-only
+`0600` log file; stderr remains sanitized. The setting has no effect if the
+private file cannot be opened. Treat this file as sensitive diagnostic data,
+review it before sharing, and restart the server without this setting when the
+investigation ends.
+
 MCP tool lifecycle events include only a local call ID, tool name, duration,
 success state, and error class; captured content, labels, query text, command
 text, and secrets are not logged. A start event without a matching completion
