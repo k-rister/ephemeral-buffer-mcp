@@ -547,14 +547,15 @@ The agent has access to the following tools:
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. |
+| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. Cancelling or disconnecting the caller requests subprocess cleanup. |
 | `preflight_command(command, cwd=None)` | Performs content-free path, symlink, local Git-root, and executable-resolution diagnostics without executing the requested command. |
-| `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Runs a sequential, durably checkpointed set of command phases and returns phase statuses, metrics, and a partial/completed marker. |
-| `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase, skipping completed phases; retries and unsafe side effects require explicit controls. |
+| `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Persists and starts a sequential, durably checkpointed execution, then returns its ID and current status promptly. Use `get_execution` to follow progress. |
+| `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase and returns promptly; use `get_execution` to follow progress. Retries and unsafe side effects require explicit controls. |
+| `cancel_execution(execution_id)` | Requests cancellation of active durable work by ID. Completed phases remain checkpointed; process cleanup uses the existing interruption and fencing path. |
 | `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. |
 | `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves a bounded output chunk persisted for all phases or one phase, including after a server restart; use `offset` to continue a large phase. |
 | `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact IDs with pagination metadata. |
-| `get_execution_capacity()` | Reports durable record, summary, and atomic-write temporary-file bytes, aggregate quota, checkpoint headroom, filesystem free space, and storage anomalies without attempting recovery. |
+| `get_execution_capacity()` | Reports durable record storage and quota diagnostics plus active and queued background execution counts; it does not attempt recovery. |
 | `retire_executions(execution_ids, archive_path=None, dry_run=True)` | Previews eligibility and projected reclaimed space; actual retirement writes a private tar archive outside the state directory before removing selected record pairs. |
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded regular file from disk and returns the same compact summary schema; symlinks are followed, but pipes and devices are rejected. |
@@ -658,6 +659,18 @@ start_execution(
   ],
 )
 ```
+
+`start_execution` returns the durable execution ID and current status without
+waiting for all phases to finish. Use `get_execution` and
+`get_execution_output` to follow it. Disconnecting from the MCP request only
+detaches the caller; call `cancel_execution(execution_id)` to request
+termination. Cancellation records the current phase as `interrupted`, keeps
+completed checkpoints, and fences the subprocess if cleanup cannot be
+confirmed. `resume_execution` also returns promptly after scheduling work.
+The manager accepts up to eight active or queued background executions;
+`get_execution_capacity` reports the current counts. If a background task
+fails outside normal phase handling, `get_execution` reports a
+`background_error` with the recorded execution state.
 
 Each phase is persisted as `pending`, `started`, `completed`, `failed`,
 `interrupted`, or `timed_out`. Output, exit status, duration, truncation, and
@@ -815,6 +828,17 @@ The CLI can receive a busy response while uploading a large socket frame. These
 concurrency limits make foreground work predictable; they do not cap process
 RSS.
 
+Shutdown stops admitting new work, requests cancellation of active command and
+durable execution work, and drains for at most
+`EPHEMERAL_SHUTDOWN_GRACE_SECONDS` (default `10`). If work remains, the
+shutdown report and structured log identify unfinished work by type and
+execution count. Each service context waits only for its own admitted calls;
+work owned by another context in the same process does not hold up its cleanup.
+Native embedding inference already running in a thread cannot
+be forcibly stopped by cancelling its await; it is reported as unfinished and
+may outlive the grace period. Python may keep the process alive until that
+worker returns.
+
 Indexed chunks are bounded separately by `EPHEMERAL_MAX_INDEXED_CHUNKS`, which
 defaults to 32,768 total chunks across retained captures. LRU eviction makes
 room for a new capture when possible. A capture that exceeds the entire index
@@ -868,7 +892,7 @@ tool. The categories are:
 | `capture` | `capture_text`, `capture_file`, `execute_and_capture`, `consolidate_captures` |
 | `configuration` | `set_semantic_index_budget` |
 | `diagnostics` | `preflight_command`, `get_buffer_stats`, `get_runtime_diagnostics`, `get_usage_metrics` |
-| `execution` | `start_execution`, `resume_execution`, `get_execution`, `get_execution_output`, `list_executions`, `get_execution_capacity`, `retire_executions` |
+| `execution` | `start_execution`, `resume_execution`, `cancel_execution`, `get_execution`, `get_execution_output`, `list_executions`, `get_execution_capacity`, `retire_executions` |
 | `lifecycle` | `clear_captures` |
 | `retrieval` | `get_capture_slice`, `get_capture_summary`, `list_captures` |
 | `search` | `search_capture` |

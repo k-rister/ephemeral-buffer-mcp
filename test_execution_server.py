@@ -626,12 +626,25 @@ class TestExecutionTools(unittest.TestCase):
                 side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
             )
             with patch.object(server, "to_thread", offload):
-                return await adapter(
+                started = json.loads(await adapter(
                     phases=[self.phase("adapter", "adapter")],
                     execution_id="adapter-execution",
-                )
+                ))
+                get_execution = names["get_execution"].fn
+                deadline = asyncio.get_running_loop().time() + 3
+                while True:
+                    result = json.loads(
+                        await get_execution(execution_id="adapter-execution")
+                    )
+                    if result["execution_status"] == "completed":
+                        return started, result
+                    if result.get("background_error"):
+                        self.fail(result["background_error"])
+                    if asyncio.get_running_loop().time() >= deadline:
+                        self.fail("background execution did not complete before the deadline")
+                    await asyncio.sleep(0.01)
 
-        result = json.loads(asyncio.run(invoke()))
+        _started, result = asyncio.run(invoke())
         self.assertEqual(result["execution_status"], "completed")
 
 

@@ -43,6 +43,7 @@ DEFAULT_MAX_QUEUED_TOOL_WORK = 16
 DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS = 4
 DEFAULT_MAX_QUEUED_SOCKET_CLIENTS = 8
 DEFAULT_SOCKET_STARTUP_TIMEOUT_SECONDS = 5
+DEFAULT_SHUTDOWN_GRACE_SECONDS = 10.0
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
 EXECUTION_STATE_SESSION_PREFIX = "ephemeral_buffer_executions-"
 EXECUTION_STATE_SOCKET_PREFIX = "ephemeral_buffer_executions-socket-"
@@ -139,6 +140,7 @@ class SettingsSnapshot:
     max_captures: ConfigSetting[int]
     max_buffer_bytes: ConfigSetting[int]
     socket_timeout_seconds: ConfigSetting[float]
+    shutdown_grace_seconds: ConfigSetting[float]
     socket_startup_timeout_seconds: ConfigSetting[int]
     socket_require_isolation: ConfigSetting[bool]
     allow_stdio_without_socket: ConfigSetting[bool]
@@ -639,6 +641,10 @@ def load_settings(
         socket_timeout_seconds=_read_float_setting(
             "EPHEMERAL_SOCKET_TIMEOUT_SECONDS", DEFAULT_SOCKET_TIMEOUT_SECONDS,
             values, minimum=0.0, inclusive=False, allow_infinity=False,
+        ),
+        shutdown_grace_seconds=_read_float_setting(
+            "EPHEMERAL_SHUTDOWN_GRACE_SECONDS", DEFAULT_SHUTDOWN_GRACE_SECONDS,
+            values, minimum=0.0, inclusive=True, allow_infinity=False,
         ),
         socket_startup_timeout_seconds=integer(
             "EPHEMERAL_SOCKET_STARTUP_TIMEOUT_SECONDS", DEFAULT_SOCKET_STARTUP_TIMEOUT_SECONDS,

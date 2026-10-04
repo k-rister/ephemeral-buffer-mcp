@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 import errno
+from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from dataclasses import dataclass
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -57,6 +58,7 @@ MAX_PROCESS_ID = (1 << 31) - 1
 MAX_EXECUTION_STATE_BYTES = 64 * 1024 * 1024
 EXECUTION_METADATA_RESERVE_BYTES = 4 * 1024 * 1024
 MAX_EXECUTION_RECORDS = 1000
+MAX_BACKGROUND_EXECUTIONS = 8
 DEFAULT_EXECUTION_LIST_LIMIT = 20
 MAX_EXECUTION_LIST_LIMIT = 100
 MAX_EXECUTION_OUTPUT_CHUNK_BYTES = 8 * 1024
@@ -252,6 +254,8 @@ def _validate_execution_record(
     if record.get("execution_id") != execution_id:
         raise _record_error(execution_id, "execution_id does not match its record path")
     require_text(record.get("execution_id"), "execution_id", MAX_EXECUTION_ID_BYTES)
+    if record.get("background_error") is not None:
+        require_text(record["background_error"], "background_error", MAX_ERROR_BYTES)
     require_text(record.get("label"), "label", 1024)
     require_text(record.get("created_at"), "created_at", 64)
     require_text(record.get("updated_at"), "updated_at", 64)
@@ -1020,6 +1024,8 @@ class ExecutionStore:
                 "updated_at", "execution_status", "partial", "resume_policy",
             )
         }
+        if record.get("background_error") is not None:
+            compact["background_error"] = record["background_error"]
         compact["phases"] = [
             {
                 key: phase.get(key)
@@ -2450,6 +2456,15 @@ class PhaseExecutionManager:
         self.command_runner = command_runner or run_command_bounded
         self.process_cleanup = process_cleanup
         self._lock = threading.RLock()
+        self._active_lock = threading.RLock()
+        self._active_cancellations: Dict[str, threading.Event] = {}
+        self._background_futures = {}
+        self._background_failures: Dict[str, str] = {}
+        self._background_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="durable-execution",
+        )
+        self._closing = False
 
     @staticmethod
     def _refresh_overall_status(record: Dict[str, Any]) -> None:
@@ -2672,10 +2687,16 @@ class PhaseExecutionManager:
             "execution_id": record["execution_id"],
             "label": record["label"],
             "execution_status": execution_status,
+            "execution_in_progress": execution_in_progress,
             "partial": record["partial"],
             "summary": summary,
             "created_at": record["created_at"],
             "updated_at": record["updated_at"],
+            **(
+                {"background_error": record["background_error"]}
+                if record.get("background_error") is not None
+                else {}
+            ),
             "resume": {
                 "available": (
                     next_phase is not None
@@ -2844,6 +2865,7 @@ class PhaseExecutionManager:
         retry_failed: bool,
         confirm_unsafe: bool,
         output_handler: Optional[OutputHandler],
+        cancellation_event: Optional[threading.Event] = None,
     ) -> Dict[str, Any]:
         while True:
             phase = self._first_incomplete(record)
@@ -2910,6 +2932,18 @@ class PhaseExecutionManager:
                 self.store.save(record)
                 return record
 
+            if cancellation_event is not None and cancellation_event.is_set():
+                phase["status"] = "interrupted"
+                phase["error"] = "execution cancelled before the phase started"
+                _phase_event(phase, "interrupted", reason="requested cancellation")
+                self._refresh_overall_status(record)
+                record["updated_at"] = _now()
+                try:
+                    self.store.save(record)
+                finally:
+                    self.store.release_checkpoint(record["execution_id"])
+                return record
+
             checkpoint_reservation = self._checkpoint_reservation_size(phase)
             self.store.reserve_checkpoint(record["execution_id"], checkpoint_reservation)
             phase["attempts"] += 1
@@ -2941,6 +2975,11 @@ class PhaseExecutionManager:
             cleanup_outcome = CleanupOutcome(True)
             try:
                 if self.command_runner is run_command_bounded:
+                    cancellation_options = (
+                        {"cancellation_event": cancellation_event}
+                        if cancellation_event is not None
+                        else {}
+                    )
                     command_result = run_command_bounded(
                         phase["command"],
                         phase["cwd"],
@@ -2950,6 +2989,7 @@ class PhaseExecutionManager:
                             record, phase, process_id, process_group_id
                         ),
                         process_marker=phase["process_launch_token"],
+                        **cancellation_options,
                     )
                 else:
                     command_result = self.command_runner(
@@ -2959,6 +2999,7 @@ class PhaseExecutionManager:
                         phase["timeout_seconds"],
                     )
                 output, exit_code, truncated, original_byte_size, timed_out = command_result
+                command_cancelled = bool(getattr(command_result, "cancelled", False))
                 runner_cleanup_confirmed = getattr(command_result, "cleanup_confirmed", True)
                 if timed_out and self.command_runner is not run_command_bounded:
                     cleanup_outcome = self._cleanup_injected_runner()
@@ -3040,6 +3081,7 @@ class PhaseExecutionManager:
                 "duration_ms": duration_ms,
                 "exit_code": exit_code,
                 "timed_out": bool(timed_out),
+                "cancelled": command_cancelled,
                 "truncated": bool(truncated),
                 "output_byte_size": len(output.encode("utf-8")),
                 "original_byte_size": original_byte_size,
@@ -3052,7 +3094,11 @@ class PhaseExecutionManager:
                         phase["result"]["capture_id"] = capture_id
                 except Exception as exc:
                     phase["result"]["capture_error"] = _bounded_error(exc)
-            if timed_out:
+            if command_cancelled:
+                phase["status"] = "interrupted"
+                phase["error"] = "phase cancelled by request"
+                event_status = "interrupted"
+            elif timed_out:
                 phase["status"] = "timed_out"
                 event_status = "timed_out"
             elif exit_code == 0:
@@ -3066,6 +3112,7 @@ class PhaseExecutionManager:
                 phase,
                 event_status,
                 exit_code=exit_code,
+                **({"reason": "requested cancellation"} if command_cancelled else {}),
                 blocked_reason_code=phase.get("blocked_reason_code"),
             )
             self._refresh_overall_status(record)
@@ -3101,6 +3148,222 @@ class PhaseExecutionManager:
                 output_handler=output_handler,
             )
             return self._public(completed)
+
+    def _submit_background(
+        self,
+        execution_id: str,
+        *,
+        resume: bool,
+        options: Dict[str, Any],
+    ) -> str:
+        """Schedule one durable execution and return its ID promptly."""
+        execution_id = _validate_text(execution_id, "execution_id", MAX_EXECUTION_ID_BYTES)
+        with self._active_lock:
+            if self._closing:
+                raise RuntimeError("durable execution manager is shutting down")
+            if execution_id in self._active_cancellations:
+                raise ExecutionBusyError(f"Execution '{execution_id}' is already active")
+            if len(self._background_futures) >= MAX_BACKGROUND_EXECUTIONS:
+                raise ExecutionBusyError(
+                    f"durable execution capacity is full ({MAX_BACKGROUND_EXECUTIONS} active or queued)"
+                )
+            self._background_failures.pop(execution_id, None)
+            cancellation_event = threading.Event()
+            self._active_cancellations[execution_id] = cancellation_event
+
+            def run_background():
+                try:
+                    with self.store.lease(execution_id):
+                        record = self.store.load(execution_id, recover=False)
+                        if record.pop("background_error", None) is not None:
+                            record["updated_at"] = _now()
+                            self.store.save(record)
+                        if resume and self.store._recover_started(record):
+                            record["updated_at"] = _now()
+                            self.store.save(record)
+                        completed = self._run(
+                            record,
+                            retry_failed=options.get("retry_failed", False),
+                            confirm_unsafe=options.get("confirm_unsafe", False),
+                            output_handler=options.get("output_handler"),
+                            cancellation_event=cancellation_event,
+                        )
+                        return self._public(completed)
+                except BaseException as exc:
+                    self._record_background_failure(execution_id, exc)
+                    raise
+
+            try:
+                future = self._background_executor.submit(run_background)
+            except BaseException:
+                if self._active_cancellations.get(execution_id) is cancellation_event:
+                    self._active_cancellations.pop(execution_id, None)
+                raise
+            self._background_futures[execution_id] = future
+            future.add_done_callback(
+                lambda done, active_id=execution_id, active_future=future,
+                active_cancellation=cancellation_event: self._finish_background(
+                    active_id, active_future, active_cancellation
+                )
+            )
+        return execution_id
+
+    def _record_background_failure(self, execution_id: str, exc: BaseException) -> None:
+        message = _bounded_error(f"{type(exc).__name__}: {exc}")
+        with self._active_lock:
+            self._background_failures[execution_id] = message
+        try:
+            with self.store.lease(execution_id):
+                record = self.store.load(execution_id, recover=False)
+                record["background_error"] = message
+                if record.get("execution_status") in {"pending", "running"}:
+                    record["execution_status"] = "partial"
+                    record["partial"] = True
+                record["updated_at"] = _now()
+                self.store.save(record)
+        except BaseException:
+            # Preserve the in-memory diagnostic when the state store itself is
+            # unavailable; the done callback still consumes the future error.
+            return
+
+    def _finish_background(
+        self,
+        execution_id: str,
+        future,
+        cancellation_event: threading.Event,
+    ) -> None:
+        if future.cancelled():
+            try:
+                self._record_cancelled_before_start(execution_id)
+            except BaseException as exc:
+                with self._active_lock:
+                    self._background_failures[execution_id] = _bounded_error(
+                        "CancelledError: execution was cancelled before its worker started; "
+                        f"the interrupted state could not be saved: {type(exc).__name__}: {exc}"
+                    )
+        else:
+            error = future.exception()
+            if error is not None:
+                with self._active_lock:
+                    recorded = execution_id in self._background_failures
+                if not recorded:
+                    self._record_background_failure(execution_id, error)
+        with self._active_lock:
+            if self._background_futures.get(execution_id) is future:
+                self._background_futures.pop(execution_id, None)
+            if self._active_cancellations.get(execution_id) is cancellation_event:
+                self._active_cancellations.pop(execution_id, None)
+
+    def _record_cancelled_before_start(self, execution_id: str) -> None:
+        """Persist shutdown cancellation for work whose queued future never ran."""
+        with self.store.lease(execution_id):
+            try:
+                record = self.store.load(execution_id, recover=False)
+                phase = self._first_incomplete(record)
+                if phase is not None and phase["status"] == "pending":
+                    phase["status"] = "interrupted"
+                    phase["error"] = "execution cancelled before the phase started"
+                    _phase_event(phase, "interrupted", reason="requested cancellation")
+                    self._refresh_overall_status(record)
+                    record["updated_at"] = _now()
+                    self.store.save(record)
+            finally:
+                self.store.release_checkpoint(execution_id)
+
+    def start_background(
+        self,
+        phases: List[Dict[str, Any]],
+        *,
+        execution_id: Optional[str] = None,
+        label: str = "",
+        resume_policy: str = "safe",
+        cwd: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+        max_output_bytes: Optional[int] = None,
+        output_handler: Optional[OutputHandler] = None,
+    ) -> Dict[str, Any]:
+        """Persist a new execution, schedule it, and return its ID before phases finish."""
+        with self._active_lock:
+            if self._closing:
+                raise RuntimeError("durable execution manager is shutting down")
+            if len(self._background_futures) >= MAX_BACKGROUND_EXECUTIONS:
+                raise ExecutionBusyError(
+                    f"durable execution capacity is full ({MAX_BACKGROUND_EXECUTIONS} active or queued)"
+                )
+            with self._create_and_lease(
+                phases, execution_id, label, resume_policy, cwd,
+                timeout_seconds, max_output_bytes, reserve_first_phase=True,
+            ) as record:
+                normalized_id = record["execution_id"]
+            normalized_id = self._submit_background(
+                normalized_id,
+                resume=False,
+                options={"output_handler": output_handler},
+            )
+        return self.public(normalized_id)
+
+    def resume_background(
+        self,
+        execution_id: str,
+        *,
+        retry_failed: bool = False,
+        confirm_unsafe: bool = False,
+        output_handler: Optional[OutputHandler] = None,
+    ) -> Dict[str, Any]:
+        """Schedule resume work and return its current persisted state promptly."""
+        execution_id = _validate_text(execution_id, "execution_id", MAX_EXECUTION_ID_BYTES)
+        self.store.load(execution_id, recover=False)
+        with self._active_lock:
+            if self._closing:
+                raise RuntimeError("durable execution manager is shutting down")
+            execution_id = self._submit_background(
+                execution_id,
+                resume=True,
+                options={
+                    "retry_failed": retry_failed,
+                    "confirm_unsafe": confirm_unsafe,
+                    "output_handler": output_handler,
+                },
+            )
+        return self.public(execution_id)
+
+    def request_cancel(self, execution_id: str) -> Dict[str, Any]:
+        """Request cancellation of one active execution without blocking on its lease."""
+        execution_id = _validate_text(execution_id, "execution_id", MAX_EXECUTION_ID_BYTES)
+        with self._active_lock:
+            cancellation_event = self._active_cancellations.get(execution_id)
+            active = cancellation_event is not None
+            if cancellation_event is not None:
+                cancellation_event.set()
+        if active:
+            return {
+                "status": "ok",
+                "execution_id": execution_id,
+                "execution_in_progress": True,
+                "cancellation_requested": True,
+                "message": "Cancellation requested; inspect this execution for its final state.",
+            }
+        payload = self.public(execution_id)
+        payload["cancellation_requested"] = False
+        return payload
+
+    def shutdown(self, grace_seconds: float) -> Dict[str, Any]:
+        """Cancel active durable phases and wait no longer than the grace period."""
+        with self._active_lock:
+            self._closing = True
+            cancellations = list(self._active_cancellations.values())
+            background_work = list(self._background_futures.items())
+            futures = [future for _execution_id, future in background_work]
+            for cancellation_event in cancellations:
+                cancellation_event.set()
+        _done, not_done = wait_futures(futures, timeout=max(0.0, grace_seconds))
+        self._background_executor.shutdown(wait=not not_done, cancel_futures=True)
+        with self._active_lock:
+            unfinished_ids = list(self._background_futures)
+        return {
+            "unfinished_execution_ids": unfinished_ids,
+            "unfinished_execution_count": len(unfinished_ids),
+        }
 
     def resume(
         self,
@@ -3143,11 +3406,24 @@ class PhaseExecutionManager:
                 record = self._load(execution_id)
             except ExecutionRecordError as exc:
                 return self.store.inspect_record(execution_id, exc)
-            return self._public(
+            with self._active_lock:
+                cancellation_requested = (
+                    execution_id in self._active_cancellations
+                    and self._active_cancellations[execution_id].is_set()
+                )
+                tracked_active = execution_id in self._active_cancellations
+                background_error = self._background_failures.get(execution_id)
+            payload = self._public(
                 record,
                 include_output=include_output,
-                execution_in_progress=self.store.is_locked(record["execution_id"]),
+                execution_in_progress=(
+                    tracked_active or self.store.is_locked(record["execution_id"])
+                ),
             )
+            payload["cancellation_requested"] = cancellation_requested
+            if background_error is not None:
+                payload["background_error"] = background_error
+            return payload
 
     def output(
         self,
@@ -3230,18 +3506,42 @@ class PhaseExecutionManager:
                 if isinstance(record, ExecutionListDiagnostic):
                     public_records.append(record.response)
                     continue
-                public_records.append(
-                    self._public(
-                        record,
-                        compact=True,
-                        execution_in_progress=self.store.is_locked(record["execution_id"]),
+                execution_id = record["execution_id"]
+                with self._active_lock:
+                    cancellation_event = self._active_cancellations.get(execution_id)
+                    tracked_active = cancellation_event is not None
+                    cancellation_requested = (
+                        cancellation_event is not None and cancellation_event.is_set()
                     )
+                    background_error = self._background_failures.get(execution_id)
+                public_record = self._public(
+                    record,
+                    compact=True,
+                    execution_in_progress=(
+                        tracked_active or self.store.is_locked(execution_id)
+                    ),
                 )
+                public_record["cancellation_requested"] = cancellation_requested
+                if background_error is not None:
+                    public_record["background_error"] = background_error
+                public_records.append(public_record)
             return public_records
 
     def capacity(self) -> Dict[str, Any]:
-        """Return read-only durable execution capacity diagnostics."""
-        return self.store.capacity()
+        """Return storage diagnostics and bounded in-process execution admission."""
+        capacity = self.store.capacity()
+        with self._active_lock:
+            futures = list(self._background_futures.values())
+        capacity.update(
+            {
+                "background_execution_limit": MAX_BACKGROUND_EXECUTIONS,
+                "background_execution_active": sum(future.running() for future in futures),
+                "background_execution_queued": sum(
+                    not future.running() and not future.done() for future in futures
+                ),
+            }
+        )
+        return capacity
 
     def retire(
         self,

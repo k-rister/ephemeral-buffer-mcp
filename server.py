@@ -42,6 +42,7 @@ from pydantic import (
     model_validator,
 )
 from config import (
+    DEFAULT_SHUTDOWN_GRACE_SECONDS,
     cleanup_execution_state_dir,
     load_settings,
     new_default_execution_state_dir,
@@ -65,6 +66,7 @@ from engine import (
 )
 from capture_utils import read_file_bounded, run_command_bounded
 from execution import (
+    ExecutionBusyError,
     MAX_EXECUTION_ID_BYTES,
     MAX_EXECUTION_RETIRE_BATCH,
     MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
@@ -77,6 +79,7 @@ from logging_utils import get_logger, log_event
 from metrics import LocalMetrics
 from socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 from admission import (
+    ADMISSION_METRICS,
     AdmissionBusy,
     MAX_ACTIVE_DIAGNOSTIC_WORK,
     MAX_ACTIVE_SOCKET_CLIENTS,
@@ -147,14 +150,35 @@ async def to_thread(function, /, *args, **kwargs):
     return await loop.run_in_executor(_WORK_EXECUTOR, context.run, call)
 
 
-async def _run_admitted_thread(ticket, function, /, *args, **kwargs):
+async def _run_admitted_thread(
+    ticket,
+    function,
+    /,
+    *args,
+    _service_context=None,
+    _call_id=None,
+    **kwargs,
+):
     """Keep admission reserved until worker work finishes, including cancellation."""
     task = asyncio.create_task(to_thread(function, *args, **kwargs))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
+        cancellation_event = _REQUEST_CANCEL_EVENT.get()
+        if cancellation_event is not None:
+            cancellation_event.set()
         ticket.defer_release_until(task)
+        if _service_context is not None and _call_id is not None:
+            _service_context.defer_tool_call_until(_call_id, task)
         raise
+
+
+_REQUEST_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
+    "ephemeral_request_cancel_event", default=None
+)
+_MCP_TOOL_INVOCATION: ContextVar[bool] = ContextVar(
+    "ephemeral_mcp_tool_invocation", default=False
+)
 SUMMARY_COMMAND_MAX_BYTES = 1024
 SUMMARY_COMMAND_TRUNCATION_MARKER = "... [command truncated]"
 SUMMARY_LABEL_MAX_BYTES = 1024
@@ -777,10 +801,31 @@ def _register_mcp_tool_for_app(
         with _activate_service_context(service_context), _bind_mcp_metrics_scope(
             app, service_context
         ):
+            registered_call = service_context.register_tool_call(name)
+            if registered_call is None:
+                message = "The service is shutting down; retry after it restarts."
+                if structured_result_factory is not None or category in {
+                    "capture", "retrieval", "search", "lifecycle"
+                }:
+                    response = ToolResponseEnvelope(
+                        status="error",
+                        error=ToolErrorEnvelope(code="server_shutting_down", message=message),
+                        text=f"Error: {message}",
+                    )
+                    return _call_tool_result(_fit_tool_envelope(response))
+                if category == "execution":
+                    return json.dumps(
+                        {"status": "error", "error": {"code": "server_shutting_down", "message": message}},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                return f"Error: server_shutting_down: {message}"
+            call_id, cancellation_event = registered_call
             try:
                 lane = "diagnostics" if name == "get_buffer_stats" else "mcp"
                 ticket = await admission_gate(lane).acquire(name)
             except AdmissionBusy:
+                service_context.finish_tool_call(call_id)
                 message = "Foreground work capacity is full; retry this tool call shortly."
                 log_event(LOGGER, logging.WARNING, "mcp_tool_rejected_busy", tool=name)
                 if structured_result_factory is not None or category in {
@@ -799,22 +844,69 @@ def _register_mcp_tool_for_app(
                         separators=(",", ":"),
                     )
                 return f"Error: server_busy: {message}"
+            except BaseException:
+                service_context.finish_tool_call(call_id)
+                raise
 
+            if service_context.closing:
+                ticket.release()
+                service_context.finish_tool_call(call_id)
+                message = "The service is shutting down; retry after it restarts."
+                if structured_result_factory is not None or category in {
+                    "capture", "retrieval", "search", "lifecycle"
+                }:
+                    response = ToolResponseEnvelope(
+                        status="error",
+                        error=ToolErrorEnvelope(code="server_shutting_down", message=message),
+                        text=f"Error: {message}",
+                    )
+                    return _call_tool_result(_fit_tool_envelope(response))
+                if category == "execution":
+                    return json.dumps(
+                        {"status": "error", "error": {"code": "server_shutting_down", "message": message}},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                return f"Error: server_shutting_down: {message}"
+
+            cancel_token = None
+            mcp_invocation_token = _MCP_TOOL_INVOCATION.set(True)
             try:
+                cancel_token = (
+                    _REQUEST_CANCEL_EVENT.set(cancellation_event)
+                    if cancellation_event is not None
+                    else None
+                )
                 if structured_result_factory is not None:
                     response = await _run_admitted_thread(
-                        ticket, structured_result_factory, *args, **kwargs
+                        ticket,
+                        structured_result_factory,
+                        *args,
+                        _service_context=service_context,
+                        _call_id=call_id,
+                        **kwargs,
                     )
                     if not isinstance(response, ToolResponseEnvelope):
                         raise TypeError("structured_result_factory must return ToolResponseEnvelope")
                 else:
-                    result = await _run_admitted_thread(ticket, function, *args, **kwargs)
+                    result = await _run_admitted_thread(
+                        ticket,
+                        function,
+                        *args,
+                        _service_context=service_context,
+                        _call_id=call_id,
+                        **kwargs,
+                    )
                     if category not in {"capture", "retrieval", "search", "lifecycle"}:
                         return result
                     response = _legacy_tool_envelope(name, result)
                 return _call_tool_result(_fit_tool_envelope(response))
             finally:
+                if cancel_token is not None:
+                    _REQUEST_CANCEL_EVENT.reset(cancel_token)
+                _MCP_TOOL_INVOCATION.reset(mcp_invocation_token)
                 ticket.release()
+                service_context.finish_tool_call(call_id)
 
     if structured_result_factory is not None or category in {
         "capture", "retrieval", "search", "lifecycle"
@@ -924,42 +1016,201 @@ class ServiceContext:
         self._metrics_snapshot_lock = threading.Lock()
         self._closed = False
         self._close_lock = threading.Lock()
+        self._close_complete = threading.Event()
+        self._close_error: BaseException | None = None
+        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_condition = threading.Condition(self._lifecycle_lock)
+        self._closing = False
+        self._active_tool_calls: Dict[str, tuple[str, threading.Event | None]] = {}
+        self._deferred_tool_calls: set[str] = set()
+        self.last_shutdown_report: Dict[str, Any] = {}
         self.engine.set_metrics_snapshot_callback(lambda: _write_metrics_snapshot(self))
 
     @property
     def execution_manager(self) -> PhaseExecutionManager:
         """Construct durable execution storage machinery only when requested."""
-        if self._execution_manager is None:
-            with self._execution_manager_lock:
-                if self._execution_manager is None:
-                    self._execution_manager = PhaseExecutionManager(
-                        self.settings.identity.state_dir,
-                        max_output_bytes=max(512, self.engine.max_buffer_bytes),
-                        quota_bytes=self.settings.execution_state_quota_bytes.value,
-                        checkpoint_reserve_bytes=(
-                            self.settings.execution_checkpoint_reserve_bytes.value
-                        ),
-                    )
+        with self._execution_manager_lock:
+            with self._lifecycle_lock:
+                if self._closing:
+                    raise RuntimeError("service is shutting down")
+            if self._execution_manager is None:
+                self._execution_manager = PhaseExecutionManager(
+                    self.settings.identity.state_dir,
+                    max_output_bytes=max(512, self.engine.max_buffer_bytes),
+                    quota_bytes=self.settings.execution_state_quota_bytes.value,
+                    checkpoint_reserve_bytes=(
+                        self.settings.execution_checkpoint_reserve_bytes.value
+                    ),
+                )
         return self._execution_manager
 
     def start(self) -> None:
         """Start optional background engine work owned by this context."""
         self.engine.start_embedding_warmup()
 
-    def close(self) -> None:
-        """Persist this context's metrics and release its owned resources."""
+    def register_tool_call(
+        self, name: str
+    ) -> tuple[str, threading.Event | None] | None:
+        """Track admitted work and provide a request cancellation signal for commands."""
+        with self._lifecycle_lock:
+            if self._closing:
+                return None
+            call_id = uuid.uuid4().hex
+            cancellation_event = threading.Event() if name == "execute_and_capture" else None
+            self._active_tool_calls[call_id] = (name, cancellation_event)
+            return call_id, cancellation_event
+
+    def finish_tool_call(self, call_id: str) -> None:
+        with self._lifecycle_condition:
+            if call_id in self._deferred_tool_calls:
+                return
+            self._active_tool_calls.pop(call_id, None)
+            self._lifecycle_condition.notify_all()
+
+    def defer_tool_call_until(
+        self,
+        call_id: str,
+        task: asyncio.Future[Any],
+    ) -> None:
+        """Keep context work active until detached worker work completes."""
+        with self._lifecycle_condition:
+            if call_id not in self._active_tool_calls:
+                return
+            self._deferred_tool_calls.add(call_id)
+
+        def finish_deferred(_task: asyncio.Future[Any]) -> None:
+            with self._lifecycle_condition:
+                self._deferred_tool_calls.discard(call_id)
+                self._active_tool_calls.pop(call_id, None)
+                self._lifecycle_condition.notify_all()
+
+        task.add_done_callback(finish_deferred)
+
+    def wait_for_tool_calls(self, timeout: float) -> bool:
+        """Wait only for work registered to this service context."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lifecycle_condition:
+            while self._active_tool_calls:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._lifecycle_condition.wait(remaining)
+            return True
+
+    @property
+    def closing(self) -> bool:
+        with self._lifecycle_lock:
+            return self._closing
+
+    def close(self) -> Dict[str, Any]:
+        """Stop admission, cancel owned work, and report anything beyond the grace period."""
         with self._close_lock:
             if self._closed:
-                return
-            self._closed = True
-            try:
-                _write_metrics_snapshot(self)
-            finally:
-                try:
-                    self.engine.shutdown()
-                finally:
-                    if self.settings.identity.state_source == "process:private temporary directory":
-                        cleanup_execution_state_dir(self.settings.identity.state_dir)
+                should_wait = True
+            else:
+                should_wait = False
+                self._closed = True
+                with self._lifecycle_lock:
+                    self._closing = True
+                    for _name, cancellation_event in self._active_tool_calls.values():
+                        if cancellation_event is not None:
+                            cancellation_event.set()
+        if should_wait:
+            self._close_complete.wait()
+            if self._close_error is not None:
+                raise self._close_error
+            return dict(self.last_shutdown_report)
+        try:
+            return self._close_resources()
+        except BaseException as exc:
+            self._close_error = exc
+            raise
+        finally:
+            self._close_complete.set()
+
+    def _close_resources(self) -> Dict[str, Any]:
+        grace_setting = getattr(self.settings, "shutdown_grace_seconds", None)
+        grace_seconds = (
+            grace_setting.value
+            if grace_setting is not None
+            else DEFAULT_SHUTDOWN_GRACE_SECONDS
+        )
+        deadline = time.monotonic() + grace_seconds
+        execution_shutdown = {
+            "unfinished_execution_ids": [],
+            "unfinished_execution_count": 0,
+        }
+        execution_grace = grace_seconds / 2
+        engine_grace = grace_seconds / 4
+        with self._execution_manager_lock:
+            execution_manager = self._execution_manager
+        if execution_manager is not None:
+            execution_shutdown = execution_manager.shutdown(execution_grace)
+        admission_wait = max(
+            0.0,
+            deadline - time.monotonic() - engine_grace,
+        )
+        admission_drained = self.wait_for_tool_calls(
+            admission_wait
+        )
+        engine_shutdown = self.engine.shutdown(
+            timeout_seconds=max(0.0, deadline - time.monotonic())
+        )
+        admission_shutdown = ADMISSION_METRICS.snapshot()
+        try:
+            _write_metrics_snapshot(self)
+        finally:
+            with self._lifecycle_lock:
+                active_names = [name for name, _event in self._active_tool_calls.values()]
+            is_private_state_dir = (
+                self.settings.identity.state_source
+                == "process:private temporary directory"
+            )
+            state_dir_cleanup_skipped = is_private_state_dir and (
+                not admission_drained
+                or bool(active_names)
+                or execution_shutdown.get("unfinished_execution_count", 0) > 0
+            )
+            self.last_shutdown_report = {
+                "admission_drained": admission_drained,
+                "active_tool_calls": len(active_names),
+                "active_tool_types": sorted(set(active_names)),
+                "admission_active": admission_shutdown["admission_active"],
+                "admission_queued": admission_shutdown["admission_queued"],
+                "admission_active_by_type": admission_shutdown["admission_active_by_type"],
+                "admission_queued_by_type": admission_shutdown["admission_queued_by_type"],
+                "execution_state_dir_cleanup_skipped": state_dir_cleanup_skipped,
+                **execution_shutdown,
+                **engine_shutdown,
+            }
+            log_event(
+                LOGGER,
+                logging.WARNING
+                if (
+                    not admission_drained
+                    or bool(active_names)
+                    or self.last_shutdown_report.get("unfinished_execution_count", 0)
+                    or self.last_shutdown_report.get("unfinished_engine_work")
+                )
+                else logging.INFO,
+                "service_shutdown_complete",
+                grace_seconds=grace_seconds,
+                admission_drained=admission_drained,
+                active_tool_calls=len(active_names),
+                active_tool_types=sorted(set(active_names)),
+                admission_active=admission_shutdown["admission_active"],
+                admission_queued=admission_shutdown["admission_queued"],
+                admission_active_by_type=admission_shutdown["admission_active_by_type"],
+                admission_queued_by_type=admission_shutdown["admission_queued_by_type"],
+                execution_state_dir_cleanup_skipped=state_dir_cleanup_skipped,
+                unfinished_execution_count=execution_shutdown.get(
+                    "unfinished_execution_count", 0
+                ),
+                unfinished_engine_work=engine_shutdown.get("unfinished_work", []),
+            )
+        if is_private_state_dir and not state_dir_cleanup_skipped:
+            cleanup_execution_state_dir(self.settings.identity.state_dir)
+        return dict(self.last_shutdown_report)
 
 
 _SERVICE_CONTEXT_OVERRIDE: ContextVar[ServiceContext | None] = ContextVar(
@@ -1089,6 +1340,16 @@ def _capture_execution_phase(
     return capture.capture_id
 
 
+def _background_execution_output_handler():
+    """Preserve the calling service context for phase captures on worker threads."""
+    context = copy_context()
+
+    def handle(phase, output, result):
+        return context.run(_capture_execution_phase, phase, output, result)
+
+    return handle
+
+
 def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> str:
     """Run an execution operation and return a compact machine-readable result."""
     try:
@@ -1110,7 +1371,9 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
                         key: execution[key]
                         for key in (
                             "execution_id", "label", "execution_status", "partial",
-                            "updated_at", "completed_phase_count", "phase_count",
+                            "execution_in_progress", "cancellation_requested",
+                            "background_error", "updated_at",
+                            "completed_phase_count", "phase_count",
                         )
                         if key in execution
                     }
@@ -1132,8 +1395,10 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
                     key: payload[key]
                     for key in (
                         "status", "schema_version", "execution_id", "label",
-                        "execution_status", "partial", "summary", "created_at",
-                        "updated_at", "resume", "completed_phase_count", "phase_count",
+                        "execution_status", "execution_in_progress",
+                        "cancellation_requested", "partial", "summary", "created_at",
+                        "background_error", "updated_at", "resume",
+                        "completed_phase_count", "phase_count",
                     )
                     if key in payload
                 }
@@ -1154,6 +1419,15 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
                 f"{max_response_bytes:,}-byte limit; request a smaller output chunk"
             )
         return result
+    except ExecutionBusyError as exc:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": {"code": "execution_busy", "message": str(exc)},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     except (KeyError, ValueError, OSError, RuntimeError) as exc:
         return f"Error managing execution: {exc}"
 
@@ -1481,7 +1755,11 @@ def start_execution(
         Optional[int], Field(ge=512)
     ] = None,
 ) -> str:
-    """Run a sequential, durably checkpointed set of command phases.
+    """Start a sequential, durably checkpointed set of command phases.
+
+    Returns a durable execution ID promptly; use get_execution to follow
+    progress. Caller disconnection detaches from this work. Use cancel_execution
+    to request intentional termination.
 
     Each phase is an object with ``name`` and ``command`` plus optional
     ``cwd``, ``timeout_seconds``, ``max_output_bytes``, ``structured_metrics``,
@@ -1495,9 +1773,15 @@ def start_execution(
         phase.model_dump(exclude_none=True) if isinstance(phase, ExecutionPhaseInput) else phase
         for phase in phases
     ]
+    manager = _active_execution_manager()
+    start_method = (
+        manager.start_background
+        if _MCP_TOOL_INVOCATION.get()
+        else manager.start
+    )
     return _execution_json(
         lambda: _execution_public_payload(
-            _active_execution_manager().start(
+            start_method(
                 phase_payloads,
                 execution_id=execution_id,
                 label=label,
@@ -1505,7 +1789,7 @@ def start_execution(
                 cwd=cwd,
                 timeout_seconds=timeout_seconds,
                 max_output_bytes=max_output_bytes,
-                output_handler=_capture_execution_phase,
+                output_handler=_background_execution_output_handler(),
             )
         ),
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
@@ -1521,7 +1805,10 @@ def resume_execution(
     retry_failed: bool = False,
     confirm_unsafe: bool = False,
 ) -> str:
-    """Resume an execution from its first incomplete phase.
+    """Resume an execution from its first incomplete phase and return promptly.
+
+    Use get_execution to follow progress. Caller disconnection detaches from
+    this durable work.
 
     Completed phases are skipped. Failed and timed-out phases require
     ``retry_failed=True``; a safe phase recovered as interrupted resumes on
@@ -1529,15 +1816,35 @@ def resume_execution(
     ``confirm_unsafe=True`` unless the execution was created with the explicit
     ``allow-unsafe`` resume policy.
     """
+    manager = _active_execution_manager()
+    resume_method = (
+        manager.resume_background
+        if _MCP_TOOL_INVOCATION.get()
+        else manager.resume
+    )
     return _execution_json(
         lambda: _execution_public_payload(
-            _active_execution_manager().resume(
+            resume_method(
                 execution_id,
                 retry_failed=retry_failed,
                 confirm_unsafe=confirm_unsafe,
-                output_handler=_capture_execution_phase,
+                output_handler=_background_execution_output_handler(),
             )
         ),
+        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    )
+
+
+@_mcp_tool("cancel_execution", "execution")
+@_instrument_tool("cancel_execution")
+def cancel_execution(
+    execution_id: Annotated[str, Field(
+        min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_EXECUTION_ID_BYTES}
+    )],
+) -> str:
+    """Request cancellation of an active durable execution by its ID."""
+    return _execution_json(
+        lambda: _active_execution_manager().request_cancel(execution_id),
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
     )
 
@@ -1606,7 +1913,7 @@ def list_executions(
 @_mcp_tool("get_execution_capacity", "execution")
 @_instrument_tool("get_execution_capacity")
 def get_execution_capacity() -> str:
-    """Report durable execution storage, quota, checkpoint headroom, and anomalies."""
+    """Report durable storage diagnostics and active/queued background execution counts."""
     return _execution_json(
         lambda: _active_execution_manager().capacity(),
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
@@ -2010,9 +2317,14 @@ def execute_and_capture(
             )
         output_limit = active_engine.max_buffer_bytes if max_output_bytes is None else max_output_bytes
         command_started = time.perf_counter()
-        output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
-            command, cwd, output_limit, timeout_seconds
+        command_result = run_command_bounded(
+            command,
+            cwd,
+            output_limit,
+            timeout_seconds,
+            cancellation_event=_REQUEST_CANCEL_EVENT.get(),
         )
+        output, exit_code, truncated, original_byte_size, timed_out = command_result
         duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
         
         cap = active_engine.ingest(
@@ -2033,6 +2345,7 @@ def execute_and_capture(
         bounded_command, command_truncated = _bounded_command(command)
         payload["command"] = bounded_command
         payload["command_truncated"] = command_truncated
+        payload["command_cancelled"] = bool(getattr(command_result, "cancelled", False))
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception as e:
         log_event(LOGGER, logging.ERROR, "command_execution_failed", error_type=type(e).__name__)
@@ -2820,9 +3133,23 @@ async def _write_socket_error(
 
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     async def _handle():
+        registered_call = DEFAULT_SERVICES.register_tool_call("socket")
+        if registered_call is None:
+            try:
+                await _write_socket_error(
+                    writer,
+                    "server_shutting_down",
+                    "The service is shutting down; retry after it restarts.",
+                )
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            return
+        call_id, _cancellation_event = registered_call
         try:
             ticket = await admission_gate("socket").acquire("socket")
         except AdmissionBusy:
+            DEFAULT_SERVICES.finish_tool_call(call_id)
             log_event(LOGGER, logging.WARNING, "socket_client_rejected_busy")
             try:
                 await _write_socket_error(
@@ -2832,6 +3159,23 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 )
             except Exception:
                 pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            return
+        except BaseException:
+            DEFAULT_SERVICES.finish_tool_call(call_id)
+            raise
+
+        if DEFAULT_SERVICES.closing:
+            ticket.release()
+            DEFAULT_SERVICES.finish_tool_call(call_id)
+            try:
+                await _write_socket_error(
+                    writer,
+                    "server_shutting_down",
+                    "The service is shutting down; retry after it restarts.",
+                )
             finally:
                 writer.close()
                 await writer.wait_closed()
@@ -2896,6 +3240,8 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 source="socket",
                 duration_ms=duration_ms,
                 structured_metrics=structured_metrics,
+                _service_context=DEFAULT_SERVICES,
+                _call_id=call_id,
             )
             resp = {
                 "status": "ok",
@@ -2912,6 +3258,8 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 ticket,
                 engine.get_summary_for_capture,
                 cap,
+                _service_context=DEFAULT_SERVICES,
+                _call_id=call_id,
                 include_previews=False,
             )
             if summary.get("status") == "ok":
@@ -2929,6 +3277,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             await writer.drain()
         finally:
             ticket.release()
+            DEFAULT_SERVICES.finish_tool_call(call_id)
             writer.close()
             await writer.wait_closed()
 

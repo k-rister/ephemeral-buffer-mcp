@@ -1864,11 +1864,10 @@ class EphemeralEngine:
             live.semantic_index_state = "not-requested"
         job.done.set()
 
-    def shutdown(self) -> None:
-        """Stop background embedding work without holding the engine lock while waiting."""
+    def shutdown(self, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+        """Stop queued embedding work and bound waits for running native inference."""
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
         with self._lock:
-            if self._shutdown:
-                return
             self._shutdown = True
             executor = self._prefetch_executor
             warmup_thread = self._embedding_warmup_thread
@@ -1878,11 +1877,50 @@ class EphemeralEngine:
             for capture_id in list(self._on_demand_jobs):
                 self._cancel_on_demand_job(capture_id)
         self._flush_metrics_snapshot()
-        if warmup_thread is not None and warmup_thread is not threading.current_thread():
-            warmup_thread.join()
         if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
-        on_demand_executor.shutdown(wait=True, cancel_futures=True)
+            executor.shutdown(wait=False, cancel_futures=True)
+        on_demand_executor.shutdown(wait=False, cancel_futures=True)
+        if warmup_thread is not None and warmup_thread is not threading.current_thread():
+            warmup_thread.join(max(0.0, deadline - time.monotonic()))
+        self._wait_for_executor_workers(executor, deadline)
+        self._wait_for_executor_workers(on_demand_executor, deadline)
+        with self._lock:
+            return {"unfinished_work": self._unfinished_shutdown_work_locked()}
+
+    @staticmethod
+    def _wait_for_executor_workers(executor, deadline: float) -> None:
+        """Wait for a pool's threads only while the shared shutdown budget remains."""
+        if executor is None:
+            return
+        workers = tuple(getattr(executor, "_threads", ()))
+        current_thread = threading.current_thread()
+        while True:
+            live_workers = [
+                worker
+                for worker in workers
+                if worker is not current_thread and worker.is_alive()
+            ]
+            if not live_workers:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            live_workers[0].join(min(remaining, 0.01))
+
+    def _unfinished_shutdown_work_locked(self) -> List[str]:
+        """Summarize running engine workers while the engine lock is held."""
+        unfinished = []
+        warmup_thread = self._embedding_warmup_thread
+        if warmup_thread is not None and warmup_thread.is_alive():
+            unfinished.append("embedding_warmup")
+        if self._prefetch_workers_active:
+            unfinished.append(f"semantic_prefetch:{self._prefetch_workers_active}")
+        running_on_demand = sum(
+            1 for job in self._on_demand_jobs.values() if job.future.running()
+        )
+        if running_on_demand:
+            unfinished.append(f"semantic_index:{running_on_demand}")
+        return unfinished
 
     @synchronized
     def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
