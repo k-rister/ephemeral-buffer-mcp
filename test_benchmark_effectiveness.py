@@ -23,6 +23,12 @@ import server
 
 
 class TestEffectivenessBenchmark(unittest.TestCase):
+    def assert_shutdown_receives_bounded_timeout(self, shutdown):
+        shutdown.assert_called_once()
+        timeout_seconds = shutdown.call_args.kwargs["timeout_seconds"]
+        self.assertGreaterEqual(timeout_seconds, 0.0)
+        self.assertLessEqual(timeout_seconds, server.DEFAULT_SHUTDOWN_GRACE_SECONDS)
+
     def test_benchmark_engine_disables_prefetch_and_shuts_down_after_failure(self):
         with patch("benchmark_effectiveness.server.EphemeralEngine") as engine_type:
             engine = engine_type.return_value
@@ -33,7 +39,7 @@ class TestEffectivenessBenchmark(unittest.TestCase):
         engine_type.assert_called_once()
         self.assertEqual(engine_type.call_args.kwargs["max_captures"], 3)
         self.assertFalse(engine_type.call_args.kwargs["semantic_prefetch"])
-        engine.shutdown.assert_called_once_with()
+        self.assert_shutdown_receives_bounded_timeout(engine.shutdown)
 
     def test_summary_engine_disables_prefetch_and_shuts_down(self):
         with patch("benchmark_effectiveness.server.EphemeralEngine") as engine_type:
@@ -46,7 +52,7 @@ class TestEffectivenessBenchmark(unittest.TestCase):
             len(benchmark_effectiveness.summary_scenarios()),
         )
         self.assertFalse(engine_type.call_args.kwargs["semantic_prefetch"])
-        engine_type.return_value.shutdown.assert_called_once_with()
+        self.assert_shutdown_receives_bounded_timeout(engine_type.return_value.shutdown)
 
     def test_fixtures_are_reproducible_and_content_free(self):
         first = scenarios()
