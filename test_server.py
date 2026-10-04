@@ -165,12 +165,12 @@ class TestServerTools(unittest.TestCase):
                 first_capture_id = first_response["capture_id"]
                 second_capture_id = second_response["capture_id"]
                 self.assertEqual(
-                    first.engine.get_capture(first_capture_id).raw_lines,
-                    ["first context output"],
+                    first.engine.get_slice_page(1, 1, capture_id=first_capture_id)["content"],
+                    "first context output",
                 )
                 self.assertEqual(
-                    second.engine.get_capture(second_capture_id).raw_lines,
-                    ["second context output"],
+                    second.engine.get_slice_page(1, 1, capture_id=second_capture_id)["content"],
+                    "second context output",
                 )
                 self.assertIsNone(server.engine.get_capture(first_capture_id))
 
@@ -1023,7 +1023,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(payload["records"], [])
 
     def test_consolidate_reports_ingest_failure(self):
-        with patch.object(server.engine, "ingest", side_effect=RuntimeError("storage unavailable")):
+        with patch.object(server.engine, "ingest_with_summary", side_effect=RuntimeError("storage unavailable")):
             result = server.consolidate_captures([])
 
         self.assertIn("Error consolidating captures", result)
@@ -2565,7 +2565,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
         ):
             writer = await self.run_handler(payload)
 
@@ -2654,7 +2654,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, summary]),
+            new=AsyncMock(return_value=(capture, summary)),
         ):
             writer = await self.run_handler(payload)
 
@@ -2685,7 +2685,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, summary]),
+            new=AsyncMock(return_value=(capture, summary)),
         ):
             writer = await self.run_handler(payload)
 
@@ -2715,7 +2715,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             with patch.object(
                 server,
                 "to_thread",
-                new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+                new=AsyncMock(return_value=(capture, {"status": "error"})),
             ):
                 writer = await self.run_handler(payload)
         finally:
@@ -2737,7 +2737,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
         ):
             await server.handle_socket_client(
                 ChunkedReader(payload[:7], payload[7:]),
@@ -2765,7 +2765,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
         ):
             writer = await self.run_handler(payload)
 
@@ -2822,15 +2822,25 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
         ) as offload:
             await self.run_handler(payload)
 
-        self.assertEqual(offload.await_count, 2)
-        summary_callable = offload.await_args_list[1].args[0]
-        self.assertIs(summary_callable.__self__, server.engine)
-        self.assertIs(summary_callable.__func__, server.engine.get_summary_for_capture.__func__)
-        self.assertEqual(offload.await_args_list[1].kwargs, {
+        self.assertEqual(offload.await_count, 1)
+        ingest_callable = offload.await_args.args[0]
+        self.assertIs(ingest_callable.__self__, server.engine)
+        self.assertIs(ingest_callable.__func__, server.engine.ingest_with_summary.__func__)
+        self.assertEqual(offload.await_args.args[1], "hello")
+        self.assertEqual(offload.await_args.kwargs, {
+            "label": "offload-test",
+            "content_type": "auto",
+            "truncated": False,
+            "original_byte_size": None,
+            "command_exit_code": None,
+            "timed_out": False,
+            "source": "socket",
+            "duration_ms": None,
+            "structured_metrics": {},
             "include_previews": False,
         })
 
@@ -2864,7 +2874,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(side_effect=[capture, {"status": "error"}]),
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
         ):
             writer = await self.run_handler(encode_frame(b"not-json"))
 
@@ -2904,7 +2914,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("original_byte_size", response["message"])
-        self.assertEqual(server.engine.captures, {})
+        self.assertEqual(server.engine._captures, {})
         self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
 
     async def test_invalid_socket_metrics_return_error_without_capturing_envelope(self):
@@ -2919,7 +2929,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("JSON object", response["message"])
-        self.assertEqual(server.engine.captures, {})
+        self.assertEqual(server.engine._captures, {})
 
     async def test_non_object_json_payload_returns_error_without_capturing(self):
         writer = await self.run_handler(encode_frame(b"[]"))
@@ -2927,7 +2937,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertIn("JSON object", response["message"])
-        self.assertEqual(server.engine.captures, {})
+        self.assertEqual(server.engine._captures, {})
 
     async def test_truncated_frame_returns_error_response(self):
         writer = await self.run_handler(FRAME_MAGIC + b"\x01\x00")

@@ -216,6 +216,13 @@ the effective limits and the number of over-budget captures.
 Use `benchmark_semantic_memory.py` to measure RSS before and after model load,
 semantic indexing, and capture cleanup on the deployment host.
 
+The benchmark uses the engine's supported `load_embedding_model`,
+`index_capture`, `wait_for_capture_index`, and `get_capture_diagnostics`
+methods. Python integrations receive the frozen `CaptureView` from `ingest`
+and `get_capture` (also available as `get_capture_view`). Capture content
+remains available through the bounded slice and search APIs; the view does not
+expose raw storage or indexing objects.
+
 Lexical search uses SQLite FTS5 when the host SQLite library provides it. If
 FTS5 is unavailable, captures remain searchable through a complete token-based
 Python fallback with case- and diacritic-insensitive terms; this preserves

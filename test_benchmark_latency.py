@@ -26,8 +26,9 @@ class FakeEngine:
         self.events.append(("ingest", label, content))
         return capture
 
-    def _ensure_embeddings(self, capture):
-        self.events.append(("ensure_embeddings", capture.capture_id))
+    def index_capture(self, capture_id):
+        self.events.append(("index_capture", capture_id))
+        return "ready"
 
     def shutdown(self):
         self.events.append(("shutdown",))
@@ -51,10 +52,10 @@ class TestBenchmarkLatency(unittest.TestCase):
         warm_events = FakeEngine.instances[1].events
         self.assertEqual(warm_events[:2], [
             ("ingest", "latency-warmup", "warmup"),
-            ("ensure_embeddings", "cap-1"),
+            ("index_capture", "cap-1"),
         ])
         self.assertLess(
-            warm_events.index(("ensure_embeddings", "cap-1")),
+            warm_events.index(("index_capture", "cap-1")),
             warm_events.index(("ingest", "latency-1", "benchmark line\n")),
         )
 

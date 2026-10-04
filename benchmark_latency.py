@@ -46,8 +46,10 @@ def _measure_once(line_count: int, engine: EphemeralEngine) -> dict[str, float |
     ingest_seconds = time.perf_counter() - started
 
     started = time.perf_counter()
-    engine._ensure_embeddings(capture)
+    index_status = engine.index_capture(capture.capture_id)
     semantic_index_seconds = time.perf_counter() - started
+    if index_status != "ready":
+        raise RuntimeError(f"semantic index did not become ready: {index_status}")
 
     started = time.perf_counter()
     engine.get_summary(capture.capture_id)
@@ -118,7 +120,8 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
     try:
         # Keep the reported size measurements focused on capture work, not model setup.
         warmup = engine.ingest("warmup", label="latency-warmup")
-        engine._ensure_embeddings(warmup)
+        if engine.index_capture(warmup.capture_id) != "ready":
+            raise RuntimeError("semantic index warmup did not become ready")
         by_size = []
         for line_count in line_counts:
             measurements = [_measure_once(line_count, engine) for _ in range(samples)]

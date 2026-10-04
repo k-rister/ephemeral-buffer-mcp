@@ -603,6 +603,15 @@ page's `data["content"]` value to reconstruct the retained content. Cursor
 offsets count UTF-8 bytes from the start of the current line; treat the cursor
 itself as opaque and pass it back unchanged.
 
+Python engine callers receive a frozen `CaptureView` from `ingest`,
+`get_capture`, and `get_capture_view`. The historical `get_capture` method
+remains as a compatibility wrapper; these views expose supported metadata but
+not raw lines, chunks, embeddings, SQLite connections, or reader state. Retrieve
+content through the bounded slice and search APIs. Semantic benchmarks should
+use `load_embedding_model`, `index_capture`, `wait_for_capture_index`, and
+`get_capture_diagnostics`; the underscored model and indexing methods are
+engine internals.
+
 The deterministic summary benchmark measures the initial agent-prompt
 reduction for representative successful, failed, noisy, truncated, and
 timed-out captures. It exercises the public capture API, compares a

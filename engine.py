@@ -19,10 +19,11 @@ import unicodedata
 import base64
 import binascii
 import secrets
+from types import MappingProxyType
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import Counter, OrderedDict
 import numpy as np
-from typing import Callable, List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Tuple, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
 from logging_utils import get_logger, log_event
@@ -213,7 +214,7 @@ def normalize_structured_metrics(metrics: Optional[Dict[str, Any]]) -> Dict[str,
     return json.loads(encoded.decode("utf-8"))
 
 
-def _capture_execution_status(capture: "Capture") -> str:
+def _capture_execution_status(capture: "_CaptureState") -> str:
     """Return the stable execution status exposed by the summary schema."""
     if capture.timed_out:
         return "timed_out"
@@ -700,7 +701,7 @@ class Chunk:
 
 
 @dataclass
-class Capture:
+class _CaptureState:
     capture_id: str
     label: str
     timestamp: float
@@ -718,7 +719,7 @@ class Capture:
     semantic_index_state: str = "not-requested"
     active_readers: int = 0
     storage_close_pending: bool = False
-    # Append summary metadata after the legacy fields so positional Capture
+    # Append summary metadata after the legacy fields so positional state
     # construction remains compatible with the pre-summary data model.
     source: str = "capture"
     duration_ms: Optional[float] = None
@@ -728,7 +729,7 @@ class Capture:
     # the overlap BM25 uses for exact line ranges.
     semantic_chunks: List[Chunk] = field(default_factory=list)
     # Internal reader-lease accounting is appended to preserve positional
-    # construction compatibility for the public capture record.
+    # construction compatibility for the state record.
     deferred_storage_tracked: bool = False
     deferred_storage_accounted_bytes: int = 0
 
@@ -749,6 +750,72 @@ class Capture:
     def retained_byte_size(self) -> int:
         """Return content plus label bytes counted against the buffer limit."""
         return self.byte_size + self.label_byte_size
+
+
+def _freeze_public_value(value: Any) -> Any:
+    """Copy nested metadata into containers that cannot mutate engine state."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_public_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_public_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_public_value(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
+class CaptureView:
+    """Read-only public metadata for an engine-owned capture.
+
+    Capture text is retrieved through the bounded slice and search APIs. This
+    view intentionally has no raw lines, chunks, embedding arrays, SQLite
+    connections, or reader and deferred-close bookkeeping.
+    """
+
+    capture_id: str
+    label: str
+    timestamp: float
+    line_count: int
+    input_byte_size: int
+    content_type: str
+    diff_meta: Optional[Mapping[str, Any]]
+    truncated: bool
+    original_byte_size: Optional[int]
+    command_exit_code: Optional[int]
+    timed_out: bool
+    semantic_index_state: str
+    source: str
+    duration_ms: Optional[float]
+    structured_metrics: Mapping[str, Any]
+
+    @property
+    def byte_size(self) -> int:
+        return self.input_byte_size
+
+    @property
+    def label_byte_size(self) -> int:
+        return len(self.label.encode("utf-8"))
+
+    @property
+    def retained_byte_size(self) -> int:
+        return self.byte_size + self.label_byte_size
+
+
+@dataclass(frozen=True)
+class CaptureDiagnostics:
+    """Supported semantic-index statistics for diagnostics and benchmarks."""
+
+    capture_id: str
+    semantic_index_state: str
+    lexical_chunk_count: int
+    semantic_chunk_count: int
+    semantic_input_bytes: int
+    retained_embedding_bytes: int
+
+
+# Keep the public type name pointed at the safe metadata view. Live storage is
+# represented only by the private _CaptureState class.
+Capture = CaptureView
 
 
 _BUNDLED_MODELS_REGISTERED = False
@@ -881,7 +948,7 @@ class EphemeralEngine:
         self.max_captures = max_captures
         self.max_buffer_bytes = max_buffer_bytes
         self._embedding_lock = threading.RLock()
-        self.captures: Dict[str, Capture] = {}
+        self._captures: Dict[str, _CaptureState] = {}
         self.capture_order: OrderedDict[str, None] = OrderedDict()
         self.session_id = uuid.uuid4().hex
         self._total_bytes = 0
@@ -988,7 +1055,7 @@ class EphemeralEngine:
         # Eligible captures wait in an ordered queue that is drained newest-first,
         # so a burst of ingestion never silently skips a capture; the queue is
         # bounded by max_captures because eviction removes queued work.
-        self._prefetch_queue: "OrderedDict[str, Capture]" = OrderedDict()
+        self._prefetch_queue: "OrderedDict[str, _CaptureState]" = OrderedDict()
         self._prefetch_running: Dict[str, threading.Event] = {}
         self._prefetch_job_meta: Dict[str, Dict[str, Any]] = {}
         self._semantic_job_dispositions: Dict[str, str] = {}
@@ -1130,6 +1197,14 @@ class EphemeralEngine:
             log_event(LOGGER, logging.INFO, "embedding_model_ready", model=self.embedding_model_name)
             return self.embedding_model
 
+    def load_embedding_model(self) -> None:
+        """Ensure the configured embedding model is loaded without exposing it.
+
+        This supported operation is useful for measuring model-load cost. The
+        FastEmbed object remains owned by the engine.
+        """
+        self._get_embedding_model()
+
     def _chunk_lines(self, lines: List[str], window_size: int = 4, step_size: int = 2) -> List[Chunk]:
         """
         Creates sliding window chunks over lines with line numbers preserved.
@@ -1220,7 +1295,55 @@ class EphemeralEngine:
         source: str = "capture",
         duration_ms: Optional[float] = None,
         structured_metrics: Optional[Dict[str, Any]] = None,
-    ) -> Capture:
+    ) -> CaptureView:
+        """Ingest text and return a detached, read-only metadata view."""
+        state = self._ingest_state(
+            text,
+            label=label,
+            content_type=content_type,
+            truncated=truncated,
+            original_byte_size=original_byte_size,
+            command_exit_code=command_exit_code,
+            timed_out=timed_out,
+            protected_capture_ids=protected_capture_ids,
+            source=source,
+            duration_ms=duration_ms,
+            structured_metrics=structured_metrics,
+        )
+        return self._capture_view(state)
+
+    def ingest_with_summary(
+        self,
+        text: str,
+        *,
+        include_previews: bool = False,
+        **ingest_options: Any,
+    ) -> Tuple[CaptureView, Dict[str, Any]]:
+        """Ingest text and atomically retain the summary needed by a caller.
+
+        This avoids a lookup race if another ingestion evicts the capture
+        before the caller serializes its response.
+        """
+        state = self._ingest_state(text, **ingest_options)
+        view = self._capture_view(state)
+        summary = self._build_summary(state, include_previews=include_previews)
+        return view, summary
+
+    def _ingest_state(
+        self,
+        text: str,
+        label: str = "",
+        content_type: str = "auto",
+        truncated: bool = False,
+        original_byte_size: Optional[int] = None,
+        command_exit_code: Optional[int] = None,
+        timed_out: bool = False,
+        protected_capture_ids: Optional[List[str]] = None,
+        *,
+        source: str = "capture",
+        duration_ms: Optional[float] = None,
+        structured_metrics: Optional[Dict[str, Any]] = None,
+    ) -> _CaptureState:
         """
         Ingests text, chunks it, and builds the SQLite FTS5 BM25 index.
         FastEmbed dense vector embeddings are materialized lazily when semantic
@@ -1286,7 +1409,7 @@ class EphemeralEngine:
         # paying the model/indexing cost when semantic ranking is unnecessary.
         embeddings = np.empty((0, 384), dtype=np.float32) if not semantic_chunks else None
 
-        capture = Capture(
+        capture = _CaptureState(
             capture_id=capture_id,
             label=label,
             timestamp=time.time(),
@@ -1309,7 +1432,7 @@ class EphemeralEngine:
 
         with self._lock:
             protected_ids = set(protected_capture_ids or [])
-            missing_protected_ids = sorted(protected_ids.difference(self.captures))
+            missing_protected_ids = sorted(protected_ids.difference(self._captures))
             if missing_protected_ids:
                 raise ValueError(
                     "Cannot admit capture while retaining unavailable source captures: "
@@ -1331,7 +1454,7 @@ class EphemeralEngine:
                     break
                 if candidate_id in protected_ids:
                     continue
-                old_cap = self.captures[candidate_id]
+                old_cap = self._captures[candidate_id]
                 eviction_ids.append(candidate_id)
                 projected_count -= 1
                 projected_bytes -= old_cap.retained_byte_size
@@ -1371,7 +1494,7 @@ class EphemeralEngine:
 
             if capture.duration_ms is None:
                 capture.duration_ms = round((time.perf_counter() - ingest_started) * 1000, 3)
-            self.captures[capture_id] = capture
+            self._captures[capture_id] = capture
             self.capture_order[capture_id] = None
             self._total_bytes += capture.retained_byte_size
             self._indexed_chunks += len(capture.chunks)
@@ -1388,7 +1511,7 @@ class EphemeralEngine:
     def _evict_capture_locked(self, capture_id: str) -> bool:
         """Evict one capture; the caller must hold ``self._lock``."""
         self.capture_order.pop(capture_id, None)
-        old_cap = self.captures.pop(capture_id, None)
+        old_cap = self._captures.pop(capture_id, None)
         if old_cap is None:
             return False
         self._total_bytes -= old_cap.retained_byte_size
@@ -1477,7 +1600,7 @@ class EphemeralEngine:
     def _finish_prefetch_job_locked(
         self,
         capture_id: str,
-        capture: Capture,
+        capture: _CaptureState,
         outcome: str | None = None,
     ) -> None:
         metadata = self._prefetch_job_meta.pop(
@@ -1499,14 +1622,14 @@ class EphemeralEngine:
         )
 
     @staticmethod
-    def _semantic_input_byte_count(capture: Capture) -> int:
+    def _semantic_input_byte_count(capture: _CaptureState) -> int:
         """Return the UTF-8 bytes the semantic windows would send to inference."""
         return sum(
             len(chunk.text.encode("utf-8", errors="replace"))
             for chunk in capture.semantic_chunks
         )
 
-    def _schedule_semantic_prefetch(self, capture: Capture) -> None:
+    def _schedule_semantic_prefetch(self, capture: _CaptureState) -> None:
         """Queue post-ingestion indexing and make sure a bounded worker is draining."""
         if not capture.semantic_chunks:
             self._flush_metrics_snapshot()
@@ -1530,7 +1653,7 @@ class EphemeralEngine:
             return
         try:
             with self._lock:
-                if self._shutdown or capture.capture_id not in self.captures:
+                if self._shutdown or capture.capture_id not in self._captures:
                     return
                 if (
                     capture.embeddings is not None
@@ -1618,7 +1741,7 @@ class EphemeralEngine:
                 done.set()
                 self._flush_metrics_snapshot()
 
-    def _start_semantic_index(self, capture: Capture) -> Optional[Tuple[threading.Event, Optional[_SemanticIndexJob]]]:
+    def _start_semantic_index(self, capture: _CaptureState) -> Optional[Tuple[threading.Event, Optional[_SemanticIndexJob]]]:
         """Return the completion event for the job indexing ``capture``, starting one if needed.
 
         A running prefetch job is reused.  Otherwise the capture is pulled out
@@ -1675,7 +1798,7 @@ class EphemeralEngine:
         finally:
             self._flush_metrics_snapshot()
 
-    def _on_demand_index_worker(self, capture: Capture, job: _SemanticIndexJob) -> None:
+    def _on_demand_index_worker(self, capture: _CaptureState, job: _SemanticIndexJob) -> None:
         """Materialize one capture's embeddings and publish the outcome to waiters."""
         job.started_at = time.perf_counter()
         try:
@@ -1719,7 +1842,7 @@ class EphemeralEngine:
             job.done.set()
             self._flush_metrics_snapshot()
 
-    def _await_semantic_index(self, capture: Capture, timeout: Optional[float] = None) -> str:
+    def _await_semantic_index(self, capture: _CaptureState, timeout: Optional[float] = None) -> str:
         """Wait up to ``timeout`` seconds for the capture's semantic index.
 
         Returns ``"ready"`` or ``"pending"``.  ``None`` and ``inf`` wait until
@@ -1740,7 +1863,7 @@ class EphemeralEngine:
         with self._lock:
             if capture.embeddings is not None:
                 return "ready"
-            retained = self.captures.get(capture.capture_id) is capture
+            retained = self._captures.get(capture.capture_id) is capture
         if wait_seconds is not None and (not retained or (job is not None and job.cancelled)):
             # The job was cancelled (eviction or shutdown) or finished without
             # publishing for an evicted capture.  Indexing inline would ignore
@@ -1754,7 +1877,7 @@ class EphemeralEngine:
         self._ensure_embeddings(capture)
         return "ready"
 
-    def wait_for_semantic_index(self, capture: Capture, timeout: Optional[float] = None) -> str:
+    def _wait_for_state_index(self, capture: _CaptureState, timeout: Optional[float] = None) -> str:
         """Block until the capture's semantic index is ready, failed, or ``timeout`` elapses.
 
         Returns ``"ready"``, ``"pending"``, or ``"failed"``; it never raises for
@@ -1765,7 +1888,7 @@ class EphemeralEngine:
         except Exception:
             return "failed"
 
-    def _close_capture_storage(self, capture: Capture) -> None:
+    def _close_capture_storage(self, capture: _CaptureState) -> None:
         """Close per-capture search storage and report cleanup failures."""
         if capture.active_readers:
             if not capture.deferred_storage_tracked:
@@ -1792,21 +1915,21 @@ class EphemeralEngine:
             )
             LOGGER.exception("capture_storage_cleanup_exception")
 
-    def _acquire_capture_reader(self, capture_id: str) -> Optional[Capture]:
+    def _acquire_capture_reader(self, capture_id: str) -> Optional[_CaptureState]:
         """Return a capture while retaining its storage for one search reader."""
         with self._lock:
-            if not self.captures:
+            if not self._captures:
                 return None
             if capture_id == "latest" or not capture_id:
-                capture = self.captures[next(reversed(self.capture_order))]
+                capture = self._captures[next(reversed(self.capture_order))]
             else:
-                capture = self.captures.get(capture_id)
+                capture = self._captures.get(capture_id)
             if capture:
                 self._touch_capture(capture.capture_id)
                 capture.active_readers += 1
             return capture
 
-    def _release_capture_reader(self, capture: Capture) -> None:
+    def _release_capture_reader(self, capture: _CaptureState) -> None:
         """Release a search reader and finish deferred storage cleanup."""
         with self._lock:
             capture.active_readers = max(0, capture.active_readers - 1)
@@ -1859,7 +1982,7 @@ class EphemeralEngine:
             started_at=job.started_at,
             measurement=job.measurement,
         )
-        live = self.captures.get(capture_id)
+        live = self._captures.get(capture_id)
         if live is not None and live.semantic_index_state == "pending":
             live.semantic_index_state = "not-requested"
         job.done.set()
@@ -1923,16 +2046,121 @@ class EphemeralEngine:
         return unfinished
 
     @synchronized
-    def get_capture(self, capture_id: str = "latest") -> Optional[Capture]:
-        if not self.captures:
+    def _get_capture_state(self, capture_id: str = "latest") -> Optional[_CaptureState]:
+        """Resolve engine-owned storage for internal engine operations only."""
+        if not self._captures:
             return None
         if capture_id == "latest" or not capture_id:
-            capture = self.captures[next(reversed(self.capture_order))]
+            capture = self._captures[next(reversed(self.capture_order))]
         else:
-            capture = self.captures.get(capture_id)
+            capture = self._captures.get(capture_id)
         if capture:
             self._touch_capture(capture.capture_id)
         return capture
+
+    @staticmethod
+    def _capture_view(capture: _CaptureState) -> CaptureView:
+        """Create a detached, recursively read-only capture metadata view."""
+        diff_meta = _freeze_public_value(capture.diff_meta) if capture.diff_meta is not None else None
+        structured_metrics = _freeze_public_value(capture.structured_metrics)
+        return CaptureView(
+            capture_id=capture.capture_id,
+            label=capture.label,
+            timestamp=capture.timestamp,
+            line_count=capture.line_count,
+            input_byte_size=capture.input_byte_size,
+            content_type=capture.content_type,
+            diff_meta=diff_meta,
+            truncated=capture.truncated,
+            original_byte_size=capture.original_byte_size,
+            command_exit_code=capture.command_exit_code,
+            timed_out=capture.timed_out,
+            semantic_index_state=capture.semantic_index_state,
+            source=capture.source,
+            duration_ms=capture.duration_ms,
+            structured_metrics=structured_metrics,
+        )
+
+    @synchronized
+    def get_capture_view(self, capture_id: str = "latest") -> Optional[CaptureView]:
+        """Return immutable metadata without exposing capture storage or leases."""
+        capture = self._get_capture_state(capture_id)
+        return self._capture_view(capture) if capture is not None else None
+
+    def get_capture(self, capture_id: str = "latest") -> Optional[CaptureView]:
+        """Compatibility wrapper returning the supported read-only capture view.
+
+        Callers that previously read ``raw_lines`` should use
+        ``get_capture_slice``; indexing and storage fields are engine-owned.
+        """
+        return self.get_capture_view(capture_id)
+
+    def index_capture(self, capture_id: str = "latest") -> str:
+        """Ensure one capture's semantic index and return its supported status.
+
+        Returns ``ready`` or ``budget_exceeded``. Other indexing failures are
+        represented by the capture's ``failed`` diagnostic state.
+        """
+        capture = self._acquire_capture_reader(capture_id)
+        if capture is None:
+            return "not-found"
+        try:
+            if not capture.semantic_chunks:
+                return "ready"
+            try:
+                self._ensure_embeddings(capture)
+            except SemanticIndexBudgetExceeded:
+                return "budget_exceeded"
+            return "ready" if capture.semantic_index_state == "ready" else capture.semantic_index_state
+        except Exception:
+            with self._lock:
+                if (
+                    self._captures.get(capture.capture_id) is capture
+                    and capture.embeddings is None
+                ):
+                    capture.semantic_index_state = "failed"
+            return "failed"
+        finally:
+            self._release_capture_reader(capture)
+
+    def wait_for_capture_index(
+        self,
+        capture_id: str = "latest",
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Wait for indexing by capture ID without exposing capture state."""
+        capture = self._acquire_capture_reader(capture_id)
+        if capture is None:
+            return "not-found"
+        try:
+            return self._wait_for_state_index(capture, timeout)
+        finally:
+            self._release_capture_reader(capture)
+
+    def wait_for_semantic_index(self, capture: Any, timeout: Optional[float] = None) -> str:
+        """Compatibility wrapper accepting a view, ID, or legacy internal state."""
+        if isinstance(capture, _CaptureState):
+            return self._wait_for_state_index(capture, timeout)
+        capture_id = capture.capture_id if isinstance(capture, CaptureView) else capture
+        if not isinstance(capture_id, str):
+            return "failed"
+        return self.wait_for_capture_index(capture_id, timeout)
+
+    @synchronized
+    def get_capture_diagnostics(self, capture_id: str = "latest") -> Optional[CaptureDiagnostics]:
+        """Return stable, supported semantic-index measurements for a capture."""
+        capture = self._get_capture_state(capture_id)
+        if capture is None:
+            return None
+        embedding_bytes = int(capture.embeddings.nbytes) if capture.embeddings is not None else 0
+        return CaptureDiagnostics(
+            capture_id=capture.capture_id,
+            semantic_index_state=capture.semantic_index_state,
+            lexical_chunk_count=len(capture.chunks),
+            semantic_chunk_count=len(capture.semantic_chunks),
+            semantic_input_bytes=self._semantic_input_byte_count(capture),
+            retained_embedding_bytes=embedding_bytes,
+        )
 
     def _touch_capture(self, capture_id: str) -> None:
         """Marks a capture as recently used for LRU eviction."""
@@ -1940,7 +2168,7 @@ class EphemeralEngine:
             self.capture_order.move_to_end(capture_id)
 
     @synchronized
-    def search_bm25(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
+    def search_bm25(self, capture: _CaptureState, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
         Search using SQLite FTS5 BM25. Query punctuation is treated as a
         separator; terms are combined with OR. Returns (chunk_id, score).
@@ -1976,7 +2204,7 @@ class EphemeralEngine:
 
     @staticmethod
     def _search_lexical_fallback(
-        capture: Capture, tokens: List[str], top_k: int
+        capture: _CaptureState, tokens: List[str], top_k: int
     ) -> List[Tuple[int, float]]:
         """Search chunks with complete token matching when SQLite lacks FTS5."""
         query_terms = set(tokens)
@@ -1991,7 +2219,7 @@ class EphemeralEngine:
         ranked.sort(key=lambda item: (-item[1], item[0]))
         return ranked[:top_k]
 
-    def search_semantic(self, capture: Capture, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
+    def search_semantic(self, capture: _CaptureState, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """
         Dense vector cosine similarity search over the semantic windows.
         Returns list of (semantic_chunk_id, score).
@@ -2060,7 +2288,7 @@ class EphemeralEngine:
             batches.append(batch)
         return batches
 
-    def _ensure_embeddings(self, capture: Capture) -> None:
+    def _ensure_embeddings(self, capture: _CaptureState) -> None:
         """Materialize and cache dense embeddings for a captured chunk set."""
         with self._lock:
             if capture.embeddings is not None:
@@ -2071,9 +2299,9 @@ class EphemeralEngine:
                 )
             # A search reader may outlive LRU admission.  Its lease keeps the
             # capture's chunks and storage alive long enough to finish lazy
-            # indexing even after the capture is removed from ``self.captures``.
+            # indexing even after the capture is removed from ``self._captures``.
             if (
-                self.captures.get(capture.capture_id) is not capture
+                self._captures.get(capture.capture_id) is not capture
                 and not getattr(capture, "active_readers", 0)
             ):
                 return
@@ -2083,7 +2311,7 @@ class EphemeralEngine:
                 if capture.embeddings is not None:
                     return
                 if (
-                    self.captures.get(capture.capture_id) is not capture
+                    self._captures.get(capture.capture_id) is not capture
                     and not getattr(capture, "active_readers", 0)
                 ):
                     return
@@ -2128,7 +2356,7 @@ class EphemeralEngine:
             with self._lock:
                 if (
                     (
-                        self.captures.get(capture.capture_id) is capture
+                        self._captures.get(capture.capture_id) is capture
                         or getattr(capture, "active_readers", 0)
                     )
                     and capture.embeddings is None
@@ -2211,7 +2439,7 @@ class EphemeralEngine:
 
     def _search_capture(
         self,
-        capture: Capture,
+        capture: _CaptureState,
         query: str,
         mode: str,
         top_k: int,
@@ -2575,10 +2803,9 @@ class EphemeralEngine:
                 ),
             }
 
-        # get_capture holds the engine lock only while resolving the reference.
-        # The retained raw lines are immutable, so page construction can run
-        # outside that lock without blocking ingestion or other retrievals.
-        capture = self.get_capture(capture_id)
+        # Resolve private storage while holding the engine lock. The retained
+        # raw lines are immutable, so page construction can run outside it.
+        capture = self._get_capture_state(capture_id)
         if not capture:
             return {
                 "status": "error",
@@ -2781,7 +3008,7 @@ class EphemeralEngine:
             content += "\n... [slice truncated; continue with next_cursor]"
         return {**page, "content": content, "raw_content": page["content"]}
 
-    def _build_summary(self, capture: Capture, include_previews: bool = True) -> Dict[str, Any]:
+    def _build_summary(self, capture: _CaptureState, include_previews: bool = True) -> Dict[str, Any]:
         """Build a summary from a captured object without looking it up by ID."""
         signals, signals_str = detect_signals(
             capture.raw_lines,
@@ -2850,7 +3077,7 @@ class EphemeralEngine:
     @synchronized
     def get_summary(self, capture_id: str = "latest", include_previews: bool = True) -> Dict[str, Any]:
         """Generate a quick diagnostic summary for an active capture."""
-        capture = self.get_capture(capture_id)
+        capture = self._get_capture_state(capture_id)
         if not capture:
             return {
                 "status": "error",
@@ -2861,15 +3088,25 @@ class EphemeralEngine:
 
     def get_summary_for_capture(
         self,
-        capture: Capture,
+        capture: Any,
         include_previews: bool = True,
     ) -> Dict[str, Any]:
-        """Build a summary from an ingestion result even after LRU eviction.
+        """Build a summary from a capture or its read-only metadata view.
 
-        Ingestion callers retain the returned capture object. Reading that
-        snapshot avoids a lookup race where another capture evicts it before
-        the response summary is assembled.
+        Internal callers may pass a private state snapshot. A ``CaptureView``
+        is resolved through the engine while active and never exposes backing
+        storage. Use ``ingest_with_summary`` when an eviction-safe summary is
+        required as part of ingestion.
         """
+        if isinstance(capture, CaptureView):
+            state = self._get_capture_state(capture.capture_id)
+            if state is None:
+                return {
+                    "status": "error",
+                    "error_code": "capture_not_found",
+                    "message": f"Capture '{capture.capture_id}' not found.",
+                }
+            capture = state
         return self._build_summary(capture, include_previews=include_previews)
 
     @synchronized
@@ -2879,7 +3116,7 @@ class EphemeralEngine:
         """
         result = []
         for cid in reversed(self.capture_order):
-            cap = self.captures[cid]
+            cap = self._captures[cid]
             result.append({
                 "capture_id": cap.capture_id,
                 "label": cap.label,
@@ -2907,9 +3144,8 @@ class EphemeralEngine:
                 f"({self.max_buffer_bytes:,})"
             )
 
-        # Capture objects are immutable after ingestion. Snapshot their metadata
-        # and lines while holding the lock, then release it before doing the
-        # potentially expensive serialization work.
+        # Capture content and chunks are immutable after ingestion. Snapshot
+        # their metadata and lines under the lock, then serialize outside it.
         with self._lock:
             requested_ids = list(capture_ids) if capture_ids else list(reversed(self.capture_order))
             selected_ids = list(dict.fromkeys(requested_ids))[:max_captures]
@@ -2917,7 +3153,7 @@ class EphemeralEngine:
             records: List[Dict[str, Any]] = []
             missing_ids: List[str] = []
             for capture_id in selected_ids:
-                capture = self.captures.get(capture_id)
+                capture = self._captures.get(capture_id)
                 if not capture:
                     missing_ids.append(capture_id)
                     continue
@@ -3021,18 +3257,18 @@ class EphemeralEngine:
     @synchronized
     def get_buffer_stats(self) -> Dict[str, Any]:
         """Returns aggregate capture and memory-accounting metrics."""
-        total_lines = sum(cap.line_count for cap in self.captures.values())
-        total_chunks = sum(len(cap.chunks) for cap in self.captures.values())
-        total_semantic_chunks = sum(len(cap.semantic_chunks) for cap in self.captures.values())
+        total_lines = sum(cap.line_count for cap in self._captures.values())
+        total_chunks = sum(len(cap.chunks) for cap in self._captures.values())
+        total_semantic_chunks = sum(len(cap.semantic_chunks) for cap in self._captures.values())
         embedding_bytes = sum(
-            int(cap.embeddings.nbytes) for cap in self.captures.values()
+            int(cap.embeddings.nbytes) for cap in self._captures.values()
             if cap.embeddings is not None
         )
         accounted_bytes = self._total_bytes + self._deferred_storage_bytes + embedding_bytes
         rss_bytes = process_rss_bytes()
         admission = admission_snapshot()
         return {
-            "capture_count": len(self.captures),
+            "capture_count": len(self._captures),
             "max_captures": self.max_captures,
             "total_lines": total_lines,
             "total_chunks": total_chunks,
@@ -3065,7 +3301,7 @@ class EphemeralEngine:
             "semantic_prefetch_enabled": self.semantic_prefetch_enabled,
             "semantic_prefetch_workers": self.semantic_prefetch_workers,
             "semantic_prefetch_pending": sum(
-                1 for cap in self.captures.values() if cap.semantic_index_state == "pending"
+                1 for cap in self._captures.values() if cap.semantic_index_state == "pending"
             ),
             "semantic_prefetch_queued": len(self._prefetch_queue),
             "semantic_prefetch_running": len(self._prefetch_running),
@@ -3078,11 +3314,11 @@ class EphemeralEngine:
             ),
             "semantic_wait_seconds": self.semantic_wait_seconds,
             "semantic_prefetch_failed": sum(
-                1 for cap in self.captures.values() if cap.semantic_index_state == "failed"
+                1 for cap in self._captures.values() if cap.semantic_index_state == "failed"
             ),
             "semantic_index_budget_exceeded": sum(
                 1
-                for cap in self.captures.values()
+                for cap in self._captures.values()
                 if cap.semantic_index_state == "budget-exceeded"
             ),
             "accounted_bytes": accounted_bytes,
@@ -3099,14 +3335,14 @@ class EphemeralEngine:
         Clears one or all captures from the buffer.
         """
         if capture_id == "all":
-            capture_ids = list(self.captures)
-            for cap in self.captures.values():
+            capture_ids = list(self._captures)
+            for cap in self._captures.values():
                 self._mark_semantic_job_disposition_locked(cap.capture_id, "cleared")
                 self._cancel_prefetch(cap.capture_id, outcome="cleared")
                 self._cancel_on_demand_job(cap.capture_id, outcome="cleared")
                 cap.semantic_index_state = "evicted"
                 self._close_capture_storage(cap)
-            self.captures.clear()
+            self._captures.clear()
             self.capture_order.clear()
             self._total_bytes = 0
             self._indexed_chunks = 0
@@ -3114,8 +3350,8 @@ class EphemeralEngine:
             for current_id in capture_ids:
                 self.metrics.forget_capture(current_id)
             return "Cleared all captures from ephemeral buffer."
-        elif capture_id in self.captures:
-            cap = self.captures.pop(capture_id)
+        elif capture_id in self._captures:
+            cap = self._captures.pop(capture_id)
             self._mark_semantic_job_disposition_locked(capture_id, "cleared")
             self._cancel_prefetch(capture_id, outcome="cleared")
             self._cancel_on_demand_job(capture_id, outcome="cleared")
