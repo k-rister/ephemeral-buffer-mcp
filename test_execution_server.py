@@ -76,6 +76,35 @@ class TestExecutionTools(unittest.TestCase):
         listed = json.loads(server.list_executions())
         self.assertEqual(listed["executions"][0]["execution_id"], "tool-execution")
 
+    def test_service_context_allocates_execution_storage_on_first_use(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = os.path.join(directory, "lazy-execution-state")
+            context = server.create_service_context(
+                state_dir=state_dir,
+                metrics_file=None,
+                engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+            )
+            try:
+                self.assertFalse(os.path.exists(state_dir))
+                self.assertIsNone(context._execution_manager)
+
+                manager = context.execution_manager
+                manager.command_runner = self.runner
+                self.assertFalse(os.path.exists(state_dir))
+
+                with server._activate_service_context(context):
+                    result = json.loads(
+                        server.start_execution(
+                            [self.phase("build", "build")],
+                            execution_id="context-lazy-state",
+                        )
+                    )
+
+                self.assertEqual(result["execution_status"], "completed")
+                self.assertTrue(os.path.isdir(state_dir))
+            finally:
+                context.close()
+
     def test_capacity_and_retirement_tools(self):
         server.start_execution(
             [self.phase("retire", "retire")],

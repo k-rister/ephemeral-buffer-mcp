@@ -111,6 +111,32 @@ captures to the running server over its local Unix socket.
 The private CLI socket uses versioned length-prefixed request and response
 frames, so fragmented reads do not depend on half-closing the connection.
 
+### Embed an isolated service
+
+Python callers can create an owned service context and bind an MCP application
+to it. The context owns its engine, metrics, lazy execution manager, and metrics
+snapshot destination; call `close()` when the host is done with the app.
+
+```python
+from server import create_mcp_server, create_service_context
+
+context = create_service_context(metrics_file=None)
+app = create_mcp_server(context)
+try:
+    # Mount or run `app` with the embedding host.
+    ...
+finally:
+    context.close()
+```
+
+`context.start()` starts optional embedding warm-up. With the default
+process-private execution identity, creating a context does not create the
+execution-state directory; durable execution creates it on first use. Pass a
+distinct `state_dir` when contexts need separate durable namespaces. Contexts
+created with `create_service_context()` keep metrics in memory by default; pass
+a context-specific `metrics_file` to persist a snapshot. The standard
+`python -m server` entrypoint continues to use the default context.
+
 ### Start an isolated Codex session
 
 When using the global Codex MCP configuration, start Codex through the

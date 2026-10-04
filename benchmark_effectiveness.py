@@ -27,12 +27,16 @@ PRIVACY_NOTE = "fixtures are generated in code; no user content, captures, or pr
 
 @contextmanager
 def _benchmark_engine(max_captures: int) -> Iterator[EphemeralEngine]:
-    """Create a benchmark engine without background semantic indexing."""
-    engine = EphemeralEngine(max_captures=max_captures, semantic_prefetch=False)
+    """Create an isolated benchmark service without background indexing."""
+    context = server.create_service_context(
+        metrics_file=None,
+        engine_options={"max_captures": max_captures, "semantic_prefetch": False},
+    )
     try:
-        yield engine
+        with server._activate_service_context(context):
+            yield context.engine
     finally:
-        engine.shutdown()
+        context.close()
 
 
 class _IsolatedSummaryEngine(ContextDecorator):
@@ -42,15 +46,22 @@ class _IsolatedSummaryEngine(ContextDecorator):
         return type(self)()
 
     def __enter__(self):
-        self._benchmark_engine = EphemeralEngine(
-            max_captures=len(summary_scenarios()), semantic_prefetch=False
+        self._service_context = server.create_service_context(
+            metrics_file=None,
+            engine_options={
+                "max_captures": len(summary_scenarios()),
+                "semantic_prefetch": False,
+            },
         )
-        self._engine_token = server._ENGINE_OVERRIDE.set(self._benchmark_engine)
-        return self._benchmark_engine
+        self._activation = server._activate_service_context(self._service_context)
+        self._activation.__enter__()
+        return self._service_context.engine
 
     def __exit__(self, exc_type, exc_value, traceback):
-        server._ENGINE_OVERRIDE.reset(self._engine_token)
-        self._benchmark_engine.shutdown()
+        try:
+            self._activation.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._service_context.close()
         return False
 
 

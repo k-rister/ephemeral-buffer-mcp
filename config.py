@@ -1,6 +1,5 @@
 """Environment-backed server configuration helpers."""
 
-import atexit
 import dataclasses
 import hashlib
 import math
@@ -10,6 +9,7 @@ import stat
 import sys
 import tempfile
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Generic, Mapping, TypeVar
 
@@ -44,14 +44,21 @@ DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS = 4
 DEFAULT_MAX_QUEUED_SOCKET_CLIENTS = 8
 DEFAULT_SOCKET_STARTUP_TIMEOUT_SECONDS = 5
 SESSION_SOCKET_PREFIX = "ephemeral_buffer-"
-DEFAULT_EXECUTION_STATE_QUOTA_BYTES = 4 * 1024 * 1024 * 1024
-DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES = 128 * 1024 * 1024
-DEFAULT_EXECUTION_STATE_DIR = tempfile.mkdtemp(
-    prefix="ephemeral_buffer_executions-",
-    dir=tempfile.gettempdir(),
-)
 EXECUTION_STATE_SESSION_PREFIX = "ephemeral_buffer_executions-"
 EXECUTION_STATE_SOCKET_PREFIX = "ephemeral_buffer_executions-socket-"
+DEFAULT_EXECUTION_STATE_QUOTA_BYTES = 4 * 1024 * 1024 * 1024
+DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES = 128 * 1024 * 1024
+
+
+def new_default_execution_state_dir() -> str:
+    """Return a unique private-state path without creating it."""
+    return os.path.join(
+        tempfile.gettempdir(),
+        f"{EXECUTION_STATE_SESSION_PREFIX}{uuid.uuid4().hex}",
+    )
+
+
+DEFAULT_EXECUTION_STATE_DIR = new_default_execution_state_dir()
 
 T = TypeVar("T")
 
@@ -174,9 +181,9 @@ class SettingsSnapshot:
         }
 
 
-def cleanup_default_execution_state_dir() -> None:
-    """Remove only this process's private, non-persistent execution state."""
-    path = os.path.abspath(DEFAULT_EXECUTION_STATE_DIR)
+def cleanup_execution_state_dir(path: str) -> None:
+    """Remove only a private temporary execution-state directory."""
+    path = os.path.abspath(path)
     temp_dir = os.path.abspath(tempfile.gettempdir())
     if (
         os.path.dirname(path) != temp_dir
@@ -198,7 +205,9 @@ def cleanup_default_execution_state_dir() -> None:
         return
 
 
-atexit.register(cleanup_default_execution_state_dir)
+def cleanup_default_execution_state_dir() -> None:
+    """Remove this process's private default execution state, if it exists."""
+    cleanup_execution_state_dir(DEFAULT_EXECUTION_STATE_DIR)
 
 
 def socket_isolation_configured() -> bool:
@@ -603,10 +612,11 @@ def load_settings(
     environ: Mapping[str, str] | None = None,
     *,
     warn_on_legacy_state_transition: bool = True,
+    default_state_dir: str | None = None,
 ) -> SettingsSnapshot:
     """Parse one immutable startup settings snapshot from an environment."""
     values = os.environ if environ is None else environ
-    identity = resolve_session_descriptor(values)
+    identity = resolve_session_descriptor(values, default_state_dir=default_state_dir)
     if warn_on_legacy_state_transition and identity.legacy_state_transition:
         print(
             "Execution state identity now follows the resolved socket identity. "
