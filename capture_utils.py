@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
@@ -38,12 +39,14 @@ class BoundedCommandResult(tuple):
         timed_out: bool,
         *,
         cleanup_confirmed: bool = True,
+        cancelled: bool = False,
     ):
         result = super().__new__(
             cls,
             (output, exit_code, truncated, original_byte_size, timed_out),
         )
         result.cleanup_confirmed = cleanup_confirmed
+        result.cancelled = cancelled
         return result
 
 
@@ -150,10 +153,17 @@ def run_command_bounded(
     timeout_seconds: Optional[float] = None,
     process_started: Optional[Callable[[int, Optional[int]], None]] = None,
     process_marker: Optional[str] = None,
+    cancellation_event: Optional[threading.Event] = None,
 ) -> Tuple[str, int, bool, int, bool]:
-    """Run a command while retaining bounded output and enforcing an optional timeout."""
+    """Run a command with bounded output, optional timeout, and cooperative cancellation."""
     return _run_command_bounded(
-        command, cwd, max_output_bytes, timeout_seconds, process_started, process_marker
+        command,
+        cwd,
+        max_output_bytes,
+        timeout_seconds,
+        process_started,
+        process_marker,
+        cancellation_event,
     )
 
 
@@ -164,6 +174,7 @@ def _run_command_bounded(
     timeout_seconds: Optional[float],
     process_started: Optional[Callable[[int, Optional[int]], None]] = None,
     process_marker: Optional[str] = None,
+    cancellation_event: Optional[threading.Event] = None,
 ) -> Tuple[str, int, bool, int, bool]:
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than 0")
@@ -215,6 +226,7 @@ def _run_command_bounded(
     selector = None
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
     timed_out = False
+    cancelled = False
     aborted = False
     pending_error = None
     try:
@@ -225,32 +237,73 @@ def _run_command_bounded(
             selector = selectors.DefaultSelector()
             selector.register(proc.stdout, selectors.EVENT_READ)
             while selector.get_map():
+                if (
+                    cancellation_event is not None
+                    and cancellation_event.is_set()
+                ):
+                    cancelled = True
+                    break
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     timed_out = True
                     break
-                events = selector.select(remaining)
+                if cancellation_event is None:
+                    wait_seconds = remaining
+                else:
+                    wait_seconds = 0.1 if remaining is None else min(remaining, 0.1)
+                events = selector.select(wait_seconds)
                 if not events:
-                    timed_out = True
-                    break
+                    if cancellation_event is None:
+                        timed_out = True
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    continue
                 for key, _ in events:
                     chunk = key.fileobj.read1(65536)
                     if chunk:
                         capture.add(chunk)
                     else:
                         selector.unregister(key.fileobj)
-            if not timed_out:
-                remaining = None if deadline is None else max(0, deadline - time.monotonic())
-                try:
-                    proc.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
+            if not timed_out and not cancelled:
+                if cancellation_event is None:
+                    remaining = (
+                        None if deadline is None
+                        else max(0.0, deadline - time.monotonic())
+                    )
+                    try:
+                        proc.wait(timeout=remaining)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                else:
+                    while True:
+                        if cancellation_event.is_set():
+                            cancelled = True
+                            break
+                        remaining = (
+                            None if deadline is None
+                            else deadline - time.monotonic()
+                        )
+                        if remaining is not None and remaining <= 0:
+                            timed_out = True
+                            break
+                        wait_seconds = (
+                            0.1 if remaining is None else min(remaining, 0.1)
+                        )
+                        try:
+                            proc.wait(timeout=wait_seconds)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if remaining is not None and wait_seconds >= remaining:
+                                timed_out = True
+                                break
         except BaseException as exc:
             pending_error = exc
             aborted = True
             raise
     finally:
-        if timed_out or aborted:
+        if timed_out or cancelled or aborted:
             if timed_out:
                 log_event(
                     LOGGER,
@@ -258,6 +311,14 @@ def _run_command_bounded(
                     "command_timeout",
                     pid=getattr(proc, "pid", None),
                     timeout_seconds=timeout_seconds,
+                    output_bytes=capture.total_bytes,
+                )
+            elif cancelled:
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "command_cancelled",
+                    pid=getattr(proc, "pid", None),
                     output_bytes=capture.total_bytes,
                 )
             try:
@@ -303,11 +364,12 @@ def _run_command_bounded(
         )
     return BoundedCommandResult(
         output,
-        (124 if timed_out else proc.returncode),
+        (124 if timed_out else 130 if cancelled else proc.returncode),
         truncated,
         total_bytes,
         timed_out,
         cleanup_confirmed=cleanup_confirmed,
+        cancelled=cancelled,
     )
 
 

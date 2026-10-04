@@ -251,9 +251,17 @@ queue newest-first, so bursts are never silently dropped; the queue is bounded
 by the capture limit because eviction removes queued work. Semantic and hybrid
 search wait for an active job, index a still-queued capture on a dedicated
 thread instead of waiting behind older work, and retry failed jobs the same
-way, preserving the lazy path as the correctness fallback. Explicit cleanup and
-process shutdown drop queued work and let running jobs finish. Embedding
-inference is serialized by one model lock, so raise
+way, preserving the lazy path as the correctness fallback. Explicit cleanup
+drops queued work and lets running jobs finish. Process shutdown stops new
+admission, requests cancellation of active command and durable execution work,
+and waits for at most `EPHEMERAL_SHUTDOWN_GRACE_SECONDS` (default 10 seconds)
+for calls owned by that service context. Another context's admitted work does
+not delay its shutdown or private state cleanup. Shutdown reports active work
+that remains after that bound. Running native
+embedding inference cannot be forcibly stopped by cancelling its await and may
+continue in its worker thread; Python may keep the process alive until it
+returns. Embedding inference is serialized by one model
+lock, so raise
 `EPHEMERAL_EMBEDDING_THREADS` rather than the worker count for throughput. Use
 the content-free pending, queued, running, and failed counts in runtime
 diagnostics when checking host impact.
@@ -353,6 +361,16 @@ reported unavailable; persisted phase output remains available through
 If detailed execution metadata would exceed the 64 KiB tool-response budget,
 the server returns a compact response that preserves the durable execution ID
 and sets `response_truncated: true`.
+`start_execution` and `resume_execution` return promptly after scheduling
+work. Disconnecting the MCP caller detaches it from the durable execution;
+`cancel_execution(execution_id)` requests intentional termination. A command
+cancelled during a phase is checkpointed as `interrupted`, and existing
+process cleanup and fencing rules determine whether it can be resumed safely.
+Unexpected background task failures are exposed by `get_execution` in its
+`background_error` field, even when normal phase handling could not checkpoint
+a terminal phase result.
+The background manager admits at most eight active or queued executions;
+`get_execution_capacity` reports those counts.
 The state directory is checked for current-user ownership before use, and
 directory metadata is synchronized after atomic record replacement so a
 completed phase checkpoint survives normal host-crash recovery.

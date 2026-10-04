@@ -1018,7 +1018,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Data-path bytes: {", result)
         self.assertIn('"captures": 1', result)
         self.assertIn('"interface_coverage": {', result)
-        self.assertIn('"available": 21', result)
+        self.assertIn('"available": 22', result)
         self.assertIn('"get_buffer_stats": {', result)
         self.assertNotIn("secret metrics payload", result)
         self.assertNotIn("private metrics label", result)
@@ -1040,7 +1040,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(payload["scope"], "process")
         self.assertIn("started_at", payload)
         self.assertIn("snapshot_at", payload)
-        self.assertEqual(payload["interface_coverage"]["available"], 21)
+        self.assertEqual(payload["interface_coverage"]["available"], 22)
         self.assertNotIn("get_usage_metrics", payload["interface_coverage"]["unused_tools"])
         self.assertEqual(
             payload["interface_coverage"]["by_category"]["diagnostics"]["used"],
@@ -1220,6 +1220,7 @@ class TestServerTools(unittest.TestCase):
                 "preflight_command": "diagnostics",
                 "start_execution": "execution",
                 "resume_execution": "execution",
+                "cancel_execution": "execution",
                 "get_execution": "execution",
                 "get_execution_output": "execution",
                 "list_executions": "execution",
@@ -1240,7 +1241,7 @@ class TestServerTools(unittest.TestCase):
                 "set_semantic_index_budget": "configuration",
             },
         )
-        self.assertEqual(len(fastmcp_names), 21)
+        self.assertEqual(len(fastmcp_names), 22)
 
     def test_usage_metrics_reports_disabled_state_as_versioned_json(self):
         original_metrics = server.METRICS
@@ -3394,16 +3395,26 @@ class TestSocketServerStartup(unittest.TestCase):
             def clear(self):
                 pass
 
-            def wait(self, timeout):
+            def set(self):
+                pass
+
+            def wait(self, timeout=None):
                 self.timeout = timeout
                 return True
 
         class FakeThread:
+            def __init__(self):
+                self.alive = False
+
             def start(self):
                 self.started = True
+                self.alive = True
 
             def join(self, timeout=None):
-                pass
+                self.alive = False
+
+            def is_alive(self):
+                return self.alive
 
         fake_thread = FakeThread()
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \

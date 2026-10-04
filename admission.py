@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import weakref
 from collections import deque
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ class AdmissionMetrics:
     """Thread-safe, content-free counters for admitted work."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._active: Dict[str, int] = {}
         self._queued: Dict[str, int] = {}
         self._rejected: Dict[str, int] = {}
@@ -46,6 +47,7 @@ class AdmissionMetrics:
                 values[work_type] = updated
             else:
                 values.pop(work_type, None)
+            self._lock.notify_all()
 
     def snapshot(self) -> Dict[str, object]:
         with self._lock:
@@ -65,6 +67,17 @@ class AdmissionMetrics:
             "admission_max_queued_socket_clients": MAX_QUEUED_SOCKET_CLIENTS,
             "admission_max_active_diagnostic_work": MAX_ACTIVE_DIAGNOSTIC_WORK,
         }
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for all admitted work to release its ticket."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            while self._active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._lock.wait(remaining)
+            return True
 
 
 ADMISSION_METRICS = AdmissionMetrics()

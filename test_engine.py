@@ -2263,7 +2263,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         finally:
             engine.shutdown()
 
-    def test_shutdown_joins_on_demand_index_threads(self):
+    def test_shutdown_reports_running_on_demand_index_threads_without_joining(self):
         started = threading.Event()
         release = threading.Event()
 
@@ -2286,18 +2286,21 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(engine.search("payload", mode="hybrid", capture_id=queued.capture_id)["semantic_coverage"], "pending")
         queued_job = engine._on_demand_jobs[queued.capture_id]
         self.assertFalse(queued_job.future.running())
-        shutdown_thread = threading.Thread(target=engine.shutdown)
-        shutdown_thread.start()
-        shutdown_thread.join(timeout=0.2)
-        self.assertTrue(shutdown_thread.is_alive())
-        # Shutdown cancels the queued job at once and only waits for the running one.
+        shutdown_report = engine.shutdown(timeout_seconds=0)
+        self.assertIn("semantic_index:1", shutdown_report["unfinished_work"])
+        self.assertTrue(engine._on_demand_jobs[capture.capture_id].future.running())
+        # Shutdown cancels queued work and reports the running job.
         self.assertTrue(queued_job.done.wait(timeout=2))
         self.assertTrue(queued_job.future.cancelled())
         self.assertEqual(queued.semantic_index_state, "not-requested")
         self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
         release.set()
-        shutdown_thread.join(timeout=2)
-        self.assertFalse(shutdown_thread.is_alive())
+        deadline = time.monotonic() + 2
+        while (
+            capture.capture_id in engine._on_demand_jobs
+            or _semantic_index_threads() - other_pools
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(_semantic_index_threads() - other_pools, set())
         self.assertEqual(engine._on_demand_jobs, {})
         self.assertEqual(capture.semantic_index_state, "ready")
@@ -2549,7 +2552,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         finally:
             evicted_engine.shutdown()
 
-    def test_shutdown_drops_queued_prefetch_and_lets_running_work_finish(self):
+    def test_shutdown_reports_running_prefetch_and_drops_queued_work(self):
         started = threading.Event()
         release = threading.Event()
 
@@ -2567,8 +2570,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             second = engine.ingest("queued shutdown payload", label="shutdown-second")
             self.assertIn(second.capture_id, engine._prefetch_queue)
 
-            shutdown_thread = threading.Thread(target=engine.shutdown)
-            shutdown_thread.start()
+            shutdown_report = engine.shutdown(timeout_seconds=0)
+            self.assertIn("semantic_prefetch:1", shutdown_report["unfinished_work"])
+            self.assertIn(first.capture_id, engine._prefetch_running)
             deadline = time.time() + 2
             while second.capture_id in engine._prefetch_queue and time.time() < deadline:
                 time.sleep(0.01)
@@ -2576,8 +2580,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(second.semantic_index_state, "not-requested")
 
             release.set()
-            shutdown_thread.join(timeout=2)
-            self.assertFalse(shutdown_thread.is_alive())
+            deadline = time.monotonic() + 2
+            while engine._prefetch_running and time.monotonic() < deadline:
+                time.sleep(0.01)
             self.assertTrue(engine._shutdown)
             self.assertEqual(engine._prefetch_queue, {})
             self.assertEqual(engine._prefetch_running, {})
