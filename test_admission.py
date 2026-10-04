@@ -1,6 +1,8 @@
 """Regression tests for bounded asynchronous work admission."""
 
 import asyncio
+import threading
+import time
 import unittest
 
 import admission
@@ -36,6 +38,20 @@ class TestAdmissionMetrics(unittest.TestCase):
     def test_counter_underflow_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "counter underflow"):
             admission.ADMISSION_METRICS.change("active", "search", -1)
+
+    def test_wait_for_idle_observes_timeout_and_ticket_release(self):
+        metrics = admission.AdmissionMetrics()
+        metrics.change("active", "worker", 1)
+        self.assertFalse(metrics.wait_for_idle(0))
+
+        def release_later():
+            time.sleep(0.01)
+            metrics.change("active", "worker", -1)
+
+        releaser = threading.Thread(target=release_later)
+        releaser.start()
+        self.assertTrue(metrics.wait_for_idle(1))
+        releaser.join(timeout=1)
 
 
 class TestBoundedAdmissionGate(unittest.IsolatedAsyncioTestCase):

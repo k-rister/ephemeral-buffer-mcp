@@ -2628,6 +2628,26 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             release.set()
             engine.shutdown()
 
+    def test_shutdown_reports_warmup_that_outlives_grace_period(self):
+        class StillRunning:
+            def __init__(self):
+                self.join_timeouts = []
+
+            def join(self, timeout=None):
+                self.join_timeouts.append(timeout)
+
+            def is_alive(self):
+                return True
+
+        engine = EphemeralEngine(embedding_warmup=False, semantic_prefetch=False)
+        warmup = StillRunning()
+        engine._embedding_warmup_thread = warmup
+
+        report = engine.shutdown(timeout_seconds=0)
+
+        self.assertEqual(warmup.join_timeouts, [0.0])
+        self.assertIn("embedding_warmup", report["unfinished_work"])
+
     def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
         engine = EphemeralEngine(max_captures=1)
         capture = engine.ingest("searchable payload", label="search-errors")
