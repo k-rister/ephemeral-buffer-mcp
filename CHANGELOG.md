@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Isolate FastMCP private API access behind a compatibility adapter, delegate
+  argument parsing and validation to the SDK, report validation-metrics
+  limitations without interrupting tool dispatch, and test the minimum and
+  latest supported FastMCP 1.x versions.
 - Bound MCP and socket foreground work with configurable active slots and
   queues, return explicit busy errors on saturation, let the CLI stop a large
   socket upload when rejected, report admission and reader-pinned storage

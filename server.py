@@ -36,8 +36,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -52,8 +50,12 @@ from config import (
 
 SETTINGS = startup_settings()
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
 from mcp.types import CallToolResult, TextContent
+from fastmcp_adapter import (
+    compatibility_diagnostics as _fastmcp_compatibility_diagnostics,
+    refresh_instructions as _refresh_fastmcp_instructions,
+    register_tool as _register_fastmcp_tool,
+)
 from engine import (
     DEFAULT_MAX_BUFFER_BYTES,
     DEFAULT_MAX_CAPTURES,
@@ -291,57 +293,6 @@ def _bind_mcp_metrics_scope(app=None, service_context: "ServiceContext | None" =
     )
     with metrics.bind_scope(scope[0], attribution=scope[1]):
         yield
-
-
-class _MetricsFuncMetadata(FuncMetadata):
-    """FastMCP argument metadata that records rejected input schemas."""
-
-    _metrics_tool_name: str = PrivateAttr()
-    _service_context: Any = PrivateAttr()
-    _app: Any = PrivateAttr()
-
-    @classmethod
-    def for_tool(
-        cls,
-        metadata: FuncMetadata,
-        tool_name: str,
-        service_context: "ServiceContext",
-        app,
-    ) -> "_MetricsFuncMetadata":
-        instrumented = cls.model_validate(metadata.model_dump())
-        instrumented._metrics_tool_name = tool_name
-        instrumented._service_context = service_context
-        instrumented._app = app
-        return instrumented
-
-    async def call_fn_with_arg_validation(
-        self,
-        fn,
-        fn_is_async,
-        arguments_to_validate,
-        arguments_to_pass_directly,
-    ):
-        with _activate_service_context(self._service_context):
-            with _bind_mcp_metrics_scope(self._app, self._service_context):
-                try:
-                    with _active_metrics().measure(self._metrics_tool_name) as state:
-                        try:
-                            arguments_pre_parsed = self.pre_parse_json(arguments_to_validate)
-                            arguments_parsed_model = self.arg_model.model_validate(arguments_pre_parsed)
-                            arguments_parsed_dict = arguments_parsed_model.model_dump_one_level()
-                        except ValidationError:
-                            state["success"] = False
-                            state["failure_category"] = "validation"
-                            raise
-                        state["record"] = False
-                except ValidationError:
-                    _write_metrics_snapshot(self._service_context)
-                    raise
-
-                arguments_parsed_dict |= arguments_to_pass_directly or {}
-                if fn_is_async:
-                    return await fn(**arguments_parsed_dict)
-                return fn(**arguments_parsed_dict)
 
 
 def _classify_failure_text(text: str) -> str:
@@ -917,12 +868,26 @@ def _register_mcp_tool_for_app(
             **getattr(function, "__annotations__", {}),
             "return": ToolResponseEnvelope,
         }
-    app.add_tool(adapter, name=name)
-    registered_tool = app._tool_manager._tools.get(name)
-    if registered_tool is not None:
-        registered_tool.fn_metadata = _MetricsFuncMetadata.for_tool(
-            registered_tool.fn_metadata, name, service_context, app
-        )
+    @contextmanager
+    def validation_scope():
+        with _activate_service_context(service_context), _bind_mcp_metrics_scope(
+            app, service_context
+        ):
+            yield
+
+    def observe_validation_failure():
+        with _active_metrics().measure(name) as state:
+            state["success"] = False
+            state["failure_category"] = "validation"
+        _write_metrics_snapshot(service_context)
+
+    _register_fastmcp_tool(
+        app,
+        adapter,
+        name=name,
+        validation_scope=validation_scope,
+        validation_observer=observe_validation_failure,
+    )
 
 def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
     """Return client-visible operating guidance for this server instance."""
@@ -957,7 +922,7 @@ mcp = FastMCP("ephemeral-buffer", instructions=_mcp_instructions())
 def _refresh_mcp_instructions(app=None, context: "ServiceContext | None" = None) -> None:
     """Refresh client guidance immediately before MCP request serving."""
     target = app or mcp
-    target._mcp_server.instructions = _mcp_instructions(context)
+    _refresh_fastmcp_instructions(target, _mcp_instructions(context))
 
 
 def _runtime_package_version() -> str:
@@ -3040,6 +3005,26 @@ def get_runtime_diagnostics() -> str:
         f"Local metrics: {'enabled' if _active_metrics().enabled else 'disabled'}",
         "Captured content, labels, and command arguments are not included.",
     ]
+    fastmcp_status = _fastmcp_compatibility_diagnostics()
+    limitations = []
+    if fastmcp_status["tools_without_validation_metrics"]:
+        limitations.append(
+            "validation metrics unavailable for "
+            + ", ".join(fastmcp_status["tools_without_validation_metrics"])
+        )
+    if fastmcp_status["validation_observation_failures"]:
+        limitations.append(
+            "validation metrics failed during observation for "
+            + ", ".join(fastmcp_status["validation_observation_failures"])
+        )
+    if fastmcp_status["instruction_refresh"] == "unavailable":
+        limitations.append("runtime instruction refresh unavailable")
+    if limitations:
+        lines.append(
+            f"FastMCP {fastmcp_status['sdk_version']} compatibility limitation: "
+            + "; ".join(limitations)
+            + ". Tool dispatch remains available."
+        )
     if _active_metrics().enabled:
         snapshot = _metrics_snapshot()
         lines.append(f"Data-path bytes: {json.dumps(snapshot['bytes'], sort_keys=True)}")

@@ -78,14 +78,14 @@ jobs:
           )
 
       - name: Compile sources
-        run: python -m py_compile admission.py cli.py config.py engine.py execution.py server.py capture_utils.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py benchmark_relevance.py benchmark_routing.py benchmark_prefetch.py benchmark_semantic_index.py benchmark_semantic_memory.py benchmark_warmup.py benchmark_agent_ab.py benchmark_agent_ab_fixtures.py benchmark_agent_ab_baseline.py run_codex_agent_ab.py release_checks.py workload_results.py compare_workload_results.py list_workload_results.py
+        run: python -m py_compile admission.py cli.py config.py engine.py execution.py fastmcp_adapter.py server.py capture_utils.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py benchmark_relevance.py benchmark_routing.py benchmark_prefetch.py benchmark_semantic_index.py benchmark_semantic_memory.py benchmark_warmup.py benchmark_agent_ab.py benchmark_agent_ab_fixtures.py benchmark_agent_ab_baseline.py run_codex_agent_ab.py release_checks.py workload_results.py compare_workload_results.py list_workload_results.py
 
       - name: Run focused tests
         env:
           EPHEMERAL_SOCKET_PATH: ${{ runner.temp }}/ephemeral-buffer-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.sock
           EPHEMERAL_EXECUTION_STATE_DIR: ${{ runner.temp }}/ephemeral-buffer-executions-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}
           EPHEMERAL_METRICS_FILE: ${{ runner.temp }}/ephemeral-buffer-metrics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.json
-        run: ./scripts/with-test-env.sh python -u -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' -m unittest -v test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py test_compare_workload_results.py test_list_workload_results.py test_ci_workflow.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_metrics.py test_logging_utils.py test_execution.py test_execution_server.py
+        run: ./scripts/with-test-env.sh python -u -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' -m unittest -v test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py test_compare_workload_results.py test_list_workload_results.py test_ci_workflow.py test_fastmcp_adapter.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_metrics.py test_logging_utils.py test_execution.py test_execution_server.py
 
       - name: Report coverage
         run: |
@@ -178,6 +178,32 @@ jobs:
             benchmark-effectiveness-consolidation.json
             search-relevance.json
             benchmark-latency.json
+
+  fastmcp-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp-spec: ["mcp==1.29.1", "mcp<2"]
+    env:
+      EPHEMERAL_TEST_EMBEDDINGS: "1"
+      EPHEMERAL_REQUIRE_ISOLATION: "1"
+      EPHEMERAL_SESSION_ID: "fastmcp-compat-${{ github.run_id }}-${{ strategy.job-index }}"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt "${{ matrix.mcp-spec }}"
+
+      - name: Check adapter and MCP behavior
+        run: ./scripts/with-test-env.sh python -m unittest -v test_fastmcp_adapter.py test_server.py test_execution_server.py
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'

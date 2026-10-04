@@ -18,6 +18,16 @@ import server
 from execution import ExecutionBusyError, PhaseExecutionManager
 
 
+def mcp_result_text(result):
+    if hasattr(result, "content"):
+        content = result.content
+    else:
+        content = result[0] if isinstance(result, tuple) else result
+    if isinstance(content, str):
+        return content
+    return content[0].text
+
+
 class ToolRunner:
     def __init__(self, results=None):
         self.results = results or {}
@@ -533,14 +543,17 @@ class TestExecutionTools(unittest.TestCase):
         self.assertEqual(response["omitted_count"], 2)
 
     def test_execution_tools_are_registered_with_async_mcp_adapters(self):
-        names = server.mcp._tool_manager._tools
+        names = {
+            tool.name: tool
+            for tool in asyncio.run(server.mcp.list_tools())
+        }
         for name in (
             "start_execution", "resume_execution", "get_execution",
             "get_execution_output", "list_executions", "get_execution_capacity",
             "retire_executions",
         ):
             self.assertIn(name, names)
-        start_schema = names["start_execution"].parameters
+        start_schema = names["start_execution"].inputSchema
         phase_schema = start_schema["properties"]["phases"]["items"]
         if "$ref" in phase_schema:
             phase_schema = start_schema["$defs"][phase_schema["$ref"].rsplit("/", 1)[-1]]
@@ -563,19 +576,19 @@ class TestExecutionTools(unittest.TestCase):
             512,
         )
         self.assertNotIn("maximum", start_schema["properties"]["max_output_bytes"]["anyOf"][0])
-        list_schema = names["list_executions"].parameters
+        list_schema = names["list_executions"].inputSchema
         self.assertEqual(list_schema["properties"]["limit"]["minimum"], 1)
         self.assertEqual(list_schema["properties"]["limit"]["maximum"], 100)
-        retirement_schema = names["retire_executions"].parameters
+        retirement_schema = names["retire_executions"].inputSchema
         self.assertEqual(
             retirement_schema["properties"]["execution_ids"]["maxItems"], 20
         )
-        output_schema = names["get_execution_output"].parameters
+        output_schema = names["get_execution_output"].inputSchema
         self.assertEqual(output_schema["properties"]["max_bytes"]["minimum"], 512)
         self.assertEqual(start_schema["properties"]["label"]["maxUtf8Bytes"], 1024)
         self.assertEqual(start_schema["properties"]["cwd"]["anyOf"][0]["maxUtf8Bytes"], 4096)
         for name in ("resume_execution", "get_execution", "get_execution_output"):
-            execution_id_schema = names[name].parameters["properties"]["execution_id"]
+            execution_id_schema = names[name].inputSchema["properties"]["execution_id"]
             self.assertEqual(execution_id_schema["minLength"], 1)
             self.assertEqual(execution_id_schema["maxUtf8Bytes"], 256)
         self.assertEqual(output_schema["properties"]["phase_name"]["anyOf"][0]["minLength"], 1)
@@ -628,20 +641,24 @@ class TestExecutionTools(unittest.TestCase):
             )
 
         async def invoke():
-            adapter = names["start_execution"].fn
             offload = AsyncMock(
                 side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
             )
             with patch.object(server, "to_thread", offload):
-                started = json.loads(await adapter(
-                    phases=[self.phase("adapter", "adapter")],
-                    execution_id="adapter-execution",
-                ))
-                get_execution = names["get_execution"].fn
+                started = json.loads(mcp_result_text(await server.mcp.call_tool(
+                    "start_execution",
+                    {
+                        "phases": [self.phase("adapter", "adapter")],
+                        "execution_id": "adapter-execution",
+                    },
+                )))
                 deadline = asyncio.get_running_loop().time() + 3
                 while True:
                     result = json.loads(
-                        await get_execution(execution_id="adapter-execution")
+                        mcp_result_text(await server.mcp.call_tool(
+                            "get_execution",
+                            {"execution_id": "adapter-execution"},
+                        ))
                     )
                     if result["execution_status"] == "completed":
                         return started, result
