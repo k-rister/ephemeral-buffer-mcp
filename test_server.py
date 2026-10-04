@@ -173,6 +173,36 @@ class TestServerTools(unittest.TestCase):
             self.assertFalse(first_state.exists())
             self.assertFalse(second_state.exists())
 
+    def test_service_context_replaces_and_cleans_private_state_directory(self):
+        settings = settings_with_environment(
+            EPHEMERAL_EXECUTION_STATE_DIR="",
+            EPHEMERAL_SESSION_ID="",
+            EPHEMERAL_SOCKET_PATH="",
+            EPHEMERAL_METRICS="0",
+        )
+        self.assertEqual(
+            settings.identity.state_source,
+            "process:private temporary directory",
+        )
+
+        context = server.create_service_context(
+            settings,
+            engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+        )
+        state_dir = context.settings.identity.state_dir
+        self.assertNotEqual(state_dir, settings.identity.state_dir)
+        os.mkdir(state_dir, 0o700)
+
+        context.close()
+        context.close()
+
+        self.assertFalse(os.path.exists(state_dir))
+
+    def test_lazy_execution_manager_proxy_forwards_to_default_context(self):
+        manager = SimpleNamespace(probe="forwarded")
+        with patch.object(server.DEFAULT_SERVICES, "_execution_manager", manager):
+            self.assertEqual(server.execution_manager.probe, "forwarded")
+
     def test_tool_instrumentation_logs_content_free_lifecycle(self):
         with patch.object(server, "log_event") as log:
             @server._instrument_tool("probe_tool")
