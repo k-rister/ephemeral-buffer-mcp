@@ -1497,9 +1497,15 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertFalse(hasattr(capture, "raw_lines"))
             self.assertFalse(hasattr(capture, "embeddings"))
             self.assertFalse(hasattr(engine, "captures"))
+            self.assertEqual(capture.byte_size, capture.input_byte_size)
+            self.assertEqual(capture.label_byte_size, len(capture.label.encode("utf-8")))
+            self.assertEqual(capture.retained_byte_size, capture.byte_size + capture.label_byte_size)
+
+            engine._get_capture_state(capture.capture_id).structured_metrics["set_values"] = {"kept"}
             view = engine.get_capture(capture.capture_id)
             self.assertEqual(view.line_count, 2)
             self.assertEqual(view.structured_metrics["items"], ("kept",))
+            self.assertEqual(view.structured_metrics["set_values"], frozenset({"kept"}))
             with self.assertRaises(TypeError):
                 view.structured_metrics["new"] = True
 
@@ -1507,6 +1513,51 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(diagnostics.capture_id, capture.capture_id)
             self.assertGreater(diagnostics.semantic_chunk_count, 0)
             self.assertEqual(diagnostics.retained_embedding_bytes, 0)
+            with patch.object(engine, "_get_embedding_model") as load_model:
+                engine.load_embedding_model()
+            load_model.assert_called_once_with()
+        finally:
+            engine.shutdown()
+
+    def test_summary_for_capture_accepts_and_rejects_public_views(self):
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        try:
+            view = engine.ingest("summary payload", label="summary-view")
+            summary = engine.get_summary_for_capture(view, include_previews=False)
+            self.assertEqual(summary["status"], "ok")
+            self.assertEqual(summary["capture_id"], view.capture_id)
+
+            engine.clear(view.capture_id)
+            missing = engine.get_summary_for_capture(view, include_previews=False)
+            self.assertEqual(missing["status"], "error")
+            self.assertEqual(missing["error_code"], "capture_not_found")
+        finally:
+            engine.shutdown()
+
+    def test_public_indexing_and_wait_apis_report_supported_statuses(self):
+        engine = EphemeralEngine(max_captures=2, semantic_prefetch=False)
+        try:
+            self.assertEqual(engine.index_capture("missing"), "not-found")
+            self.assertEqual(engine.wait_for_capture_index("missing"), "not-found")
+            self.assertIsNone(engine.get_capture_diagnostics("missing"))
+
+            capture = engine.ingest("semantic index ready", label="ready-index")
+            self.assertEqual(engine.wait_for_semantic_index(capture, timeout=2), "ready")
+            self.assertEqual(engine.wait_for_semantic_index(capture.capture_id, timeout=2), "ready")
+            self.assertEqual(engine.index_capture(capture.capture_id), "ready")
+
+            state = engine._get_capture_state(capture.capture_id)
+            state.semantic_chunks.clear()
+            self.assertEqual(engine.index_capture(capture.capture_id), "ready")
+
+            over_budget = engine.ingest("semantic index too large", label="budget-index")
+            engine.semantic_max_index_input_bytes = 1
+            self.assertEqual(engine.index_capture(over_budget.capture_id), "budget_exceeded")
+            self.assertEqual(
+                engine.get_capture_diagnostics(over_budget.capture_id).semantic_index_state,
+                "budget-exceeded",
+            )
+            self.assertEqual(engine.wait_for_semantic_index(object()), "failed")
         finally:
             engine.shutdown()
 
