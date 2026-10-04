@@ -22,7 +22,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp<2",
+    "mcp>=1.29.1,<2",
     "fastembed>=0.7.0",
     "numpy>=1.24.0",
     "urllib3>=2.8.0"
@@ -38,4 +38,4 @@ ephbuf = "cli:main"
 ephemeral-config = "config:main"
 
 [tool.setuptools]
-py-modules = ["admission", "capture_utils", "cli", "config", "engine", "execution", "logging_utils", "metrics", "server", "socket_protocol"]
+py-modules = ["admission", "capture_utils", "cli", "config", "engine", "execution", "fastmcp_adapter", "logging_utils", "metrics", "server", "socket_protocol"]

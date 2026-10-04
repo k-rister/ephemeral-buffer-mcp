@@ -37,6 +37,14 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("test_execution.py", source)
         self.assertIn("test_execution_server.py", source)
 
+    def test_fastmcp_compatibility_matrix_checks_supported_1x_endpoints(self):
+        workflow = Path(__file__).with_name(".github") / "workflows" / "ci.yml"
+        source = workflow.read_text()
+
+        self.assertIn("fastmcp-compatibility:", source)
+        self.assertIn('mcp-spec: ["mcp==1.29.1", "mcp<2"]', source)
+        self.assertIn("test_fastmcp_adapter.py", source)
+
     def test_ci_compiles_and_executes_workload_result_tooling(self):
         workflow = Path(__file__).with_name(".github") / "workflows" / "ci.yml"
         source = workflow.read_text()

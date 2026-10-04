@@ -35,6 +35,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 ### Requirements
 
 - Python 3.10 or newer
+- FastMCP (the `mcp` package) 1.29.1 or newer within the 1.x series
 - A supported MCP client if you want to use the server from an AI coding assistant
 - Network access on first use if FastEmbed needs to download its embedding model
 
@@ -943,7 +944,9 @@ content-free `failure_categories` for `validation`, `timeout`, `socket`,
 messages, commands, paths, queries, or capture identifiers.
 Schema-invalid MCP arguments are measured at the FastMCP validation boundary
 as failed calls in the `validation` category, even when the tool function does
-not run.
+not run. If the installed SDK does not support that instrumentation, normal
+SDK validation and tool dispatch continue; `get_runtime_diagnostics` reports
+which tools lack validation metrics.
 The `semantic_index` section reports content-free indexing operations separately
 for `prefetch` and `on_demand`. Each source includes queued, completed, failed,
 cancelled, evicted, and cleared job counts; indexed chunk totals; and bounded
@@ -1059,7 +1062,8 @@ COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report --include='r
 ```
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
-Python 3.10 and 3.12 for pushes to `main` and pull requests. The FastEmbed
+Python 3.10 and 3.12 for pushes to `main` and pull requests. A compatibility
+matrix also checks FastMCP 1.29.1 and the latest 1.x release. The FastEmbed
 model is loaded on the first capture or semantic search rather than during
 server import. Set `EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
 `EPHEMERAL_FASTEMBED_CACHE_DIR` to control its cache directory. The model cache

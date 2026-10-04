@@ -104,6 +104,16 @@ def response_json(writer):
     return json.loads(framed[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + length])
 
 
+def mcp_result_text(result):
+    if hasattr(result, "content"):
+        content = result.content
+    else:
+        content = result[0] if isinstance(result, tuple) else result
+    if isinstance(content, str):
+        return content
+    return content[0].text
+
+
 class TestServerTools(unittest.TestCase):
     def setUp(self):
         server.engine.clear("all")
@@ -165,7 +175,8 @@ class TestServerTools(unittest.TestCase):
                 self.assertIsNone(server.engine.get_capture(first_capture_id))
 
                 app = server.create_mcp_server(first)
-                self.assertIn("capture_text", app._tool_manager._tools)
+                tool_names = {tool.name for tool in asyncio.run(app.list_tools())}
+                self.assertIn("capture_text", tool_names)
             finally:
                 first.close()
                 second.close()
@@ -355,10 +366,10 @@ class TestServerTools(unittest.TestCase):
         server.METRICS = metrics
         try:
             async def call_with_missing_required_argument():
-                await server.mcp._tool_manager.call_tool("capture_text", {})
+                await server.mcp.call_tool("capture_text", {})
 
             async def call_with_valid_argument():
-                await server.mcp._tool_manager.call_tool(
+                await server.mcp.call_tool(
                     "capture_text",
                     {"content": "valid validation-boundary probe"},
                 )
@@ -375,27 +386,6 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(stats["failures"], 1)
         self.assertEqual(stats["failure_categories"]["validation"], 1)
 
-    def test_mcp_validation_boundary_calls_sync_functions(self):
-        original_metrics = server.METRICS
-        metrics = LocalMetrics(enabled=True)
-        server.METRICS = metrics
-        try:
-            metadata = server.mcp._tool_manager._tools["capture_text"].fn_metadata
-
-            async def invoke_sync_metadata():
-                return await metadata.call_fn_with_arg_validation(
-                    lambda **kwargs: f"sync:{kwargs['content']}",
-                    False,
-                    {"content": "sync validation probe"},
-                    {},
-                )
-
-            result = asyncio.run(invoke_sync_metadata())
-        finally:
-            server.METRICS = original_metrics
-
-        self.assertEqual(result, "sync:sync validation probe")
-
     def test_registered_mcp_tools_use_async_worker_adapter(self):
         async def exercise():
             @server._mcp_tool("blocking_probe", "diagnostics")
@@ -404,12 +394,11 @@ class TestServerTools(unittest.TestCase):
                 return "worker result"
 
             try:
-                tool = server.mcp._tool_manager._tools["blocking_probe"].fn
                 offload = AsyncMock(return_value="worker result")
                 with patch.object(server, "to_thread", offload):
-                    result = await tool()
+                    result = await server.mcp.call_tool("blocking_probe", {})
 
-                self.assertEqual(result, "worker result")
+                self.assertEqual(result[0].text, "worker result")
                 offload.assert_awaited_once_with(blocking_probe)
             finally:
                 server.mcp.remove_tool("blocking_probe")
@@ -435,9 +424,17 @@ class TestServerTools(unittest.TestCase):
                     (lambda: server.ToolResponseEnvelope(status="ok", data={}, text="ok"))
                     if structured else None
                 )
+
+                def capture_registered_tool(_app, fn, *, name, **_kwargs):
+                    adapters[name] = fn
+
                 with (
-                    patch.object(server.mcp, "add_tool") as add_tool,
-                    patch.object(server.mcp._tool_manager, "_tools", {}),
+                    patch.object(
+                        server,
+                        "_register_fastmcp_tool",
+                        side_effect=capture_registered_tool,
+                    ),
+                    patch.object(server, "_MCP_TOOL_REGISTRATIONS", []),
                     patch.object(server, "_REGISTERED_MCP_TOOL_NAMES", []),
                     patch.object(server, "_REGISTERED_MCP_TOOL_CATEGORIES", {}),
                 ):
@@ -446,7 +443,6 @@ class TestServerTools(unittest.TestCase):
                         category,
                         structured_result_factory=factory,
                     )(lambda: "unused")
-                    adapters[name] = add_tool.call_args.args[0]
 
             for name, category in (
                 ("busy_retrieval_probe", "mcp"),
@@ -607,10 +603,6 @@ class TestServerTools(unittest.TestCase):
             engine_options={"embedding_warmup": False, "semantic_prefetch": False},
         )
         app = server.create_mcp_server(context)
-        tools = {
-            name: app._tool_manager._tools[name].fn
-            for name in ("capture_text", "start_execution", "get_buffer_stats")
-        }
 
         class Ticket:
             def __init__(self):
@@ -631,40 +623,52 @@ class TestServerTools(unittest.TestCase):
         async def exercise():
             with context._lifecycle_lock:
                 context._closing = True
-            structured = await tools["capture_text"](content="shutdown probe")
-            execution = await tools["start_execution"](phases=[])
-            diagnostic = await tools["get_buffer_stats"]()
+            structured = await app.call_tool("capture_text", {"content": "shutdown probe"})
+            execution = await app.call_tool(
+                "start_execution",
+                {"phases": [{"name": "shutdown-probe", "command": "true"}]},
+            )
+            diagnostic = await app.call_tool("get_buffer_stats", {})
             self.assertIn("service is shutting down", structured.content[0].text)
-            self.assertEqual(json.loads(execution)["error"]["code"], "server_shutting_down")
-            self.assertIn("server_shutting_down", diagnostic)
+            self.assertEqual(
+                json.loads(mcp_result_text(execution))["error"]["code"],
+                "server_shutting_down",
+            )
+            self.assertIn("server_shutting_down", mcp_result_text(diagnostic))
 
             for name, arguments in (
                 ("capture_text", {"content": "closing race"}),
-                ("start_execution", {"phases": []}),
+                (
+                    "start_execution",
+                    {"phases": [{"name": "closing-race", "command": "true"}]},
+                ),
                 ("get_buffer_stats", {}),
             ):
                 gate = ClosingGate()
                 with context._lifecycle_lock:
                     context._closing = False
                 with patch.object(server, "admission_gate", return_value=gate):
-                    result = await tools[name](**arguments)
+                    result = await app.call_tool(name, arguments)
                 self.assertTrue(gate.ticket.released)
                 with context._lifecycle_lock:
                     context._closing = False
                 if name == "capture_text":
                     self.assertIn("service is shutting down", result.content[0].text)
                 elif name == "start_execution":
-                    self.assertEqual(json.loads(result)["error"]["code"], "server_shutting_down")
+                    self.assertEqual(
+                        json.loads(mcp_result_text(result))["error"]["code"],
+                        "server_shutting_down",
+                    )
                 else:
-                    self.assertIn("server_shutting_down", result)
+                    self.assertIn("server_shutting_down", mcp_result_text(result))
 
             class FailingGate:
                 async def acquire(self, _work_type):
                     raise RuntimeError("admission failed")
 
             with patch.object(server, "admission_gate", return_value=FailingGate()):
-                with self.assertRaisesRegex(RuntimeError, "admission failed"):
-                    await tools["get_buffer_stats"]()
+                with self.assertRaisesRegex(Exception, "admission failed"):
+                    await app.call_tool("get_buffer_stats", {})
             self.assertEqual(context._active_tool_calls, {})
 
         try:
@@ -682,7 +686,6 @@ class TestServerTools(unittest.TestCase):
             engine_options={"embedding_warmup": False, "semantic_prefetch": False},
         )
         app = server.create_mcp_server(context)
-        adapter = app._tool_manager._tools["execute_and_capture"].fn
         from capture_utils import BoundedCommandResult
 
         with patch.object(
@@ -690,7 +693,9 @@ class TestServerTools(unittest.TestCase):
             "run_command_bounded",
             return_value=BoundedCommandResult("ok\n", 0, False, 3, False),
         ):
-            result = asyncio.run(adapter(command="echo ok"))
+            result = asyncio.run(
+                app.call_tool("execute_and_capture", {"command": "echo ok"})
+            )
 
         self.assertEqual(server._REQUEST_CANCEL_EVENT.get(), None)
         self.assertIn('"command_cancelled":false', result.content[0].text)
@@ -1078,6 +1083,27 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Semantic index budget adjustment:", result)
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
+
+    def test_runtime_diagnostics_exposes_fastmcp_observability_limitations(self):
+        with patch.object(
+            server,
+            "_fastmcp_compatibility_diagnostics",
+            return_value={
+                "sdk_version": "1.test",
+                "validation_metrics": "partial",
+                "tools_without_validation_metrics": ["capture_text"],
+                "validation_observation_failures": {"search_capture": "RuntimeError"},
+                "instruction_refresh": "unavailable",
+                "instruction_refresh_error_type": "AttributeError",
+            },
+        ):
+            result = server.get_runtime_diagnostics()
+
+        self.assertIn("FastMCP 1.test compatibility limitation:", result)
+        self.assertIn("validation metrics unavailable for capture_text", result)
+        self.assertIn("validation metrics failed during observation for search_capture", result)
+        self.assertIn("runtime instruction refresh unavailable", result)
+        self.assertIn("Tool dispatch remains available.", result)
 
     def test_runtime_diagnostics_reports_active_log_file_and_level(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1990,19 +2016,17 @@ class TestServerTools(unittest.TestCase):
         captured = json.loads(server.capture_text("needle αβ\nsecond line", label="typed-result"))
         capture_id = captured["capture_id"]
 
-        capture_response = asyncio.run(server.mcp._tool_manager.call_tool(
+        capture_response = asyncio.run(server.mcp.call_tool(
             "capture_text",
             {"content": "another capture", "label": "mcp-envelope"},
-            convert_result=True,
         ))
         self.assertEqual(capture_response.structuredContent["schema_version"], 1)
         self.assertEqual(capture_response.structuredContent["status"], "ok")
         self.assertIn("capture_id", capture_response.structuredContent["data"])
 
-        search_response = asyncio.run(server.mcp._tool_manager.call_tool(
+        search_response = asyncio.run(server.mcp.call_tool(
             "search_capture",
             {"query": "needle", "mode": "bm25", "capture_id": capture_id},
-            convert_result=True,
         ))
         self.assertEqual(search_response.structuredContent["schema_version"], 1)
         self.assertEqual(search_response.structuredContent["status"], "ok")
@@ -2021,7 +2045,7 @@ class TestServerTools(unittest.TestCase):
             server.MCP_TOOL_RESPONSE_MAX_BYTES,
         )
 
-        slice_response = asyncio.run(server.mcp._tool_manager.call_tool(
+        slice_response = asyncio.run(server.mcp.call_tool(
             "get_capture_slice",
             {
                 "start_line": 1,
@@ -2029,7 +2053,6 @@ class TestServerTools(unittest.TestCase):
                 "capture_id": capture_id,
                 "max_bytes": 8192,
             },
-            convert_result=True,
         ))
         self.assertEqual(slice_response.structuredContent["schema_version"], 1)
         self.assertEqual(slice_response.structuredContent["data"]["content"], "needle αβ\nsecond line")
