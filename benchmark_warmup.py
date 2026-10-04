@@ -40,7 +40,7 @@ def _measure_in_process(warmup: bool) -> dict[str, Any]:
 
         capture = engine.ingest("embedding warmup benchmark", label=f"warmup-{warmup}")
         started = time.perf_counter()
-        engine.search_semantic(capture, "embedding benchmark")
+        engine.search("embedding benchmark", mode="semantic", capture_id=capture.capture_id)
         first_search_seconds = time.perf_counter() - started
         if not warmup:
             # Lazy mode becomes embedding-ready only when its first semantic
