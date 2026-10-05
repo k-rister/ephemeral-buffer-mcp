@@ -90,6 +90,37 @@ class FakeEngine:
 
 
 class TestSemanticMemoryWorkloadResult(unittest.TestCase):
+    def _run_budget_exceeded_main(self, search_results):
+        engines = []
+
+        class SearchFakeEngine(FakeEngine):
+            def __init__(self, **options):
+                super().__init__(**options)
+                self.search_calls = []
+                engines.append(self)
+
+            def search(self, query, mode, top_k):
+                self.search_calls.append((query, mode, top_k))
+                return search_results[mode]
+
+        argv = [
+            "benchmark_semantic_memory.py",
+            "--line-count", "4",
+            "--line-bytes", "32",
+        ]
+        with patch.object(benchmark_semantic_memory, "EphemeralEngine", SearchFakeEngine), patch.object(
+            SearchFakeEngine, "index_capture", return_value="budget_exceeded"
+        ), patch.object(
+            benchmark_semantic_memory,
+            "measure_rss_stage",
+            side_effect=lambda action, interval: (action(), 0.25, 2048),
+        ), patch.object(benchmark_semantic_memory, "process_rss_bytes", return_value=1024), patch.object(
+            benchmark_semantic_memory.time, "sleep"
+        ), patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            benchmark_semantic_memory.main()
+
+        return json.loads(stdout.getvalue()), engines[0]
+
     def test_workload_result_reports_memory_stages_and_budget_validation(self):
         converted = benchmark_semantic_memory.workload_result(sample_record("passed"))
         self.assertEqual(converted["workload"]["name"], "semantic-memory")
@@ -109,6 +140,49 @@ class TestSemanticMemoryWorkloadResult(unittest.TestCase):
         self.assertEqual(converted["status"], "failure")
         self.assertEqual(converted["runs"][1]["status"], "failure")
         self.assertIn("fallback validation failed", converted["errors"][0])
+
+    def test_matched_target_rank_returns_the_matching_rank_or_none(self):
+        search_result = {
+            "matches": [
+                {"matched_range": "L00001-L00003"},
+                {"matched_range": "L00004-L00006"},
+            ],
+        }
+
+        self.assertEqual(benchmark_semantic_memory.matched_target_rank(search_result, 5), 2)
+        self.assertIsNone(benchmark_semantic_memory.matched_target_rank(search_result, 8))
+        self.assertIsNone(benchmark_semantic_memory.matched_target_rank({"matches": []}, 1))
+
+    def test_main_validates_budget_exceeded_fallback_searches(self):
+        valid_search = {
+            "semantic_coverage": "unavailable",
+            "semantic_fallback": "SemanticIndexBudgetExceeded",
+            "matches": [{"matched_range": "L00001-L00004"}],
+        }
+        valid, engine = self._run_budget_exceeded_main(
+            {"hybrid": valid_search, "semantic": valid_search}
+        )
+
+        validation = valid["budget_fallback_validation"]
+        self.assertEqual(validation["status"], "passed")
+        self.assertEqual(validation["target_line"], 3)
+        self.assertEqual(
+            [engine.search_calls[0][1], engine.search_calls[1][1]],
+            ["hybrid", "semantic"],
+        )
+        self.assertEqual(
+            [search["target_rank"] for search in validation["searches"].values()],
+            [1, 1],
+        )
+
+        invalid_search = {
+            **valid_search,
+            "semantic_fallback": "unexpected-fallback",
+        }
+        invalid, _ = self._run_budget_exceeded_main(
+            {"hybrid": valid_search, "semantic": invalid_search}
+        )
+        self.assertEqual(invalid["budget_fallback_validation"]["status"], "failed")
 
     def test_main_rejects_failed_semantic_index_status(self):
         argv = [

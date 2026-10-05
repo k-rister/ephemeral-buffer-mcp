@@ -669,7 +669,11 @@ class TestCodexAgentRunner(unittest.TestCase):
         }) + "\n")
         with patch("run_codex_agent_ab._run_codex_process", return_value=result), patch.dict(
             os.environ,
-            {"EPHEMERAL_TEST_EMBEDDINGS": "", "EPHEMERAL_FASTEMBED_CACHE_DIR": ""},
+            {
+                "EPHEMERAL_TEST_EMBEDDINGS": "",
+                "EPHEMERAL_FASTEMBED_CACHE_DIR": "",
+                "EPHEMERAL_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5-fp32",
+            },
             clear=False,
         ):
             payload = run_schedule(schedule, manifest, args)

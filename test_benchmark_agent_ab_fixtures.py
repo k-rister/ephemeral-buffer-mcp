@@ -1,5 +1,6 @@
 """Tests for deterministic, privacy-safe agent A/B fixtures."""
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,13 +30,24 @@ class TestAgentAbFixtures(unittest.TestCase):
     def test_create_fixture_is_deterministic_and_contains_no_logs(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "fixture"
+            second_destination = Path(directory) / "fixture-copy"
             create_fixture(destination)
+            create_fixture(second_destination)
+
+            def snapshot(root):
+                return {
+                    path.relative_to(root): path.read_bytes()
+                    for path in sorted(root.rglob("*"))
+                    if path.is_file()
+                }
+
+            self.assertEqual(snapshot(destination), snapshot(second_destination))
             emitter = destination / "emit_log.py"
             self.assertTrue(emitter.is_file())
             self.assertTrue((destination / "FIXTURE.md").is_file())
             self.assertFalse((destination / "tests.log").exists())
             self.assertNotIn("TARGETED_SIGNAL", (destination / "FIXTURE.md").read_text(encoding="utf-8"))
-            first = __import__("subprocess").check_output(
+            first = subprocess.check_output(
                 ["python3", str(emitter), "build"], text=True
             )
             self.assertEqual(first.count("BUILD_FAILURE_SIGNAL"), 1)
