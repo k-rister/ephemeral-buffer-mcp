@@ -191,9 +191,15 @@ class TestAgentAbBenchmark(unittest.TestCase):
         )
         self.assertFalse(unavailable["paired_deltas_mcp_minus_control"]["peak_rss_bytes"]["available"])
 
-    def test_validation_rejects_missing_runs_and_raw_fields(self):
+    def test_validation_rejects_missing_runs(self):
         schedule, payload = _records_payload()
         payload["runs"] = payload["runs"][:-1]
+        with self.assertRaises(ValueError):
+            validate_records(payload, schedule)
+
+    def test_validation_rejects_raw_fields(self):
+        schedule, payload = _records_payload()
+        payload["runs"][0]["raw_output"] = "forbidden"
         with self.assertRaises(ValueError):
             validate_records(payload, schedule)
 
@@ -246,10 +252,6 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertEqual(usage["runs_with_multiple_samples"], 8)
         self.assertEqual(usage["observation"], "monotonic_samples_inconclusive")
         self.assertEqual(summary["records_schema_version"], 4)
-        _, payload = _records_payload()
-        payload["runs"][0]["raw_output"] = "forbidden"
-        with self.assertRaises(ValueError):
-            validate_records(payload, schedule)
 
     def test_summary_reports_session_data_path_bytes_for_version_five(self):
         schedule, payload = _records_payload()

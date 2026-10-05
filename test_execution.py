@@ -3158,6 +3158,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
             and time.monotonic() < deadline
         ):
             time.sleep(0.01)
+        self.assertNotIn(started["execution_id"], manager._background_futures)
         result = manager.public(started["execution_id"])
         self.assertEqual(result["execution_status"], "partial")
         self.assertIn("RuntimeError: unexpected worker failure", result["background_error"])

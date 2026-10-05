@@ -192,6 +192,18 @@ class TestDirectionsAndClassification(unittest.TestCase):
             with self.assertRaisesRegex(ComparisonError, "tolerance must be a finite percentage"):
                 cw.classify(0, 0.0, "lower", tolerance)
 
+    def test_validate_tolerance_directly_rejects_invalid_percentages(self):
+        self.assertEqual(cw.validate_tolerance(0), 0)
+        self.assertEqual(cw.validate_tolerance(2.5), 2.5)
+        for tolerance in (math.nan, math.inf, -math.inf):
+            with self.subTest(tolerance=tolerance):
+                with self.assertRaisesRegex(ComparisonError, "tolerance must be a finite percentage"):
+                    cw.validate_tolerance(tolerance)
+        for tolerance in (-0.01, -1):
+            with self.subTest(tolerance=tolerance):
+                with self.assertRaisesRegex(ComparisonError, "tolerance must not be negative"):
+                    cw.validate_tolerance(tolerance)
+
 
 class TestCompareMeasurement(unittest.TestCase):
     def entries(self, baseline, candidate, **options):
@@ -532,6 +544,22 @@ class TestCompare(ResultFiles):
             cw.compare([f"{sweep}@old", path])
         with patch.object(cw.Path, "read_text", side_effect=OSError("gone")):
             self.assertIsNone(cw._claimed_group(stale))
+
+    def test_resolve_group_reports_selection_errors_directly(self):
+        sweep = self.directory / "direct-group-errors"
+        path = self.write(
+            "direct-group-errors/result.json",
+            latency_result(),
+            experiment=wr.experiment("available"),
+        )
+
+        missing_group = f"{sweep}@missing"
+        with self.assertRaisesRegex(ComparisonError, "selects no result document"):
+            cw.resolve_group(missing_group, cw.parse_reference(missing_group))
+
+        non_directory = f"{path}@available"
+        with self.assertRaisesRegex(ComparisonError, "names group 'available'.*is not a directory"):
+            cw.resolve_group(non_directory, cw.parse_reference(non_directory))
 
     def test_group_references_scan_a_directory_once_per_comparison(self):
         sweep = self.directory / "sweep"

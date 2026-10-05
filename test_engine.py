@@ -1744,6 +1744,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine._ensure_embeddings(capture)
         finally:
             engine._embedding_lock = original_lock
+        self.assertIsNone(capture.embeddings)
 
     def test_async_semantic_prefetch_materializes_once_and_search_waits(self):
         started = threading.Event()
