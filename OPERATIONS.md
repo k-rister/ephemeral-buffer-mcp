@@ -571,7 +571,7 @@ client scopes; an inactive client scope can be evicted and starts a fresh
 measurement window if that client later returns.
 
 When enabled, each snapshot includes `interface_coverage`: the number and
-percentage of the 19 exposed MCP tools called during the process lifetime or
+percentage of the 22 exposed MCP tools called during the process lifetime or
 active MCP session, depending on the `scope` field, and the complete list of
 tools not called. MCP session snapshots report an opaque `attribution.id`; the
 process scope is aggregate and does not identify which client made a call. The

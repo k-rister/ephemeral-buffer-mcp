@@ -561,7 +561,7 @@ The agent has access to the following tools:
 | `capture_text(content, label, content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. |
 | `capture_file(file_path, label, content_type='auto', max_bytes=None, structured_metrics=None)` | Ingests a bounded regular file from disk and returns the same compact summary schema; symlinks are followed, but pipes and devices are rejected. |
 | `consolidate_captures(capture_ids, label, max_captures=25, max_bytes=None)` | Creates one bounded, searchable JSON capture from multiple captures while preserving source IDs and source line numbers. |
-| `search_capture(query, mode, top_k, context_lines)` | Hybrid/BM25/Semantic search over the captured output. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns bounded match snippets, exact numeric context boundaries, bounded raw-context previews, line numbers, and whether the match came from the lexical or semantic chunk grid. `top_k` is limited to 20 and `context_lines` to 100. The complete structured MCP result is capped at 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
+| `search_capture(query, mode, capture_id='latest', top_k, context_lines)` | Hybrid/BM25/Semantic search over the selected capture. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns bounded match snippets, exact numeric context boundaries, bounded raw-context previews, line numbers, and whether the match came from the lexical or semantic chunk grid. `top_k` is limited to 20 and `context_lines` to 100. The complete structured MCP result is capped at 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
 | `get_capture_slice(start_line, end_line, capture_id='latest', max_bytes=65536, cursor=None)` | Retrieves one byte-bounded page from a 1-indexed line range. A long line can continue across pages; repeat the original range and pass back `next_cursor` until it is null. `max_bytes` bounds the serialized MCP result and must be between 4 KiB and 64 KiB. The cursor is opaque; each segment reports a zero-based UTF-8 byte offset within its line, and pages never split a Unicode character. Joining `structuredContent.data.content` from successive pages reconstructs the retained newline-joined text exactly. |
 | `get_capture_summary(capture_id, include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
 | `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, semantic memory limits, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
@@ -889,7 +889,7 @@ The isolated coding-agent launchers enable this setting by default; direct
 server launches remain opt-in.
 The metrics include per-tool call counts, success/failure counts, duration
 totals, capture/search/retrieval, empty-search, eviction, and cleanup events,
-plus interface coverage showing how many of the 19 exposed MCP tools were
+plus interface coverage showing how many of the 22 exposed MCP tools were
 called and the complete list of unused tools. MCP snapshots are scoped to the
 active transport session and include a server-generated opaque
 `attribution.id`; the persisted metrics file remains an aggregate process
@@ -1028,7 +1028,9 @@ Python 3.12 development and release environment. Python 3.10 remains
 supported through the direct requirements and tested `constraints.txt` file;
 the CI matrix exercises both paths. Keep `requirements.txt` and
 `requirements-dev.txt` as the reviewable dependency inputs, and regenerate the
-Python 3.12 locks with `pip-tools` after an intentional dependency update:
+Python 3.12 locks with `pip-tools` after an intentional dependency update.
+Leave the configured package index available so new or updated dependencies
+can be resolved:
 
 ```bash
 .venv/bin/python -m pip install pip-tools
@@ -1048,26 +1050,37 @@ settings to test subprocesses. The temporary paths are removed when the command
 exits, so tests run safely from a shell that also belongs to an active EB
 session.
 
-Run the test suite:
+Run the focused suite and application coverage with deterministic test
+embeddings in an isolated per-command namespace:
+
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_benchmark_warmup.py test_benchmark_semantic_memory.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
+  --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  -m unittest test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py \
+  test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py \
+  test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
+  test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py \
+  test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py \
+  test_compare_workload_results.py test_list_workload_results.py test_ci_workflow.py \
+  test_engine.py test_capture_utils.py test_config.py test_cli.py test_socket_protocol.py test_fastmcp_adapter.py test_server.py \
+  test_execution.py test_execution_server.py test_metrics.py test_logging_utils.py
+.venv/bin/python -m coverage report -m \
+  --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  --fail-under=100
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
 ```
 
-Measure focused-test coverage locally:
+CI requires 100% coverage for application runtime modules using the same omit
+list. Coverage reports are uploaded for inspection, and new runtime paths
+should include targeted tests.
+
+Track release guardrail coverage separately from application coverage:
+
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_warmup.py,benchmark_agent_ab_repository_fixture.py,release_checks.py' -m unittest test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_warmup.py test_benchmark_semantic_memory.py test_release_checks.py test_benchmark_agent_ab_repository_fixture.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_server.py test_execution.py test_execution_server.py
-.venv/bin/python -m coverage report
-```
-CI requires 100% coverage for application runtime modules and excludes test,
-benchmark, release-check, and packaging-metadata files from that gate. Coverage
-reports are uploaded for inspection, and new runtime paths should include
-targeted tests.
-The release guardrail utility is measured separately because it is a workflow
-utility rather than application runtime code:
-```bash
-COVERAGE_FILE=.coverage.release EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run --source=. -m unittest test_release_checks.py
-COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report --include='release_checks.py'
+COVERAGE_FILE=.coverage.release EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
+  --source=. -m unittest test_release_checks.py
+COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report \
+  --include='release_checks.py' --fail-under=100
 ```
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
@@ -1077,10 +1090,14 @@ model is loaded on the first capture or semantic search rather than during
 server import. Set `EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
 `EPHEMERAL_FASTEMBED_CACHE_DIR` to control its cache directory. The model cache
 is retained between CI runs to reduce startup time. CI unit and end-to-end
-tests set the internal `EPHEMERAL_TEST_EMBEDDINGS=1` flag, which uses a small
-deterministic embedding substitute so test execution does not depend on a
-model download; release and benchmark jobs continue to exercise FastEmbed.
-It also builds the wheel and verifies the installed `ephbuf` entry point.
+tests and evaluation steps set the internal `EPHEMERAL_TEST_EMBEDDINGS=1` flag,
+which uses a small deterministic embedding substitute so those paths do not
+depend on a model download. The release workflow checks installed imports and
+the `ephbuf --help` output without running a capture or search. The schedule-
+gated benchmark job exercises FastEmbed with the configured model. The CI
+package smoke test also verifies an installed MCP capture/search/retrieval
+roundtrip with deterministic embeddings. CI also builds a wheel and verifies
+the installed `ephbuf` entry point.
 CI audits the declared dependencies with `pip-audit` and fails if known
 vulnerabilities are found.
 CI installs the hashed Python 3.12 development/runtime locks and uses the

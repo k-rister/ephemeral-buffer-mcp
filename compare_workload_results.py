@@ -413,6 +413,10 @@ def compare_measurement_blocks(
     tolerance_percent: float,
     directions: dict[str, str] | None,
 ) -> list[dict[str, Any]]:
+    """Compare measurements by name across baseline and candidate blocks.
+
+    Results follow baseline-name order, followed by candidate-only names.
+    """
     entries: list[dict[str, Any]] = []
     names = list(baseline) + [name for name in candidate if name not in baseline]
     for name in names:
@@ -629,6 +633,7 @@ def check_selection_failure(comparison: dict[str, Any]) -> str | None:
 
 
 def format_value(value: float | None, unit: str | None) -> str:
+    """Format a measurement value with grouping and its unit suffix."""
     if value is None:
         return "n/a"
     text = f"{int(value):,}" if float(value).is_integer() else f"{value:,.4g}"
@@ -636,6 +641,7 @@ def format_value(value: float | None, unit: str | None) -> str:
 
 
 def format_delta(entry: dict[str, Any]) -> tuple[str, str]:
+    """Format one comparison entry's absolute and percentage deltas."""
     if entry["delta"] is None:
         return "-", "-"
     sign = "+" if entry["delta"] > 0 else ""
@@ -741,6 +747,7 @@ def format_report(comparison: dict[str, Any]) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for workload-result comparisons."""
     parser = argparse.ArgumentParser(
         description="Compare coding-agent workload result documents.",
         epilog=(
@@ -772,6 +779,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the comparison CLI and return its process exit status."""
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
