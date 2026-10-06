@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Run summary signal scans outside the engine-wide lock, preserve the available
+  output budget when invalid UTF-8 expands during decoding, report effective
+  consolidation limits, and make metrics accounting and process cleanup more
+  reliable.
 - Harden durable execution records against listing races and non-finite JSON,
   preserve failed-phase retry gates when cancellation arrives before a retry,
   invalidate stale summaries after failed writes, and document per-phase output

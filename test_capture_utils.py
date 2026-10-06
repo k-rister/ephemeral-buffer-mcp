@@ -821,12 +821,13 @@ class TestBoundedCommandCapture(unittest.TestCase):
         process.wait.side_effect = [
             subprocess.TimeoutExpired("ignored", 0.05),
             0,
+            0,
         ]
         with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
                 patch("capture_utils.subprocess.Popen", return_value=process), \
-                patch("capture_utils.time.monotonic", side_effect=[0, 0, 0]), \
+                patch("capture_utils.time.monotonic", return_value=0), \
                 patch("capture_utils._terminate_process_group", return_value=True):
-            timed_out = _run_command_bounded(
+            completed = _run_command_bounded(
                 "ignored",
                 None,
                 1024,
@@ -834,8 +835,8 @@ class TestBoundedCommandCapture(unittest.TestCase):
                 cancellation_event=cancellation_event,
             )
 
-        self.assertTrue(timed_out[4])
-        self.assertFalse(timed_out.cancelled)
+        self.assertFalse(completed[4])
+        self.assertFalse(completed.cancelled)
 
         stream = Mock()
         stream.read1.return_value = b""
@@ -883,6 +884,43 @@ class TestBoundedCommandCapture(unittest.TestCase):
             )
         self.assertTrue(expired[4])
         self.assertFalse(expired.cancelled)
+
+    def test_post_eof_wait_checks_fresh_deadline_after_timeout(self):
+        stream = Mock()
+        stream.read1.return_value = b""
+        selector = Mock()
+        selector.get_map.side_effect = [{"stdout": object()}, {}]
+        selector.select.return_value = [(type("Key", (), {"fileobj": stream})(), None)]
+        selector.unregister.return_value = None
+        cancellation_event = Mock()
+        cancellation_event.is_set.return_value = False
+        process = Mock(stdout=stream, returncode=0, pid=123)
+        clock = [0.0]
+        wait_calls = []
+
+        def wait(timeout=None):
+            wait_calls.append(timeout)
+            if len(wait_calls) == 1:
+                clock[0] = 0.05
+                raise subprocess.TimeoutExpired("ignored", timeout)
+            return 0
+
+        process.wait.side_effect = wait
+        with patch("capture_utils.selectors.DefaultSelector", return_value=selector), \
+                patch("capture_utils.subprocess.Popen", return_value=process), \
+                patch("capture_utils.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("capture_utils._terminate_process_group", return_value=True):
+            timed_out = _run_command_bounded(
+                "ignored",
+                None,
+                1024,
+                timeout_seconds=0.05,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertTrue(timed_out[4])
+        self.assertEqual(timed_out[1], 124)
+        self.assertEqual(len(wait_calls), 2)
 
     def test_keyboard_interrupt_terminates_the_process_group(self):
         class InterruptingSelector:
@@ -1108,8 +1146,11 @@ class TestBoundedCommandCapture(unittest.TestCase):
     def test_process_group_cleanup_uses_group_termination_when_available(self):
         process = type("Process", (), {"pid": 42, "wait": lambda _self, timeout=None: None})()
 
-        with patch("capture_utils.os.killpg") as killpg:
-            _terminate_process_group(process)
+        with patch(
+            "capture_utils.os.killpg",
+            side_effect=[None, None, ProcessLookupError()],
+        ) as killpg:
+            self.assertTrue(_terminate_process_group(process))
 
         self.assertEqual(killpg.call_count, 3)
         self.assertEqual(killpg.call_args_list[0].args, (42, 15))
@@ -1155,12 +1196,35 @@ class TestBoundedCommandCapture(unittest.TestCase):
                 self.killed = True
 
         process = SlowProcess()
-        with patch("capture_utils.os.killpg") as killpg:
-            _terminate_process_group(process)
+        with patch(
+            "capture_utils.os.killpg",
+            side_effect=[None, None, ProcessLookupError()],
+        ) as killpg:
+            self.assertTrue(_terminate_process_group(process))
 
         self.assertEqual(killpg.call_count, 3)
         self.assertEqual(killpg.call_args_list[1].args, (42, 9))
         self.assertGreaterEqual(process.wait_calls, 2)
+
+    def test_process_group_cleanup_retries_post_kill_probe(self):
+        process = Mock(pid=42)
+        with patch(
+            "capture_utils.os.killpg",
+            side_effect=[None, None, None, None, ProcessLookupError()],
+        ) as killpg, patch("capture_utils.time.sleep") as sleep:
+            self.assertTrue(_terminate_process_group(process))
+
+        self.assertEqual(killpg.call_count, 5)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_process_group_cleanup_reports_unconfirmed_after_probe_grace(self):
+        process = Mock(pid=42)
+        with patch("capture_utils.os.killpg", return_value=None) as killpg, \
+                patch("capture_utils.time.sleep") as sleep:
+            self.assertFalse(_terminate_process_group(process))
+
+        self.assertEqual(killpg.call_count, 2 + capture_utils._PROCESS_GROUP_PROBE_ATTEMPTS)
+        self.assertEqual(sleep.call_count, capture_utils._PROCESS_GROUP_PROBE_ATTEMPTS - 1)
 
     def test_process_group_cleanup_retries_kill_when_reap_stays_blocked(self):
         class UnkillableProcess:
@@ -1216,10 +1280,13 @@ class TestBoundedCommandCapture(unittest.TestCase):
         capture.add(b"\xff" * 200)
 
         output, truncated, original_size = capture.finish()
+        marker = "\n\n[output truncated: retained first 200 and last 0 bytes of 200]\n\n"
+        content_budget = 512 - len(marker.encode("utf-8"))
 
         self.assertTrue(truncated)
         self.assertEqual(original_size, 200)
         self.assertLessEqual(len(output.encode("utf-8")), 512)
+        self.assertEqual(output.count("\ufffd"), content_budget // 3)
 
     def test_file_read_rejects_oversized_content(self):
         with tempfile.NamedTemporaryFile() as file_handle:

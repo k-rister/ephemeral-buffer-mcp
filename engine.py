@@ -3,6 +3,7 @@ Core search and indexing engine for ephemeral command output buffer.
 Provides hybrid search (BM25 lexical + dense semantic embeddings) with RRF ranking.
 """
 
+import copy
 import os
 import sys
 import time
@@ -1847,9 +1848,11 @@ class EphemeralEngine:
 
         Returns ``"ready"`` or ``"pending"``.  ``None`` and ``inf`` wait until
         the index is ready or its job fails, in which case the job's exception
-        is re-raised so callers keep the lazy-path error semantics.  A bounded
-        wait never indexes inline: if the job was cancelled or the capture was
-        evicted, it reports ``"pending"`` instead.
+        is re-raised so callers keep the lazy-path error semantics. A bounded
+        wait that expires, or observes a cancelled or evicted job, reports
+        ``"pending"``. If a completed prefetch did not publish embeddings for
+        a retained capture, indexing retries inline and may exceed the wait
+        budget.
         """
         started = self._start_semantic_index(capture)
         if started is None:
@@ -3074,17 +3077,24 @@ class EphemeralEngine:
             )
         return summary
 
-    @synchronized
     def get_summary(self, capture_id: str = "latest", include_previews: bool = True) -> Dict[str, Any]:
         """Generate a quick diagnostic summary for an active capture."""
-        capture = self._get_capture_state(capture_id)
-        if not capture:
-            return {
-                "status": "error",
-                "error_code": "capture_not_found",
-                "message": f"Capture '{capture_id}' not found.",
-            }
-        return self._build_summary(capture, include_previews=include_previews)
+        try:
+            with self._lock:
+                capture = self._get_capture_state(capture_id)
+                # Summary inputs are immutable after ingestion. Keep the state
+                # alive across concurrent eviction, then scan its raw lines
+                # after releasing the engine-wide lock.
+                capture_snapshot = copy.copy(capture) if capture is not None else None
+            if capture_snapshot is None:
+                return {
+                    "status": "error",
+                    "error_code": "capture_not_found",
+                    "message": f"Capture '{capture_id}' not found.",
+                }
+            return self._build_summary(capture_snapshot, include_previews=include_previews)
+        finally:
+            self._flush_metrics_snapshot()
 
     def get_summary_for_capture(
         self,
@@ -3137,7 +3147,9 @@ class EphemeralEngine:
             raise ValueError("max_captures must be at least 1")
         output_limit = self.max_buffer_bytes if max_bytes is None else max_bytes
         if output_limit < 512:
-            raise ValueError("max_bytes must be at least 512")
+            raise ValueError(
+                f"effective output limit ({output_limit}) must be at least 512 bytes"
+            )
         if output_limit > self.max_buffer_bytes:
             raise ValueError(
                 f"max_bytes ({output_limit:,}) exceeds the configured buffer limit "

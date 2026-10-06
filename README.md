@@ -917,9 +917,11 @@ response includes a `snapshot_token`; pass that token as `since` on a later
 call to obtain a non-resetting task-window delta. A valid window reports
 `window.status` as `ok`, including when all activity counters are zero. An
 invalid, expired, or pre-restart token reports `window.status` as
-`unavailable` instead of being interpreted as zero activity. Tokens are local
-to the active metrics scope and bounded in-memory token history; a new
-isolated coding-agent session always starts a new measurement scope. MCP
+`unavailable` instead of being interpreted as zero activity. `window.kind` is
+`cumulative` for a full snapshot and `delta` for a snapshot based on a token.
+Tokens are local to the active metrics scope and bounded in-memory token
+history; a new isolated coding-agent session always starts a new measurement
+scope. MCP
 requests are additionally scoped to their transport session: the response
 reports `scope: "mcp_session"` and an opaque `attribution.id`, and coverage,
 funnel, byte, and per-tool counters are isolated between clients sharing one
