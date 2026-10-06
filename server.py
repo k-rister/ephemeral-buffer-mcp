@@ -446,7 +446,7 @@ def _bind_socket_probe(probe, socket_path):
         os.path.dirname(socket_path) or ".",
     )
     seen_directories = set()
-    last_error = None
+    last_error = OSError("No Unix socket probe address candidates are available")
     for directory in directories:
         if directory in seen_directories:
             continue
@@ -459,9 +459,7 @@ def _bind_socket_probe(probe, socket_path):
             continue
         return probe_address
 
-    if last_error is not None:
-        raise last_error
-    raise OSError("No Unix socket probe address candidates are available")
+    raise last_error
 
 
 async def _connect_socket_probe(probe, path):

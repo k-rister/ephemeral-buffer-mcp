@@ -2607,6 +2607,45 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(writer.writes, [encode_frame(token)])
         self.assertTrue(writer.closed)
 
+    async def test_startup_gate_rejects_clients_before_dispatch(self):
+        class PeerSocket:
+            def getpeername(self):
+                return "/tmp/ordinary-client.sock"
+
+        class ClientWriter(FakeWriter):
+            def get_extra_info(self, name, default=None):
+                return PeerSocket() if name == "socket" else default
+
+        class Services:
+            def register_tool_call(self, _name):
+                raise AssertionError("startup-gated clients must not be dispatched")
+
+        writer = ClientWriter()
+        with patch.object(server, "_SOCKET_STARTUP_GATED", True), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", None), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", None), \
+                patch.object(server, "DEFAULT_SERVICES", Services()):
+            await server.handle_socket_client(FakeReader(b""), writer)
+
+        response = response_json(writer)
+        self.assertEqual(response["code"], "server_starting")
+        self.assertTrue(writer.closed)
+
+    async def test_startup_gate_closes_when_error_reply_fails(self):
+        writer = FakeWriter()
+        with patch.object(server, "_SOCKET_STARTUP_GATED", True), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", None), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", None), \
+                patch.object(
+                    server,
+                    "_write_socket_error",
+                    new=AsyncMock(side_effect=OSError("client disconnected")),
+                ) as write_error:
+            await server.handle_socket_client(FakeReader(b""), writer)
+
+        write_error.assert_awaited_once()
+        self.assertTrue(writer.closed)
+
     async def test_client_request_is_processed_while_startup_probe_is_active(self):
         probe_address = "/tmp/ephemeral-startup-probe.sock"
         client_address = "/tmp/ephemeral-cli-client.sock"
@@ -3163,6 +3202,43 @@ class TestSocketServerStartup(unittest.TestCase):
             self.assertEqual(probe.type & socket.SOCK_STREAM, socket.SOCK_STREAM)
         finally:
             probe.close()
+
+    def test_bind_socket_probe_falls_back_to_another_short_directory(self):
+        class FallbackProbe(FakeProbeSocket):
+            def __init__(self):
+                super().__init__()
+                self.attempted_addresses = []
+
+            def bind(self, address):
+                self.attempted_addresses.append(address)
+                if address.startswith("/tmp/"):
+                    raise OSError("probe path unavailable")
+                super().bind(address)
+
+        probe = FallbackProbe()
+        with patch.object(server.tempfile, "gettempdir", return_value="/tmp"):
+            address = server._bind_socket_probe(probe, "/tmp/server.sock")
+
+        self.assertEqual(address, probe.address)
+        self.assertTrue(address.startswith("/var/tmp/"))
+        self.assertEqual(len(probe.attempted_addresses), 2)
+
+    def test_bind_socket_probe_raises_after_all_unique_directories_fail(self):
+        class FailingProbe(FakeProbeSocket):
+            def __init__(self):
+                super().__init__()
+                self.attempted_addresses = []
+
+            def bind(self, address):
+                self.attempted_addresses.append(address)
+                raise OSError(f"cannot bind {address}")
+
+        probe = FailingProbe()
+        with patch.object(server.tempfile, "gettempdir", return_value="/tmp"):
+            with self.assertRaisesRegex(OSError, "cannot bind"):
+                server._bind_socket_probe(probe, "/tmp/server.sock")
+
+        self.assertEqual(len(probe.attempted_addresses), 2)
 
     def test_bound_socket_verification_rejects_non_socket_descriptor(self):
         regular_stat = os.stat_result(
