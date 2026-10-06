@@ -435,6 +435,92 @@ class TestCliConfiguration(unittest.TestCase):
                 cli._send_large_frame_with_early_response(FakeSocket([]), b"z" * 2048)
         self.assertEqual(expired_selector.select_calls, 0)
 
+    def test_large_frame_send_error_surfaces_buffered_server_response(self):
+        class FakeSelector:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+            def register(self, *_args):
+                return None
+
+            def select(self, _timeout):
+                return [(None, cli.selectors.EVENT_WRITE)]
+
+        response_frame = encode_frame(
+            b'{"status":"error","code":"server_busy","message":"retry"}'
+        )
+
+        class FakeSocket:
+            def setblocking(self, _value):
+                return None
+
+            def send(self, _payload):
+                raise ConnectionResetError("peer closed during upload")
+
+            def recv(self, _size):
+                return response_frame
+
+        with patch.object(cli.selectors, "DefaultSelector", return_value=FakeSelector()):
+            result = cli._send_large_frame_with_early_response(
+                FakeSocket(), b"z" * 2048
+            )
+
+        self.assertEqual(result["code"], "server_busy")
+        self.assertEqual(result["message"], "retry")
+
+    def test_read_buffered_early_response_handles_incomplete_and_closed_peers(self):
+        response = {"status": "error", "code": "server_busy"}
+        frame = encode_frame(json.dumps(response).encode("utf-8"))
+
+        class FakeSocket:
+            def __init__(self, outcome):
+                self.outcome = outcome
+
+            def recv(self, _size):
+                if isinstance(self.outcome, Exception):
+                    raise self.outcome
+                return self.outcome
+
+        self.assertEqual(
+            cli._read_buffered_early_response(FakeSocket(b""), bytearray(frame)),
+            response,
+        )
+        self.assertIsNone(cli._read_buffered_early_response(FakeSocket(b""), bytearray()))
+        self.assertIsNone(
+            cli._read_buffered_early_response(FakeSocket(BlockingIOError()), bytearray())
+        )
+
+    def test_large_frame_send_error_is_preserved_without_complete_response(self):
+        class FakeSelector:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                return False
+
+            def register(self, *_args):
+                return None
+
+            def select(self, _timeout):
+                return [(None, cli.selectors.EVENT_WRITE)]
+
+        class FakeSocket:
+            def setblocking(self, _value):
+                return None
+
+            def send(self, _payload):
+                raise BrokenPipeError("upload pipe closed")
+
+            def recv(self, _size):
+                return b""
+
+        with patch.object(cli.selectors, "DefaultSelector", return_value=FakeSelector()):
+            with self.assertRaisesRegex(BrokenPipeError, "upload pipe closed"):
+                cli._send_large_frame_with_early_response(FakeSocket(), b"z" * 2048)
+
     def test_large_frame_decoder_waits_for_header_and_complete_payload(self):
         frame = encode_frame(b'{"status":"ok"}')
         self.assertIsNone(cli._decode_available_response(bytearray(frame[:3])))

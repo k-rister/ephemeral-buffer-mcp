@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
+from engine import DEFAULT_MAX_BUFFER_BYTES
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 os.environ.setdefault("EPHEMERAL_TEST_EMBEDDINGS", "1")
@@ -608,17 +609,17 @@ class TestExecutionTools(unittest.TestCase):
             server.ExecutionPhaseInput(
                 name="output-limit",
                 command="echo",
-                max_output_bytes=server.DEFAULT_MAX_BUFFER_BYTES + 1,
+                max_output_bytes=DEFAULT_MAX_BUFFER_BYTES + 1,
             )
         original_limit = server.engine.max_buffer_bytes
         try:
-            server.engine.max_buffer_bytes = server.DEFAULT_MAX_BUFFER_BYTES + 1024
+            server.engine.max_buffer_bytes = DEFAULT_MAX_BUFFER_BYTES + 1024
             accepted = server.ExecutionPhaseInput(
                 name="configured-limit",
                 command="echo",
-                max_output_bytes=server.DEFAULT_MAX_BUFFER_BYTES + 512,
+                max_output_bytes=DEFAULT_MAX_BUFFER_BYTES + 512,
             )
-            self.assertEqual(accepted.max_output_bytes, server.DEFAULT_MAX_BUFFER_BYTES + 512)
+            self.assertEqual(accepted.max_output_bytes, DEFAULT_MAX_BUFFER_BYTES + 512)
         finally:
             server.engine.max_buffer_bytes = original_limit
         self.assertEqual(

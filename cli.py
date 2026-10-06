@@ -145,8 +145,31 @@ def _send_large_frame_with_early_response(sock: socket.socket, frame: bytes) -> 
                         sent += sock.send(frame[sent:sent + 64 * 1024])
                     except BlockingIOError:
                         pass
+                    except OSError:
+                        response = _read_buffered_early_response(sock, received)
+                        if response is not None:
+                            return response
+                        raise
                     if sent == len(frame):
                         selector.modify(sock, selectors.EVENT_READ)
+
+
+def _read_buffered_early_response(sock: socket.socket, received: bytearray) -> dict | None:
+    """Read any already-arrived response after the peer closes an upload."""
+    response = _decode_available_response(received)
+    if response is not None:
+        return response
+    while True:
+        try:
+            chunk = sock.recv(64 * 1024)
+        except (BlockingIOError, OSError):
+            return _decode_available_response(received)
+        if not chunk:
+            return _decode_available_response(received)
+        received.extend(chunk)
+        response = _decode_available_response(received)
+        if response is not None:
+            return response
 
 
 def _decode_available_response(buffer: bytearray) -> dict | None:

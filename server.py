@@ -57,12 +57,8 @@ from fastmcp_adapter import (
     register_tool as _register_fastmcp_tool,
 )
 from engine import (
-    DEFAULT_MAX_BUFFER_BYTES,
-    DEFAULT_MAX_CAPTURES,
     MAX_CAPTURE_SLICE_CONTENT_BYTES,
     CAPTURE_SLICE_SEGMENT_MAX_BYTES,
-    MAX_SEARCH_CONTEXT_LINES,
-    MAX_SEARCH_TOP_K,
     EphemeralEngine,
     normalize_structured_metrics,
 )
@@ -100,6 +96,10 @@ except ImportError:  # pragma: no cover - Windows has no Unix socket backend.
 SOCKET_PATH = SETTINGS.identity.socket_path
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SOCKET_CLIENT_READ_TIMEOUT_SECONDS = SETTINGS.socket_timeout_seconds.value
+_SOCKET_CLIENT_TASKS: set[asyncio.Task[Any]] = set()
+_SOCKET_STARTUP_GATED = False
+_SOCKET_STARTUP_PROBE_ADDRESS: Optional[str] = None
+_SOCKET_STARTUP_PROBE_TOKEN: Optional[bytes] = None
 
 
 def socket_isolation_required() -> bool:
@@ -116,9 +116,11 @@ def socket_isolation_configured() -> bool:
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
 EXECUTION_OUTPUT_RESPONSE_MAX_BYTES = 64 * 1024
-SEARCH_RESPONSE_MAX_BYTES = 64 * 1024
 MCP_TOOL_RESPONSE_MAX_BYTES = 64 * 1024
 MCP_JSONRPC_ENVELOPE_RESERVE_BYTES = 1024
+SEARCH_RESPONSE_MAX_BYTES = (
+    MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+)
 SEARCH_STRUCTURED_MATCH_MAX_BYTES = 2 * 1024
 SEARCH_STRUCTURED_CONTEXT_MAX_BYTES = 1024
 SEARCH_SNIPPET_TRUNCATION_MARKER = (
@@ -430,6 +432,122 @@ def _socket_identity(path):
     return path_stat.st_dev, path_stat.st_ino
 
 
+def _new_socket_probe():
+    """Create the short-lived client used to verify a Unix socket path."""
+    return socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
+
+def _bind_socket_probe(probe, socket_path):
+    """Bind a short-lived probe using a path that fits AF_UNIX limits."""
+    directories = (
+        "/tmp",
+        "/var/tmp",
+        tempfile.gettempdir(),
+        os.path.dirname(socket_path) or ".",
+    )
+    seen_directories = set()
+    last_error = None
+    for directory in directories:
+        if directory in seen_directories:
+            continue
+        seen_directories.add(directory)
+        probe_address = os.path.join(directory, f"ebp-{uuid.uuid4().hex}")
+        try:
+            probe.bind(probe_address)
+        except OSError as exc:
+            last_error = exc
+            continue
+        return probe_address
+
+    if last_error is not None:
+        raise last_error
+    raise OSError("No Unix socket probe address candidates are available")
+
+
+async def _connect_socket_probe(probe, path):
+    """Connect a bound local probe socket and wrap it as asyncio streams."""
+    loop = asyncio.get_running_loop()
+    await loop.sock_connect(probe, path)
+    return await asyncio.open_connection(sock=probe)
+
+
+async def _verify_bound_socket_path(bound_socket, path):
+    """Return the path identity only after it is verified against the listener."""
+    global _SOCKET_STARTUP_PROBE_ADDRESS, _SOCKET_STARTUP_PROBE_TOKEN
+
+    bound_fd_stat = os.fstat(bound_socket.fileno())
+    if not stat.S_ISSOCK(bound_fd_stat.st_mode):
+        raise RuntimeError("Bound Unix listener descriptor is not a socket")
+    if bound_socket.getsockname() != path:
+        raise RuntimeError(f"Bound Unix listener address does not match path: {path}")
+
+    path_stat_before = os.lstat(path)
+    if not stat.S_ISSOCK(path_stat_before.st_mode):
+        raise RuntimeError(f"Bound socket path is not a socket: {path}")
+
+    # On Linux, fstat(socket_fd) identifies the sockfs socket object while
+    # lstat(path) identifies its filesystem node; those inode values differ.
+    # Verify the path through asyncio's normal accept callback so startup
+    # never consumes a queued client connection itself.
+    probe = None
+    writer = None
+    probe_address = None
+    probe_bound = False
+    old_probe_address = _SOCKET_STARTUP_PROBE_ADDRESS
+    old_probe_token = _SOCKET_STARTUP_PROBE_TOKEN
+    probe_token = os.urandom(32)
+    try:
+        probe = _new_socket_probe()
+        probe.setblocking(False)
+        probe_address = _bind_socket_probe(probe, path)
+        probe_bound = True
+        _SOCKET_STARTUP_PROBE_ADDRESS = probe.getsockname()
+        _SOCKET_STARTUP_PROBE_TOKEN = probe_token
+        try:
+            reader, writer = await asyncio.wait_for(
+                _connect_socket_probe(probe, path), timeout=1.0
+            )
+            # The asyncio transport now owns the connected probe socket.
+            probe = None
+            header = await asyncio.wait_for(
+                _read_exact(reader, FRAME_HEADER_SIZE), timeout=1.0
+            )
+            response_length = decode_header(header)
+            response = await asyncio.wait_for(
+                _read_exact(reader, response_length), timeout=1.0
+            )
+            if response != probe_token:
+                raise RuntimeError(
+                    f"Socket path did not acknowledge the bound listener: {path}"
+                )
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+    except OSError as exc:
+        raise RuntimeError(f"Unable to verify bound socket path {path}: {exc}") from exc
+    finally:
+        _SOCKET_STARTUP_PROBE_ADDRESS = old_probe_address
+        _SOCKET_STARTUP_PROBE_TOKEN = old_probe_token
+        if probe is not None:
+            probe.close()
+        if probe_bound:
+            try:
+                os.unlink(probe_address)
+            except FileNotFoundError:
+                pass
+
+    path_stat_after = os.lstat(path)
+    path_identity_before = (path_stat_before.st_dev, path_stat_before.st_ino)
+    path_identity_after = (path_stat_after.st_dev, path_stat_after.st_ino)
+    if (
+        not stat.S_ISSOCK(path_stat_after.st_mode)
+        or path_identity_before != path_identity_after
+    ):
+        raise RuntimeError(f"Socket path changed while verifying the bound listener: {path}")
+    return path_identity_after
+
+
 @contextmanager
 def _socket_path_lock(path):
     """Serialize socket probing and cleanup for one pathname."""
@@ -688,6 +806,28 @@ def _fit_tool_envelope(
     return best
 
 
+def _service_rejection_result(
+    code: str,
+    message: str,
+    *,
+    structured: bool,
+) -> CallToolResult | str:
+    """Return a consistent JSON error body for busy and shutdown failures."""
+    error_text = json.dumps(
+        {"status": "error", "error": {"code": code, "message": message}},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if not structured:
+        return error_text
+    response = ToolResponseEnvelope(
+        status="error",
+        error=ToolErrorEnvelope(code=code, message=message),
+        text=error_text,
+    )
+    return _call_tool_result(_fit_tool_envelope(response))
+
+
 def _mcp_tool(name, category, *, structured_result_factory=None):
     """Register a synchronous tool implementation behind an async MCP adapter.
 
@@ -757,22 +897,14 @@ def _register_mcp_tool_for_app(
             registered_call = service_context.register_tool_call(name)
             if registered_call is None:
                 message = "The service is shutting down; retry after it restarts."
-                if structured_result_factory is not None or category in {
-                    "capture", "retrieval", "search", "lifecycle"
-                }:
-                    response = ToolResponseEnvelope(
-                        status="error",
-                        error=ToolErrorEnvelope(code="server_shutting_down", message=message),
-                        text=f"Error: {message}",
-                    )
-                    return _call_tool_result(_fit_tool_envelope(response))
-                if category == "execution":
-                    return json.dumps(
-                        {"status": "error", "error": {"code": "server_shutting_down", "message": message}},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                return f"Error: server_shutting_down: {message}"
+                return _service_rejection_result(
+                    "server_shutting_down",
+                    message,
+                    structured=(
+                        structured_result_factory is not None
+                        or category in {"capture", "retrieval", "search", "lifecycle"}
+                    ),
+                )
             call_id, cancellation_event = registered_call
             try:
                 lane = "diagnostics" if name == "get_buffer_stats" else "mcp"
@@ -781,22 +913,14 @@ def _register_mcp_tool_for_app(
                 service_context.finish_tool_call(call_id)
                 message = "Foreground work capacity is full; retry this tool call shortly."
                 log_event(LOGGER, logging.WARNING, "mcp_tool_rejected_busy", tool=name)
-                if structured_result_factory is not None or category in {
-                    "capture", "retrieval", "search", "lifecycle"
-                }:
-                    response = ToolResponseEnvelope(
-                        status="error",
-                        error=ToolErrorEnvelope(code="server_busy", message=message),
-                        text=f"Error: {message}",
-                    )
-                    return _call_tool_result(_fit_tool_envelope(response))
-                if category == "execution":
-                    return json.dumps(
-                        {"status": "error", "error": {"code": "server_busy", "message": message}},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                return f"Error: server_busy: {message}"
+                return _service_rejection_result(
+                    "server_busy",
+                    message,
+                    structured=(
+                        structured_result_factory is not None
+                        or category in {"capture", "retrieval", "search", "lifecycle"}
+                    ),
+                )
             except BaseException:
                 service_context.finish_tool_call(call_id)
                 raise
@@ -805,22 +929,14 @@ def _register_mcp_tool_for_app(
                 ticket.release()
                 service_context.finish_tool_call(call_id)
                 message = "The service is shutting down; retry after it restarts."
-                if structured_result_factory is not None or category in {
-                    "capture", "retrieval", "search", "lifecycle"
-                }:
-                    response = ToolResponseEnvelope(
-                        status="error",
-                        error=ToolErrorEnvelope(code="server_shutting_down", message=message),
-                        text=f"Error: {message}",
-                    )
-                    return _call_tool_result(_fit_tool_envelope(response))
-                if category == "execution":
-                    return json.dumps(
-                        {"status": "error", "error": {"code": "server_shutting_down", "message": message}},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                return f"Error: server_shutting_down: {message}"
+                return _service_rejection_result(
+                    "server_shutting_down",
+                    message,
+                    structured=(
+                        structured_result_factory is not None
+                        or category in {"capture", "retrieval", "search", "lifecycle"}
+                    ),
+                )
 
             cancel_token = None
             mcp_invocation_token = _MCP_TOOL_INVOCATION.set(True)
@@ -1728,13 +1844,16 @@ def start_execution(
     progress. Caller disconnection detaches from this work. Use cancel_execution
     to request intentional termination.
 
-    Each phase is an object with ``name`` and ``command`` plus optional
-    ``cwd``, ``timeout_seconds``, ``max_output_bytes``, ``structured_metrics``,
-    and ``side_effects`` (``none`` or ``unsafe``). A completed phase is never
+    Each phase requires ``name`` and ``command`` and accepts optional ``cwd``,
+    ``timeout_seconds``, ``max_output_bytes``, ``structured_metrics``,
+    ``side_effects`` (``none`` or ``unsafe``), ``unsafe_side_effects``, and
+    ``idempotency_key``. A completed phase is never
     rerun by ``resume_execution``. An unsafe phase that must be retried after
     failure, timeout, or interruption requires ``confirm_unsafe=True`` or the
     explicit ``resume_policy='allow-unsafe'``. Outputs and phase event history
-    are stored under ``EPHEMERAL_EXECUTION_STATE_DIR``.
+    are stored in the directory resolved from the session identity (or the
+    process-private default when no identity is configured). Set
+    ``EPHEMERAL_EXECUTION_STATE_DIR`` to override the resolved directory.
     """
     phase_payloads = [
         phase.model_dump(exclude_none=True) if isinstance(phase, ExecutionPhaseInput) else phase
@@ -1978,7 +2097,12 @@ def _bounded_summary_text(value: str, max_bytes: int, marker: str) -> tuple[str,
     if len(encoded) <= max_bytes:
         return value, False
     marker_bytes = marker.encode("utf-8")
-    prefix = encoded[: max_bytes - len(marker_bytes)].decode("utf-8", errors="ignore")
+    if max_bytes <= 0:
+        return "", True
+    if len(marker_bytes) >= max_bytes:
+        return marker_bytes[:max_bytes].decode("utf-8", errors="ignore"), True
+    prefix_budget = max(0, max_bytes - len(marker_bytes))
+    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
     return prefix + marker, True
 
 
@@ -2266,6 +2390,7 @@ def execute_and_capture(
         content_type: Content type hint - 'auto' (default, detects diff/log/text), 'diff', 'log', or 'text'.
         max_output_bytes: Maximum command output retained (default: configured buffer byte limit).
         timeout_seconds: Optional maximum runtime; timed-out commands return exit code 124.
+        structured_metrics: Optional JSON-compatible named metrics attached to the capture summary.
     """
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
@@ -2490,7 +2615,7 @@ def _search_capture_response(
         return ToolResponseEnvelope(
             status="error", error=ToolErrorEnvelope(code="query_too_large", message=message), text=message
         )
-    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+    response_budget = SEARCH_RESPONSE_MAX_BYTES
     res = _active_engine().search(
         query=query,
         mode=mode,
@@ -2607,7 +2732,23 @@ def search_capture(
     top_k: int = 5,
     context_lines: int = 3,
 ) -> str:
-    """Search a capture and return the compatibility text from a typed result."""
+    """Search a capture by text and return readable and structured results.
+
+    Args:
+        query: Text to find in the selected capture.
+        mode: Ranking mode: ``hybrid`` (default), ``bm25`` (lexical), or
+            ``semantic`` (embedding based).
+        capture_id: Capture to search, defaulting to ``latest``.
+        top_k: Maximum number of matches to return; defaults to 5 (maximum 20).
+        context_lines: Lines of context around each match; defaults to 3
+            (maximum 100).
+
+    Returns:
+        Readable match text plus structured match data, including status,
+        capture metadata, ``matches``, and ``match_count``. Errors include a
+        machine-readable code and message. Use ``get_capture_slice`` for full
+        capture content.
+    """
     return search_capture_result(query, mode, capture_id, top_k, context_lines).text or ""
 
 
@@ -2835,7 +2976,12 @@ def _list_captures_response() -> ToolResponseEnvelope:
 
 @_mcp_tool("list_captures", "retrieval", structured_result_factory=_list_captures_response)
 def list_captures() -> str:
-    """List active captures and return the compatibility text rendering."""
+    """List active captures with readable text and structured capture data.
+
+    The structured result contains ``captures`` and ``capture_count`` alongside
+    the text summary. Use ``get_capture_summary`` or ``get_capture_slice`` for
+    details about an individual capture.
+    """
     return list_captures_result().text or ""
 
 
@@ -3101,7 +3247,7 @@ async def _read_socket_payload(reader: asyncio.StreamReader, read_limit: int) ->
             payload_bytes=payload_length,
             max_payload_bytes=read_limit,
         )
-        raise ValueError(f"CLI payload exceeds the {engine.max_buffer_bytes:,}-byte capture limit")
+        raise ValueError(f"CLI payload exceeds the {read_limit:,}-byte socket payload limit")
     return await _read_exact(reader, payload_length, "socket_request_bytes")
 
 
@@ -3122,7 +3268,47 @@ async def _write_socket_error(
 
 
 def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Handle one framed CLI request and keep its task alive until completion."""
+    # Snapshot startup state when the connection callback runs. A queued
+    # connection may not start its task until after verification has cleared
+    # the globals, but it still arrived while ordinary requests were gated.
+    startup_gated = _SOCKET_STARTUP_GATED
+    startup_probe_address = _SOCKET_STARTUP_PROBE_ADDRESS
+    startup_probe_token = _SOCKET_STARTUP_PROBE_TOKEN
+
     async def _handle():
+        probe_address = startup_probe_address
+        probe_token = startup_probe_token
+        if probe_address is not None and probe_token is not None:
+            try:
+                peer_address = writer.get_extra_info("socket").getpeername()
+            except (AttributeError, OSError):
+                peer_address = None
+            if peer_address == probe_address:
+                response_frame = encode_frame(probe_token)
+                METRICS.record_bytes("socket_response_bytes", len(response_frame))
+                try:
+                    writer.write(response_frame)
+                    await writer.drain()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+                return
+
+        if startup_gated:
+            try:
+                await _write_socket_error(
+                    writer,
+                    "server_starting",
+                    "The service is starting; retry this request shortly.",
+                )
+            except Exception:
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            return
+
         registered_call = DEFAULT_SERVICES.register_tool_call("socket")
         if registered_call is None:
             try:
@@ -3264,13 +3450,18 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             writer.close()
             await writer.wait_closed()
 
-    # Return the task as well as scheduling it so embedders and tests can
-    # await completion when they need deterministic cleanup.
-    return asyncio.create_task(_handle())
+    # StreamReaderProtocol ignores the connection callback's return value.
+    # Retain the task explicitly until it completes so the loop cannot collect
+    # an in-flight socket request.
+    task = asyncio.create_task(_handle())
+    _SOCKET_CLIENT_TASKS.add(task)
+    task.add_done_callback(_SOCKET_CLIENT_TASKS.discard)
+    return task
 
 
 def run_socket_server():
     """Runs a Unix domain socket server in a separate thread so CLI tools can pipe to it."""
+    global _SOCKET_STARTUP_GATED
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     _set_socket_state("starting")
@@ -3339,23 +3530,26 @@ def run_socket_server():
 
         async def _main():
             nonlocal bound_socket_identity
+            global _SOCKET_STARTUP_GATED
             socket_backlog = (
                 MAX_ACTIVE_SOCKET_CLIENTS + MAX_QUEUED_SOCKET_CLIENTS
             )
+            _SOCKET_STARTUP_GATED = True
             server = await asyncio.start_unix_server(
                 handle_socket_client,
                 path=SOCKET_PATH,
                 backlog=socket_backlog,
             )
-            bound_path_stat = os.lstat(SOCKET_PATH)
-            if stat.S_ISSOCK(bound_path_stat.st_mode):
-                bound_socket_identity = (
-                    bound_path_stat.st_dev,
-                    bound_path_stat.st_ino,
-                )
-            os.chmod(SOCKET_PATH, 0o600)
-            _set_socket_state("ready")
             async with server:
+                bound_sockets = server.sockets or ()
+                if not bound_sockets:
+                    raise RuntimeError("Unix socket listener has no bound socket descriptor")
+                bound_socket_identity = await _verify_bound_socket_path(
+                    bound_sockets[0], SOCKET_PATH
+                )
+                os.chmod(SOCKET_PATH, 0o600)
+                _set_socket_state("ready")
+                _SOCKET_STARTUP_GATED = False
                 await server.serve_forever()
 
         loop.run_until_complete(_main())
@@ -3368,6 +3562,7 @@ def run_socket_server():
         # that capture the server's direct error stream.
         print(f"Socket server error: {e}", file=sys.stderr)
     finally:
+        _SOCKET_STARTUP_GATED = False
         try:
             if bound_socket_identity is not None:
                 try:
