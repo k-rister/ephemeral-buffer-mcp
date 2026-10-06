@@ -53,6 +53,12 @@ class TestExecutionTools(unittest.TestCase):
         server.engine.clear("all")
 
     def tearDown(self):
+        shutdown_result = self.manager.shutdown(grace_seconds=10.0)
+        self.assertEqual(
+            shutdown_result["unfinished_execution_ids"],
+            [],
+            "execution manager must finish background state writes before fixture cleanup",
+        )
         server.engine.clear("all")
         self.directory.cleanup()
 
