@@ -1149,13 +1149,15 @@ Measure MCP and Unix-socket admission under controlled saturation:
 The benchmark uses the configured active and queued limits, adds four overflow
 requests by default, and reports successful throughput, request latency, and
 `server_busy` rejection rates for each transport. FastMCP tool dispatch runs a
-short local sleep command; socket clients hold incomplete frames until the
-active slots and queue are full. The MCP timings cover the server tool adapter
-without external client transport framing. Semantic prefetch is disabled so
-model work does not mask admission behavior. It fails if either transport does
-not reach its configured capacity, reject the overflow requests, or return to
-idle. The scheduled and manually dispatched benchmark workflow uploads both
-the detailed report and a common workload-result document.
+short local sleep command. Socket clients hold idle connections until the
+active slots and queue are full, then send complete requests; this lets the
+benchmark read overflow responses without unread request bytes. The MCP timings
+cover the server tool adapter without external client transport framing.
+Semantic prefetch is disabled so model work does not mask admission behavior.
+It fails if either transport does not reach its configured capacity, reject
+the overflow requests, or return to idle. The scheduled and manually dispatched
+benchmark workflow uploads both the detailed report and a common workload-result
+document.
 
 Measure command-capture latency by output size and pipeline phase:
 ```bash
