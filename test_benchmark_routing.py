@@ -52,6 +52,22 @@ class TestRoutingBenchmark(unittest.TestCase):
         with self.assertRaises(ValueError):
             routing_summary([], 16)
 
+    def test_zero_direct_median_ratio_is_reported_as_not_available(self):
+        profile = routing_summary(
+            [{"direct_seconds": 0.0, "captured_seconds": 0.1, "output_bytes": 10}],
+            16,
+        )
+        self.assertIsNone(profile["capture_overhead_ratio_median"])
+        with patch.object(
+            benchmark_routing,
+            "run_benchmark",
+            return_value={"profiles": [profile]},
+        ), patch("sys.argv", ["benchmark_routing.py"]), patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout:
+            benchmark_routing.main()
+        self.assertIn("overhead_ratio=n/a", stdout.getvalue())
+
     def test_benchmark_reports_profiles_and_comparable_timings(self):
         result = run_benchmark((2, 4), samples=2)
         self.assertEqual(result["schema_version"], 1)

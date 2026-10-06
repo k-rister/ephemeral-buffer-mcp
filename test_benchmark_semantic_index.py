@@ -2,7 +2,9 @@
 
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import benchmark_semantic_index
@@ -187,6 +189,47 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
         self.assertIn("threads=3", stdout.getvalue())
         self.assertIn("semantic_wait=1.5s", stdout.getvalue())
         self.assertIn("lines:6/bytes:512/overlap:1", stdout.getvalue())
+
+    def test_output_flag_writes_strict_json_for_unbounded_wait(self):
+        canned = {
+            "embedding_model": "m",
+            "embedding_threads": 3,
+            "semantic_chunking": {"lines": 6, "bytes": 512, "overlap": 1},
+            "test_embeddings": True,
+            "mode": "hybrid",
+            "semantic_wait_seconds": float("inf"),
+            "model_load_seconds": 0.0,
+            "measurements": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "semantic-index.json"
+            argv = [
+                "benchmark_semantic_index.py",
+                "--line-counts", "4",
+                "--samples", "1",
+                "--semantic-wait-seconds", "inf",
+                "--output", str(output_path),
+            ]
+            with patch.object(
+                benchmark_semantic_index, "run_benchmark", return_value=canned
+            ) as run_benchmark, patch("sys.argv", argv), patch(
+                "sys.stdout", new_callable=io.StringIO
+            ):
+                benchmark_semantic_index.main()
+
+            self.assertEqual(
+                run_benchmark.call_args.kwargs["engine_options"]["semantic_wait_seconds"],
+                float("inf"),
+            )
+
+            def reject_nonstandard_constant(value):
+                raise ValueError(f"non-standard JSON constant: {value}")
+
+            output = json.loads(
+                output_path.read_text(encoding="utf-8"),
+                parse_constant=reject_nonstandard_constant,
+            )
+        self.assertEqual(output["semantic_wait_seconds"], "unbounded")
 
     def test_benchmark_rejects_invalid_inputs(self):
         with self.assertRaises(ValueError):

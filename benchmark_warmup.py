@@ -67,18 +67,25 @@ def _measure_in_process(warmup: bool) -> dict[str, Any]:
 
 def _measure(warmup: bool) -> dict[str, Any]:
     """Measure one policy in a fresh process so RSS baselines are independent."""
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--worker",
-            "--warmup",
-            str(warmup).lower(),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--worker",
+                "--warmup",
+                str(warmup).lower(),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"warmup worker failed with exit status {exc.returncode}\n"
+            f"stdout:\n{exc.stdout or ''}\n"
+            f"stderr:\n{exc.stderr or ''}"
+        ) from exc
     return json.loads(completed.stdout)
 
 
