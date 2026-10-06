@@ -2,6 +2,7 @@
 
 import io
 import json
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +43,22 @@ class TestWarmupBenchmark(unittest.TestCase):
     def test_benchmark_rejects_invalid_samples(self):
         with self.assertRaises(ValueError):
             run_benchmark(samples=0)
+
+    def test_worker_failure_includes_captured_stdout_and_stderr(self):
+        failure = subprocess.CalledProcessError(
+            7,
+            ["python", "benchmark_warmup.py", "--worker"],
+            output="worker stdout detail",
+            stderr="worker stderr detail",
+        )
+        with patch.object(benchmark_warmup.subprocess, "run", side_effect=failure):
+            with self.assertRaises(RuntimeError) as raised:
+                benchmark_warmup._measure(warmup=False)
+
+        self.assertIn("exit status 7", str(raised.exception))
+        self.assertIn("worker stdout detail", str(raised.exception))
+        self.assertIn("worker stderr detail", str(raised.exception))
+        self.assertIs(raised.exception.__cause__, failure)
 
 
     def test_result_flag_emits_json_on_stdout(self):

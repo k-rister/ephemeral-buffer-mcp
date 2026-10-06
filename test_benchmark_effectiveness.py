@@ -163,6 +163,26 @@ class TestEffectivenessBenchmark(unittest.TestCase):
             server.engine = previous_engine
             original_engine.shutdown()
 
+    def test_summary_benchmark_surfaces_errors_from_both_mcp_calls(self):
+        with self.subTest(tool="execute_and_capture"):
+            with patch(
+                "benchmark_effectiveness.server.execute_and_capture",
+                return_value="Error: command execution failed",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Error: command execution failed"):
+                    run_summary_benchmark()
+
+        with self.subTest(tool="get_capture_summary"):
+            with patch(
+                "benchmark_effectiveness.server.execute_and_capture",
+                return_value=json.dumps({"capture_id": "synthetic-capture"}),
+            ), patch(
+                "benchmark_effectiveness.server.get_capture_summary",
+                return_value="Error: capture summary unavailable",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Error: capture summary unavailable"):
+                    run_summary_benchmark()
+
 
     def test_smoke_workload_result_reports_scenarios_and_aggregate(self):
         result = workload_result(run_benchmark())

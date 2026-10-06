@@ -188,11 +188,13 @@ def main() -> None:
         parser.error(str(exc))
     report = wr.report_stream(args.result)
     for profile in results["profiles"]:
+        overhead_ratio = profile["capture_overhead_ratio_median"]
+        overhead_ratio_text = f"{overhead_ratio:.2f}x" if overhead_ratio is not None else "n/a"
         print(
             f"profile={profile['profile']} lines={profile['line_count']} bytes={profile['output_bytes']} "
             f"direct_median={profile['direct_seconds_median']:.6f}s "
             f"captured_median={profile['captured_seconds_median']:.6f}s "
-            f"overhead_ratio={profile['capture_overhead_ratio_median']:.2f}x",
+            f"overhead_ratio={overhead_ratio_text}",
             file=report,
         )
     if args.output:

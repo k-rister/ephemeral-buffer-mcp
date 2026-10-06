@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Report unavailable routing ratios safely, write strict semantic-index
+  benchmark JSON for unbounded wait budgets, preserve benchmark server errors,
+  and include worker output when warm-up subprocesses fail.
 - Run summary signal scans outside the engine-wide lock, preserve the available
   output budget when invalid UTF-8 expands during decoding, report effective
   consolidation limits, and make metrics accounting and process cleanup more

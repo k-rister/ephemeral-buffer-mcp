@@ -200,6 +200,13 @@ def _legacy_execute_response(
     )
 
 
+def _parse_tool_json_response(response: str) -> Any:
+    """Decode a JSON tool response while preserving plain-text server errors."""
+    if response.startswith("Error"):
+        raise RuntimeError(response)
+    return json.loads(response)
+
+
 @_IsolatedSummaryEngine()
 def run_summary_benchmark() -> Dict[str, Any]:
     """Measure public preview responses versus summary-first prompts.
@@ -224,14 +231,14 @@ def run_summary_benchmark() -> Dict[str, Any]:
                 scenario["timed_out"],
             ),
         ):
-            compact_summary = json.loads(server.execute_and_capture(
+            compact_summary = _parse_tool_json_response(server.execute_and_capture(
                 scenario["command"],
                 label=f"summary-benchmark-{scenario['id']}",
                 content_type=scenario["content_type"],
                 max_output_bytes=server._active_engine().max_buffer_bytes,
             ))
         capture_id = compact_summary["capture_id"]
-        detailed_summary = json.loads(
+        detailed_summary = _parse_tool_json_response(
             server.get_capture_summary(capture_id, include_previews=True)
         )
         raw_summary = server._active_engine().get_summary(capture_id, include_previews=True)
