@@ -108,6 +108,10 @@ def _outcome(payload: dict[str, Any], elapsed_seconds: float) -> dict[str, Any]:
     """Keep response classification and latency while discarding response content."""
     error = payload.get("error")
     error_code = error.get("code") if isinstance(error, dict) else None
+    if error_code is None:
+        # MCP tool errors are nested, while the socket protocol uses a
+        # top-level code field for errors such as server_busy.
+        error_code = payload.get("code")
     return {
         "status": payload.get("status", "error"),
         "error_code": error_code,
@@ -244,8 +248,8 @@ async def _run_socket_repetition(
     repetition: int,
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    """Hold socket slots with incomplete frames, reject overflow, then complete them."""
-    from socket_protocol import FRAME_HEADER_SIZE, encode_frame
+    """Hold socket slots with idle connections, reject overflow, then send requests."""
+    from socket_protocol import encode_frame
 
     admitted = active_limit + queue_limit
     request_count = admitted + overflow
@@ -266,9 +270,7 @@ async def _run_socket_repetition(
                 "content_type": "text",
             }).encode("utf-8")
             frame = encode_frame(payload)
-            writer.write(frame[:FRAME_HEADER_SIZE])
-            await writer.drain()
-            clients.append((reader, writer, request_started, frame[FRAME_HEADER_SIZE:]))
+            clients.append((reader, writer, request_started, frame))
 
             expected_admitted_so_far = min(index + 1, admitted)
             expected_active = min(expected_admitted_so_far, active_limit)
@@ -298,8 +300,8 @@ async def _run_socket_repetition(
                 "socket requests did not hold the configured active slots and queue"
             )
 
-        for _reader, writer, _request_started, payload in clients[:admitted]:
-            writer.write(payload)
+        for _reader, writer, _request_started, frame in clients[:admitted]:
+            writer.write(frame)
             await writer.drain()
 
         admitted_outcomes = await asyncio.gather(*[
@@ -380,7 +382,7 @@ def _summarize_repetition(
         "request_latency_seconds": wr.summarize(
             (item["elapsed_seconds"] for item in outcomes),
             "seconds",
-            note="Includes queue wait and response time; socket clients first hold incomplete frames.",
+            note="Includes queue wait and response time; socket clients first hold idle connections.",
         ),
         "successful_latency_seconds": wr.summarize(
             (item["elapsed_seconds"] for item in successes),
@@ -497,8 +499,8 @@ def _workload_result(record: dict[str, Any]) -> dict[str, Any]:
         errors=errors,
         description=(
             "Measures bounded MCP and Unix-socket request admission with a controlled saturation burst. "
-            "MCP workers run a short local sleep command; socket requests hold incomplete frames until "
-            "the active slots and queue are occupied."
+            "MCP workers run a short local sleep command; socket clients hold idle connections until "
+            "the active slots and queue are occupied, then send complete requests."
         ),
         privacy="Counts, timing, capacity settings, and response status codes only; no output content is retained.",
     )
