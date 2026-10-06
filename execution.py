@@ -30,7 +30,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from capture_utils import run_command_bounded
+from capture_utils import PROCESS_MARKER_ENV, run_command_bounded
 from config import (
     DEFAULT_MAX_OUTPUT_BYTES,
     execution_checkpoint_reserve_bytes,
@@ -65,7 +65,6 @@ MAX_EXECUTION_OUTPUT_CHUNK_BYTES = 8 * 1024
 MAX_EXECUTION_RECORD_PREVIEW_BYTES = 8 * 1024
 MAX_EXECUTION_RETIRE_BATCH = 20
 JSON_OUTPUT_EXPANSION_BOUND = 6
-PROCESS_MARKER_ENV = "EPHEMERAL_EXECUTION_PROCESS_MARKER"
 PROCESS_CONTAINMENT_SUBREAPER = "linux-subreaper"
 
 
@@ -109,6 +108,7 @@ class ExecutionListDiagnostic(dict):
 
     @property
     def response(self) -> Dict[str, Any]:
+        """Return this diagnostic mapping as a plain dictionary response."""
         return self
 
 
@@ -459,11 +459,13 @@ class _DigestingReader:
         self.digest = hashlib.sha256()
 
     def read(self, size: int = -1) -> bytes:
+        """Read bytes from the source and hash the exact returned chunk."""
         chunk = self.source.read(size)
         self.digest.update(chunk)
         return chunk
 
     def hexdigest(self) -> str:
+        """Return the SHA-256 digest of all bytes read so far."""
         return self.digest.hexdigest()
 
 
@@ -1240,7 +1242,7 @@ class ExecutionStore:
                 self._write_reservation_locked(execution_id, reserved_bytes)
 
     def release_checkpoint(self, execution_id: str) -> None:
-        """Release a phase reservation after its checkpoint has been saved."""
+        """Release a phase reservation after save, rollback, or pre-start cancel."""
         with self._lock:
             with self._record_lease():
                 path = self._reservation_path(execution_id)
@@ -1387,7 +1389,12 @@ class ExecutionStore:
                 summary_path = self._summary_path(record["execution_id"])
                 self._reject_symlink(path, "record file")
                 self._reject_symlink(summary_path, "summary file")
-                encoded = json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                encoded = json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                ).encode("utf-8")
                 if len(encoded) > MAX_EXECUTION_STATE_BYTES:
                     raise ValueError(
                         f"execution state exceeds the {MAX_EXECUTION_STATE_BYTES:,}-byte limit"
@@ -1466,6 +1473,19 @@ class ExecutionStore:
                             stream.flush()
                             os.fsync(stream.fileno())
                         os.replace(temporary, destination)
+                    except OSError:
+                        if destination == summary_path:
+                            # The record is already current. Remove the previous
+                            # summary so listing and retirement cannot mistake it
+                            # for a matching pair after a failed replacement.
+                            self._reject_symlink(summary_path, "summary file")
+                            try:
+                                summary_path.unlink()
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                self._fsync_directory(self.state_dir)
+                        raise
                     finally:
                         if temporary is not None and temporary.exists():
                             temporary.unlink()
@@ -2182,6 +2202,7 @@ class ExecutionStore:
             }
 
     def load(self, execution_id: str, recover: bool = True) -> Dict[str, Any]:
+        """Load and validate a record, optionally recovering a started phase."""
         record = self._read_record(execution_id)
         if not recover or not any(
             phase.get("status") == "started"
@@ -2288,16 +2309,27 @@ class ExecutionStore:
         limit: Optional[int] = None,
         offset: int = 0,
     ) -> List[Any]:
+        """List compact records, tolerating files removed during discovery."""
         with self._lock:
             if not self._validate_state_dir(require_exists=False):
                 return []
+            sort_by_name_only = False
+
+            def is_not_symlink(path: Path) -> bool:
+                nonlocal sort_by_name_only
+                try:
+                    return not path.is_symlink()
+                except OSError:
+                    sort_by_name_only = True
+                    return False
+
             main_paths = {
                 path.name: path
                 for path in self.state_dir.glob("*.json")
                 if (
                     not path.name.endswith(".summary.json")
                     and self._is_record_digest(path.name.removesuffix(".json"))
-                    and not path.is_symlink()
+                    and is_not_symlink(path)
                 )
             }
             summary_paths = {
@@ -2307,25 +2339,35 @@ class ExecutionStore:
                     self._is_record_digest(
                         path.name.removesuffix(".summary.json")
                     )
-                    and not path.is_symlink()
+                    and is_not_symlink(path)
                 )
             }
-            entries: List[Tuple[str, Any]] = []
+            entries: List[Tuple[str, str, Any]] = []
             for name in sorted(set(main_paths) | set(summary_paths)):
                 main_path = main_paths.get(name)
                 summary_path = summary_paths.get(name)
-                if summary_path is not None and (
-                    main_path is None
-                    or summary_path.stat().st_mtime_ns >= main_path.stat().st_mtime_ns
-                ):
-                    candidates = [summary_path]
-                    if main_path is not None:
-                        candidates.append(main_path)
-                else:
-                    # Every name comes from the union of these two mappings;
-                    # if the summary is not preferred, the main record exists.
+                if summary_path is None:
                     assert main_path is not None
                     candidates = [main_path]
+                elif main_path is None:
+                    candidates = [summary_path]
+                else:
+                    try:
+                        summary_is_newer = (
+                            summary_path.stat().st_mtime_ns
+                            >= main_path.stat().st_mtime_ns
+                        )
+                    except OSError:
+                        # The full record is authoritative when file metadata
+                        # disappears during discovery. Name order is stable if
+                        # timestamps cannot reliably order the discovered set.
+                        sort_by_name_only = True
+                        summary_is_newer = False
+                    candidates = (
+                        [summary_path, main_path]
+                        if summary_is_newer
+                        else [main_path, summary_path]
+                    )
 
                 discovered = None
                 for candidate in candidates:
@@ -2353,6 +2395,7 @@ class ExecutionStore:
                         else self._listing_file_sort_time(
                             main_path or summary_path
                         ),
+                        name,
                         {"execution_id": execution_id},
                     ))
                     continue
@@ -2396,15 +2439,18 @@ class ExecutionStore:
                         )
                 else:
                     diagnostic = self._listing_file_diagnostic(main_path)
-                entries.append((updated_at, ExecutionListDiagnostic(diagnostic)))
+                entries.append((updated_at, name, ExecutionListDiagnostic(diagnostic)))
 
-            entries.sort(key=lambda item: item[0], reverse=True)
+            if sort_by_name_only:
+                entries.sort(key=lambda item: item[1])
+            else:
+                entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
             if limit is not None:
                 entries = entries[offset:offset + limit]
             elif offset:
                 entries = entries[offset:]
             selected = []
-            for _updated_at, summary in entries:
+            for _updated_at, _name, summary in entries:
                 if isinstance(summary, ExecutionListDiagnostic):
                     selected.append(summary)
                     continue
@@ -2731,6 +2777,7 @@ class PhaseExecutionManager:
         timeout_seconds: Optional[float] = None,
         max_output_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
+        """Validate and persist a new execution without running its phases."""
         with self._lock:
             with self._create_and_lease(
                 phases, execution_id, label, resume_policy, cwd,
@@ -2933,8 +2980,9 @@ class PhaseExecutionManager:
                 return record
 
             if cancellation_event is not None and cancellation_event.is_set():
-                phase["status"] = "interrupted"
-                phase["error"] = "execution cancelled before the phase started"
+                if phase["status"] not in {"failed", "timed_out"}:
+                    phase["status"] = "interrupted"
+                    phase["error"] = "execution cancelled before the phase started"
                 _phase_event(phase, "interrupted", reason="requested cancellation")
                 self._refresh_overall_status(record)
                 record["updated_at"] = _now()
@@ -3136,6 +3184,7 @@ class PhaseExecutionManager:
         max_output_bytes: Optional[int] = None,
         output_handler: Optional[OutputHandler] = None,
     ) -> Dict[str, Any]:
+        """Create an execution and run phases until they complete or block."""
         with self._create_and_lease(
             phases, execution_id, label, resume_policy, cwd,
             timeout_seconds, max_output_bytes, reserve_first_phase=True,
@@ -3373,6 +3422,7 @@ class PhaseExecutionManager:
         confirm_unsafe: bool = False,
         output_handler: Optional[OutputHandler] = None,
     ) -> Dict[str, Any]:
+        """Continue an execution while honoring retry and unsafe-side-effect gates."""
         execution_id = _validate_text(execution_id, "execution_id", MAX_EXECUTION_ID_BYTES)
         # Avoid creating a durable lease file for a request that cannot resolve
         # to an execution record. The second read under the lease closes the
@@ -3392,10 +3442,12 @@ class PhaseExecutionManager:
             return self._public(completed)
 
     def get(self, execution_id: str, *, include_output: bool = False) -> Dict[str, Any]:
+        """Return the internal validated execution record."""
         with self._lock:
             return self._load(execution_id)
 
     def public(self, execution_id: str, *, include_output: bool = False) -> Dict[str, Any]:
+        """Return a sanitized public view with current activity diagnostics."""
         with self._lock:
             execution_id = _validate_text(
                 execution_id,
@@ -3433,6 +3485,7 @@ class PhaseExecutionManager:
         offset: int = 0,
         max_bytes: int = MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
     ) -> Dict[str, Any]:
+        """Return bounded output; page through one phase by specifying phase_name."""
         with self._lock:
             if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
                 raise ValueError("offset must be a non-negative integer")
@@ -3491,6 +3544,7 @@ class PhaseExecutionManager:
         limit: int = DEFAULT_EXECUTION_LIST_LIMIT,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
+        """Return a paginated public view of durable execution records."""
         with self._lock:
             if isinstance(limit, bool) or not isinstance(limit, int):
                 raise ValueError("limit must be an integer")
