@@ -143,6 +143,7 @@ def format_listing(listing: dict[str, Any], *, fields: Iterable[str] = (), runs:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for workload-result listings."""
     parser = argparse.ArgumentParser(
         description="List coding-agent workload result documents by experiment group and metadata.",
         epilog=(
@@ -163,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Print selected workload results and return their validation status."""
     parser = build_parser()
     args = parser.parse_args(argv)
     listing = build_listing(

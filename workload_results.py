@@ -916,6 +916,10 @@ def iter_result_files(paths: Iterable[str | os.PathLike[str]]) -> Iterable[tuple
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Validate result files and print a summary for each valid document.
+
+    Return 1 if any input is invalid, otherwise 0.
+    """
     parser = argparse.ArgumentParser(description="Validate coding-agent workload result files.")
     parser.add_argument("paths", nargs="+", type=Path, help="Workload result JSON files to validate")
     args = parser.parse_args(argv)

@@ -189,6 +189,10 @@ async def _exercise_mcp_roundtrip() -> None:
 
 
 def main() -> None:
+    """Verify the installed distribution through an MCP initialization.
+
+    The smoke test lists tools, captures text, searches it, and retrieves lines.
+    """
     _assert_installed_modules()
     asyncio.run(asyncio.wait_for(_exercise_mcp_roundtrip(), timeout=60))
     print("Installed package MCP initialize/list/capture/search/retrieve smoke passed.")

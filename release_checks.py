@@ -110,6 +110,7 @@ def validate_source_state(tag_commit: str, main_commit: str, is_on_main: bool, s
 
 
 def git(*args: str) -> str:
+    """Run Git and return stripped stdout, raising on command failure."""
     try:
         return subprocess.run(
             ["git", *args], check=True, capture_output=True, text=True
@@ -120,6 +121,7 @@ def git(*args: str) -> str:
 
 
 def is_ancestor(ancestor: str, descendant: str) -> bool:
+    """Return whether ``ancestor`` is reachable from ``descendant``."""
     return subprocess.run(
         ["git", "merge-base", "--is-ancestor", ancestor, descendant],
         capture_output=True,
@@ -127,6 +129,7 @@ def is_ancestor(ancestor: str, descendant: str) -> bool:
 
 
 def run(argv: list[str] | None = None) -> int:
+    """Validate release metadata and source-state guardrails from CLI options."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True, help="Release tag, for example v0.1.1")
     parser.add_argument("--main-ref", default="origin/main", help="Fetched default-branch ref")
