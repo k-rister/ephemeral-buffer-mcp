@@ -1057,7 +1057,7 @@ embeddings in an isolated per-command namespace:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
-  --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  --source=. --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
   -m unittest test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py \
   test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py \
   test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
@@ -1067,7 +1067,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m cover
   test_engine.py test_capture_utils.py test_config.py test_cli.py test_socket_protocol.py test_fastmcp_adapter.py test_server.py \
   test_execution.py test_execution_server.py test_metrics.py test_logging_utils.py
 .venv/bin/python -m coverage report -m \
-  --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
   --fail-under=100
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
 ```
@@ -1136,6 +1136,26 @@ dispatched GitHub Actions run records the raw JSON result as an artifact and
 adds the measurements and regression status to the workflow summary. This
 benchmark remains optional and is not part of the required pull-request checks;
 update the baseline deliberately when the runner or benchmark workload changes.
+
+Measure MCP and Unix-socket admission under controlled saturation:
+
+```bash
+.venv/bin/python benchmark_admission.py \
+  --repetitions 3 \
+  --output /tmp/benchmark-admission.json \
+  --result /tmp/benchmark-admission.result.json
+```
+
+The benchmark uses the configured active and queued limits, adds four overflow
+requests by default, and reports successful throughput, request latency, and
+`server_busy` rejection rates for each transport. FastMCP tool dispatch runs a
+short local sleep command; socket clients hold incomplete frames until the
+active slots and queue are full. The MCP timings cover the server tool adapter
+without external client transport framing. Semantic prefetch is disabled so
+model work does not mask admission behavior. It fails if either transport does
+not reach its configured capacity, reject the overflow requests, or return to
+idle. The scheduled and manually dispatched benchmark workflow uploads both
+the detailed report and a common workload-result document.
 
 Measure command-capture latency by output size and pipeline phase:
 ```bash
