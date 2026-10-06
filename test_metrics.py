@@ -29,6 +29,12 @@ class TestMetrics(unittest.TestCase):
         metrics.record_event("secret-event")
         self.assertEqual(metrics.snapshot(), {"enabled": False})
 
+    def test_record_event_rejects_unknown_names(self):
+        metrics = LocalMetrics(enabled=True)
+
+        with self.assertRaisesRegex(ValueError, "unknown event: secret-event"):
+            metrics.record_event("secret-event")
+
     def test_scoped_compatibility_views_and_measurement_handle(self):
         disabled = LocalMetrics(enabled=False)
         with disabled.bind_scope("disabled-client"):
@@ -93,6 +99,14 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(stats["latency_ms"]["count"], 3)
         self.assertEqual(sum(stats["failure_categories"].values()), 1)
         self.assertEqual(stats["failure_categories"]["other"], 1)
+
+    def test_record_result_count_takes_precedence_over_measurement_state(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.measure("sample") as state:
+            metrics.record_result_count("sample", 3)
+            state["result_count"] = 3
+
+        self.assertEqual(metrics.snapshot()["tools"]["sample"]["result_count"], 3)
 
     def test_tool_measurement_reports_bounded_latency_and_failure_categories(self):
         metrics = LocalMetrics(enabled=True)
@@ -629,7 +643,7 @@ class TestMetrics(unittest.TestCase):
         following = metrics.snapshot(since_snapshot=delta["snapshot_token"])
         self.assertEqual(following["tools"]["sample"]["calls"], 1)
         self.assertEqual(following["tools"]["sample"]["successes"], 1)
-        self.assertEqual(following["tools"]["sample"]["result_count"], 7)
+        self.assertEqual(following["tools"]["sample"]["result_count"], 3)
         self.assertEqual(following["events"]["captures"], 1)
         self.assertEqual(following["events"]["searches"], 1)
         self.assertEqual(following["events"]["empty_searches"], 1)
@@ -671,6 +685,7 @@ class TestMetrics(unittest.TestCase):
             )
 
         self.assertEqual(client_a["scope"], "mcp_session")
+        self.assertEqual(client_a["window"]["kind"], "cumulative")
         self.assertEqual(client_a["interface_coverage"]["used"], 1)
         self.assertEqual(client_b["window"]["status"], "unavailable")
         self.assertNotEqual(client_a["attribution"]["id"], client_b["attribution"]["id"])

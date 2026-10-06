@@ -26,6 +26,8 @@ _SUPERVISOR_CLEANUP_TIMEOUT = 3
 _SUPERVISOR_MARKER_SETTLE_TIMEOUT = 1
 _SUPERVISOR_SIGNAL_RETRY_DELAY = 0.01
 _SUPERVISOR_IDENTITY_RETRIES = 3
+_PROCESS_GROUP_PROBE_ATTEMPTS = 5
+_PROCESS_GROUP_PROBE_INTERVAL_SECONDS = 0.02
 
 
 class BoundedCommandResult(tuple):
@@ -121,7 +123,7 @@ class _BoundedCapture:
         content_budget = self.max_output_bytes - marker_bytes
         head_budget = min(
             len(head_text.encode("utf-8")),
-            content_budget // 2,
+            content_budget if not tail_text else content_budget // 2,
         )
         head_text = self._truncate_text_to_bytes(head_text, head_budget)
         tail_budget = content_budget - len(head_text.encode("utf-8"))
@@ -184,7 +186,6 @@ def _run_command_bounded(
     if process_marker is not None:
         environment = os.environ.copy()
         environment[PROCESS_MARKER_ENV] = process_marker
-    if process_marker is not None:
         # Keep a dedicated Linux subreaper alive until the command exits.  A
         # process-group kill cannot reach a child that calls setsid(); the
         # supervisor adopts such orphans and removes them before returning.
@@ -296,7 +297,7 @@ def _run_command_bounded(
                             proc.wait(timeout=wait_seconds)
                             break
                         except subprocess.TimeoutExpired:
-                            if remaining is not None and wait_seconds >= remaining:
+                            if deadline is not None and time.monotonic() >= deadline:
                                 timed_out = True
                                 break
         except BaseException as exc:
@@ -411,12 +412,15 @@ def _terminate_process_group(proc: subprocess.Popen, process_group_id: Optional[
             proc.wait()
         except subprocess.TimeoutExpired:
             pass
-    try:
-        os.killpg(group_id, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
+    for attempt in range(_PROCESS_GROUP_PROBE_ATTEMPTS):
+        try:
+            os.killpg(group_id, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        if attempt + 1 < _PROCESS_GROUP_PROBE_ATTEMPTS:
+            time.sleep(_PROCESS_GROUP_PROBE_INTERVAL_SECONDS)
     return False
 
 

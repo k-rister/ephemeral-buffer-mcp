@@ -1046,7 +1046,10 @@ class TestServerTools(unittest.TestCase):
             "max_captures must be at most",
             server.consolidate_captures(max_captures=26),
         )
-        self.assertIn("max_bytes must be at least 512", server.consolidate_captures(max_bytes=511))
+        self.assertIn(
+            "effective output limit (511) must be at least 512 bytes",
+            server.consolidate_captures(max_bytes=511),
+        )
         self.assertIn(
             "at most 25 capture IDs",
             server.consolidate_captures(["missing"] * 26),

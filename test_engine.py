@@ -895,6 +895,56 @@ STEP 3: Summary
         self.assertEqual(summary["capture_id"], capture.capture_id)
         self.assertEqual(summary["label"], "first")
 
+    def test_get_summary_releases_engine_lock_before_scanning_signals(self):
+        capture = self.engine._ingest_state("ERROR\n" * 10, content_type="log")
+        scan_started = threading.Event()
+        release_scan = threading.Event()
+        list_finished = threading.Event()
+        summary_result = {}
+        failures = []
+        original_detector = detect_signals
+
+        def blocked_detector(*args, **kwargs):
+            scan_started.set()
+            release_scan.wait(timeout=2)
+            return original_detector(*args, **kwargs)
+
+        def summarize():
+            try:
+                summary_result["value"] = self.engine.get_summary(capture.capture_id)
+            except BaseException as exc:
+                failures.append(exc)
+
+        def list_captures():
+            try:
+                self.engine.list_captures()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                list_finished.set()
+
+        summary_thread = threading.Thread(target=summarize)
+        list_thread = threading.Thread(target=list_captures)
+        with patch("engine.detect_signals", side_effect=blocked_detector):
+            summary_thread.start()
+            self.assertTrue(scan_started.wait(timeout=1))
+            list_thread.start()
+            try:
+                self.assertTrue(
+                    list_finished.wait(timeout=1),
+                    "list_captures waited for the summary scan to finish",
+                )
+            finally:
+                release_scan.set()
+            summary_thread.join(timeout=2)
+            list_thread.join(timeout=2)
+
+        self.assertFalse(summary_thread.is_alive())
+        self.assertFalse(list_thread.is_alive())
+        if failures:
+            raise failures[0]
+        self.assertEqual(summary_result["value"]["status"], "ok")
+
     def test_04_slice_and_summary(self):
         lines = [f"Log line number {i}" for i in range(1, 101)]
         lines[49] = "FATAL: System ran out of file descriptors"
@@ -921,6 +971,17 @@ STEP 3: Summary
         self.assertIn("FATAL: System ran out of file descriptors", slice_res["content"])
         print("\n[Slice & Summary Test Passed]:")
         print(slice_res["content"])
+
+    def test_consolidate_reports_effective_limit_below_floor(self):
+        engine = EphemeralEngine(max_buffer_bytes=256)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                r"effective output limit \(256\) must be at least 512 bytes",
+            ):
+                engine.consolidate()
+        finally:
+            engine.shutdown()
 
     def test_04a_previews_are_utf8_bounded_without_changing_retained_content(self):
         long_line = "界" * 10_000
