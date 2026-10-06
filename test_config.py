@@ -364,11 +364,15 @@ class TestPositiveIntEnv(unittest.TestCase):
             "EPHEMERAL_SESSION_ID": "session-1",
             "EPHEMERAL_SOCKET_PATH": '/tmp/a"b.sock',
             "EPHEMERAL_EXECUTION_STATE_DIR": "/tmp/state",
+            "EPHEMERAL_SHUTDOWN_GRACE_SECONDS": "3.5",
+            "EPHEMERAL_LOG_DIAGNOSTICS": "1",
             "EPHEMERAL_SEMANTIC_PREFETCH": "0",
         })
         self.assertIn('EPHEMERAL_SESSION_ID="session-1"', rendered)
         self.assertIn('EPHEMERAL_SOCKET_PATH="/tmp/a\\"b.sock"', rendered)
         self.assertIn('EPHEMERAL_EXECUTION_STATE_DIR="/tmp/state"', rendered)
+        self.assertIn('EPHEMERAL_SHUTDOWN_GRACE_SECONDS="3.5"', rendered)
+        self.assertIn('EPHEMERAL_LOG_DIAGNOSTICS="1"', rendered)
         self.assertIn('EPHEMERAL_SEMANTIC_PREFETCH="0"', rendered)
         relative_rendered = codex_mcp_env_config({
             "EPHEMERAL_SOCKET_PATH": "relative.sock",

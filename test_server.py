@@ -97,6 +97,62 @@ class FakeWriter:
     async def wait_closed(self):
         return None
 
+    def get_extra_info(self, _name, default=None):
+        return default
+
+
+
+class FakeBoundSocket:
+    def fileno(self):
+        return 41
+
+    def getsockname(self):
+        return server.SOCKET_PATH
+
+
+class FakeProbeSocket:
+    def __init__(self):
+        self.address = None
+
+    def setblocking(self, _blocking):
+        pass
+
+    def bind(self, address):
+        self.address = address
+
+    def getsockname(self):
+        return self.address
+
+    def close(self):
+        pass
+
+
+class FakeStartupProbeReader:
+    def __init__(self, response_payload=None):
+        self.response_payload = response_payload
+        self.payload = bytearray()
+
+    async def read(self, limit):
+        if not self.payload:
+            payload = (
+                server._SOCKET_STARTUP_PROBE_TOKEN
+                if self.response_payload is None
+                else self.response_payload
+            )
+            self.payload.extend(encode_frame(payload))
+        chunk = bytes(self.payload[:limit])
+        del self.payload[:limit]
+        return chunk
+
+
+FAKE_BOUND_SOCKET = FakeBoundSocket()
+
+
+def successful_socket_probe_connector(response_payload=None):
+    return AsyncMock(
+        return_value=(FakeStartupProbeReader(response_payload), FakeWriter())
+    )
+
 
 def response_json(writer):
     framed = writer.writes[0]
@@ -453,13 +509,9 @@ class TestServerTools(unittest.TestCase):
                 with patch.object(server, "admission_gate", return_value=BusyGate()) as gate:
                     result = await adapters[name]()
                 gate.assert_called_once_with(category)
-                if name == "busy_retrieval_probe":
-                    self.assertEqual(result.content[0].text, "Error: Foreground work capacity is full; retry this tool call shortly.")
-                elif name == "busy_execution_probe":
-                    payload = json.loads(result)
-                    self.assertEqual(payload["error"]["code"], "server_busy")
-                else:
-                    self.assertIn("server_busy", result)
+                payload = json.loads(mcp_result_text(result))
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["error"]["code"], "server_busy")
 
         asyncio.run(exercise())
 
@@ -629,12 +681,13 @@ class TestServerTools(unittest.TestCase):
                 {"phases": [{"name": "shutdown-probe", "command": "true"}]},
             )
             diagnostic = await app.call_tool("get_buffer_stats", {})
-            self.assertIn("service is shutting down", structured.content[0].text)
-            self.assertEqual(
-                json.loads(mcp_result_text(execution))["error"]["code"],
-                "server_shutting_down",
-            )
-            self.assertIn("server_shutting_down", mcp_result_text(diagnostic))
+            for result in (structured, execution, diagnostic):
+                payload = json.loads(mcp_result_text(result))
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(
+                    payload["error"]["code"],
+                    "server_shutting_down",
+                )
 
             for name, arguments in (
                 ("capture_text", {"content": "closing race"}),
@@ -652,15 +705,12 @@ class TestServerTools(unittest.TestCase):
                 self.assertTrue(gate.ticket.released)
                 with context._lifecycle_lock:
                     context._closing = False
-                if name == "capture_text":
-                    self.assertIn("service is shutting down", result.content[0].text)
-                elif name == "start_execution":
-                    self.assertEqual(
-                        json.loads(mcp_result_text(result))["error"]["code"],
-                        "server_shutting_down",
-                    )
-                else:
-                    self.assertIn("server_shutting_down", mcp_result_text(result))
+                payload = json.loads(mcp_result_text(result))
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(
+                    payload["error"]["code"],
+                    "server_shutting_down",
+                )
 
             class FailingGate:
                 async def acquire(self, _work_type):
@@ -710,6 +760,9 @@ class TestServerTools(unittest.TestCase):
         capture_file_doc = server.capture_file.__doc__
         execute_doc = server.execute_and_capture.__doc__
         preflight_doc = server.preflight_command.__doc__
+        search_doc = server.search_capture.__doc__
+        list_doc = server.list_captures.__doc__
+        start_execution_doc = server.start_execution.__doc__
 
         self.assertIn("already-collected text", capture_text_doc)
         self.assertIn("resolve symlinks", capture_file_doc)
@@ -717,8 +770,30 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("omitted ``cwd``", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
         self.assertIn("filesystem safety", execute_doc)
+        self.assertIn("structured_metrics", execute_doc)
+        self.assertIn("structured_metrics", server.start_execution.__doc__)
         self.assertIn("never executed", preflight_doc)
         self.assertIn("Shell expansion", preflight_doc)
+        for argument in ("query", "mode", "capture_id", "top_k", "context_lines"):
+            self.assertIn(argument, search_doc)
+        for mode in ("hybrid", "bm25", "semantic"):
+            self.assertIn(mode, search_doc)
+        self.assertIn("structured match data", search_doc)
+        self.assertIn("captures", list_doc)
+        self.assertIn("capture_count", list_doc)
+        for field in ("unsafe_side_effects", "idempotency_key"):
+            self.assertIn(field, start_execution_doc)
+        self.assertIn("resolved from the session identity", start_execution_doc)
+        self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", start_execution_doc)
+        self.assertIn("framed CLI request", server.handle_socket_client.__doc__)
+
+    def test_bounded_summary_text_handles_marker_larger_than_budget(self):
+        text, truncated = server._bounded_summary_text("a long value", 4, "[cut]")
+
+        self.assertTrue(truncated)
+        self.assertEqual(text, "[cut"[:4])
+        self.assertLessEqual(len(text.encode("utf-8")), 4)
+        self.assertEqual(server._bounded_summary_text("value", 0, "[cut]"), ("", True))
 
     def test_preflight_reports_repo_executable_and_does_not_run_command(self):
         result = json.loads(server.preflight_command("printf 'secret output'", cwd=os.getcwd()))
@@ -2397,6 +2472,10 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Range: L1-L1, Context: L1-L1", result.text)
         self.assertNotIn("Range: L2-L2, Context: L1-L2", result.text)
         self.assertIn("Additional matches omitted", result.text)
+        self.assertIn(
+            f"{server.SEARCH_RESPONSE_MAX_BYTES:,}-byte budget",
+            result.text,
+        )
         self.assertNotIn("snippet truncated", result.text)
         self.assertLessEqual(
             server._call_tool_result_bytes(result),
@@ -2500,7 +2579,114 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         writer = FakeWriter()
         task = server.handle_socket_client(FakeReader(payload), writer)
         await task
+        await asyncio.sleep(0)
         return writer
+
+    async def test_startup_probe_is_acknowledged_without_registering_tool_call(self):
+        token = b"startup-probe-token"
+        address = "/tmp/ephemeral-startup-probe.sock"
+
+        class PeerSocket:
+            def getpeername(self):
+                return address
+
+        class ProbeWriter(FakeWriter):
+            def get_extra_info(self, name, default=None):
+                return PeerSocket() if name == "socket" else default
+
+        class Services:
+            def register_tool_call(self, _name):
+                raise AssertionError("startup probe must not register tool work")
+
+        writer = ProbeWriter()
+        with patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", address), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", token), \
+                patch.object(server, "DEFAULT_SERVICES", Services()):
+            await server.handle_socket_client(FakeReader(b""), writer)
+
+        self.assertEqual(writer.writes, [encode_frame(token)])
+        self.assertTrue(writer.closed)
+
+    async def test_client_request_is_processed_while_startup_probe_is_active(self):
+        probe_address = "/tmp/ephemeral-startup-probe.sock"
+        client_address = "/tmp/ephemeral-cli-client.sock"
+        token = b"startup-probe-token"
+
+        class PeerSocket:
+            def getpeername(self):
+                return client_address
+
+        class ClientWriter(FakeWriter):
+            def get_extra_info(self, name, default=None):
+                return PeerSocket() if name == "socket" else default
+
+        payload = encode_frame(json.dumps({
+            "label": "startup-race",
+            "text": "client request must be preserved",
+        }).encode())
+        writer = ClientWriter()
+        with patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", probe_address), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", token):
+            task = server.handle_socket_client(FakeReader(payload), writer)
+            await task
+
+        self.assertEqual(response_json(writer)["status"], "ok")
+        self.assertTrue(any(
+            capture.label == "startup-race"
+            for capture in server.engine._captures.values()
+        ))
+
+    async def test_client_without_peer_address_uses_regular_shutdown_path(self):
+        class ShuttingDownServices:
+            def register_tool_call(self, _name):
+                return None
+
+        writer = FakeWriter()
+        with patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", "/tmp/probe.sock"), \
+                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", b"probe-token"), \
+                patch.object(server, "DEFAULT_SERVICES", ShuttingDownServices()):
+            await server.handle_socket_client(FakeReader(b""), writer)
+
+        self.assertEqual(response_json(writer)["code"], "server_shutting_down")
+
+    async def test_socket_client_task_is_retained_until_finished(self):
+        gate_entered = asyncio.Event()
+        release_gate = asyncio.Event()
+
+        class Context:
+            closing = False
+
+            def register_tool_call(self, _name):
+                return "socket-call", None
+
+            def finish_tool_call(self, _call_id):
+                return None
+
+        class Ticket:
+            def release(self):
+                return None
+
+        class Gate:
+            async def acquire(self, _name):
+                gate_entered.set()
+                await release_gate.wait()
+                return Ticket()
+
+        writer = FakeWriter()
+        with patch.object(server, "DEFAULT_SERVICES", Context()), patch.object(
+            server, "admission_gate", return_value=Gate()
+        ):
+            task = server.handle_socket_client(FakeReader(b""), writer)
+            try:
+                await gate_entered.wait()
+                self.assertIn(task, server._SOCKET_CLIENT_TASKS)
+            finally:
+                release_gate.set()
+            await task
+            await asyncio.sleep(0)
+
+        self.assertNotIn(task, server._SOCKET_CLIENT_TASKS)
+        self.assertTrue(writer.closed)
 
     async def test_socket_handler_rejects_shutdown_and_admission_failure(self):
         class Context:
@@ -2798,7 +2984,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
-        self.assertIn("exceeds", response["message"])
+        enforced_limit = (
+            server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
+            + server.SOCKET_PAYLOAD_OVERHEAD
+        )
+        self.assertEqual(
+            response["message"],
+            f"CLI payload exceeds the {enforced_limit:,}-byte socket payload limit",
+        )
 
     async def test_socket_byte_metrics_count_consumed_rejected_request_bytes(self):
         original_metrics = server.METRICS
@@ -2963,6 +3156,97 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSocketServerStartup(unittest.TestCase):
+    def test_new_socket_probe_uses_unix_stream_socket(self):
+        probe = server._new_socket_probe()
+        try:
+            self.assertEqual(probe.family, socket.AF_UNIX)
+            self.assertEqual(probe.type & socket.SOCK_STREAM, socket.SOCK_STREAM)
+        finally:
+            probe.close()
+
+    def test_bound_socket_verification_rejects_non_socket_descriptor(self):
+        regular_stat = os.stat_result(
+            (stat.S_IFREG | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
+        )
+        with patch.object(server.os, "fstat", return_value=regular_stat):
+            with self.assertRaisesRegex(RuntimeError, "descriptor is not a socket"):
+                asyncio.run(
+                    server._verify_bound_socket_path(FAKE_BOUND_SOCKET, server.SOCKET_PATH)
+                )
+
+    def test_bound_socket_verification_rejects_wrong_listener_address(self):
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
+        )
+
+        class WrongAddressSocket(FakeBoundSocket):
+            def getsockname(self):
+                return "/tmp/another.sock"
+
+        with patch.object(server.os, "fstat", return_value=socket_stat):
+            with self.assertRaisesRegex(RuntimeError, "address does not match path"):
+                asyncio.run(
+                    server._verify_bound_socket_path(
+                        WrongAddressSocket(), server.SOCKET_PATH
+                    )
+                )
+
+    def test_bound_socket_verification_rejects_non_socket_path(self):
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
+        )
+        regular_stat = os.stat_result(
+            (stat.S_IFREG | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
+        )
+        with patch.object(server.os, "fstat", return_value=socket_stat), \
+                patch.object(server.os, "lstat", return_value=regular_stat):
+            with self.assertRaisesRegex(RuntimeError, "path is not a socket"):
+                asyncio.run(
+                    server._verify_bound_socket_path(FAKE_BOUND_SOCKET, server.SOCKET_PATH)
+                )
+
+    def test_bound_socket_verification_reports_probe_os_error(self):
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
+        )
+
+        with patch.object(server.os, "fstat", return_value=socket_stat), \
+                patch.object(server.os, "lstat", return_value=socket_stat), \
+                patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                patch.object(
+                    server,
+                    "_connect_socket_probe",
+                    new=AsyncMock(side_effect=OSError("probe failed")),
+                ):
+            with self.assertRaisesRegex(RuntimeError, "Unable to verify bound socket path"):
+                asyncio.run(
+                    server._verify_bound_socket_path(FAKE_BOUND_SOCKET, server.SOCKET_PATH)
+                )
+
+    def test_connect_socket_probe_uses_running_loop_and_streams(self):
+        probe = object()
+        reader = object()
+        writer = object()
+        calls = []
+
+        class Loop:
+            async def sock_connect(self, actual_probe, path):
+                calls.append(("connect", actual_probe, path))
+
+        async def exercise():
+            with patch.object(server.asyncio, "get_running_loop", return_value=Loop()), \
+                    patch.object(
+                        server.asyncio,
+                        "open_connection",
+                        new=AsyncMock(return_value=(reader, writer)),
+                    ) as open_connection:
+                result = await server._connect_socket_probe(probe, "/tmp/test.sock")
+            self.assertEqual(result, (reader, writer))
+            open_connection.assert_awaited_once_with(sock=probe)
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, [("connect", probe, "/tmp/test.sock")])
+
     def test_socket_path_lock_closes_fd_when_lock_acquisition_fails(self):
         with patch.object(server.os, "open", return_value=41), \
                 patch.object(server.fcntl, "flock", side_effect=OSError("lock failed")), \
@@ -2985,6 +3269,8 @@ class TestSocketServerStartup(unittest.TestCase):
                 return False
 
         class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
             async def __aenter__(self):
                 return self
 
@@ -3013,8 +3299,11 @@ class TestSocketServerStartup(unittest.TestCase):
                 patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
                 patch.object(server.asyncio, "set_event_loop"), \
                 patch.object(server.os.path, "lexists", return_value=False), \
+                patch.object(server.os, "fstat", return_value=socket_stat), \
                 patch.object(server.os, "lstat", return_value=socket_stat), \
                 patch.object(server.asyncio, "start_unix_server", new=AsyncMock(side_effect=start_server)) as start_listener, \
+                patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
                 patch.object(server.os, "chmod"), \
                 patch.object(server, "_socket_path_lock", return_value=Lock()), \
                 patch.object(server, "_unlink_socket_if_identity", return_value=True), \
@@ -3474,6 +3763,8 @@ class TestSocketServerStartup(unittest.TestCase):
         test_case = self
 
         class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
             async def __aenter__(self):
                 return self
 
@@ -3502,7 +3793,10 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.asyncio, "set_event_loop"), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())) as start, \
                     patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "fstat", return_value=socket_stat) as fstat, \
                     patch.object(server.os, "lstat", return_value=socket_stat), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
                     patch.object(server.os, "chmod") as chmod, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 server.run_socket_server()
@@ -3512,11 +3806,156 @@ class TestSocketServerStartup(unittest.TestCase):
             path=socket_path,
             backlog=server.MAX_ACTIVE_SOCKET_CLIENTS + server.MAX_QUEUED_SOCKET_CLIENTS,
         )
+        fstat.assert_any_call(41)
         chmod.assert_called_once_with(socket_path, 0o600)
         self.assertIn("listener stopped", stderr.getvalue())
 
+    def test_startup_fails_if_listener_has_no_bound_socket_descriptor(self):
+        class Listener:
+            sockets = ()
+
+            def __init__(self):
+                self.closed = False
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                self.closed = True
+                return False
+
+            async def serve_forever(self):
+                raise AssertionError("listener must not serve without a descriptor")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        listener = Listener()
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "chmod") as chmod, \
+                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+        self.assertTrue(listener.closed)
+        chmod.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertIn("Unix socket listener has no bound socket descriptor", stderr.getvalue())
+
+    def test_path_replacement_during_listener_verification_fails_before_tracking(self):
+        class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
+            def __init__(self):
+                self.closed = False
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                self.closed = True
+                return False
+
+            async def serve_forever(self):
+                raise AssertionError("listener must not serve after an identity mismatch")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        bound_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 11, 22, 1, 0, 0, 0, 0, 0, 0)
+        )
+        replacement_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 12, 22, 1, 0, 0, 0, 0, 0, 0)
+        )
+        listener = Listener()
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "fstat", return_value=bound_stat), \
+                    patch.object(server.os, "lstat", side_effect=[bound_stat, replacement_stat]), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(server.os, "chmod") as chmod, \
+                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+        self.assertTrue(listener.closed)
+        chmod.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertIn("Socket path changed while verifying", stderr.getvalue())
+
+    def test_path_that_does_not_acknowledge_bound_listener_fails_startup(self):
+        class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc_info):
+                return False
+
+            async def serve_forever(self):
+                raise AssertionError("listener must not serve without a probe acknowledgement")
+
+        class RunningLoop:
+            def close(self):
+                pass
+
+            def run_until_complete(self, coroutine):
+                return asyncio.run(coroutine)
+
+        socket_stat = os.stat_result(
+            (stat.S_IFSOCK | 0o600, 11, 22, 1, 0, 0, 0, 0, 0, 0)
+        )
+        listener = Listener()
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "ephemeral.sock")
+            with patch.object(server, "SOCKET_PATH", socket_path), \
+                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(server.asyncio, "set_event_loop"), \
+                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
+                    patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "fstat", return_value=socket_stat), \
+                    patch.object(server.os, "lstat", return_value=socket_stat), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(
+                        server,
+                        "_connect_socket_probe",
+                        new=successful_socket_probe_connector(b"wrong-token"),
+                    ), \
+                    patch.object(server.os, "chmod") as chmod, \
+                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                server.run_socket_server()
+
+        chmod.assert_not_called()
+        cleanup.assert_not_called()
+        self.assertIn("Socket path did not acknowledge the bound listener", stderr.getvalue())
+
     def test_shutdown_removes_socket_owned_by_listener(self):
         class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
             async def __aenter__(self):
                 return self
 
@@ -3541,7 +3980,10 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
                     patch.object(server.os.path, "lexists", return_value=False), \
+                    patch.object(server.os, "fstat", return_value=socket_stat), \
                     patch.object(server.os, "lstat", return_value=socket_stat), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
                     patch.object(server.os, "chmod"), \
                     patch.object(server, "_unlink_socket_if_identity", return_value=True) as cleanup, \
@@ -3552,6 +3994,8 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_shutdown_tolerates_socket_already_removed(self):
         class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
             async def __aenter__(self):
                 return self
 
@@ -3578,7 +4022,10 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
                     patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "lstat", side_effect=[socket_stat, socket_stat]), \
+                    patch.object(server.os, "fstat", return_value=socket_stat), \
+                    patch.object(server.os, "lstat", side_effect=[socket_stat, socket_stat, socket_stat]), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
                     patch.object(server.os, "chmod"), \
                     patch.object(server, "_unlink_socket_if_identity", side_effect=FileNotFoundError()), \
@@ -3586,10 +4033,12 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch("sys.stderr", new_callable=io.StringIO):
                 server.run_socket_server()
 
-        unlink.assert_not_called()
+        self.assertFalse(any(call.args == (socket_path,) for call in unlink.call_args_list))
 
     def test_shutdown_tolerates_socket_removed_before_final_revalidation(self):
         class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
             async def __aenter__(self):
                 return self
 
@@ -3616,7 +4065,10 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
                     patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "lstat", side_effect=[socket_stat, FileNotFoundError()]), \
+                    patch.object(server.os, "fstat", return_value=socket_stat), \
+                    patch.object(server.os, "lstat", side_effect=[socket_stat, socket_stat, FileNotFoundError()]), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
                     patch.object(server.os, "chmod"), \
                     patch.object(server, "_unlink_socket_if_identity") as cleanup, \
@@ -3627,6 +4079,8 @@ class TestSocketServerStartup(unittest.TestCase):
 
     def test_shutdown_does_not_remove_replacement_socket(self):
         class Listener:
+            sockets = (FAKE_BOUND_SOCKET,)
+
             async def __aenter__(self):
                 return self
 
@@ -3652,14 +4106,17 @@ class TestSocketServerStartup(unittest.TestCase):
                     patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
                     patch.object(server.asyncio, "set_event_loop"), \
                     patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "lstat", side_effect=[bound_stat, replacement_stat]), \
+                    patch.object(server.os, "fstat", return_value=bound_stat), \
+                    patch.object(server.os, "lstat", side_effect=[bound_stat, bound_stat, replacement_stat]), \
+                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
                     patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
                     patch.object(server.os, "chmod"), \
                     patch.object(server.os, "unlink") as unlink, \
                     patch("sys.stderr", new_callable=io.StringIO):
                 server.run_socket_server()
 
-        unlink.assert_not_called()
+        self.assertFalse(any(call.args == (socket_path,) for call in unlink.call_args_list))
 
     def test_socket_probe_failure_is_reported(self):
         class FailingLoop:
