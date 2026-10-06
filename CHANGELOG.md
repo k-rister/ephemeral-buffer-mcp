@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a controlled MCP and socket admission saturation benchmark with latency,
+  throughput, queue occupancy, and busy-rejection measurements; run it in the
+  scheduled and manually dispatched benchmark workflow.
 - Report unavailable routing ratios safely, write strict semantic-index
   benchmark JSON for unbounded wait budgets, preserve benchmark server errors,
   and include worker output when warm-up subprocesses fail.
