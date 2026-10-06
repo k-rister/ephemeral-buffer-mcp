@@ -610,6 +610,30 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertEqual(diagnostic["record_bytes"], 0)
         self.assertEqual(sort_time, "")
 
+    def test_list_uses_name_order_when_summary_disappears_during_stat(self):
+        manager = self.manager()
+        store = manager.store
+        execution_ids = ["stat-race-b", "stat-race-a"]
+        for execution_id in execution_ids:
+            manager.create([self.phase("phase", execution_id)], execution_id=execution_id)
+
+        disappearing_symlink_check = store._summary_path(execution_ids[0])
+        disappearing_stat = store._summary_path(execution_ids[1])
+        original_stat = Path.stat
+
+        def disappear_during_stat(path, *args, **kwargs):
+            if path == disappearing_symlink_check and kwargs.get("follow_symlinks") is False:
+                raise FileNotFoundError("summary removed during symlink check")
+            if path == disappearing_stat and kwargs.get("follow_symlinks") is not False:
+                raise FileNotFoundError("summary removed during listing")
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", new=disappear_during_stat):
+            listed = store.list()
+
+        expected = sorted(execution_ids, key=store._filename)
+        self.assertEqual([item["execution_id"] for item in listed], expected)
+
     def test_list_surfaces_unreadable_record_diagnostics_across_summary_races(self):
         manager = self.manager()
         store = manager.store
@@ -2178,13 +2202,14 @@ class TestPhaseExecutionManager(unittest.TestCase):
             with patch("execution.os.replace", side_effect=replace_main_only):
                 with self.assertRaisesRegex(OSError, "summary replace failed"):
                     store.save(reconciled)
-            main_path = store._path("listed")
-            os_mtime = summary_path.stat().st_mtime + 1
-            os.utime(main_path, (os_mtime, os_mtime))
+            self.assertFalse(summary_path.exists())
             listed_after_partial_save = {
                 item["execution_id"]: item for item in store.list()
             }
             self.assertEqual(listed_after_partial_save["listed"]["label"], "reconciled")
+            retirement_preview = store.retire(["listed"], dry_run=True)
+            self.assertEqual(retirement_preview["blocked_count"], 1)
+            self.assertIn("summary is missing", retirement_preview["items"][0]["reason"])
             invalid_state = store._path("invalid-state")
             invalid_state.write_text(json.dumps({"execution_id": "other"}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "invalid state"):
@@ -2222,6 +2247,49 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 store.load("listed")
             self.assertFalse(store._path("replace-failure").exists())
 
+    def test_save_rejects_non_finite_values_without_replacing_record_pair(self):
+        manager = self.manager()
+        manager.create([self.phase("phase", "phase")], execution_id="non-finite-save")
+        record_path = manager.store._path("non-finite-save")
+        summary_path = manager.store._summary_path("non-finite-save")
+        original_record = record_path.read_bytes()
+        original_summary = summary_path.read_bytes()
+        record = manager.store.load("non-finite-save", recover=False)
+        record["phases"][0]["result"] = {"metric": float("nan")}
+
+        with self.assertRaises(ValueError):
+            manager.store.save(record)
+
+        self.assertEqual(record_path.read_bytes(), original_record)
+        self.assertEqual(summary_path.read_bytes(), original_summary)
+        self.assertEqual(manager.store.load("non-finite-save", recover=False)["phases"][0]["result"], None)
+
+    def test_summary_write_failure_without_old_summary_keeps_pair_incomplete(self):
+        manager = self.manager()
+        manager.create([self.phase("phase", "phase")], execution_id="missing-old-summary")
+        record = manager.store.load("missing-old-summary", recover=False)
+        record["label"] = "new record"
+        summary_path = manager.store._summary_path("missing-old-summary")
+        summary_path.unlink()
+        replace_calls = 0
+        original_replace = execution.os.replace
+
+        def fail_summary_replace(source, destination):
+            nonlocal replace_calls
+            replace_calls += 1
+            if replace_calls == 2:
+                raise OSError("summary replace failed")
+            return original_replace(source, destination)
+
+        with patch("execution.os.replace", side_effect=fail_summary_replace):
+            with self.assertRaisesRegex(OSError, "summary replace failed"):
+                manager.store.save(record)
+
+        self.assertFalse(summary_path.exists())
+        self.assertEqual(manager.store.list()[0]["label"], "new record")
+        retirement_preview = manager.store.retire(["missing-old-summary"], dry_run=True)
+        self.assertEqual(retirement_preview["blocked_count"], 1)
+
     def test_public_resume_and_output_errors(self):
         manager = self.manager()
         with self.assertRaisesRegex(KeyError, "not found"):
@@ -2255,6 +2323,27 @@ class TestPhaseExecutionManager(unittest.TestCase):
         listed = manager.list_public()[0]
         self.assertEqual(listed["execution_id"], "lookup")
         self.assertNotIn("events", listed["phases"][0])
+
+    def test_phase_output_can_be_paged_by_name_after_all_phase_budget(self):
+        manager = self.manager()
+        manager.create(
+            [self.phase("first", "first"), self.phase("second", "second")],
+            execution_id="output-pagination",
+        )
+        record = manager.store.load("output-pagination", recover=False)
+        record["phases"][0]["output"] = "a" * 700
+        record["phases"][1]["output"] = "b" * 700
+        manager.store.save(record)
+
+        all_phases = manager.output("output-pagination", max_bytes=512)
+        second_page = manager.output(
+            "output-pagination", "second", offset=512, max_bytes=512
+        )
+
+        self.assertEqual(len(all_phases["phases"][0]["output"]), 512)
+        self.assertEqual(all_phases["phases"][1]["output"], "")
+        self.assertEqual(second_page["phases"][0]["offset"], 512)
+        self.assertEqual(second_page["phases"][0]["output"], "b" * 188)
 
     def test_state_directory_rejects_symlink_redirection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3102,6 +3191,46 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertEqual(result["execution_status"], "interrupted")
         self.assertEqual(result["phases"][0]["status"], "interrupted")
         self.assertFalse(reservation.exists())
+
+    def test_cancellation_during_failed_retry_preserves_retry_gate(self):
+        attempts = {"phase": 0}
+
+        def fail_then_succeed(*_args):
+            attempts["phase"] += 1
+            if attempts["phase"] == 1:
+                return "first attempt failed", 1, False, 19, False
+            return "retry succeeded", 0, False, 14, False
+
+        runner = Runner({"phase": fail_then_succeed})
+        manager = self.manager(runner)
+        initial = manager.start(
+            [self.phase("phase", "phase")], execution_id="cancelled-retry"
+        )
+        original_error = initial["phases"][0]["error"]
+        cancellation_event = threading.Event()
+        cancellation_event.set()
+
+        with manager.store.lease("cancelled-retry"):
+            record = manager.store.load("cancelled-retry", recover=False)
+            cancelled = manager._run(
+                record,
+                retry_failed=True,
+                confirm_unsafe=False,
+                output_handler=None,
+                cancellation_event=cancellation_event,
+            )
+
+        self.assertEqual(cancelled["phases"][0]["status"], "failed")
+        self.assertEqual(cancelled["phases"][0]["error"], original_error)
+        self.assertEqual(cancelled["phases"][0]["events"][-1]["status"], "interrupted")
+        self.assertEqual(attempts["phase"], 1)
+
+        ordinary_resume = manager.resume("cancelled-retry")
+        self.assertEqual(ordinary_resume["phases"][0]["attempts"], 1)
+        self.assertEqual(attempts["phase"], 1)
+        retried = manager.resume("cancelled-retry", retry_failed=True)
+        self.assertEqual(retried["execution_status"], "completed")
+        self.assertEqual(attempts["phase"], 2)
 
     def test_cancelled_command_is_checkpointed_as_interrupted(self):
         runner = Runner({

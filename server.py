@@ -68,8 +68,10 @@ from engine import (
 )
 from capture_utils import read_file_bounded, run_command_bounded
 from execution import (
+    DEFAULT_EXECUTION_LIST_LIMIT,
     ExecutionBusyError,
     MAX_EXECUTION_ID_BYTES,
+    MAX_EXECUTION_LIST_LIMIT,
     MAX_EXECUTION_RETIRE_BATCH,
     MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
     MAX_EXECUTION_PHASES,
@@ -1843,7 +1845,7 @@ def get_execution_output(
     offset: Annotated[int, Field(ge=0)] = 0,
     max_bytes: Annotated[int, Field(ge=512, le=MAX_EXECUTION_OUTPUT_CHUNK_BYTES)] = MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
 ) -> str:
-    """Retrieve one bounded output chunk for all phases or one named phase."""
+    """Retrieve bounded output; specify phase_name to page through one phase."""
     return _execution_json(
         lambda: _execution_public_payload(
             _active_execution_manager().output(
@@ -1860,7 +1862,9 @@ def get_execution_output(
 @_mcp_tool("list_executions", "execution")
 @_instrument_tool("list_executions")
 def list_executions(
-    limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    limit: Annotated[
+        int, Field(ge=1, le=MAX_EXECUTION_LIST_LIMIT)
+    ] = DEFAULT_EXECUTION_LIST_LIMIT,
     offset: Annotated[int, Field(ge=0)] = 0,
 ) -> str:
     """List durable executions with compact partial/completion summaries."""

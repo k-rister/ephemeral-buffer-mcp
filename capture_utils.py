@@ -19,6 +19,7 @@ from logging_utils import get_logger, log_event
 
 
 LOGGER = get_logger("capture")
+PROCESS_MARKER_ENV = "EPHEMERAL_EXECUTION_PROCESS_MARKER"
 _SUPERVISOR_ARG = "--ephemeral-supervise"
 _SUPERVISOR_CLEANUP_FAILURE = 125
 _SUPERVISOR_CLEANUP_TIMEOUT = 3
@@ -182,7 +183,7 @@ def _run_command_bounded(
     environment = None
     if process_marker is not None:
         environment = os.environ.copy()
-        environment["EPHEMERAL_EXECUTION_PROCESS_MARKER"] = process_marker
+        environment[PROCESS_MARKER_ENV] = process_marker
     if process_marker is not None:
         # Keep a dedicated Linux subreaper alive until the command exits.  A
         # process-group kill cannot reach a child that calls setsid(); the
@@ -505,7 +506,7 @@ def _marker_processes(marker: str) -> Optional[set[int]]:
     """Find marked processes, or return None for an incomplete clean scan."""
     if not sys.platform.startswith("linux"):
         return None
-    marker_bytes = f"EPHEMERAL_EXECUTION_PROCESS_MARKER={marker}".encode("utf-8")
+    marker_bytes = f"{PROCESS_MARKER_ENV}={marker}".encode("utf-8")
     try:
         process_names = os.listdir("/proc")
     except OSError:

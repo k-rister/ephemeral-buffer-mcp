@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Harden durable execution records against listing races and non-finite JSON,
+  preserve failed-phase retry gates when cancellation arrives before a retry,
+  invalidate stale summaries after failed writes, and document per-phase output
+  paging.
 - Return a frozen metadata view from `ingest` and `get_capture`, keep the
   historical lookup as a compatibility wrapper, and expose supported
   semantic-index operations and diagnostics for Python integrations and

@@ -357,8 +357,9 @@ with owner-only permissions; use
 owner-readable. `get_execution` exposes a human-readable summary plus structured
 status, event history, metrics, and the first incomplete phase;
 `get_execution_output` retrieves bounded chunks of persisted phase output after
-a restart; pass `phase_name`, `offset`, and `max_bytes` to page through a large
-phase without creating an oversized MCP response.
+a restart. The all-phase response shares its byte budget across phases; pass
+`phase_name`, `offset`, and `max_bytes` to page through one large phase without
+creating an oversized MCP response. `offset` requires `phase_name`.
 The `capture_id` included with a phase result is a convenience reference into
 the active engine's in-memory capture ring. Its `capture_session_id` identifies
 the engine session, and `capture_available` is true only when that same session
