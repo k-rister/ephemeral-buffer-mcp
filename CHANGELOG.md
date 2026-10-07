@@ -3,9 +3,10 @@
 ## Unreleased
 
 - Record per-criterion phrase exposure in successful MCP search and capture-slice
-  responses without retaining response text, summarize the retrieval-to-answer
-  stages, and let release benchmark collection run only the agent A/B suite with
-  an independent repetition count.
+  responses without retaining response text, summarize retrieval-to-answer
+  outcomes by phrase-hit, response-without-hit, and no-successful-response state,
+  report per-task success rates and paired deltas, and let release benchmark
+  collection run only the agent A/B suite with an independent repetition count.
 - Add a controlled MCP and socket admission saturation benchmark with latency,
   throughput, queue occupancy, and busy-rejection measurements; run it in the
   scheduled and manually dispatched benchmark workflow.

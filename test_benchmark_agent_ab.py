@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import benchmark_agent_ab
 import workload_results as wr
+from render_agent_ab_report import append_agent_ab_report
 from benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
     RECORDS_SCHEMA_VERSION,
@@ -173,6 +174,16 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
+        self.assertEqual(summary["schema_version"], 3)
+        task_success = summary["task_success_by_mode"]
+        self.assertEqual(
+            task_success["mcp"]["tasks"]["targeted-inspection"],
+            {"successes": 1, "count": 2, "success_rate": 0.5},
+        )
+        task_delta = summary["paired_task_success_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"]
+        self.assertEqual(task_delta["mean"], 0.5)
+        self.assertEqual(task_delta["count"], 2)
+        self.assertTrue(task_delta["available"])
         self.assertTrue(summary["criterion_summaries_by_mode"]["mcp"]["available"])
         self.assertEqual(
             summary["criterion_summaries_by_mode"]["mcp"]["tasks"]["targeted-inspection"][0]["pass_rate"],
@@ -212,6 +223,95 @@ class TestAgentAbBenchmark(unittest.TestCase):
         serialized = json.dumps(summary)
         self.assertNotIn("TARGETED_SIGNAL", serialized)
         self.assertNotIn("line 32", serialized)
+
+    def test_response_exposure_cross_tabs_criterion_outcomes_without_content(self):
+        schedule, payload = _scored_records_payload()
+        targeted_mcp = sorted(
+            (
+                record for record in payload["runs"]
+                if record["task_id"] == "targeted-inspection" and record["mode"] == "mcp"
+            ),
+            key=lambda record: record["repetition"],
+        )
+        first, second = targeted_mcp
+        first["task_success"] = False
+        first["criterion_passes"] = [False, True]
+        first["criterion_search_response_hits"] = [True, False]
+        first["search_capture_responses"] = 1
+        first["criterion_slice_response_hits"] = [False, False]
+        first["get_capture_slice_responses"] = 0
+        second["task_success"] = True
+        second["criterion_passes"] = [True, True]
+        second["criterion_search_response_hits"] = [False, True]
+        second["search_capture_responses"] = 1
+        second["criterion_slice_response_hits"] = [False, True]
+        second["get_capture_slice_responses"] = 1
+
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(summary["records_schema_version"], 8)
+        search_criteria = summary["criterion_exposure_summaries_by_mode"]["mcp"]["sources"]["search_capture"]["tasks"]["targeted-inspection"]
+        criterion_one_states = search_criteria[0]["answer_outcomes_by_response_state"]
+        self.assertEqual(criterion_one_states["phrase_hit"]["failed"], 1)
+        self.assertEqual(criterion_one_states["phrase_hit"]["passed"], 0)
+        self.assertEqual(criterion_one_states["response_without_phrase_hit"]["passed"], 1)
+        self.assertEqual(criterion_one_states["no_successful_response"]["count"], 0)
+
+        slice_criteria = summary["criterion_exposure_summaries_by_mode"]["mcp"]["sources"]["get_capture_slice"]["tasks"]["targeted-inspection"]
+        criterion_one_slice = slice_criteria[0]["answer_outcomes_by_response_state"]
+        self.assertEqual(criterion_one_slice["no_successful_response"]["failed"], 1)
+        self.assertEqual(criterion_one_slice["response_without_phrase_hit"]["passed"], 1)
+        self.assertNotIn("TARGETED_SIGNAL", json.dumps(summary))
+        self.assertNotIn("line 32", json.dumps(summary))
+
+    def test_agent_ab_report_renders_new_and_legacy_summaries(self):
+        schedule, payload = _scored_records_payload()
+        targeted_mcp = sorted(
+            (
+                record for record in payload["runs"]
+                if record["task_id"] == "targeted-inspection" and record["mode"] == "mcp"
+            ),
+            key=lambda record: record["repetition"],
+        )
+        targeted_mcp[0]["task_success"] = False
+        targeted_mcp[0]["criterion_passes"] = [False, True]
+        targeted_mcp[0]["criterion_search_response_hits"] = [True, False]
+        targeted_mcp[0]["search_capture_responses"] = 1
+        targeted_mcp[0]["get_capture_slice_responses"] = 0
+        targeted_mcp[1]["criterion_passes"] = [True, True]
+        targeted_mcp[1]["criterion_search_response_hits"] = [False, True]
+        targeted_mcp[1]["search_capture_responses"] = 1
+        targeted_mcp[1]["criterion_slice_response_hits"] = [False, True]
+        targeted_mcp[1]["get_capture_slice_responses"] = 1
+        candidate = summarize_records(payload, schedule)
+
+        legacy_schedule, legacy_payload = _legacy_v6_records_payload()
+        legacy = summarize_records(legacy_payload, legacy_schedule)
+        legacy["schema_version"] = 2
+        legacy.pop("task_success_by_mode")
+        legacy.pop("paired_task_success_deltas_mcp_minus_control")
+        legacy.pop("criterion_exposure_summaries_by_mode")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline_path = root / "baseline.json"
+            candidate_path = root / "candidate.json"
+            report_path = root / "REPORT.md"
+            baseline_path.write_text(json.dumps(legacy), encoding="utf-8")
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+            report_path.write_text("# Report\n", encoding="utf-8")
+            append_agent_ab_report(baseline_path, candidate_path, report_path)
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("## Agent A/B task success", report)
+        self.assertIn("## MCP response exposure and answer outcomes", report)
+        self.assertIn("`phrase_hit` means", report)
+        self.assertIn("response_without_phrase_hit", report)
+        self.assertIn("no_successful_response", report)
+        self.assertIn("| baseline | task-level data unavailable | n/a | n/a | n/a |", report)
+        self.assertIn("| baseline | task-level data unavailable | n/a | unavailable | n/a | n/a | n/a |", report)
+        self.assertIn("| candidate | targeted-inspection | 0/2 | 1/2 | +50.0 pp", report)
+        self.assertNotIn("TARGETED_SIGNAL", report)
+        self.assertNotIn("line 32", report)
 
     def test_legacy_v6_records_keep_criterion_results_unavailable(self):
         schedule, payload = _legacy_v6_records_payload()

@@ -798,7 +798,14 @@ during the run. Control vectors are null because MCP responses do not apply.
 The runner scores returned text in memory and stores only booleans and counts;
 it does not persist tool-response text. Per-task, per-criterion exposure rates
 and source-specific successful-response counts are included in summary schema
-version 2. The analyzer reads records from versions 1 through 8; a missing
+version 2. Summary schema version 3 adds per-task objective success rates and
+paired MCP-minus-control task-success deltas with 95% confidence intervals. It
+also cross-tabulates each criterion's answer pass/fail against three MCP
+response states for each source: phrase matched, successful response without a
+phrase match, and no successful response. Phrase matching case-folds text,
+normalizes whitespace, and checks phrase boundaries. No successful response
+does not establish whether the tool was called, and phrase absence does not
+establish semantic irrelevance. The analyzer reads records from versions 1 through 8; a missing
 version field is treated as version 1. Data-path and provider metrics absent
 from older records are reported as unavailable, not zero. Criterion-level
 scores are unavailable for versions 1 through 6; task-success and affirmative
@@ -806,7 +813,9 @@ retrieval rates are unavailable for versions 1 through 5 and are never
 inferred from a zero exit code or the prior marker-only score. The summary
 reports per-criterion pass counts/rates by mode and paired MCP-minus-control
 deltas without including phrase or answer content. Response-exposure metrics
-are unavailable for records from versions 1 through 7.
+are unavailable for records from versions 1 through 7. Older summaries may not
+contain per-task success or response/outcome cross-tabs and display those fields
+as unavailable.
 The aggregate summary reports usage sample counts, monotonicity observations,
 and first-to-last deltas. A monotonic sequence is not treated as proof of
 cumulative accounting; use a controlled calibration matrix to establish the

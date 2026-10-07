@@ -424,94 +424,13 @@ fi
 } > "$output_dir/REPORT.md"
 
 if [[ -f "$output_dir/agent-ab/baseline/summary.json" || -f "$output_dir/agent-ab/candidate/summary.json" ]]; then
-    if ! "$python_bin" - "$output_dir/agent-ab/baseline/summary.json" \
-        "$output_dir/agent-ab/candidate/summary.json" "$output_dir/REPORT.md" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-summary_paths = (("baseline", Path(sys.argv[1])), ("candidate", Path(sys.argv[2])))
-report_path = Path(sys.argv[3])
-summaries = []
-for revision, path in summary_paths:
-    if path.is_file():
-        summaries.append((revision, json.loads(path.read_text(encoding="utf-8"))))
-
-lines = ["", "## Agent A/B criterion results", ""]
-lines.append(
-    "Answer columns show passing runs over scheduled runs. Search and slice hit "
-    "columns show MCP runs where the criterion appeared in at least one successful "
-    "response over scheduled MCP runs. Response totals/runs show successful responses "
-    "and the runs with at least one response. Response text is not stored."
-)
-lines.append("")
-lines.append("| Revision | Task | Criterion | Control answer | MCP answer | MCP − control (pp ± 95% CI half-width) | Search hit runs | Search responses (total/runs) | Slice hit runs | Slice responses (total/runs) |")
-lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-
-def fraction(item, count_key="passed"):
-    if not isinstance(item, dict) or not item.get("count"):
-        return "n/a"
-    return f"{item.get(count_key, 0)}/{item['count']}"
-
-for revision, summary in summaries:
-    criteria = summary.get("criterion_summaries_by_mode", {})
-    deltas = summary.get("paired_criterion_deltas_mcp_minus_control", {}).get("tasks", {})
-    exposure = (
-        summary.get("criterion_exposure_summaries_by_mode", {})
-        .get("mcp", {})
-        .get("sources", {})
-    )
-    task_ids = sorted(
-        set(criteria.get("control", {}).get("tasks", {}))
-        | set(criteria.get("mcp", {}).get("tasks", {}))
-    )
-    for task_id in task_ids:
-        control_items = criteria.get("control", {}).get("tasks", {}).get(task_id, [])
-        mcp_items = criteria.get("mcp", {}).get("tasks", {}).get(task_id, [])
-        count = max(len(control_items), len(mcp_items))
-        search_items = exposure.get("search_capture", {}).get("tasks", {}).get(task_id, [])
-        slice_items = exposure.get("get_capture_slice", {}).get("tasks", {}).get(task_id, [])
-        search_counts = (
-            exposure.get("search_capture", {})
-            .get("response_counts_by_task", {})
-            .get(task_id, {})
-        )
-        slice_counts = (
-            exposure.get("get_capture_slice", {})
-            .get("response_counts_by_task", {})
-            .get(task_id, {})
-        )
-        task_deltas = deltas.get(task_id, [])
-        for index in range(count):
-            control = control_items[index] if index < len(control_items) else None
-            mcp = mcp_items[index] if index < len(mcp_items) else None
-            search = search_items[index] if index < len(search_items) else None
-            sliced = slice_items[index] if index < len(slice_items) else None
-            delta = task_deltas[index] if index < len(task_deltas) else None
-            delta_text = "n/a"
-            if isinstance(delta, dict) and delta.get("available"):
-                delta_text = f"{delta['mean'] * 100:+.1f} pp ± {delta['ci95_half_width'] * 100:.1f}"
-            search_response_text = (
-                f"{search_counts.get('total', 0)}/{search_counts.get('runs_with_response', 0)}"
-                if search_counts else "n/a"
-            )
-            slice_response_text = (
-                f"{slice_counts.get('total', 0)}/{slice_counts.get('runs_with_response', 0)}"
-                if slice_counts else "n/a"
-            )
-            lines.append(
-                f"| {revision} | {task_id} | {index + 1} | {fraction(control)} "
-                f"| {fraction(mcp)} | {delta_text} | {fraction(search, 'exposed')} "
-                f"| {search_response_text} | {fraction(sliced, 'exposed')} "
-                f"| {slice_response_text} |"
-            )
-
-report_path.write_text(report_path.read_text(encoding="utf-8") + "\n".join(lines) + "\n", encoding="utf-8")
-PY
-    then
+    if ! "$python_bin" "$repo_dir/render_agent_ab_report.py" \
+        "$output_dir/agent-ab/baseline/summary.json" \
+        "$output_dir/agent-ab/candidate/summary.json" \
+        "$output_dir/REPORT.md"; then
         failures=$((failures + 1))
-        record_status failed render-agent-ab-report - "criterion report rendering failed"
-        printf 'Failed to render agent A/B criterion table.\n' >&2
+        record_status failed render-agent-ab-report - "task and criterion report rendering failed"
+        printf 'Failed to render agent A/B report sections.\n' >&2
     fi
 fi
 
