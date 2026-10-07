@@ -1051,6 +1051,29 @@ diagnostics report.
 Releases are distributed as GitHub Actions artifacts and, once the trusted
 publisher is registered, PyPI distributions.
 
+Before cutting a release, collect the benchmark and agent A/B bundle against
+the previous release from a clean candidate checkout:
+
+```bash
+git fetch --tags
+CODEX_HOME=/path/to/writable/authenticated-codex-home \
+  ./scripts/collect-release-benchmarks.sh \
+  --baseline-ref v0.6.3 \
+  --model gpt-5.6-luna
+```
+
+The runner creates a temporary worktree at the baseline ref, runs every
+available benchmark on both revisions, compares their workload-result files,
+and runs the same synthetic agent A/B schedule against each revision (five
+repetitions by default). It uses deterministic test embeddings for synthetic
+retrieval and effectiveness checks, and the configured FastEmbed model for
+performance, indexing, memory, and warm-up measurements. Agent A/B runs make
+live Codex CLI calls with the selected model. The default output directory is
+under `/tmp`; `REPORT.md`, `manifest.json`, native measurements, comparison
+reports, and logs are collected there. A benchmark absent from the baseline
+is recorded as skipped, while incompatible result metrics remain visible in
+the comparison reports. Keep the generated bundle outside the repository.
+
 1. Update the version in `pyproject.toml` and add release notes to
    `CHANGELOG.md`.
 2. Run the focused and end-to-end test suites locally.
