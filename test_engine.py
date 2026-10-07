@@ -1787,7 +1787,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine._embedding_lock = original_lock
 
     def test_embedding_snapshot_aborts_when_capture_is_not_current(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
         engine._ensure_embeddings(SimpleNamespace(capture_id="missing", embeddings=None, chunks=[]))
         capture = engine._ingest_state("evicted before embedding", label="evicted")
 
