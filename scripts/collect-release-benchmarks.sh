@@ -168,7 +168,6 @@ fi
 run_revision_suite() {
     local revision="$1" source_dir="$2" source_revision="$3"
     local native="$output_dir/$1/native" results="$output_dir/$1/results"
-    local -a memory_args
     mkdir -p "$native" "$results"
 
     run_benchmark "$revision" "$source_dir" concurrency 0 benchmark_concurrency.py \
@@ -188,14 +187,11 @@ run_revision_suite() {
         --samples "$semantic_samples" --output "$native/semantic-index.json" --result "$results/semantic-index.result.json"
 
     if [[ -f "$source_dir/benchmark_semantic_memory.py" ]]; then
-        memory_args=(--threads 1)
         if grep -q 'add_result_argument(parser)' "$source_dir/benchmark_semantic_memory.py"; then
-            memory_args+=(--result "$results/semantic-memory.result.json")
+            run_benchmark "$revision" "$source_dir" semantic-memory 0 benchmark_semantic_memory.py \
+                --threads 1 --result "$results/semantic-memory.result.json"
         else
-            memory_args=()
-        fi
-        run_benchmark "$revision" "$source_dir" semantic-memory 0 benchmark_semantic_memory.py "${memory_args[@]}"
-        if [[ ! -f "$results/semantic-memory.result.json" ]]; then
+            run_benchmark "$revision" "$source_dir" semantic-memory 0 benchmark_semantic_memory.py --threads 1
             run "normalize-$revision-semantic-memory" "$repo_dir" 0 "$python_bin" \
                 "$repo_dir/scripts/normalize-semantic-memory-result.py" \
                 --log "$output_dir/logs/$revision-semantic-memory.log" \
@@ -319,7 +315,7 @@ fi
         printf '| %s | %s | %s | %s |\n' "$status" "$name" "$code" "$log_or_reason"
     done < "$output_dir/STATUS.tsv"
     printf '\nGenerated fixture and records remain in this local bundle. The fixture is synthetic; keep the bundle out of the repository.\n'
-    printf 'Native metrics are under `baseline/native/` and `candidate/native/`; common result JSON is under each revision’s `results/`.\n'
+    printf 'Native JSON is under `baseline/native/` and `candidate/native/` where supported; common result JSON is under each revision’s `results/`.\n'
     printf 'Compare JSON is under `comparisons/`; command logs are under `logs/`. Missing or incompatible results are recorded above or in each comparison.\n'
 } > "$output_dir/REPORT.md"
 
