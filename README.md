@@ -1154,6 +1154,19 @@ to 26.0 ms, while summary-batch latency stayed roughly flat (209.6 ms to
 construction outside the engine-wide lock, which lets ingestion proceed during
 large log scans. These local measurements are workload- and machine-specific.
 
+A 20-pair follow-up on the same Linux host and Python 3.12.12 compared
+`6d2dc21` with `80ecfc6`, alternating revision order between runs. Median
+paired summary-read throughput change was +41.7% (95% paired bootstrap
+interval: +36.5% to +50.9%); ingest throughput's paired median change was +2.5%
+(interval: -2.6% to +4.2%).
+Across the four deterministic MCP capture/search/slice scenarios, paired median
+latency decreased 5.7% for `large-build` (95% interval: 3.2% to 10.8%), 10.0%
+for `failure-log` (6.4% to 12.4%), 19.0% for `review-diff` (15.1% to 22.6%),
+and 8.2% for `timeout-log` (2.8% to 12.0%). The intervals are percentile
+bootstrap intervals over paired run changes, using 20,000 resamples. The MCP
+timings cover capture, search, and slice retrieval together; they do not isolate
+snippet-formatting time. These results are specific to this host and workload.
+
 Measure MCP and Unix-socket admission under controlled saturation:
 
 ```bash
