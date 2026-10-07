@@ -107,6 +107,11 @@ def _bounded_preview(
     if max_bytes <= 0:
         return ""
 
+    # Short ASCII lines fit whenever their character count fits. Checking this
+    # in C avoids the Python-level per-character loop for normal log snippets.
+    if len(content) <= max_bytes and content.isascii():
+        return content
+
     total_bytes = 0
     is_truncated = False
     for char in content:
@@ -155,6 +160,11 @@ def _bounded_join_lines(
         return bounded_marker, bool(lines)
 
     content_budget = max_bytes - len(marker_bytes)
+    character_count = sum(len(line) for line in lines) + max(0, len(lines) - 1)
+    if character_count <= content_budget and all(line.isascii() for line in lines):
+        joined = "\n".join(lines)
+        return joined, False
+
     pieces: List[str] = []
     used_bytes = 0
     for line_index, line in enumerate(lines):
