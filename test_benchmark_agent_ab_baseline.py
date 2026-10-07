@@ -22,6 +22,7 @@ def summary_fixture():
         record = {
             "task_id": item["task_id"], "repetition": item["repetition"], "mode": item["mode"],
             "completed": True, "task_success": mcp, "signal_retrieved": mcp,
+            "criterion_passes": [mcp, mcp],
             "duration_seconds": 2 if mcp else 1,
             "tool_calls": 3, "repeated_commands": 0, "context_bytes_proxy": 100 if mcp else 80,
             "peak_rss_bytes": 1000, "exit_code": 0, "failure_reason": None,
@@ -155,6 +156,17 @@ class TestAgentAbBaseline(unittest.TestCase):
                 comparison = result["comparisons"][mode][metric]
                 self.assertIsNone(comparison["current"])
                 self.assertFalse(comparison["available"])
+
+    def test_version_six_keeps_task_outcomes_available_without_phrase_scores(self):
+        summary = summary_fixture()
+        summary["records_schema_version"] = 6
+        summary.pop("criterion_summaries_by_mode")
+        summary.pop("paired_criterion_deltas_mcp_minus_control")
+
+        baseline = build_baseline(summary)
+        self.assertEqual(baseline["metrics"]["control"]["task_success_rate"], 0.0)
+        self.assertEqual(baseline["metrics"]["mcp"]["task_success_rate"], 1.0)
+        self.assertEqual(baseline["metrics"]["mcp"]["signal_retrieval_rate"], 1.0)
 
     def test_checked_in_legacy_baseline_does_not_claim_objective_scores(self):
         baseline = load_baseline(Path(__file__).with_name("benchmark_agent_ab_baseline.json"))

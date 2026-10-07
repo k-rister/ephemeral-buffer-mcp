@@ -13,7 +13,7 @@ import workload_results as wr
 
 
 SCHEMA_VERSION = 1
-RECORDS_SCHEMA_VERSION = 6
+RECORDS_SCHEMA_VERSION = 7
 TASK_FIXTURE_VERSION = 2
 MODES = ("control", "mcp")
 TASKS = (
@@ -56,6 +56,7 @@ DATA_PATH_BYTE_FIELDS = (
 )
 RUN_KEYS_V5 = RUN_KEYS_V4 | set(DATA_PATH_BYTE_FIELDS)
 RUN_KEYS_V6 = RUN_KEYS_V5 | {"task_success"}
+RUN_KEYS_V7 = RUN_KEYS_V6 | {"criterion_passes"}
 METRICS = (
     "completed",
     "task_success",
@@ -182,7 +183,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, 4, 5, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, 4, 5, 6, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
     run_keys = (
         RUN_KEYS
@@ -196,12 +197,15 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         else RUN_KEYS_V5
         if records_schema_version == 5
         else RUN_KEYS_V6
+        if records_schema_version == 6
+        else RUN_KEYS_V7
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
     if not isinstance(runs, list):
         raise ValueError("records runs must be a list")
     actual = {}
+    criterion_counts_by_task: dict[str, int] = {}
     for record in runs:
         if not isinstance(record, dict) or set(record) != run_keys:
             raise ValueError("each run must contain exactly the documented metadata fields")
@@ -219,6 +223,19 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
                 raise ValueError(f"{field} must be boolean in run: {key}")
         if records_schema_version >= 6 and not isinstance(record["task_success"], bool):
             raise ValueError(f"task_success must be boolean in run: {key}")
+        if records_schema_version >= 7:
+            criterion_passes = record["criterion_passes"]
+            if (
+                not isinstance(criterion_passes, list)
+                or len(criterion_passes) < 2
+                or any(not isinstance(passed, bool) for passed in criterion_passes)
+            ):
+                raise ValueError(f"criterion_passes must contain at least two booleans in run: {key}")
+            prior_count = criterion_counts_by_task.setdefault(record["task_id"], len(criterion_passes))
+            if len(criterion_passes) != prior_count:
+                raise ValueError(f"criterion_passes length must be consistent for task: {record['task_id']}")
+            if record["task_success"] and not all(criterion_passes):
+                raise ValueError(f"task_success requires every criterion to pass in run: {key}")
         numeric_fields = ("duration_seconds", "tool_calls", "repeated_commands", "peak_rss_bytes")
         if records_schema_version == 1:
             numeric_fields += ("context_bytes",)
@@ -275,7 +292,7 @@ def _metric_value(record: dict[str, Any], metric: str) -> float:
 
 def _invocation_completed(record: dict[str, Any], records_schema_version: int) -> bool | None:
     """Return invocation completion when the records schema can distinguish it."""
-    if records_schema_version >= RECORDS_SCHEMA_VERSION:
+    if records_schema_version >= 6:
         return record["completed"]
     if records_schema_version >= 2:
         exit_code = record.get("exit_code")
@@ -408,6 +425,50 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     grouped: dict[tuple[int, str], dict[str, dict[str, Any]]] = {}
     for record in runs:
         grouped.setdefault((record["repetition"], record["task_id"]), {})[record["mode"]] = record
+
+    criterion_summaries_by_mode = {
+        mode: {"available": False, "tasks": {}}
+        for mode in MODES
+    }
+    paired_criterion_deltas: dict[str, Any] = {"available": False, "tasks": {}}
+    if records_schema_version >= 7:
+        criterion_summaries_by_mode = {}
+        for mode in MODES:
+            mode_records = [record for record in runs if record["mode"] == mode]
+            task_summaries = {}
+            for task_id in sorted({record["task_id"] for record in mode_records}):
+                task_records = [record for record in mode_records if record["task_id"] == task_id]
+                criterion_count = len(task_records[0]["criterion_passes"])
+                task_summaries[task_id] = [
+                    {
+                        "criterion_index": index + 1,
+                        "passed": sum(record["criterion_passes"][index] for record in task_records),
+                        "count": len(task_records),
+                        "pass_rate": sum(record["criterion_passes"][index] for record in task_records) / len(task_records),
+                    }
+                    for index in range(criterion_count)
+                ]
+            criterion_summaries_by_mode[mode] = {"available": True, "tasks": task_summaries}
+
+        paired_tasks = {}
+        for task_id in sorted({task_id for _, task_id in grouped}):
+            task_pairs = [pair for (repetition, paired_task_id), pair in grouped.items() if paired_task_id == task_id]
+            criterion_count = len(task_pairs[0]["control"]["criterion_passes"])
+            paired_tasks[task_id] = []
+            for index in range(criterion_count):
+                deltas = [
+                    int(pair["mcp"]["criterion_passes"][index])
+                    - int(pair["control"]["criterion_passes"][index])
+                    for pair in task_pairs
+                ]
+                stats = _stats(deltas)
+                stats.update({
+                    "available": bool(deltas),
+                    "criterion_index": index + 1,
+                })
+                paired_tasks[task_id].append(stats)
+        paired_criterion_deltas = {"available": True, "tasks": paired_tasks}
+
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
@@ -468,8 +529,10 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         "protocol": payload["protocol"],
         "mode_summaries": by_mode,
         "paired_deltas_mcp_minus_control": paired,
+        "criterion_summaries_by_mode": criterion_summaries_by_mode,
+        "paired_criterion_deltas_mcp_minus_control": paired_criterion_deltas,
         "recommendations": recommendations,
-        "privacy": "summary contains aggregate metadata only; raw prompts, commands, captures, transcripts, and user content are excluded",
+        "privacy": "summary contains aggregate metadata and task-scoped criterion indices only; raw prompts, criterion text, commands, captures, transcripts, and user content are excluded",
     }
 
 

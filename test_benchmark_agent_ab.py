@@ -74,11 +74,20 @@ def _scored_records_payload():
             "output_bytes_proxy": context_bytes - 40,
             "task_success": record["mode"] == "mcp" and record["repetition"] == 2,
         })
+        record["criterion_passes"] = [record["task_success"], record["task_success"]]
         record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
         record["completed"] = True
         record["signal_retrieved"] = record["task_success"] or (
             record["mode"] == "mcp" and record["repetition"] == 1 and record["task_id"] == "targeted-inspection"
         )
+    return schedule, payload
+
+
+def _legacy_v6_records_payload():
+    schedule, payload = _scored_records_payload()
+    payload["records_schema_version"] = 6
+    for record in payload["runs"]:
+        record.pop("criterion_passes")
     return schedule, payload
 
 
@@ -156,11 +165,75 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
+        self.assertTrue(summary["criterion_summaries_by_mode"]["mcp"]["available"])
+        self.assertEqual(
+            summary["criterion_summaries_by_mode"]["mcp"]["tasks"]["targeted-inspection"][0]["pass_rate"],
+            0.5,
+        )
+        self.assertTrue(summary["paired_criterion_deltas_mcp_minus_control"]["available"])
         result = summary_workload_result(summary)
         mcp_result = next(item for item in result["runs"] if item["id"] == "mcp")
         self.assertEqual(mcp_result["status"], "partial")
         self.assertEqual(mcp_result["measurements"]["success_rate"]["value"], 0.5)
         self.assertEqual(mcp_result["measurements"]["invocation_completion_rate"]["value"], 1.0)
+
+    def test_criterion_summary_and_paired_deltas_show_task_scoped_indices(self):
+        schedule, payload = _scored_records_payload()
+        targeted_results = {
+            ("control", 1): [True, False],
+            ("control", 2): [False, False],
+            ("mcp", 1): [True, False],
+            ("mcp", 2): [True, True],
+        }
+        for record in payload["runs"]:
+            if record["task_id"] == "targeted-inspection":
+                record["criterion_passes"] = targeted_results[(record["mode"], record["repetition"])]
+
+        summary = summarize_records(payload, schedule)
+        control = summary["criterion_summaries_by_mode"]["control"]["tasks"]["targeted-inspection"]
+        mcp = summary["criterion_summaries_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+        self.assertEqual(control[0], {"criterion_index": 1, "passed": 1, "count": 2, "pass_rate": 0.5})
+        self.assertEqual(control[1], {"criterion_index": 2, "passed": 0, "count": 2, "pass_rate": 0.0})
+        self.assertEqual(mcp[0], {"criterion_index": 1, "passed": 2, "count": 2, "pass_rate": 1.0})
+        self.assertEqual(mcp[1], {"criterion_index": 2, "passed": 1, "count": 2, "pass_rate": 0.5})
+
+        paired = summary["paired_criterion_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"]
+        self.assertEqual(paired[0]["mean"], 0.5)
+        self.assertEqual(paired[0]["count"], 2)
+        self.assertEqual(paired[1]["mean"], 0.5)
+        serialized = json.dumps(summary)
+        self.assertNotIn("TARGETED_SIGNAL", serialized)
+        self.assertNotIn("line 32", serialized)
+
+    def test_legacy_v6_records_keep_criterion_results_unavailable(self):
+        schedule, payload = _legacy_v6_records_payload()
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(summary["records_schema_version"], 6)
+        self.assertEqual(
+            summary["criterion_summaries_by_mode"]["mcp"],
+            {"available": False, "tasks": {}},
+        )
+        self.assertEqual(
+            summary["paired_criterion_deltas_mcp_minus_control"],
+            {"available": False, "tasks": {}},
+        )
+
+    def test_validation_rejects_invalid_or_inconsistent_criterion_scores(self):
+        schedule, payload = _scored_records_payload()
+        payload["runs"][0]["criterion_passes"] = ["private phrase", False]
+        with self.assertRaisesRegex(ValueError, "criterion_passes must contain at least two booleans"):
+            validate_records(payload, schedule)
+
+        schedule, payload = _scored_records_payload()
+        payload["runs"][0]["criterion_passes"].append(False)
+        with self.assertRaisesRegex(ValueError, "criterion_passes length must be consistent"):
+            validate_records(payload, schedule)
+
+        schedule, payload = _scored_records_payload()
+        successful = next(record for record in payload["runs"] if record["task_success"])
+        successful["criterion_passes"][0] = False
+        with self.assertRaisesRegex(ValueError, "task_success requires every criterion to pass"):
+            validate_records(payload, schedule)
 
     def test_summary_excludes_unavailable_rss_measurements(self):
         schedule, payload = _records_payload()
