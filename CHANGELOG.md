@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-10-07
 
 - Record per-criterion phrase exposure in successful MCP search and capture-slice
   responses without retaining response text, summarize retrieval-to-answer
