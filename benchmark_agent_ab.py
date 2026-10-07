@@ -13,7 +13,8 @@ import workload_results as wr
 
 
 SCHEMA_VERSION = 1
-RECORDS_SCHEMA_VERSION = 7
+SUMMARY_SCHEMA_VERSION = 2
+RECORDS_SCHEMA_VERSION = 8
 TASK_FIXTURE_VERSION = 2
 MODES = ("control", "mcp")
 TASKS = (
@@ -57,6 +58,12 @@ DATA_PATH_BYTE_FIELDS = (
 RUN_KEYS_V5 = RUN_KEYS_V4 | set(DATA_PATH_BYTE_FIELDS)
 RUN_KEYS_V6 = RUN_KEYS_V5 | {"task_success"}
 RUN_KEYS_V7 = RUN_KEYS_V6 | {"criterion_passes"}
+RUN_KEYS_V8 = RUN_KEYS_V7 | {
+    "criterion_search_response_hits",
+    "criterion_slice_response_hits",
+    "search_capture_responses",
+    "get_capture_slice_responses",
+}
 METRICS = (
     "completed",
     "task_success",
@@ -183,7 +190,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, 4, 5, 6, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, 4, 5, 6, 7, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
     run_keys = (
         RUN_KEYS
@@ -199,6 +206,8 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         else RUN_KEYS_V6
         if records_schema_version == 6
         else RUN_KEYS_V7
+        if records_schema_version == 7
+        else RUN_KEYS_V8
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
@@ -236,6 +245,29 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
                 raise ValueError(f"criterion_passes length must be consistent for task: {record['task_id']}")
             if record["task_success"] and not all(criterion_passes):
                 raise ValueError(f"task_success requires every criterion to pass in run: {key}")
+        if records_schema_version >= 8:
+            exposure_fields = (
+                "criterion_search_response_hits",
+                "criterion_slice_response_hits",
+            )
+            if record["mode"] == "control":
+                if any(record[field] is not None for field in exposure_fields):
+                    raise ValueError(f"MCP response exposure must be null for control runs: {key}")
+                if record["search_capture_responses"] != 0 or record["get_capture_slice_responses"] != 0:
+                    raise ValueError(f"MCP response counts must be zero for control runs: {key}")
+            else:
+                for field in exposure_fields:
+                    values = record[field]
+                    if (
+                        not isinstance(values, list)
+                        or len(values) != len(record["criterion_passes"])
+                        or any(not isinstance(value, bool) for value in values)
+                    ):
+                        raise ValueError(f"{field} must align with criterion_passes in run: {key}")
+            for field in ("search_capture_responses", "get_capture_slice_responses"):
+                value = record[field]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"{field} must be a non-negative integer in run: {key}")
         numeric_fields = ("duration_seconds", "tool_calls", "repeated_commands", "peak_rss_bytes")
         if records_schema_version == 1:
             numeric_fields += ("context_bytes",)
@@ -469,6 +501,51 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
                 paired_tasks[task_id].append(stats)
         paired_criterion_deltas = {"available": True, "tasks": paired_tasks}
 
+    criterion_exposure_summaries_by_mode = {
+        mode: {"available": False, "sources": {}}
+        for mode in MODES
+    }
+    if records_schema_version >= 8:
+        source_fields = (
+            ("search_capture", "criterion_search_response_hits", "search_capture_responses"),
+            ("get_capture_slice", "criterion_slice_response_hits", "get_capture_slice_responses"),
+        )
+        criterion_exposure_summaries_by_mode["mcp"] = {"available": True, "sources": {}}
+        for source, hit_field, response_count_field in source_fields:
+            source_tasks = {}
+            response_counts_by_task = {}
+            mcp_task_ids = {
+                record["task_id"] for record in runs if record["mode"] == "mcp"
+            }
+            for task_id in sorted(mcp_task_ids):
+                task_records = [
+                    record for record in runs
+                    if record["mode"] == "mcp" and record["task_id"] == task_id
+                ]
+                response_counts = [record[response_count_field] for record in task_records]
+                criterion_count = len(task_records[0][hit_field])
+                response_counts_by_task[task_id] = {
+                    "total": sum(response_counts),
+                    "runs": len(response_counts),
+                    "runs_with_response": sum(count > 0 for count in response_counts),
+                }
+                source_tasks[task_id] = [
+                    {
+                        "criterion_index": index + 1,
+                        "exposed": sum(record[hit_field][index] for record in task_records),
+                        "count": len(task_records),
+                        "exposure_rate": (
+                            sum(record[hit_field][index] for record in task_records)
+                            / len(task_records)
+                        ),
+                    }
+                    for index in range(criterion_count)
+                ]
+            criterion_exposure_summaries_by_mode["mcp"]["sources"][source] = {
+                "response_counts_by_task": response_counts_by_task,
+                "tasks": source_tasks,
+            }
+
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
@@ -520,7 +597,7 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         recommendations.insert(1, "MCP reduced at least one paired task outcome; inspect failures and routing choices before enabling broader use.")
 
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": SUMMARY_SCHEMA_VERSION,
         "benchmark": "agent-ab",
         "records_schema_version": max(payload.get("records_schema_version", 1), 1),
         "task_fixture_version": schedule["task_fixture_version"],
@@ -531,8 +608,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         "paired_deltas_mcp_minus_control": paired,
         "criterion_summaries_by_mode": criterion_summaries_by_mode,
         "paired_criterion_deltas_mcp_minus_control": paired_criterion_deltas,
+        "criterion_exposure_summaries_by_mode": criterion_exposure_summaries_by_mode,
         "recommendations": recommendations,
-        "privacy": "summary contains aggregate metadata and task-scoped criterion indices only; raw prompts, criterion text, commands, captures, transcripts, and user content are excluded",
+        "privacy": "summary contains aggregate metadata and task-scoped criterion indices only; raw prompts, criterion text, tool responses, commands, captures, transcripts, and user content are excluded",
     }
 
 

@@ -75,6 +75,10 @@ def _scored_records_payload():
             "task_success": record["mode"] == "mcp" and record["repetition"] == 2,
         })
         record["criterion_passes"] = [record["task_success"], record["task_success"]]
+        record["criterion_search_response_hits"] = [False, False] if record["mode"] == "mcp" else None
+        record["criterion_slice_response_hits"] = [False, False] if record["mode"] == "mcp" else None
+        record["search_capture_responses"] = 0
+        record["get_capture_slice_responses"] = 0
         record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
         record["completed"] = True
         record["signal_retrieved"] = record["task_success"] or (
@@ -88,6 +92,10 @@ def _legacy_v6_records_payload():
     payload["records_schema_version"] = 6
     for record in payload["runs"]:
         record.pop("criterion_passes")
+        record.pop("criterion_search_response_hits")
+        record.pop("criterion_slice_response_hits")
+        record.pop("search_capture_responses")
+        record.pop("get_capture_slice_responses")
     return schedule, payload
 
 

@@ -790,14 +790,23 @@ capture input, retained and original bytes, tool/search/retrieval responses,
 and socket requests and responses. Version 4 records include exit code,
 failure reason, MCP-specific tool-call counts, optional provider-reported
 input/output token counts and samples, and the prompt/output components of the
-context proxy. The analyzer reads records from versions 1 through 7; a missing
+context proxy. Version 8 adds ordered `criterion_search_response_hits` and
+`criterion_slice_response_hits` booleans for MCP runs, along with successful
+response counts for `search_capture` and `get_capture_slice`. A hit means the
+criterion phrase appeared in at least one successful response from that tool
+during the run. Control vectors are null because MCP responses do not apply.
+The runner scores returned text in memory and stores only booleans and counts;
+it does not persist tool-response text. Per-task, per-criterion exposure rates
+and source-specific successful-response counts are included in summary schema
+version 2. The analyzer reads records from versions 1 through 8; a missing
 version field is treated as version 1. Data-path and provider metrics absent
 from older records are reported as unavailable, not zero. Criterion-level
 scores are unavailable for versions 1 through 6; task-success and affirmative
 retrieval rates are unavailable for versions 1 through 5 and are never
 inferred from a zero exit code or the prior marker-only score. The summary
 reports per-criterion pass counts/rates by mode and paired MCP-minus-control
-deltas without including phrase or answer content.
+deltas without including phrase or answer content. Response-exposure metrics
+are unavailable for records from versions 1 through 7.
 The aggregate summary reports usage sample counts, monotonicity observations,
 and first-to-last deltas. A monotonic sequence is not treated as proof of
 cumulative accounting; use a controlled calibration matrix to establish the
@@ -1082,6 +1091,17 @@ platform details, artifact paths, and command status counts. `REPORT.md`,
 and logs are collected alongside it. A benchmark absent from the baseline is
 recorded as skipped, while incompatible result metrics remain visible in the
 comparison reports. Keep the generated bundle outside the repository.
+
+To repeat the agent A/B comparison more heavily without rerunning local
+benchmarks, add `--agent-ab-repetitions N --agent-ab-only`. The independent
+agent A/B count defaults to the value of `--repetitions`; the selected model,
+seed, and one shared counterbalanced schedule are used across control and MCP
+runs on both revisions. For example, `--agent-ab-repetitions 20` produces 20
+scheduled repetitions per task and mode on each revision. The report shows
+per-criterion final-answer rates and paired deltas, plus whether each required
+phrase appeared in any successful `search_capture` or `get_capture_slice`
+response. Those exposure measurements help distinguish missing retrieval
+content from details that were returned but absent from the final answer.
 
 1. Update the version in `pyproject.toml` and add release notes to
    `CHANGELOG.md`.
