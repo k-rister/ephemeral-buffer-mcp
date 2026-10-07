@@ -1137,6 +1137,23 @@ adds the measurements and regression status to the workflow summary. This
 benchmark remains optional and is not part of the required pull-request checks;
 update the baseline deliberately when the runner or benchmark workload changes.
 
+Interpret summary-read results in light of the workload. The built-in benchmark
+uses 20 identical plain-text lines per capture and `benchmark-N` labels, so it
+does not exercise the log-signal scan in `detect_signals`. Treat its read rate
+as a microbenchmark; use representative logs and mixed read/ingest load when
+assessing user impact.
+
+For [issue #370](https://github.com/k-rister/ephemeral-buffer-mcp/issues/370),
+local reruns compared `v0.6.3` with `f70c14c` on Python 3.12.12. With 32 plain-text
+captures and 8 workers, the median paired read rate fell 25.7%, while the median
+read batch grew by about 1.4 ms. With 2,000-line log captures, the median read
+rate fell 3.5% and the 32-summary batch grew by 28 ms. In a mixed run with 8
+concurrent log summaries and an ingest, median ingest latency fell from 150.4 ms
+to 26.0 ms, while summary-batch latency stayed roughly flat (209.6 ms to
+205.8 ms). We accepted this isolated read-throughput cost to keep summary
+construction outside the engine-wide lock, which lets ingestion proceed during
+large log scans. These local measurements are workload- and machine-specific.
+
 Measure MCP and Unix-socket admission under controlled saturation:
 
 ```bash
