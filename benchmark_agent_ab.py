@@ -13,10 +13,15 @@ import workload_results as wr
 
 
 SCHEMA_VERSION = 1
-SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 3
 RECORDS_SCHEMA_VERSION = 8
 TASK_FIXTURE_VERSION = 2
 MODES = ("control", "mcp")
+EXPOSURE_STATES = (
+    "phrase_hit",
+    "response_without_phrase_hit",
+    "no_successful_response",
+)
 TASKS = (
     {"id": "targeted-inspection", "category": "small-targeted-output"},
     {"id": "noisy-test-failure", "category": "noisy-test-output"},
@@ -458,6 +463,41 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     for record in runs:
         grouped.setdefault((record["repetition"], record["task_id"]), {})[record["mode"]] = record
 
+    task_success_by_mode = {
+        mode: {"available": False, "tasks": {}}
+        for mode in MODES
+    }
+    paired_task_success_deltas: dict[str, Any] = {"available": False, "tasks": {}}
+    if records_schema_version >= 6:
+        task_success_by_mode = {}
+        for mode in MODES:
+            mode_records = [record for record in runs if record["mode"] == mode]
+            task_summaries = {}
+            for task_id in sorted({record["task_id"] for record in mode_records}):
+                task_records = [record for record in mode_records if record["task_id"] == task_id]
+                successes = sum(record["task_success"] for record in task_records)
+                task_summaries[task_id] = {
+                    "successes": successes,
+                    "count": len(task_records),
+                    "success_rate": successes / len(task_records),
+                }
+            task_success_by_mode[mode] = {"available": True, "tasks": task_summaries}
+
+        paired_task_success = {}
+        for task_id in sorted({task_id for _, task_id in grouped}):
+            task_pairs = [
+                pair for (repetition, paired_task_id), pair in grouped.items()
+                if paired_task_id == task_id
+            ]
+            deltas = [
+                int(pair["mcp"]["task_success"]) - int(pair["control"]["task_success"])
+                for pair in task_pairs
+            ]
+            stats = _stats(deltas)
+            stats["available"] = bool(deltas)
+            paired_task_success[task_id] = stats
+        paired_task_success_deltas = {"available": True, "tasks": paired_task_success}
+
     criterion_summaries_by_mode = {
         mode: {"available": False, "tasks": {}}
         for mode in MODES
@@ -529,18 +569,35 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
                     "runs": len(response_counts),
                     "runs_with_response": sum(count > 0 for count in response_counts),
                 }
-                source_tasks[task_id] = [
-                    {
-                        "criterion_index": index + 1,
-                        "exposed": sum(record[hit_field][index] for record in task_records),
-                        "count": len(task_records),
-                        "exposure_rate": (
-                            sum(record[hit_field][index] for record in task_records)
-                            / len(task_records)
-                        ),
+                criteria = []
+                for index in range(criterion_count):
+                    exposure_count = sum(record[hit_field][index] for record in task_records)
+                    outcomes_by_state = {
+                        state: {"passed": 0, "failed": 0, "count": 0, "pass_rate": None}
+                        for state in EXPOSURE_STATES
                     }
-                    for index in range(criterion_count)
-                ]
+                    for record in task_records:
+                        if record[hit_field][index]:
+                            state = "phrase_hit"
+                        elif record[response_count_field] > 0:
+                            state = "response_without_phrase_hit"
+                        else:
+                            state = "no_successful_response"
+                        outcome = outcomes_by_state[state]
+                        passed = record["criterion_passes"][index]
+                        outcome["passed" if passed else "failed"] += 1
+                        outcome["count"] += 1
+                    for outcome in outcomes_by_state.values():
+                        if outcome["count"]:
+                            outcome["pass_rate"] = outcome["passed"] / outcome["count"]
+                    criteria.append({
+                        "criterion_index": index + 1,
+                        "exposed": exposure_count,
+                        "count": len(task_records),
+                        "exposure_rate": exposure_count / len(task_records),
+                        "answer_outcomes_by_response_state": outcomes_by_state,
+                    })
+                source_tasks[task_id] = criteria
             criterion_exposure_summaries_by_mode["mcp"]["sources"][source] = {
                 "response_counts_by_task": response_counts_by_task,
                 "tasks": source_tasks,
@@ -606,6 +663,8 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         "protocol": payload["protocol"],
         "mode_summaries": by_mode,
         "paired_deltas_mcp_minus_control": paired,
+        "task_success_by_mode": task_success_by_mode,
+        "paired_task_success_deltas_mcp_minus_control": paired_task_success_deltas,
         "criterion_summaries_by_mode": criterion_summaries_by_mode,
         "paired_criterion_deltas_mcp_minus_control": paired_criterion_deltas,
         "criterion_exposure_summaries_by_mode": criterion_exposure_summaries_by_mode,

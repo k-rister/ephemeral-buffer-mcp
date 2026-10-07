@@ -1057,7 +1057,7 @@ embeddings in an isolated per-command namespace:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
-  --source=. --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  --source=. --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,render_agent_ab_report.py,release_checks.py' \
   -m unittest test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py \
   test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py \
   test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
@@ -1067,7 +1067,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m cover
   test_engine.py test_capture_utils.py test_config.py test_cli.py test_socket_protocol.py test_fastmcp_adapter.py test_server.py \
   test_execution.py test_execution_server.py test_metrics.py test_logging_utils.py
 .venv/bin/python -m coverage report -m \
-  --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
+  --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,render_agent_ab_report.py,release_checks.py' \
   --fail-under=100
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
 ```
@@ -1539,6 +1539,14 @@ metrics as unavailable. The runner reads response text in memory to score it,
 then retains only booleans and counts; it does not write tool-response text to
 the records or summary. Aggregate summary schema version 2 includes source-
 specific successful-response counts and per-task exposure rates.
+Summary schema version 3 adds per-task objective task-success rates by mode and
+paired MCP-minus-control deltas with 95% confidence intervals. It cross-tabulates
+criterion answer pass/fail against phrase-hit, successful-response-without-hit,
+and no-successful-response states for each MCP source. Phrase matching uses
+case-folded text, normalized whitespace, and phrase boundaries. No successful
+response does not prove that a tool was not called, and no phrase match does not
+prove that semantically useful evidence was absent. Older summaries show these
+new fields as unavailable.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.
@@ -1558,9 +1566,12 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 
 The wrapper creates one counterbalanced schedule and reuses it for control and
 MCP runs on both revisions, passing the same model to every run. The bundle
-report includes per-criterion final-answer counts, paired MCP-minus-control
-deltas with 95% intervals, and MCP response exposure counts for search and
-slice results. `--agent-ab-only` skips the other benchmark sections;
+report includes per-task success counts and paired MCP-minus-control deltas,
+per-criterion final-answer counts and paired deltas, and source-specific MCP
+response exposure cross-tabs against answer pass/fail. `phrase_hit` means a
+case-folded, whitespace-normalized criterion phrase matched with phrase
+boundaries; phrase absence does not establish semantic irrelevance.
+`--agent-ab-only` skips the other benchmark sections;
 `--agent-ab-repetitions` defaults to `--repetitions` when omitted.
 
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
