@@ -1069,10 +1069,12 @@ repetitions by default). It uses deterministic test embeddings for synthetic
 retrieval and effectiveness checks, and the configured FastEmbed model for
 performance, indexing, memory, and warm-up measurements. Agent A/B runs make
 live Codex CLI calls with the selected model. The default output directory is
-under `/tmp`; `REPORT.md`, `manifest.json`, native measurements, comparison
-reports, and logs are collected there. A benchmark absent from the baseline
-is recorded as skipped, while incompatible result metrics remain visible in
-the comparison reports. Keep the generated bundle outside the repository.
+under `/tmp`; `manifest.json` records the revisions, run settings, Python and
+platform details, artifact paths, and command status counts. `REPORT.md`,
+`STATUS.tsv`, native measurements, common result files, comparison reports,
+and logs are collected alongside it. A benchmark absent from the baseline is
+recorded as skipped, while incompatible result metrics remain visible in the
+comparison reports. Keep the generated bundle outside the repository.
 
 1. Update the version in `pyproject.toml` and add release notes to
    `CHANGELOG.md`.

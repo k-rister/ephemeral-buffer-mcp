@@ -302,12 +302,92 @@ else
     skip compare-agent-ab "both aggregate result documents are required"
 fi
 
+cleanup_worktree
+trap - EXIT
+if ((cleanup_failure)); then
+    printf 'Temporary baseline worktree cleanup failed.\n' >&2
+fi
+
+if ! RELEASE_BENCHMARK_BASELINE_REF="$baseline_ref" \
+    RELEASE_BENCHMARK_BASELINE_REVISION="$baseline_revision" \
+    RELEASE_BENCHMARK_CANDIDATE_REVISION="$candidate_revision" \
+    RELEASE_BENCHMARK_MODEL="$model" \
+    RELEASE_BENCHMARK_SAMPLES="$samples" \
+    RELEASE_BENCHMARK_SEMANTIC_SAMPLES="$semantic_samples" \
+    RELEASE_BENCHMARK_REPETITIONS="$repetitions" \
+    RELEASE_BENCHMARK_SEED="$seed" \
+    RELEASE_BENCHMARK_AGENT_TIMEOUT="$agent_timeout" \
+    "$python_bin" - "$output_dir/manifest.json" "$output_dir/STATUS.tsv" <<'PY'
+import csv
+import json
+import os
+import platform
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+status_path = Path(sys.argv[2])
+status_counts = {}
+with status_path.open(encoding="utf-8", newline="") as status_file:
+    for row in csv.DictReader(status_file, delimiter="\t"):
+        status = row.get("status", "")
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+manifest = {
+    "schema_version": 1,
+    "benchmark": "release-benchmarks",
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+    "baseline": {
+        "ref": os.environ["RELEASE_BENCHMARK_BASELINE_REF"],
+        "revision": os.environ["RELEASE_BENCHMARK_BASELINE_REVISION"],
+    },
+    "candidate": {
+        "revision": os.environ["RELEASE_BENCHMARK_CANDIDATE_REVISION"],
+    },
+    "configuration": {
+        "model": os.environ["RELEASE_BENCHMARK_MODEL"],
+        "samples": int(os.environ["RELEASE_BENCHMARK_SAMPLES"]),
+        "semantic_index_samples": int(os.environ["RELEASE_BENCHMARK_SEMANTIC_SAMPLES"]),
+        "repetitions": int(os.environ["RELEASE_BENCHMARK_REPETITIONS"]),
+        "seed": int(os.environ["RELEASE_BENCHMARK_SEED"]),
+        "agent_timeout_seconds": int(os.environ["RELEASE_BENCHMARK_AGENT_TIMEOUT"]),
+        "python_executable": sys.executable,
+    },
+    "environment": {
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "cpu_count": os.cpu_count(),
+    },
+    "status_counts": status_counts,
+    "artifacts": {
+        "report": "REPORT.md",
+        "status": "STATUS.tsv",
+        "baseline_native": "baseline/native/",
+        "candidate_native": "candidate/native/",
+        "baseline_results": "baseline/results/",
+        "candidate_results": "candidate/results/",
+        "comparisons": "comparisons/",
+        "agent_ab": "agent-ab/",
+        "logs": "logs/",
+    },
+}
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+then
+    failures=$((failures + 1))
+    record_status failed write-manifest - "manifest generation failed"
+    printf 'Failed to write manifest.json.\n' >&2
+fi
+
 {
     printf '# Release benchmark bundle\n\n'
     printf '%s\n' "- Baseline: \`$baseline_ref\` (\`${baseline_revision:0:12}\`)"
     printf '%s\n' "- Candidate: \`${candidate_revision:0:12}\`"
     printf '%s\n' "- Model: \`$model\`"
     printf '%s\n' "- Repetitions: $repetitions; seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
+    printf '%s\n' '- Manifest: `manifest.json`'
     printf '%s\n\n' "- Results: \`$output_dir\`"
     printf '## Command status\n\n| Status | Name | Exit | Log or reason |\n|---|---|---:|---|\n'
     while IFS=$'\t' read -r status name code log_or_reason; do
@@ -319,11 +399,6 @@ fi
     printf 'Compare JSON is under `comparisons/`; command logs are under `logs/`. Missing or incompatible results are recorded above or in each comparison.\n'
 } > "$output_dir/REPORT.md"
 
-cleanup_worktree
-trap - EXIT
-if ((cleanup_failure)); then
-    printf 'Temporary baseline worktree cleanup failed.\n' >&2
-fi
 printf '\nBenchmark bundle: %s\nReport: %s/REPORT.md\n' "$output_dir" "$output_dir"
 if ((failures)); then
     printf 'Completed with %s failed command(s); inspect STATUS.tsv and logs.\n' "$failures" >&2
