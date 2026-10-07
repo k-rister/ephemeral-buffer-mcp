@@ -166,7 +166,8 @@ if ! git -C "$repo_dir" worktree add --detach "$worktree" "$baseline_revision" >
 fi
 
 run_revision_suite() {
-    local revision="$1" source_dir="$2" native="$output_dir/$1/native" results="$output_dir/$1/results"
+    local revision="$1" source_dir="$2" source_revision="$3"
+    local native="$output_dir/$1/native" results="$output_dir/$1/results"
     local -a memory_args
     mkdir -p "$native" "$results"
 
@@ -190,8 +191,18 @@ run_revision_suite() {
         memory_args=(--threads 1)
         if grep -q 'add_result_argument(parser)' "$source_dir/benchmark_semantic_memory.py"; then
             memory_args+=(--result "$results/semantic-memory.result.json")
+        else
+            memory_args=()
         fi
         run_benchmark "$revision" "$source_dir" semantic-memory 0 benchmark_semantic_memory.py "${memory_args[@]}"
+        if [[ ! -f "$results/semantic-memory.result.json" ]]; then
+            run "normalize-$revision-semantic-memory" "$repo_dir" 0 "$python_bin" \
+                "$repo_dir/scripts/normalize-semantic-memory-result.py" \
+                --log "$output_dir/logs/$revision-semantic-memory.log" \
+                --revision-dir "$source_dir" --source-revision "$source_revision" \
+                --native-output "$native/semantic-memory.json" \
+                --result-output "$results/semantic-memory.result.json"
+        fi
     else
         skip "$revision-semantic-memory" "benchmark_semantic_memory.py is absent at this revision"
     fi
@@ -210,8 +221,8 @@ run_revision_suite() {
         --output "$native/relevance.json" --result "$results/relevance.result.json"
 }
 
-run_revision_suite baseline "$worktree"
-run_revision_suite candidate "$repo_dir"
+run_revision_suite baseline "$worktree" "$baseline_revision"
+run_revision_suite candidate "$repo_dir" "$candidate_revision"
 
 compare_result() {
     local name="$1" baseline_result="$2" candidate_result="$3" destination="$4"
