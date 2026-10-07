@@ -10,6 +10,8 @@ output_dir=""
 samples=5
 semantic_samples=3
 repetitions=5
+agent_ab_repetitions=""
+agent_ab_only=0
 seed=20261006
 agent_timeout=900
 benchmark_timeout=3600
@@ -24,7 +26,9 @@ Options:
   --output-dir PATH          New output directory (default: timestamped path under /tmp)
   --samples N                Latency, prefetch, routing, and warm-up samples (default: 5)
   --semantic-samples N       Semantic-index samples per size (default: 3)
-  --repetitions N            Effectiveness and agent A/B repetitions (default: 5)
+  --repetitions N            Effectiveness repetitions (default: 5)
+  --agent-ab-repetitions N   Agent A/B repetitions (default: --repetitions)
+  --agent-ab-only            Skip non-agent benchmarks and comparisons
   --seed N                   Shared synthetic workload seed (default: 20261006)
   --agent-timeout SECONDS    Per-task Codex timeout (default: 900)
   --benchmark-timeout SECONDS Timeout for each local benchmark (default: 3600)
@@ -43,6 +47,8 @@ while (($#)); do
         --samples) samples="${2:?missing value for --samples}"; shift 2 ;;
         --semantic-samples) semantic_samples="${2:?missing value for --semantic-samples}"; shift 2 ;;
         --repetitions) repetitions="${2:?missing value for --repetitions}"; shift 2 ;;
+        --agent-ab-repetitions) agent_ab_repetitions="${2:?missing value for --agent-ab-repetitions}"; shift 2 ;;
+        --agent-ab-only) agent_ab_only=1; shift ;;
         --seed) seed="${2:?missing value for --seed}"; shift 2 ;;
         --agent-timeout) agent_timeout="${2:?missing value for --agent-timeout}"; shift 2 ;;
         --benchmark-timeout) benchmark_timeout="${2:?missing value for --benchmark-timeout}"; shift 2 ;;
@@ -56,7 +62,10 @@ if [[ -z "$baseline_ref" || -z "$model" || "$model" == "your-fixed-model" ]]; th
     usage >&2
     exit 2
 fi
-for count in "$samples" "$semantic_samples" "$repetitions" "$agent_timeout" "$benchmark_timeout"; do
+if [[ -z "$agent_ab_repetitions" ]]; then
+    agent_ab_repetitions="$repetitions"
+fi
+for count in "$samples" "$semantic_samples" "$repetitions" "$agent_ab_repetitions" "$agent_timeout" "$benchmark_timeout"; do
     if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
         echo "sample counts, repetitions, and timeouts must be positive integers" >&2
         exit 2
@@ -217,45 +226,49 @@ run_revision_suite() {
         --output "$native/relevance.json" --result "$results/relevance.result.json"
 }
 
-run_revision_suite baseline "$worktree" "$baseline_revision"
-run_revision_suite candidate "$repo_dir" "$candidate_revision"
-
 compare_result() {
     local name="$1" baseline_result="$2" candidate_result="$3" destination="$4"
     run "compare-$name" "$repo_dir" 0 "$python_bin" "$repo_dir/compare_workload_results.py" \
         "$baseline_result" "$candidate_result" --statistic all --output "$destination"
 }
 
-for candidate_result in "$output_dir"/candidate/results/*.result.json; do
-    [[ -f "$candidate_result" ]] || continue
-    result_name="$(basename "$candidate_result")"
-    baseline_result="$output_dir/baseline/results/$result_name"
-    comparison_name="${result_name%.result.json}"
-    if [[ -f "$baseline_result" ]]; then
-        compare_result "$comparison_name" "$baseline_result" "$candidate_result" \
-            "$output_dir/comparisons/$comparison_name.comparison.json"
-    else
-        skip "compare-$comparison_name" "baseline workload-result document is unavailable"
-    fi
-done
-for baseline_result in "$output_dir"/baseline/results/*.result.json; do
-    [[ -f "$baseline_result" ]] || continue
-    result_name="$(basename "$baseline_result")"
-    if [[ ! -f "$output_dir/candidate/results/$result_name" ]]; then
-        skip "compare-${result_name%.result.json}" "candidate workload-result document is unavailable"
-    fi
-done
+if ((agent_ab_only == 0)); then
+    run_revision_suite baseline "$worktree" "$baseline_revision"
+    run_revision_suite candidate "$repo_dir" "$candidate_revision"
 
-for revision in baseline candidate; do
-    prefetch_result="$output_dir/$revision/results/prefetch.result.json"
-    if [[ -f "$prefetch_result" ]]; then
-        run "compare-$revision-prefetch-policies" "$repo_dir" 0 "$python_bin" \
-            "$repo_dir/compare_workload_results.py" \
-            "$prefetch_result#prefetch-off" "$prefetch_result#prefetch-on" \
-            --statistic median --metric ingest --metric first_search --metric subsequent_search \
-            --output "$output_dir/comparisons/$revision-prefetch.comparison.json"
-    fi
-done
+    for candidate_result in "$output_dir"/candidate/results/*.result.json; do
+        [[ -f "$candidate_result" ]] || continue
+        result_name="$(basename "$candidate_result")"
+        baseline_result="$output_dir/baseline/results/$result_name"
+        comparison_name="${result_name%.result.json}"
+        if [[ -f "$baseline_result" ]]; then
+            compare_result "$comparison_name" "$baseline_result" "$candidate_result" \
+                "$output_dir/comparisons/$comparison_name.comparison.json"
+        else
+            skip "compare-$comparison_name" "baseline workload-result document is unavailable"
+        fi
+    done
+    for baseline_result in "$output_dir"/baseline/results/*.result.json; do
+        [[ -f "$baseline_result" ]] || continue
+        result_name="$(basename "$baseline_result")"
+        if [[ ! -f "$output_dir/candidate/results/$result_name" ]]; then
+            skip "compare-${result_name%.result.json}" "candidate workload-result document is unavailable"
+        fi
+    done
+
+    for revision in baseline candidate; do
+        prefetch_result="$output_dir/$revision/results/prefetch.result.json"
+        if [[ -f "$prefetch_result" ]]; then
+            run "compare-$revision-prefetch-policies" "$repo_dir" 0 "$python_bin" \
+                "$repo_dir/compare_workload_results.py" \
+                "$prefetch_result#prefetch-off" "$prefetch_result#prefetch-on" \
+                --statistic median --metric ingest --metric first_search --metric subsequent_search \
+                --output "$output_dir/comparisons/$revision-prefetch.comparison.json"
+        fi
+    done
+else
+    skip non-agent-benchmarks "--agent-ab-only was selected"
+fi
 
 fixture_dir="$output_dir/agent-ab/fixture"
 tasks="$output_dir/agent-ab/tasks.json"
@@ -264,7 +277,7 @@ mkdir -p "$output_dir/agent-ab"
 run create-agent-ab-v2-fixture "$repo_dir" 0 "$python_bin" "$repo_dir/benchmark_agent_ab_fixtures.py" \
     --fixture-output "$fixture_dir" --manifest-output "$tasks"
 run create-agent-ab-v2-schedule "$repo_dir" 0 "$python_bin" "$repo_dir/benchmark_agent_ab.py" \
-    --schedule-output "$schedule" --repetitions "$repetitions" --seed "$seed"
+    --schedule-output "$schedule" --repetitions "$agent_ab_repetitions" --seed "$seed"
 
 for revision in baseline candidate; do
     if [[ "$revision" == baseline ]]; then
@@ -315,6 +328,8 @@ if ! RELEASE_BENCHMARK_BASELINE_REF="$baseline_ref" \
     RELEASE_BENCHMARK_SAMPLES="$samples" \
     RELEASE_BENCHMARK_SEMANTIC_SAMPLES="$semantic_samples" \
     RELEASE_BENCHMARK_REPETITIONS="$repetitions" \
+    RELEASE_BENCHMARK_AGENT_AB_REPETITIONS="$agent_ab_repetitions" \
+    RELEASE_BENCHMARK_AGENT_AB_ONLY="$agent_ab_only" \
     RELEASE_BENCHMARK_SEED="$seed" \
     RELEASE_BENCHMARK_AGENT_TIMEOUT="$agent_timeout" \
     "$python_bin" - "$output_dir/manifest.json" "$output_dir/STATUS.tsv" <<'PY'
@@ -350,6 +365,8 @@ manifest = {
         "samples": int(os.environ["RELEASE_BENCHMARK_SAMPLES"]),
         "semantic_index_samples": int(os.environ["RELEASE_BENCHMARK_SEMANTIC_SAMPLES"]),
         "repetitions": int(os.environ["RELEASE_BENCHMARK_REPETITIONS"]),
+        "agent_ab_repetitions": int(os.environ["RELEASE_BENCHMARK_AGENT_AB_REPETITIONS"]),
+        "agent_ab_only": os.environ["RELEASE_BENCHMARK_AGENT_AB_ONLY"] == "1",
         "seed": int(os.environ["RELEASE_BENCHMARK_SEED"]),
         "agent_timeout_seconds": int(os.environ["RELEASE_BENCHMARK_AGENT_TIMEOUT"]),
         "python_executable": sys.executable,
@@ -386,7 +403,10 @@ fi
     printf '%s\n' "- Baseline: \`$baseline_ref\` (\`${baseline_revision:0:12}\`)"
     printf '%s\n' "- Candidate: \`${candidate_revision:0:12}\`"
     printf '%s\n' "- Model: \`$model\`"
-    printf '%s\n' "- Repetitions: $repetitions; seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
+    printf '%s\n' "- Repetitions: effectiveness=$repetitions; agent A/B=$agent_ab_repetitions; seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
+    if ((agent_ab_only)); then
+        printf '%s\n' '- Scope: agent A/B only; other local benchmarks and comparisons were skipped.'
+    fi
     printf '%s\n' '- Manifest: `manifest.json`'
     printf '%s\n\n' "- Results: \`$output_dir\`"
     printf '## Command status\n\n| Status | Name | Exit | Log or reason |\n|---|---|---:|---|\n'
@@ -395,9 +415,105 @@ fi
         printf '| %s | %s | %s | %s |\n' "$status" "$name" "$code" "$log_or_reason"
     done < "$output_dir/STATUS.tsv"
     printf '\nGenerated fixture and records remain in this local bundle. The fixture is synthetic; keep the bundle out of the repository.\n'
-    printf 'Native JSON is under `baseline/native/` and `candidate/native/` where supported; common result JSON is under each revision’s `results/`.\n'
+    if ((agent_ab_only)); then
+        printf 'Agent A/B records and summaries are under `agent-ab/`; no native local-benchmark outputs were requested.\n'
+    else
+        printf 'Native JSON is under `baseline/native/` and `candidate/native/` where supported; common result JSON is under each revision’s `results/`.\n'
+    fi
     printf 'Compare JSON is under `comparisons/`; command logs are under `logs/`. Missing or incompatible results are recorded above or in each comparison.\n'
 } > "$output_dir/REPORT.md"
+
+if [[ -f "$output_dir/agent-ab/baseline/summary.json" || -f "$output_dir/agent-ab/candidate/summary.json" ]]; then
+    if ! "$python_bin" - "$output_dir/agent-ab/baseline/summary.json" \
+        "$output_dir/agent-ab/candidate/summary.json" "$output_dir/REPORT.md" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary_paths = (("baseline", Path(sys.argv[1])), ("candidate", Path(sys.argv[2])))
+report_path = Path(sys.argv[3])
+summaries = []
+for revision, path in summary_paths:
+    if path.is_file():
+        summaries.append((revision, json.loads(path.read_text(encoding="utf-8"))))
+
+lines = ["", "## Agent A/B criterion results", ""]
+lines.append(
+    "Answer columns show passing runs over scheduled runs. Search and slice hit "
+    "columns show MCP runs where the criterion appeared in at least one successful "
+    "response over scheduled MCP runs. Response totals/runs show successful responses "
+    "and the runs with at least one response. Response text is not stored."
+)
+lines.append("")
+lines.append("| Revision | Task | Criterion | Control answer | MCP answer | MCP − control (pp ± 95% CI half-width) | Search hit runs | Search responses (total/runs) | Slice hit runs | Slice responses (total/runs) |")
+lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+
+def fraction(item, count_key="passed"):
+    if not isinstance(item, dict) or not item.get("count"):
+        return "n/a"
+    return f"{item.get(count_key, 0)}/{item['count']}"
+
+for revision, summary in summaries:
+    criteria = summary.get("criterion_summaries_by_mode", {})
+    deltas = summary.get("paired_criterion_deltas_mcp_minus_control", {}).get("tasks", {})
+    exposure = (
+        summary.get("criterion_exposure_summaries_by_mode", {})
+        .get("mcp", {})
+        .get("sources", {})
+    )
+    task_ids = sorted(
+        set(criteria.get("control", {}).get("tasks", {}))
+        | set(criteria.get("mcp", {}).get("tasks", {}))
+    )
+    for task_id in task_ids:
+        control_items = criteria.get("control", {}).get("tasks", {}).get(task_id, [])
+        mcp_items = criteria.get("mcp", {}).get("tasks", {}).get(task_id, [])
+        count = max(len(control_items), len(mcp_items))
+        search_items = exposure.get("search_capture", {}).get("tasks", {}).get(task_id, [])
+        slice_items = exposure.get("get_capture_slice", {}).get("tasks", {}).get(task_id, [])
+        search_counts = (
+            exposure.get("search_capture", {})
+            .get("response_counts_by_task", {})
+            .get(task_id, {})
+        )
+        slice_counts = (
+            exposure.get("get_capture_slice", {})
+            .get("response_counts_by_task", {})
+            .get(task_id, {})
+        )
+        task_deltas = deltas.get(task_id, [])
+        for index in range(count):
+            control = control_items[index] if index < len(control_items) else None
+            mcp = mcp_items[index] if index < len(mcp_items) else None
+            search = search_items[index] if index < len(search_items) else None
+            sliced = slice_items[index] if index < len(slice_items) else None
+            delta = task_deltas[index] if index < len(task_deltas) else None
+            delta_text = "n/a"
+            if isinstance(delta, dict) and delta.get("available"):
+                delta_text = f"{delta['mean'] * 100:+.1f} pp ± {delta['ci95_half_width'] * 100:.1f}"
+            search_response_text = (
+                f"{search_counts.get('total', 0)}/{search_counts.get('runs_with_response', 0)}"
+                if search_counts else "n/a"
+            )
+            slice_response_text = (
+                f"{slice_counts.get('total', 0)}/{slice_counts.get('runs_with_response', 0)}"
+                if slice_counts else "n/a"
+            )
+            lines.append(
+                f"| {revision} | {task_id} | {index + 1} | {fraction(control)} "
+                f"| {fraction(mcp)} | {delta_text} | {fraction(search, 'exposed')} "
+                f"| {search_response_text} | {fraction(sliced, 'exposed')} "
+                f"| {slice_response_text} |"
+            )
+
+report_path.write_text(report_path.read_text(encoding="utf-8") + "\n".join(lines) + "\n", encoding="utf-8")
+PY
+    then
+        failures=$((failures + 1))
+        record_status failed render-agent-ab-report - "criterion report rendering failed"
+        printf 'Failed to render agent A/B criterion table.\n' >&2
+    fi
+fi
 
 printf '\nBenchmark bundle: %s\nReport: %s/REPORT.md\n' "$output_dir" "$output_dir"
 if ((failures)); then

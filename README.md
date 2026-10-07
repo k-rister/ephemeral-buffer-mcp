@@ -1508,16 +1508,16 @@ task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 7 and add `criterion_passes`: ordered booleans for
-the task's required answer phrases. Summary indexes are one-based and scoped
-to the task ID and fixture version. Phrase text and final answers are not
-stored. Empty or refused answers fail every phrase; objective `task_success`
+Runner records use version 8. Version 7 added `criterion_passes`, ordered
+booleans for the task's required answer phrases. Summary indexes are one-based
+and scoped to the task ID and fixture version. Phrase text and final answers
+are not stored. Empty or refused answers fail every phrase; objective `task_success`
 also requires an eligible invocation and all criteria to pass. The `completed`
 invocation flag remains separate. Records include exit code, failure reason,
 MCP-specific tool-call count, provider-reported input/output token counts, and
 every provider usage sample when Codex emits them. They break the observable
 context proxy into prompt and output byte components. Version-1 through
-version-6 records remain readable. Criterion scores are unavailable for
+version-7 records remain readable. Criterion scores are unavailable for
 versions 1 through 6; task-success and affirmative retrieval scores are
 unavailable for versions 1 through 5. Missing values are not inferred from
 invocation status or marker-only scoring. Missing provider metrics are
@@ -1528,10 +1528,40 @@ The adapter enables local metrics for MCP runs and collects the server
 snapshot after each run; missing snapshots are represented as zero counters
 and should be treated as unavailable when diagnosing a failed run. Summaries
 include per-criterion pass counts/rates by mode and paired MCP-minus-control
-deltas, without exposing criterion or answer text.
+deltas, without exposing criterion or answer text. Version 8 adds ordered
+`criterion_search_response_hits` and `criterion_slice_response_hits` vectors
+for MCP runs, plus counts of successful `search_capture` and
+`get_capture_slice` responses. Each boolean says whether that criterion's
+phrase appeared in any response from the named tool during that run; control
+vectors are null because no MCP response exists. Summary exposure rates are
+scoped by task and criterion index. Versions 1 through 7 report these exposure
+metrics as unavailable. The runner reads response text in memory to score it,
+then retains only booleans and counts; it does not write tool-response text to
+the records or summary. Aggregate summary schema version 2 includes source-
+specific successful-response counts and per-task exposure rates.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.
+
+From a clean candidate checkout, collect only the paired agent A/B runs and
+use a separate repetition count from local benchmarks:
+
+```bash
+CODEX_HOME=/path/to/writable/authenticated-codex-home \
+  ./scripts/collect-release-benchmarks.sh \
+  --baseline-ref v0.6.3 \
+  --model gpt-6-luna \
+  --agent-ab-repetitions 20 \
+  --agent-ab-only \
+  --seed 20261006
+```
+
+The wrapper creates one counterbalanced schedule and reuses it for control and
+MCP runs on both revisions, passing the same model to every run. The bundle
+report includes per-criterion final-answer counts, paired MCP-minus-control
+deltas with 95% intervals, and MCP response exposure counts for search and
+slice results. `--agent-ab-only` skips the other benchmark sections;
+`--agent-ab-repetitions` defaults to `--repetitions` when omitted.
 
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
 

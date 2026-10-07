@@ -696,7 +696,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 7)
+        self.assertEqual(payload["records_schema_version"], 8)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")

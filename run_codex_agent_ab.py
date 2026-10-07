@@ -128,7 +128,9 @@ def _nested_result_text(value: Any) -> list[str]:
     text = value.get("text")
     if isinstance(text, str):
         evidence.append(text)
-    for key in ("content", "result", "output", "data", "structuredContent", "resource"):
+    for key in (
+        "content", "result", "output", "data", "structuredContent", "structured_content", "resource"
+    ):
         if key in value:
             evidence.extend(_nested_result_text(value[key]))
     return evidence
@@ -144,7 +146,9 @@ def _nested_result_is_error(value: Any) -> bool:
         return True
     return any(
         _nested_result_is_error(value[key])
-        for key in ("content", "result", "output", "data", "structuredContent", "resource")
+        for key in (
+            "content", "result", "output", "data", "structuredContent", "structured_content", "resource"
+        )
         if key in value
     )
 
@@ -281,11 +285,100 @@ def _criterion_passes(answer: str, criteria: Any, marker: str = "") -> list[bool
         return None
     if not answer or _is_refusal(answer):
         return [False] * len(normalized_phrases)
-    normalized_answer = " ".join(answer.casefold().split())
+    return _criterion_text_hits(answer, required_phrases)
+
+
+def _criterion_text_hits(text: str, required_phrases: list[str]) -> list[bool]:
+    """Match phrases with the same case-folding, whitespace, and word-boundary rules."""
+    normalized_text = " ".join(text.casefold().split())
     return [
-        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", normalized_answer) is not None
-        for phrase in normalized_phrases
+        re.search(
+            rf"(?<!\w){re.escape(' '.join(phrase.casefold().split()))}(?!\w)",
+            normalized_text,
+        ) is not None
+        for phrase in required_phrases
     ]
+
+
+def _mcp_result_criterion_exposure(
+    output: str, criteria: Any
+) -> tuple[dict[str, list[bool]], dict[str, int]]:
+    """Score phrase exposure in successful search and slice responses, retaining no text."""
+    required_phrases = criteria.get("required_phrases") if isinstance(criteria, dict) else None
+    if not isinstance(required_phrases, list) or any(
+        not isinstance(phrase, str) or not phrase.strip() for phrase in required_phrases
+    ):
+        raise ValueError("MCP result exposure requires valid required_phrases")
+
+    sources = ("search_capture", "get_capture_slice")
+    hits = {source: [False] * len(required_phrases) for source in sources}
+    response_counts = {source: 0 for source in sources}
+    for event in _event_objects(output):
+        event_type = event.get("type")
+        item = event.get("item")
+        item_type_override = None
+        if isinstance(item, dict):
+            event_completed = isinstance(event_type, str) and event_type.casefold() == "item.completed"
+        elif isinstance(event_type, str):
+            normalized_event_type = event_type.casefold()
+            completed_types = {"mcp_tool_call.completed", "mcp_call.completed"}
+            if normalized_event_type not in completed_types:
+                continue
+            item = event
+            item_type_override = normalized_event_type.rsplit(".", 1)[0]
+            event_completed = True
+        else:
+            continue
+        item_type = item_type_override or item.get("type")
+        if not isinstance(item_type, str) or item_type.lower() not in {
+            "mcp_tool_call", "mcp_call"
+        }:
+            continue
+        tool_name = next(
+            (
+                item[key]
+                for key in ("tool", "tool_name", "toolName", "name")
+                if isinstance(item.get(key), str)
+            ),
+            "",
+        )
+        normalized_tool_name = tool_name.casefold().replace("-", "_")
+        source = next(
+            (candidate for candidate in sources if normalized_tool_name.endswith(candidate)),
+            None,
+        )
+        if source is None:
+            continue
+
+        status = item.get("status")
+        if isinstance(status, str) and status in {
+            "failed", "error", "cancelled", "canceled", "incomplete", "in_progress", "calling"
+        }:
+            continue
+        if not event_completed and not (
+            isinstance(status, str) and status in {"completed", "complete"}
+        ):
+            continue
+        result_keys = (
+            "result", "output", "content", "data", "structured_content", "structuredContent"
+        )
+        if item.get("error") is not None or item.get("isError") is True or any(
+            _nested_result_is_error(item[key]) for key in result_keys if key in item
+        ):
+            continue
+
+        result_values = [item[key] for key in result_keys if key in item]
+        if not result_values:
+            continue
+        response_counts[source] += 1
+        result_text = "\n".join(
+            text
+            for value in result_values
+            for text in _nested_result_text(value)
+        )
+        response_hits = _criterion_text_hits(result_text, required_phrases)
+        hits[source] = [prior or current for prior, current in zip(hits[source], response_hits)]
+    return hits, response_counts
 
 
 def _task_success(answer: str, criteria: Any, marker: str = "") -> bool:
@@ -667,6 +760,19 @@ def _run_one(
     criterion_passes = _criterion_passes(final_answer, task.get("success_criteria"), marker)
     if criterion_passes is None:
         raise ValueError(f"task {item['task_id']} has invalid success criteria")
+    if item["mode"] == "mcp":
+        criterion_exposure, mcp_response_counts = _mcp_result_criterion_exposure(
+            stdout, task.get("success_criteria")
+        )
+        criterion_search_response_hits = criterion_exposure["search_capture"]
+        criterion_slice_response_hits = criterion_exposure["get_capture_slice"]
+        search_capture_responses = mcp_response_counts["search_capture"]
+        get_capture_slice_responses = mcp_response_counts["get_capture_slice"]
+    else:
+        criterion_search_response_hits = None
+        criterion_slice_response_hits = None
+        search_capture_responses = 0
+        get_capture_slice_responses = 0
     task_success = execution_eligible and all(criterion_passes)
     if execution_eligible and not task_success:
         failure_reason = "task_success_criteria_not_met"
@@ -681,6 +787,12 @@ def _run_one(
         # Ordered booleans are scoped by task_id and task_fixture_version. Never
         # persist the criterion text or final answer in the records envelope.
         "criterion_passes": criterion_passes,
+        # MCP treatment runs store only per-criterion exposure booleans from
+        # named successful tool results. Control exposure is not applicable.
+        "criterion_search_response_hits": criterion_search_response_hits,
+        "criterion_slice_response_hits": criterion_slice_response_hits,
+        "search_capture_responses": search_capture_responses,
+        "get_capture_slice_responses": get_capture_slice_responses,
         "signal_retrieved": _signal_retrieved(stdout, marker),
         "duration_seconds": duration,
         "tool_calls": tool_calls,
@@ -743,7 +855,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "protocol": protocol,
         "schedule": schedule,
         "runs": runs,
-        "privacy": "records contain metadata and task-scoped criterion pass booleans only; prompts, criterion text, transcripts, commands, captures, and user content are excluded",
+        "privacy": "records contain metadata, task-scoped criterion pass and MCP response exposure booleans, and response counts only; prompts, criterion text, tool responses, transcripts, commands, captures, and user content are excluded",
     }
     validate_records(payload, schedule)
     return payload
