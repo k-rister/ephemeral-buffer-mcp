@@ -1158,10 +1158,22 @@ STEP 3: Summary
         self.assertEqual(_bounded_join_lines(["line"], 2, "..."), ("..", True))
         self.assertEqual(_bounded_join_lines(["ab", "c"], 5, "..."), ("ab...", True))
 
+    def test_bounded_join_lines_fast_path_preserves_utf8_and_truncation(self):
+        self.assertEqual(
+            _bounded_join_lines(["plain", "text"], 64, "..."),
+            ("plain\ntext", False),
+        )
+        self.assertEqual(
+            _bounded_join_lines(["plain", "café", "🙂"], 64, "..."),
+            ("plain\ncafé\n🙂", False),
+        )
+        self.assertEqual(_bounded_join_lines(["🙂🙂"], 10, "..."), ("🙂...", True))
+
     def test_bounded_preview_does_not_truncate_text_that_fits_with_marker_reserve(self):
         marker = "..."
         content = "x" * 90
         self.assertEqual(_bounded_preview(content, max_bytes=100, marker=marker), content)
+        self.assertEqual(_bounded_preview("café", max_bytes=8), "café")
 
     def test_ingest_validates_and_preserves_structured_metrics(self):
         engine = EphemeralEngine(max_captures=2)
