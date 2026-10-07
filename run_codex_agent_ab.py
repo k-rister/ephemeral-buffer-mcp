@@ -265,25 +265,33 @@ def _final_answer_text(output: str) -> str:
     return "\n".join(plain_lines).strip()
 
 
-def _task_success(answer: str, criteria: Any, marker: str = "") -> bool:
-    """Score a final answer using deterministic manifest evidence criteria."""
-    if not answer or _is_refusal(answer) or not isinstance(criteria, dict):
-        return False
+def _criterion_passes(answer: str, criteria: Any, marker: str = "") -> list[bool] | None:
+    """Return metadata-only phrase checks in manifest order, or None for invalid criteria."""
+    if not isinstance(criteria, dict):
+        return None
     required_phrases = criteria.get("required_phrases")
     if not isinstance(required_phrases, list) or len(required_phrases) < 2:
-        return False
+        return None
     if any(not isinstance(phrase, str) or not phrase.strip() for phrase in required_phrases):
-        return False
+        return None
     normalized_phrases = [" ".join(phrase.casefold().split()) for phrase in required_phrases]
     if len(normalized_phrases) != len(set(normalized_phrases)):
-        return False
+        return None
     if marker and marker.casefold() not in normalized_phrases:
-        return False
+        return None
+    if not answer or _is_refusal(answer):
+        return [False] * len(normalized_phrases)
     normalized_answer = " ".join(answer.casefold().split())
-    return all(
+    return [
         re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", normalized_answer) is not None
         for phrase in normalized_phrases
-    )
+    ]
+
+
+def _task_success(answer: str, criteria: Any, marker: str = "") -> bool:
+    """Score a final answer when every deterministic manifest criterion passes."""
+    criterion_passes = _criterion_passes(answer, criteria, marker)
+    return criterion_passes is not None and all(criterion_passes)
 
 
 def _as_text(value: str | bytes | None) -> str:
@@ -656,9 +664,10 @@ def _run_one(
         failure_reason = "mcp_not_used"
     marker = task["signal_marker"]
     final_answer = _final_answer_text(stdout)
-    task_success = execution_eligible and _task_success(
-        final_answer, task.get("success_criteria"), marker
-    )
+    criterion_passes = _criterion_passes(final_answer, task.get("success_criteria"), marker)
+    if criterion_passes is None:
+        raise ValueError(f"task {item['task_id']} has invalid success criteria")
+    task_success = execution_eligible and all(criterion_passes)
     if execution_eligible and not task_success:
         failure_reason = "task_success_criteria_not_met"
     return {
@@ -669,6 +678,9 @@ def _run_one(
         # separately records whether its final answer met the objective criteria.
         "completed": invocation_completed,
         "task_success": task_success,
+        # Ordered booleans are scoped by task_id and task_fixture_version. Never
+        # persist the criterion text or final answer in the records envelope.
+        "criterion_passes": criterion_passes,
         "signal_retrieved": _signal_retrieved(stdout, marker),
         "duration_seconds": duration,
         "tool_calls": tool_calls,
@@ -731,7 +743,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "protocol": protocol,
         "schedule": schedule,
         "runs": runs,
-        "privacy": "records contain metadata only; prompts, transcripts, commands, captures, and user content are excluded",
+        "privacy": "records contain metadata and task-scoped criterion pass booleans only; prompts, criterion text, transcripts, commands, captures, and user content are excluded",
     }
     validate_records(payload, schedule)
     return payload

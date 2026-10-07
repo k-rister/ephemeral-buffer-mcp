@@ -763,10 +763,10 @@ metadata-only records envelope:
 The protocol requires non-secret identifiers for model configuration,
 repository fixture, environment, reset policy, and adapter. Each run records
 only task outcome and resource metadata. The analyzer validates pairing and
-reports aggregate completion/retrieval outcomes, cost metrics, paired deltas,
-and uncertainty. It does not invoke a model or collect telemetry. Keep records
-and captures out of the repository and perform a privacy review before sharing
-the aggregate summary.
+reports aggregate completion/retrieval and per-criterion outcomes, cost
+metrics, paired deltas, and uncertainty. It does not invoke a model or collect
+telemetry. Keep records and captures out of the repository and perform a
+privacy review before sharing the aggregate summary.
 
 For Codex CLI experiments, use `run_codex_agent_ab.py` as the external
 adapter. It accepts a private task manifest, creates a fresh fixture copy per
@@ -778,19 +778,26 @@ does not write transcripts or raw command output to the records file. Its
 provider-reported model-context measurement.
 If the fixture does not contain an importable `server` module, provide the
 absolute server path with `--mcp-server-script`.
-Records schema version 6 adds an objective `task_success` score. The existing
-`completed` field means the Codex invocation exited successfully and is
-reported separately from task success. Version 5 records include data-path
-byte counters for capture input, retained and original bytes,
-tool/search/retrieval responses, and socket requests and responses. Version 4
-records include exit code, failure reason,
-MCP-specific tool-call counts, optional provider-reported input/output token
-counts and samples, and the prompt/output components of the context proxy.
-The analyzer reads records from versions 1 through 6; a missing version field
-is treated as version 1. Data-path and provider metrics absent from older
-records are reported as unavailable, not zero. Task-success and affirmative
-retrieval rates are unavailable for versions 1 through 5; they are never
-inferred from a zero exit code or the prior marker-only score.
+Records schema version 7 adds `criterion_passes`, an ordered list of booleans
+for the required answer phrases in each task. The one-based criterion indexes
+in summaries are scoped to the task ID and fixture version. Phrase text and
+final answers are not stored. An empty or refused answer fails every phrase;
+`task_success` remains false unless the run is eligible and every phrase passes.
+The existing `completed` field means the Codex invocation exited successfully
+and is reported separately from task success. Version 6 adds the objective
+`task_success` score. Version 5 records include data-path byte counters for
+capture input, retained and original bytes, tool/search/retrieval responses,
+and socket requests and responses. Version 4 records include exit code,
+failure reason, MCP-specific tool-call counts, optional provider-reported
+input/output token counts and samples, and the prompt/output components of the
+context proxy. The analyzer reads records from versions 1 through 7; a missing
+version field is treated as version 1. Data-path and provider metrics absent
+from older records are reported as unavailable, not zero. Criterion-level
+scores are unavailable for versions 1 through 6; task-success and affirmative
+retrieval rates are unavailable for versions 1 through 5 and are never
+inferred from a zero exit code or the prior marker-only score. The summary
+reports per-criterion pass counts/rates by mode and paired MCP-minus-control
+deltas without including phrase or answer content.
 The aggregate summary reports usage sample counts, monotonicity observations,
 and first-to-last deltas. A monotonic sequence is not treated as proof of
 cumulative accounting; use a controlled calibration matrix to establish the

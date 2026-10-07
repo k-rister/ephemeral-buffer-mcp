@@ -7,10 +7,8 @@ import math
 from pathlib import Path
 from typing import Any
 
-from benchmark_agent_ab import RECORDS_SCHEMA_VERSION
-
-
 SCHEMA_VERSION = 1
+TASK_OUTCOME_RECORDS_SCHEMA_VERSION = 6
 BENCHMARK = "agent-ab-baseline"
 MODES = ("control", "mcp")
 DIRECTIONS = ("higher", "lower", "informational")
@@ -65,7 +63,7 @@ def _assert_private(value: Any) -> None:
 def _summary_metric(summary: dict[str, Any], mode: str, metric: str) -> float | None:
     if (
         metric in {"task_success_rate", "signal_retrieval_rate"}
-        and summary.get("records_schema_version", 1) < RECORDS_SCHEMA_VERSION
+        and summary.get("records_schema_version", 1) < TASK_OUTCOME_RECORDS_SCHEMA_VERSION
     ):
         return None
     mode_summary = summary.get("mode_summaries", {}).get(mode, {})

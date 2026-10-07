@@ -1409,20 +1409,22 @@ Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
 the same model configuration, repository fixture, environment, and reset policy.
 Have an external agent adapter write a records envelope containing only the
 schedule, non-secret protocol identifiers, and per-run fields: completion,
-signal retrieval, duration, tool calls, repeated commands, context proxy bytes
-(total plus prompt/output components), provider usage samples, and peak RSS
-bytes sampled from that invocation's process. On hosts without a supported
+task success, signal retrieval, task-scoped criterion pass booleans, duration,
+tool calls, repeated commands, context proxy bytes (total plus prompt/output
+components), provider usage samples, and peak RSS bytes sampled from that
+invocation's process. On hosts without a supported
 per-process RSS interface, peak RSS is recorded as zero and should be treated
 as unavailable. Summarize it with:
 ```bash
 .venv/bin/python benchmark_agent_ab.py \
   --records agent-ab-records.json --output agent-ab-summary.json
 ```
-The analyzer validates balanced paired runs, reports per-mode aggregates and
-MCP-minus-control deltas with uncertainty, and emits recommendations. It does
-not invoke a model, require credentials, or accept raw prompts, transcripts,
-commands, captures, or user content. Do not commit agent records or generated
-captures; share only the aggregate summary after privacy review.
+The analyzer validates balanced paired runs, reports per-mode and per-criterion
+aggregates plus MCP-minus-control deltas with uncertainty, and emits
+recommendations. It does not invoke a model, require credentials, or accept raw
+prompts, transcripts, commands, captures, or user content. Do not commit agent
+records or generated captures; share only the aggregate summary after privacy
+review.
 
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
@@ -1506,20 +1508,27 @@ task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 6 and add objective `task_success` separately from
-the zero-exit `completed` invocation flag. They also include exit code, failure
-reason, MCP-specific tool-call count, provider-reported input/output token
-counts, and every provider usage sample when Codex emits them. They break the
-observable context proxy into prompt and output byte components. Version-1
-through version-5 records remain readable; missing task-success and
-affirmative retrieval scores are unavailable rather than inferred from
+Runner records use version 7 and add `criterion_passes`: ordered booleans for
+the task's required answer phrases. Summary indexes are one-based and scoped
+to the task ID and fixture version. Phrase text and final answers are not
+stored. Empty or refused answers fail every phrase; objective `task_success`
+also requires an eligible invocation and all criteria to pass. The `completed`
+invocation flag remains separate. Records include exit code, failure reason,
+MCP-specific tool-call count, provider-reported input/output token counts, and
+every provider usage sample when Codex emits them. They break the observable
+context proxy into prompt and output byte components. Version-1 through
+version-6 records remain readable. Criterion scores are unavailable for
+versions 1 through 6; task-success and affirmative retrieval scores are
+unavailable for versions 1 through 5. Missing values are not inferred from
 invocation status or marker-only scoring. Missing provider metrics are
-reported as unavailable rather than zero. Version-5 and version-6 MCP records include
-content-free session data-path byte counters for capture input/retention,
-tool/search/retrieval responses, and framed socket traffic. The adapter enables
-local metrics for MCP runs and collects the server snapshot after each run;
-missing snapshots are represented as zero counters and should be treated as
-unavailable when diagnosing a failed run.
+reported as unavailable rather than zero. Version-5 and later MCP records
+include content-free session data-path byte counters for capture
+input/retention, tool/search/retrieval responses, and framed socket traffic.
+The adapter enables local metrics for MCP runs and collects the server
+snapshot after each run; missing snapshots are represented as zero counters
+and should be treated as unavailable when diagnosing a failed run. Summaries
+include per-criterion pass counts/rates by mode and paired MCP-minus-control
+deltas, without exposing criterion or answer text.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.

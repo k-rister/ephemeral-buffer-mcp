@@ -356,6 +356,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             output = _run_one(item, task, args=args, repository=repository, scratch=Path(directory))
         self.assertTrue(output["completed"])
         self.assertTrue(output["task_success"])
+        self.assertEqual(output["criterion_passes"], [True, True])
         self.assertTrue(output["signal_retrieved"])
         self.assertNotIn("SUCCESS", json.dumps(output))
         command = run.call_args.args[0]
@@ -415,6 +416,8 @@ class TestCodexAgentRunner(unittest.TestCase):
         )
         self.assertTrue(positive["completed"])
         self.assertTrue(positive["task_success"])
+        self.assertEqual(positive["criterion_passes"], [True, True, True])
+        self.assertNotIn("test_case_1379", json.dumps(positive))
         self.assertTrue(positive["signal_retrieved"])
 
         qualified = score(
@@ -443,6 +446,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         partial = score("The test failure is TEST_FAILURE_SIGNAL.")
         self.assertTrue(partial["completed"])
         self.assertFalse(partial["task_success"])
+        self.assertEqual(partial["criterion_passes"], [False, True, False])
         self.assertTrue(partial["signal_retrieved"])
 
         incorrect = score(
@@ -450,6 +454,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             "expected status=ready, got status=stalled"
         )
         self.assertFalse(incorrect["task_success"])
+        self.assertEqual(incorrect["criterion_passes"], [False, True, True])
         self.assertTrue(incorrect["signal_retrieved"])
 
         refused = score(
@@ -457,8 +462,14 @@ class TestCodexAgentRunner(unittest.TestCase):
         )
         self.assertTrue(refused["completed"])
         self.assertFalse(refused["task_success"])
+        self.assertEqual(refused["criterion_passes"], [False, False, False])
         self.assertFalse(refused["signal_retrieved"])
         self.assertEqual(refused["failure_reason"], "task_success_criteria_not_met")
+
+        empty = score("")
+        self.assertTrue(empty["completed"])
+        self.assertFalse(empty["task_success"])
+        self.assertEqual(empty["criterion_passes"], [False, False, False])
 
         complete_evidence = (
             "test_case_1379: TEST_FAILURE_SIGNAL; AssertionError: "
@@ -474,11 +485,13 @@ class TestCodexAgentRunner(unittest.TestCase):
             refused_with_evidence = score(f"{refusal_text} {complete_evidence}")
             self.assertTrue(refused_with_evidence["completed"])
             self.assertFalse(refused_with_evidence["task_success"])
+            self.assertEqual(refused_with_evidence["criterion_passes"], [False, False, False])
             self.assertFalse(refused_with_evidence["signal_retrieved"])
 
         timed_out = score(error=subprocess.TimeoutExpired("codex", 1, output="partial"))
         self.assertFalse(timed_out["completed"])
         self.assertFalse(timed_out["task_success"])
+        self.assertEqual(timed_out["criterion_passes"], [False, False, False])
         self.assertEqual(timed_out["failure_reason"], "timeout")
 
     def test_task_scoring_requires_complete_phrase_boundaries(self):
@@ -626,7 +639,11 @@ class TestCodexAgentRunner(unittest.TestCase):
 
     def test_required_mcp_usage_marks_mcp_bypass_as_incomplete(self):
         item = {"sequence": 1, "repetition": 1, "task_id": "noisy-test-failure", "mode": "mcp"}
-        task = {"prompt": "inspect the fixture", "signal_marker": "SUCCESS"}
+        task = {
+            "prompt": "inspect the fixture",
+            "signal_marker": "SUCCESS",
+            "success_criteria": {"required_phrases": ["SUCCESS", "expected answer"]},
+        }
         args = argparse.Namespace(
             codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
             mcp_server_script=None, sandbox="read-only", timeout=10,
@@ -678,6 +695,8 @@ class TestCodexAgentRunner(unittest.TestCase):
         ):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
+        self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
+        self.assertEqual(payload["records_schema_version"], 7)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")
