@@ -42,16 +42,19 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: /tmp/fastembed_cache
-          key: fastembed-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'engine.py') }}
+          key: fastembed-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'src/ephemeral_buffer_mcp/engine.py') }}
 
       - name: Install dependencies
         run: |
           if [ "${{ matrix.python-version }}" = "3.12" ]; then
             python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
           else
-            # Python 3.10 uses release_checks.py's tomli fallback for TOML parsing.
+            # Python 3.10 uses scripts/release_checks.py's tomli fallback for TOML parsing.
             python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1
           fi
+
+      - name: Install project in editable mode
+        run: python -m pip install --no-deps -e .
 
       - name: Audit dependencies
         run: |
@@ -69,7 +72,7 @@ jobs:
           python -m venv /tmp/ephemeral-package-venv
           /tmp/ephemeral-package-venv/bin/python -m pip install -c constraints.txt dist/*.whl
           /tmp/ephemeral-package-venv/bin/ephbuf --help
-          /tmp/ephemeral-package-venv/bin/python -c "from metrics import LocalMetrics; assert LocalMetrics"
+          /tmp/ephemeral-package-venv/bin/python -c "from ephemeral_buffer_mcp.metrics import LocalMetrics; assert LocalMetrics"
           smoke_workdir="$(mktemp -d)"
           trap 'rm -rf "$smoke_workdir"' EXIT
           (
@@ -78,18 +81,29 @@ jobs:
           )
 
       - name: Compile sources
-        run: python -m py_compile admission.py cli.py config.py engine.py execution.py fastmcp_adapter.py server.py capture_utils.py benchmark_admission.py benchmark_concurrency.py benchmark_effectiveness.py benchmark_latency.py benchmark_relevance.py benchmark_routing.py benchmark_prefetch.py benchmark_semantic_index.py benchmark_semantic_memory.py benchmark_warmup.py benchmark_agent_ab.py benchmark_agent_ab_fixtures.py benchmark_agent_ab_baseline.py run_codex_agent_ab.py render_agent_ab_report.py release_checks.py workload_results.py compare_workload_results.py list_workload_results.py
+        run: python -m compileall -q src benchmarks scripts
 
       - name: Run focused tests
         env:
           EPHEMERAL_SOCKET_PATH: ${{ runner.temp }}/ephemeral-buffer-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.sock
           EPHEMERAL_EXECUTION_STATE_DIR: ${{ runner.temp }}/ephemeral-buffer-executions-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}
           EPHEMERAL_METRICS_FILE: ${{ runner.temp }}/ephemeral-buffer-metrics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.json
-        run: ./scripts/with-test-env.sh python -u -m coverage run --source=. --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,render_agent_ab_report.py,release_checks.py' -m unittest -v test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py test_compare_workload_results.py test_list_workload_results.py test_ci_workflow.py test_fastmcp_adapter.py test_engine.py test_capture_utils.py test_config.py test_cli.py test_socket_protocol.py test_server.py test_metrics.py test_logging_utils.py test_execution.py test_execution_server.py
+        run: |
+          ./scripts/with-test-env.sh python -u -m coverage run --source=ephemeral_buffer_mcp -m unittest -v \
+            tests.unit.test_admission tests.benchmarks.test_benchmark_concurrency tests.benchmarks.test_benchmark_effectiveness \
+            tests.benchmarks.test_benchmark_latency tests.benchmarks.test_benchmark_routing tests.benchmarks.test_benchmark_prefetch \
+            tests.benchmarks.test_benchmark_semantic_index tests.benchmarks.test_benchmark_semantic_memory tests.benchmarks.test_benchmark_warmup \
+            tests.benchmarks.test_benchmark_relevance tests.benchmarks.test_benchmark_agent_ab tests.benchmarks.test_benchmark_agent_ab_fixtures \
+            tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
+            tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.benchmarks.test_workload_results \
+            tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
+            tests.unit.test_fastmcp_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
+            tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
+            tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
 
       - name: Report coverage
         run: |
-          python -m coverage report -m --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,render_agent_ab_report.py,release_checks.py' --fail-under=100
+          python -m coverage report -m --fail-under=100
           python -m coverage xml
           python -m coverage html
 
@@ -109,30 +123,30 @@ jobs:
           EPHEMERAL_METRICS_FILE: ${{ runner.temp }}/ephemeral-buffer-metrics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.json
         run: |
           rm -f .coverage.release
-          COVERAGE_FILE=.coverage.release ./scripts/with-test-env.sh python -m coverage run --source=. -m unittest test_release_checks.py
-          COVERAGE_FILE=.coverage.release python -m coverage report --include='release_checks.py' --fail-under=100
+          COVERAGE_FILE=.coverage.release ./scripts/with-test-env.sh python -m coverage run --source=scripts.release_checks -m unittest tests.tooling.test_release_checks
+          COVERAGE_FILE=.coverage.release python -m coverage report --include='scripts/release_checks.py' --fail-under=100
 
       - name: Run end-to-end test
         env:
           EPHEMERAL_SOCKET_PATH: ${{ runner.temp }}/ephemeral-buffer-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.sock
           EPHEMERAL_EXECUTION_STATE_DIR: ${{ runner.temp }}/ephemeral-buffer-executions-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}
           EPHEMERAL_METRICS_FILE: ${{ runner.temp }}/ephemeral-buffer-metrics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.python-version }}.json
-        run: ./scripts/with-test-env.sh python -m unittest test_e2e_pipe.py
+        run: ./scripts/with-test-env.sh python -m unittest tests.integration.test_e2e_pipe
 
       - name: Run effectiveness smoke evaluation
-        run: python benchmark_effectiveness.py --mode both --output benchmark-effectiveness.json > /dev/null
+        run: python -m benchmarks.benchmark_effectiveness --mode both --output benchmark-effectiveness.json > /dev/null
 
       - name: Run paired effectiveness evaluation
-        run: python benchmark_effectiveness.py --ab-runs 5 --output benchmark-effectiveness-ab.json > /dev/null
+        run: python -m benchmarks.benchmark_effectiveness --ab-runs 5 --output benchmark-effectiveness-ab.json > /dev/null
 
       - name: Run consolidation effectiveness evaluation
-        run: python benchmark_effectiveness.py --consolidation-runs 5 --output benchmark-effectiveness-consolidation.json > /dev/null
+        run: python -m benchmarks.benchmark_effectiveness --consolidation-runs 5 --output benchmark-effectiveness-consolidation.json > /dev/null
 
       - name: Run search relevance evaluation
-        run: python benchmark_relevance.py --baseline benchmark_relevance_baseline.json --fail-on-regression --output search-relevance.json > /dev/null
+        run: python -m benchmarks.benchmark_relevance --baseline benchmarks/data/benchmark_relevance_baseline.json --fail-on-regression --output search-relevance.json > /dev/null
 
       - name: Run capture latency evaluation
-        run: python benchmark_latency.py --samples 3 --output benchmark-latency.json > /dev/null
+        run: python -m benchmarks.benchmark_latency --samples 3 --output benchmark-latency.json > /dev/null
 
       - name: Add relevance baseline summary
         if: always()
@@ -202,8 +216,11 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt "${{ matrix.mcp-spec }}"
 
+      - name: Install project in editable mode
+        run: python -m pip install --no-deps -e .
+
       - name: Check adapter and MCP behavior
-        run: ./scripts/with-test-env.sh python -m unittest -v test_fastmcp_adapter.py test_server.py test_execution_server.py
+        run: ./scripts/with-test-env.sh python -m unittest -v tests.unit.test_fastmcp_adapter tests.unit.test_server tests.unit.test_execution_server
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -224,25 +241,28 @@ jobs:
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: /tmp/fastembed_cache
-          key: benchmark-fastembed-${{ runner.os }}-python-3.12-${{ hashFiles('requirements.txt', 'engine.py') }}
+          key: benchmark-fastembed-${{ runner.os }}-python-3.12-${{ hashFiles('requirements.txt', 'src/ephemeral_buffer_mcp/engine.py') }}
 
       - name: Install dependencies
         run: python -m pip install --require-hashes -r requirements-lock-py312.txt
 
+      - name: Install project in editable mode
+        run: python -m pip install --no-deps -e .
+
       - name: Run concurrency benchmark
         run: |
           set -o pipefail
-          python benchmark_concurrency.py \
+          python -m benchmarks.benchmark_concurrency \
             --captures 32 \
             --workers 8 \
-            --baseline benchmark_baseline.json \
+            --baseline benchmarks/data/benchmark_baseline.json \
             --output benchmark-concurrency.json \
             | tee benchmark-concurrency.txt
 
       - name: Run admission saturation benchmark
         run: |
           set -o pipefail
-          python benchmark_admission.py \
+          python -m benchmarks.benchmark_admission \
             --repetitions 3 \
             --output benchmark-admission.json \
             --result benchmark-admission.result.json \
@@ -251,7 +271,7 @@ jobs:
       - name: Run capture latency benchmark
         run: |
           set -o pipefail
-          python benchmark_latency.py \
+          python -m benchmarks.benchmark_latency \
             --samples 5 \
             --output benchmark-latency.json \
             | tee benchmark-latency.txt

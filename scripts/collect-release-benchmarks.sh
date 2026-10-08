@@ -129,10 +129,17 @@ skip() {
 
 run() {
     local name="$1" cwd="$2" test_embeddings="$3" log="$output_dir/logs/$1.log" code status
+    local source_path=""
     shift 3
     mkdir -p "$(dirname "$log")"
+    if [[ -d "$cwd/src/ephemeral_buffer_mcp" ]]; then
+        source_path="$cwd/src:$cwd"
+    else
+        source_path="$cwd"
+    fi
     printf 'RUN  %s\n' "$name"
-    if (cd "$cwd" && EPHEMERAL_TEST_EMBEDDINGS="$test_embeddings" "$@") > "$log" 2>&1; then
+    if (cd "$cwd" && PYTHONPATH="${source_path}${PYTHONPATH:+:$PYTHONPATH}" \
+        EPHEMERAL_TEST_EMBEDDINGS="$test_embeddings" "$@") > "$log" 2>&1; then
         code=0
         status=success
     else
@@ -147,14 +154,49 @@ run() {
     fi
 }
 
+tool_command=()
+tool_path=""
+
+resolve_tool() {
+    local source_dir="$1" script="$2" module="${2%.py}"
+    if [[ -f "$source_dir/benchmarks/$script" ]]; then
+        tool_path="$source_dir/benchmarks/$script"
+        tool_command=("$python_bin" -m "benchmarks.$module")
+    elif [[ -f "$source_dir/$script" ]]; then
+        tool_path="$source_dir/$script"
+        tool_command=("$python_bin" "$tool_path")
+    else
+        tool_path=""
+        tool_command=()
+    fi
+}
+
+run_tool() {
+    local name="$1" source_dir="$2" embeddings="$3" script="$4"
+    shift 4
+    resolve_tool "$source_dir" "$script"
+    if [[ -z "$tool_path" ]]; then
+        skip "$name" "$script is absent at this revision"
+        return
+    fi
+    run "$name" "$source_dir" "$embeddings" "${tool_command[@]}" "$@"
+}
+
 run_benchmark() {
     local revision="$1" source_dir="$2" name="$3" embeddings="$4" script="$5"
     shift 5
-    if [[ ! -f "$source_dir/$script" ]]; then
-        skip "$revision-$name" "$script is absent at this revision"
-        return
+    run_tool "$revision-$name" "$source_dir" "$embeddings" "$script" "$@"
+}
+
+resolve_baseline_asset() {
+    local source_dir="$1" name="$2"
+    if [[ -f "$source_dir/benchmarks/data/$name" ]]; then
+        printf '%s\n' "$source_dir/benchmarks/data/$name"
+    elif [[ -f "$source_dir/$name" ]]; then
+        printf '%s\n' "$source_dir/$name"
+    else
+        printf '%s\n' "$source_dir/benchmarks/data/$name"
     fi
-    run "$revision-$name" "$source_dir" "$embeddings" "$python_bin" "$source_dir/$script" "$@"
 }
 
 worktree="$output_dir/baseline-worktree"
@@ -177,10 +219,13 @@ fi
 run_revision_suite() {
     local revision="$1" source_dir="$2" source_revision="$3"
     local native="$output_dir/$1/native" results="$output_dir/$1/results"
+    local concurrency_baseline relevance_baseline semantic_memory_script
     mkdir -p "$native" "$results"
+    concurrency_baseline="$(resolve_baseline_asset "$source_dir" benchmark_baseline.json)"
+    relevance_baseline="$(resolve_baseline_asset "$source_dir" benchmark_relevance_baseline.json)"
 
     run_benchmark "$revision" "$source_dir" concurrency 0 benchmark_concurrency.py \
-        --captures 32 --workers 8 --baseline "$source_dir/benchmark_baseline.json" \
+        --captures 32 --workers 8 --baseline "$concurrency_baseline" \
         --output "$native/concurrency.json" --result "$results/concurrency.result.json"
     run_benchmark "$revision" "$source_dir" admission 0 benchmark_admission.py \
         --repetitions 3 --output "$native/admission.json" --result "$results/admission.result.json"
@@ -195,8 +240,10 @@ run_revision_suite() {
     run_benchmark "$revision" "$source_dir" semantic-index 0 benchmark_semantic_index.py \
         --samples "$semantic_samples" --output "$native/semantic-index.json" --result "$results/semantic-index.result.json"
 
-    if [[ -f "$source_dir/benchmark_semantic_memory.py" ]]; then
-        if grep -q 'add_result_argument(parser)' "$source_dir/benchmark_semantic_memory.py"; then
+    resolve_tool "$source_dir" benchmark_semantic_memory.py
+    semantic_memory_script="$tool_path"
+    if [[ -n "$semantic_memory_script" ]]; then
+        if grep -q 'add_result_argument(parser)' "$semantic_memory_script"; then
             run_benchmark "$revision" "$source_dir" semantic-memory 0 benchmark_semantic_memory.py \
                 --threads 1 --result "$results/semantic-memory.result.json"
         else
@@ -222,13 +269,13 @@ run_revision_suite() {
     run_benchmark "$revision" "$source_dir" effectiveness-summary 1 benchmark_effectiveness.py \
         --summary --output "$native/effectiveness-summary.json" --result "$results/effectiveness-summary.result.json"
     run_benchmark "$revision" "$source_dir" relevance 1 benchmark_relevance.py \
-        --top-k 3 --baseline "$source_dir/benchmark_relevance_baseline.json" --fail-on-regression \
+        --top-k 3 --baseline "$relevance_baseline" --fail-on-regression \
         --output "$native/relevance.json" --result "$results/relevance.result.json"
 }
 
 compare_result() {
     local name="$1" baseline_result="$2" candidate_result="$3" destination="$4"
-    run "compare-$name" "$repo_dir" 0 "$python_bin" "$repo_dir/compare_workload_results.py" \
+    run_tool "compare-$name" "$repo_dir" 0 compare_workload_results.py \
         "$baseline_result" "$candidate_result" --statistic all --output "$destination"
 }
 
@@ -259,8 +306,7 @@ if ((agent_ab_only == 0)); then
     for revision in baseline candidate; do
         prefetch_result="$output_dir/$revision/results/prefetch.result.json"
         if [[ -f "$prefetch_result" ]]; then
-            run "compare-$revision-prefetch-policies" "$repo_dir" 0 "$python_bin" \
-                "$repo_dir/compare_workload_results.py" \
+            run_tool "compare-$revision-prefetch-policies" "$repo_dir" 0 compare_workload_results.py \
                 "$prefetch_result#prefetch-off" "$prefetch_result#prefetch-on" \
                 --statistic median --metric ingest --metric first_search --metric subsequent_search \
                 --output "$output_dir/comparisons/$revision-prefetch.comparison.json"
@@ -274,9 +320,9 @@ fixture_dir="$output_dir/agent-ab/fixture"
 tasks="$output_dir/agent-ab/tasks.json"
 schedule="$output_dir/agent-ab/schedule.json"
 mkdir -p "$output_dir/agent-ab"
-run create-agent-ab-v2-fixture "$repo_dir" 0 "$python_bin" "$repo_dir/benchmark_agent_ab_fixtures.py" \
+run_tool create-agent-ab-v2-fixture "$repo_dir" 0 benchmark_agent_ab_fixtures.py \
     --fixture-output "$fixture_dir" --manifest-output "$tasks"
-run create-agent-ab-v2-schedule "$repo_dir" 0 "$python_bin" "$repo_dir/benchmark_agent_ab.py" \
+run_tool create-agent-ab-v2-schedule "$repo_dir" 0 benchmark_agent_ab.py \
     --schedule-output "$schedule" --repetitions "$agent_ab_repetitions" --seed "$seed"
 
 for revision in baseline candidate; do
@@ -290,15 +336,21 @@ for revision in baseline candidate; do
     ab_dir="$output_dir/agent-ab/$revision"
     mkdir -p "$ab_dir"
     agent_metadata=(--metadata "variant=$revision" --metadata "server_revision=$server_revision")
-    run "agent-ab-$revision" "$repo_dir" 1 "$python_bin" "$repo_dir/run_codex_agent_ab.py" \
+    if [[ -f "$server_dir/src/ephemeral_buffer_mcp/server.py" ]]; then
+        server_args=(--mcp-module ephemeral_buffer_mcp.server \
+            --mcp-python-path "$server_dir/src" --mcp-python-path "$server_dir")
+    else
+        server_args=(--mcp-module server --mcp-server-script "$server_dir/server.py")
+    fi
+    run_tool "agent-ab-$revision" "$repo_dir" 1 run_codex_agent_ab.py \
         --schedule "$schedule" --tasks "$tasks" --repository "$fixture_dir" \
         --repository-fixture synthetic-eb-heavy-v2 --model "$model" \
-        --mcp-server-script "$server_dir/server.py" --mcp-python "$python_bin" \
+        "${server_args[@]}" --mcp-python "$python_bin" \
         --allow-mcp-approvals --require-mcp-calls --sandbox read-only --timeout "$agent_timeout" \
         --diagnostic-log-dir "$ab_dir/lifecycle" --output "$ab_dir/records.json" \
         --result "$ab_dir/records.result.json" "${agent_metadata[@]}"
     if [[ -f "$ab_dir/records.json" ]]; then
-        run "summarize-agent-ab-$revision" "$repo_dir" 0 "$python_bin" "$repo_dir/benchmark_agent_ab.py" \
+        run_tool "summarize-agent-ab-$revision" "$repo_dir" 0 benchmark_agent_ab.py \
             --records "$ab_dir/records.json" --output "$ab_dir/summary.json" \
             --result "$ab_dir/summary.result.json" "${agent_metadata[@]}"
     else

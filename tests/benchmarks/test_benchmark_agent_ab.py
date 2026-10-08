@@ -1,0 +1,594 @@
+"""Tests for the privacy-safe agent-level A/B evaluation harness."""
+
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import benchmarks.benchmark_agent_ab as benchmark_agent_ab
+import benchmarks.workload_results as wr
+from benchmarks.render_agent_ab_report import append_agent_ab_report
+from benchmarks.benchmark_agent_ab import (
+    DATA_PATH_BYTE_FIELDS,
+    RECORDS_SCHEMA_VERSION,
+    build_schedule,
+    records_workload_result,
+    summarize_records,
+    summary_workload_result,
+    validate_records,
+)
+
+
+def _records_payload():
+    schedule = build_schedule(repetitions=2, seed=17)
+    runs = []
+    for item in schedule["schedule"]:
+        mcp = item["mode"] == "mcp"
+        runs.append({
+            "task_id": item["task_id"],
+            "repetition": item["repetition"],
+            "mode": item["mode"],
+            "completed": mcp,
+            "signal_retrieved": mcp,
+            "duration_seconds": 2 if mcp else 3,
+            "tool_calls": 2 if mcp else 4,
+            "repeated_commands": 0 if mcp else 1,
+            "context_bytes": 100 if mcp else 400,
+            "peak_rss_bytes": 1000,
+        })
+    return schedule, {
+        "schema_version": 1,
+        "benchmark": "agent-ab",
+        "task_fixture_version": schedule["task_fixture_version"],
+        "protocol": {
+            "model_config": "test-model",
+            "repository_fixture": "synthetic-repo-v1",
+            "environment": "test-environment",
+            "reset_policy": "fresh-worktree-per-run",
+            "agent_adapter": "test-adapter",
+            "embedding_mode": "test",
+            "embedding_model": "deterministic-test",
+            "embedding_cache": "not-applicable",
+        },
+        "schedule": schedule,
+        "runs": runs,
+    }
+
+
+def _scored_records_payload():
+    schedule, payload = _records_payload()
+    payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
+    for record in payload["runs"]:
+        context_bytes = record.pop("context_bytes")
+        record.update({
+            "context_bytes_proxy": context_bytes,
+            "exit_code": 0,
+            "failure_reason": None,
+            "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "input_token_samples": [],
+            "output_token_samples": [],
+            "prompt_bytes_proxy": 40,
+            "output_bytes_proxy": context_bytes - 40,
+            "task_success": record["mode"] == "mcp" and record["repetition"] == 2,
+        })
+        record["criterion_passes"] = [record["task_success"], record["task_success"]]
+        record["criterion_search_response_hits"] = [False, False] if record["mode"] == "mcp" else None
+        record["criterion_slice_response_hits"] = [False, False] if record["mode"] == "mcp" else None
+        record["search_capture_responses"] = 0
+        record["get_capture_slice_responses"] = 0
+        record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
+        record["completed"] = True
+        record["signal_retrieved"] = record["task_success"] or (
+            record["mode"] == "mcp" and record["repetition"] == 1 and record["task_id"] == "targeted-inspection"
+        )
+    return schedule, payload
+
+
+def _legacy_v6_records_payload():
+    schedule, payload = _scored_records_payload()
+    payload["records_schema_version"] = 6
+    for record in payload["runs"]:
+        record.pop("criterion_passes")
+        record.pop("criterion_search_response_hits")
+        record.pop("criterion_slice_response_hits")
+        record.pop("search_capture_responses")
+        record.pop("get_capture_slice_responses")
+    return schedule, payload
+
+
+def _legacy_v5_records_payload():
+    schedule, payload = _records_payload()
+    payload["records_schema_version"] = 5
+    for record in payload["runs"]:
+        context_bytes = record.pop("context_bytes")
+        record.update({
+            "context_bytes_proxy": context_bytes,
+            "exit_code": 0,
+            "failure_reason": None if record["completed"] else "mcp_not_used",
+            "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "input_token_samples": [],
+            "output_token_samples": [],
+            "prompt_bytes_proxy": 40,
+            "output_bytes_proxy": context_bytes - 40,
+        })
+        record.update({field: 0 for field in DATA_PATH_BYTE_FIELDS})
+    return schedule, payload
+
+
+class TestAgentAbBenchmark(unittest.TestCase):
+    def test_schedule_is_reproducible_and_balanced(self):
+        first = build_schedule(repetitions=3, seed=17)
+        self.assertEqual(first, build_schedule(repetitions=3, seed=17))
+        self.assertEqual(len(first["schedule"]), 24)
+        self.assertEqual({item["mode"] for item in first["schedule"]}, {"control", "mcp"})
+        serialized = json_text(first)
+        self.assertNotIn('"prompt":', serialized)
+        self.assertNotIn('"commands":', serialized)
+        self.assertNotIn('"content":', serialized)
+
+    def test_summary_reports_mode_and_paired_metrics(self):
+        schedule, payload = _records_payload()
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(summary["mode_summaries"]["mcp"]["runs"], 8)
+        self.assertEqual(summary["mode_summaries"]["mcp"]["completion_rate"], 1.0)
+        self.assertIsNone(summary["mode_summaries"]["mcp"]["invocation_completion_rate"])
+        self.assertFalse(summary["paired_deltas_mcp_minus_control"]["completed"]["available"])
+        self.assertIsNone(summary["mode_summaries"]["mcp"]["task_success_rate"])
+        self.assertFalse(summary["paired_deltas_mcp_minus_control"]["task_success"]["available"])
+        self.assertTrue(summary["recommendations"])
+
+    def test_legacy_v5_invocation_completion_uses_exit_code(self):
+        schedule, payload = _legacy_v5_records_payload()
+        summary = summarize_records(payload, schedule)
+
+        control = summary["mode_summaries"]["control"]
+        self.assertEqual(control["completion_rate"], 0.0)
+        self.assertEqual(control["invocation_completion_rate"], 1.0)
+        self.assertEqual(summary["mode_summaries"]["mcp"]["invocation_completion_rate"], 1.0)
+        paired_completion = summary["paired_deltas_mcp_minus_control"]["completed"]
+        self.assertEqual(paired_completion["mean"], 0.0)
+        self.assertTrue(paired_completion["available"])
+
+        summary_result = summary_workload_result(summary)
+        control_result = next(item for item in summary_result["runs"] if item["id"] == "control")
+        self.assertEqual(control_result["measurements"]["invocation_completion_rate"]["value"], 1.0)
+
+        run_result = records_workload_result(payload, schedule)
+        control_run = next(item for item in run_result["runs"] if item["labels"]["mode"] == "control")
+        self.assertEqual(control_run["status"], "partial")
+        self.assertEqual(control_run["measurements"]["invocation_completion_rate"]["value"], 1.0)
+
+    def test_summary_separates_invocation_completion_from_objective_task_success(self):
+        schedule, payload = _scored_records_payload()
+        summary = summarize_records(payload, schedule)
+        mcp = summary["mode_summaries"]["mcp"]
+        self.assertEqual(mcp["invocation_completion_rate"], 1.0)
+        self.assertEqual(mcp["task_success_rate"], 0.5)
+        self.assertEqual(mcp["signal_retrieval_rate"], 0.625)
+        paired = summary["paired_deltas_mcp_minus_control"]
+        self.assertEqual(paired["completed"]["mean"], 0.0)
+        self.assertEqual(paired["task_success"]["mean"], 0.5)
+        self.assertEqual(summary["schema_version"], 3)
+        task_success = summary["task_success_by_mode"]
+        self.assertEqual(
+            task_success["mcp"]["tasks"]["targeted-inspection"],
+            {"successes": 1, "count": 2, "success_rate": 0.5},
+        )
+        task_delta = summary["paired_task_success_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"]
+        self.assertEqual(task_delta["mean"], 0.5)
+        self.assertEqual(task_delta["count"], 2)
+        self.assertTrue(task_delta["available"])
+        self.assertTrue(summary["criterion_summaries_by_mode"]["mcp"]["available"])
+        self.assertEqual(
+            summary["criterion_summaries_by_mode"]["mcp"]["tasks"]["targeted-inspection"][0]["pass_rate"],
+            0.5,
+        )
+        self.assertTrue(summary["paired_criterion_deltas_mcp_minus_control"]["available"])
+        result = summary_workload_result(summary)
+        mcp_result = next(item for item in result["runs"] if item["id"] == "mcp")
+        self.assertEqual(mcp_result["status"], "partial")
+        self.assertEqual(mcp_result["measurements"]["success_rate"]["value"], 0.5)
+        self.assertEqual(mcp_result["measurements"]["invocation_completion_rate"]["value"], 1.0)
+
+    def test_criterion_summary_and_paired_deltas_show_task_scoped_indices(self):
+        schedule, payload = _scored_records_payload()
+        targeted_results = {
+            ("control", 1): [True, False],
+            ("control", 2): [False, False],
+            ("mcp", 1): [True, False],
+            ("mcp", 2): [True, True],
+        }
+        for record in payload["runs"]:
+            if record["task_id"] == "targeted-inspection":
+                record["criterion_passes"] = targeted_results[(record["mode"], record["repetition"])]
+
+        summary = summarize_records(payload, schedule)
+        control = summary["criterion_summaries_by_mode"]["control"]["tasks"]["targeted-inspection"]
+        mcp = summary["criterion_summaries_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+        self.assertEqual(control[0], {"criterion_index": 1, "passed": 1, "count": 2, "pass_rate": 0.5})
+        self.assertEqual(control[1], {"criterion_index": 2, "passed": 0, "count": 2, "pass_rate": 0.0})
+        self.assertEqual(mcp[0], {"criterion_index": 1, "passed": 2, "count": 2, "pass_rate": 1.0})
+        self.assertEqual(mcp[1], {"criterion_index": 2, "passed": 1, "count": 2, "pass_rate": 0.5})
+
+        paired = summary["paired_criterion_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"]
+        self.assertEqual(paired[0]["mean"], 0.5)
+        self.assertEqual(paired[0]["count"], 2)
+        self.assertEqual(paired[1]["mean"], 0.5)
+        serialized = json.dumps(summary)
+        self.assertNotIn("TARGETED_SIGNAL", serialized)
+        self.assertNotIn("line 32", serialized)
+
+    def test_response_exposure_cross_tabs_criterion_outcomes_without_content(self):
+        schedule, payload = _scored_records_payload()
+        targeted_mcp = sorted(
+            (
+                record for record in payload["runs"]
+                if record["task_id"] == "targeted-inspection" and record["mode"] == "mcp"
+            ),
+            key=lambda record: record["repetition"],
+        )
+        first, second = targeted_mcp
+        first["task_success"] = False
+        first["criterion_passes"] = [False, True]
+        first["criterion_search_response_hits"] = [True, False]
+        first["search_capture_responses"] = 1
+        first["criterion_slice_response_hits"] = [False, False]
+        first["get_capture_slice_responses"] = 0
+        second["task_success"] = True
+        second["criterion_passes"] = [True, True]
+        second["criterion_search_response_hits"] = [False, True]
+        second["search_capture_responses"] = 1
+        second["criterion_slice_response_hits"] = [False, True]
+        second["get_capture_slice_responses"] = 1
+
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(summary["records_schema_version"], 8)
+        search_criteria = summary["criterion_exposure_summaries_by_mode"]["mcp"]["sources"]["search_capture"]["tasks"]["targeted-inspection"]
+        criterion_one_states = search_criteria[0]["answer_outcomes_by_response_state"]
+        self.assertEqual(criterion_one_states["phrase_hit"]["failed"], 1)
+        self.assertEqual(criterion_one_states["phrase_hit"]["passed"], 0)
+        self.assertEqual(criterion_one_states["response_without_phrase_hit"]["passed"], 1)
+        self.assertEqual(criterion_one_states["no_successful_response"]["count"], 0)
+
+        slice_criteria = summary["criterion_exposure_summaries_by_mode"]["mcp"]["sources"]["get_capture_slice"]["tasks"]["targeted-inspection"]
+        criterion_one_slice = slice_criteria[0]["answer_outcomes_by_response_state"]
+        self.assertEqual(criterion_one_slice["no_successful_response"]["failed"], 1)
+        self.assertEqual(criterion_one_slice["response_without_phrase_hit"]["passed"], 1)
+        self.assertNotIn("TARGETED_SIGNAL", json.dumps(summary))
+        self.assertNotIn("line 32", json.dumps(summary))
+
+    def test_agent_ab_report_renders_new_and_legacy_summaries(self):
+        schedule, payload = _scored_records_payload()
+        targeted_mcp = sorted(
+            (
+                record for record in payload["runs"]
+                if record["task_id"] == "targeted-inspection" and record["mode"] == "mcp"
+            ),
+            key=lambda record: record["repetition"],
+        )
+        targeted_mcp[0]["task_success"] = False
+        targeted_mcp[0]["criterion_passes"] = [False, True]
+        targeted_mcp[0]["criterion_search_response_hits"] = [True, False]
+        targeted_mcp[0]["search_capture_responses"] = 1
+        targeted_mcp[0]["get_capture_slice_responses"] = 0
+        targeted_mcp[1]["criterion_passes"] = [True, True]
+        targeted_mcp[1]["criterion_search_response_hits"] = [False, True]
+        targeted_mcp[1]["search_capture_responses"] = 1
+        targeted_mcp[1]["criterion_slice_response_hits"] = [False, True]
+        targeted_mcp[1]["get_capture_slice_responses"] = 1
+        candidate = summarize_records(payload, schedule)
+
+        legacy_schedule, legacy_payload = _legacy_v6_records_payload()
+        legacy = summarize_records(legacy_payload, legacy_schedule)
+        legacy["schema_version"] = 2
+        legacy.pop("task_success_by_mode")
+        legacy.pop("paired_task_success_deltas_mcp_minus_control")
+        legacy.pop("criterion_exposure_summaries_by_mode")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            baseline_path = root / "baseline.json"
+            candidate_path = root / "candidate.json"
+            report_path = root / "REPORT.md"
+            baseline_path.write_text(json.dumps(legacy), encoding="utf-8")
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+            report_path.write_text("# Report\n", encoding="utf-8")
+            append_agent_ab_report(baseline_path, candidate_path, report_path)
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("## Agent A/B task success", report)
+        self.assertIn("## MCP response exposure and answer outcomes", report)
+        self.assertIn("`phrase_hit` means", report)
+        self.assertIn("response_without_phrase_hit", report)
+        self.assertIn("no_successful_response", report)
+        self.assertIn("| baseline | task-level data unavailable | n/a | n/a | n/a |", report)
+        self.assertIn("| baseline | task-level data unavailable | n/a | unavailable | n/a | n/a | n/a |", report)
+        self.assertIn("| candidate | targeted-inspection | 0/2 | 1/2 | +50.0 pp", report)
+        self.assertNotIn("TARGETED_SIGNAL", report)
+        self.assertNotIn("line 32", report)
+
+    def test_legacy_v6_records_keep_criterion_results_unavailable(self):
+        schedule, payload = _legacy_v6_records_payload()
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(summary["records_schema_version"], 6)
+        self.assertEqual(
+            summary["criterion_summaries_by_mode"]["mcp"],
+            {"available": False, "tasks": {}},
+        )
+        self.assertEqual(
+            summary["paired_criterion_deltas_mcp_minus_control"],
+            {"available": False, "tasks": {}},
+        )
+
+    def test_validation_rejects_invalid_or_inconsistent_criterion_scores(self):
+        schedule, payload = _scored_records_payload()
+        payload["runs"][0]["criterion_passes"] = ["private phrase", False]
+        with self.assertRaisesRegex(ValueError, "criterion_passes must contain at least two booleans"):
+            validate_records(payload, schedule)
+
+        schedule, payload = _scored_records_payload()
+        payload["runs"][0]["criterion_passes"].append(False)
+        with self.assertRaisesRegex(ValueError, "criterion_passes length must be consistent"):
+            validate_records(payload, schedule)
+
+        schedule, payload = _scored_records_payload()
+        successful = next(record for record in payload["runs"] if record["task_success"])
+        successful["criterion_passes"][0] = False
+        with self.assertRaisesRegex(ValueError, "task_success requires every criterion to pass"):
+            validate_records(payload, schedule)
+
+    def test_summary_excludes_unavailable_rss_measurements(self):
+        schedule, payload = _records_payload()
+        for record in payload["runs"]:
+            if record["mode"] == "control":
+                record["peak_rss_bytes"] = 2000
+            elif record["repetition"] == 1:
+                record["peak_rss_bytes"] = 0
+            else:
+                record["peak_rss_bytes"] = 3000
+
+        summary = summarize_records(payload, schedule)
+        mcp_rss = summary["mode_summaries"]["mcp"]["peak_rss_bytes"]
+        paired_rss = summary["paired_deltas_mcp_minus_control"]["peak_rss_bytes"]
+        self.assertTrue(mcp_rss["available"])
+        self.assertEqual(mcp_rss["count"], 4)
+        self.assertEqual(mcp_rss["mean"], 3000.0)
+        self.assertTrue(paired_rss["available"])
+        self.assertEqual(paired_rss["count"], 4)
+        self.assertEqual(paired_rss["mean"], 1000.0)
+
+        for record in payload["runs"]:
+            record["peak_rss_bytes"] = 0
+        unavailable = summarize_records(payload, schedule)
+        self.assertEqual(
+            unavailable["mode_summaries"]["mcp"]["peak_rss_bytes"],
+            {"available": False, "count": 0},
+        )
+        self.assertFalse(unavailable["paired_deltas_mcp_minus_control"]["peak_rss_bytes"]["available"])
+
+    def test_validation_rejects_missing_runs(self):
+        schedule, payload = _records_payload()
+        payload["runs"] = payload["runs"][:-1]
+        with self.assertRaises(ValueError):
+            validate_records(payload, schedule)
+
+    def test_validation_rejects_raw_fields(self):
+        schedule, payload = _records_payload()
+        payload["runs"][0]["raw_output"] = "forbidden"
+        with self.assertRaises(ValueError):
+            validate_records(payload, schedule)
+
+    def test_validation_rejects_json_nonfinite_measurements(self):
+        schedule, payload = _records_payload()
+        payload["runs"][0]["duration_seconds"] = json.loads("1e999")
+
+        with self.assertRaisesRegex(ValueError, "duration_seconds must be a non-negative number"):
+            validate_records(payload, schedule)
+
+    def test_validation_accepts_legacy_protocol_without_embedding_metadata(self):
+        schedule, payload = _records_payload()
+        for field in ("embedding_mode", "embedding_model", "embedding_cache"):
+            del payload["protocol"][field]
+        self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
+
+    def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):
+        schedule, payload = _records_payload()
+        payload["records_schema_version"] = 4
+        payload["runs"] = [
+            {
+                "task_id": record["task_id"],
+                "repetition": record["repetition"],
+                "mode": record["mode"],
+                "completed": record["completed"],
+                "signal_retrieved": record["signal_retrieved"],
+                "duration_seconds": record["duration_seconds"],
+                "tool_calls": record["tool_calls"],
+                "repeated_commands": record["repeated_commands"],
+                "context_bytes_proxy": record["context_bytes"],
+                "peak_rss_bytes": record["peak_rss_bytes"],
+                "exit_code": 0,
+                "failure_reason": None,
+                "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "input_token_samples": [100] if record["mode"] == "control" else [100, 120],
+                "output_token_samples": [20] if record["mode"] == "control" else [20, 24],
+                "prompt_bytes_proxy": 40,
+                "output_bytes_proxy": 60 if record["mode"] == "mcp" else 360,
+            }
+            for record in payload["runs"]
+        ]
+        summary = summarize_records(payload, schedule)
+        self.assertIn("context_bytes_proxy", summary["mode_summaries"]["mcp"])
+        self.assertEqual(summary["mode_summaries"]["mcp"]["prompt_bytes_proxy"]["mean"], 40.0)
+        self.assertEqual(summary["mode_summaries"]["mcp"]["output_bytes_proxy"]["mean"], 60.0)
+        self.assertIn("prompt_bytes_proxy", summary["paired_deltas_mcp_minus_control"])
+        usage = summary["mode_summaries"]["mcp"]["usage_accounting"]["input_tokens"]
+        self.assertEqual(usage["runs_with_multiple_samples"], 8)
+        self.assertEqual(usage["observation"], "monotonic_samples_inconclusive")
+        self.assertEqual(summary["records_schema_version"], 4)
+
+    def test_summary_reports_session_data_path_bytes_for_version_five(self):
+        schedule, payload = _records_payload()
+        payload["records_schema_version"] = 5
+        for record in payload["runs"]:
+            record.pop("context_bytes", None)
+            record.update({
+                "context_bytes_proxy": 100 if record["mode"] == "mcp" else 400,
+                "exit_code": 0,
+                "failure_reason": None,
+                "mcp_tool_calls": 1 if record["mode"] == "mcp" else 0,
+                "input_tokens": None,
+                "output_tokens": None,
+                "input_token_samples": [],
+                "output_token_samples": [],
+                "prompt_bytes_proxy": 40,
+                "output_bytes_proxy": 60 if record["mode"] == "mcp" else 360,
+            })
+            for field in DATA_PATH_BYTE_FIELDS:
+                record[field] = 0
+            if record["mode"] == "mcp":
+                record["capture_input_bytes"] = 1000
+                record["capture_retained_bytes"] = 600
+                record["tool_response_bytes"] = 120
+                record["search_response_bytes"] = 80
+                record["retrieval_response_bytes"] = 40
+
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(
+            summary["mode_summaries"]["mcp"]["data_path_bytes"]["capture_input_bytes"]["mean"],
+            1000.0,
+        )
+        self.assertEqual(
+            summary["paired_deltas_mcp_minus_control"]["tool_response_bytes"]["mean"],
+            120.0,
+        )
+
+    def test_build_schedule_rejects_invalid_repetitions(self):
+        with self.assertRaises(ValueError):
+            build_schedule(repetitions=0)
+
+
+def json_text(value):
+    """Serialize test metadata for a simple privacy assertion."""
+    import json
+
+    return json.dumps(value, sort_keys=True)
+
+
+class TestAgentAbWorkloadResults(unittest.TestCase):
+    def test_summary_workload_result_reports_modes_and_paired_deltas(self):
+        schedule, payload = _records_payload()
+        summary = summarize_records(payload, schedule)
+        result = summary_workload_result(summary)
+        self.assertEqual(result["workload"]["name"], "agent-ab")
+        self.assertEqual(result["workload"]["kind"], "evaluation")
+        self.assertEqual(result["workload"]["parameters"]["protocol"]["agent_adapter"], "test-adapter")
+        self.assertEqual([item["id"] for item in result["runs"]], ["control", "mcp", "paired-delta"])
+        control, mcp, paired = result["runs"]
+        self.assertEqual(control["status"], "partial")
+        self.assertEqual(mcp["status"], "partial")
+        self.assertEqual(mcp["measurements"]["success_rate"], {"unit": "ratio", "value": None, "samples": 0, "note": "legacy records lack objective task-success criteria"})
+        self.assertEqual(mcp["measurements"]["wall_time_seconds"]["mean"], 2.0)
+        self.assertEqual(mcp["measurements"]["context_bytes"]["note"], benchmark_agent_ab.CONTEXT_PROXY_NOTE)
+        # Version-one records carry no token or data-path fields: they are absent, not zero.
+        self.assertEqual(mcp["measurements"]["input_tokens"]["value"], None)
+        self.assertEqual(mcp["measurements"]["capture_input_bytes"]["value"], None)
+        self.assertIsNone(mcp["measurements"]["invocation_completion_rate"]["value"])
+        self.assertEqual(mcp["measurements"]["invocation_completion_rate"]["samples"], 0)
+        self.assertEqual(paired["labels"], {"comparison": "mcp_minus_control"})
+        self.assertIsNone(paired["measurements"]["success_rate"]["value"])
+        self.assertIsNone(paired["measurements"]["invocation_completion_rate"]["value"])
+        self.assertEqual(paired["measurements"]["wall_time_seconds"]["mean"], -1.0)
+        self.assertEqual(result["details"], summary)
+
+        records_result = records_workload_result(payload, schedule)
+        control_record = next(item for item in records_result["runs"] if item["labels"]["mode"] == "control")
+        self.assertEqual(control_record["status"], "partial")
+        self.assertIsNone(control_record["measurements"]["invocation_completion_rate"]["value"])
+
+    def test_records_workload_result_keeps_timeouts_and_unavailable_values(self):
+        schedule = build_schedule(repetitions=1, seed=3)
+        runs = []
+        for item in schedule["schedule"]:
+            mcp = item["mode"] == "mcp"
+            runs.append({
+                "task_id": item["task_id"],
+                "repetition": item["repetition"],
+                "mode": item["mode"],
+                "completed": mcp,
+                "signal_retrieved": mcp,
+                "duration_seconds": 1.5,
+                "tool_calls": 3,
+                "repeated_commands": 0,
+                "context_bytes_proxy": 250,
+                "peak_rss_bytes": 4096 if mcp else 0,
+                "exit_code": 0 if mcp else 124,
+                "failure_reason": None if mcp else "timeout",
+                "mcp_tool_calls": 1 if mcp else 0,
+                "input_tokens": 100 if mcp else None,
+                "output_tokens": 20 if mcp else None,
+            })
+        payload = {
+            "schema_version": 1,
+            "benchmark": "agent-ab",
+            "records_schema_version": 2,
+            "task_fixture_version": schedule["task_fixture_version"],
+            "protocol": {
+                "model_config": "m", "repository_fixture": "f", "environment": "e",
+                "reset_policy": "r", "agent_adapter": "a",
+            },
+            "runs": runs,
+        }
+        result = records_workload_result(payload, schedule, producer="custom-runner")
+        self.assertEqual(result["workload"]["kind"], "agent-run")
+        self.assertEqual(result["workload"]["producer"], "custom-runner")
+        self.assertEqual(result["workload"]["producer_schema_version"], 2)
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(len(result["runs"]), 8)
+        control = next(item for item in result["runs"] if item["labels"]["mode"] == "control")
+        self.assertEqual(control["status"], "timeout")
+        self.assertEqual(control["errors"], ["timeout"])
+        self.assertIsNone(control["measurements"]["peak_rss_bytes"]["value"])
+        self.assertIsNone(control["measurements"]["input_tokens"]["value"])
+        mcp = next(item for item in result["runs"] if item["labels"]["mode"] == "mcp")
+        self.assertEqual(mcp["id"], f"{mcp['labels']['task_id']}-r1-mcp")
+        self.assertEqual(mcp["status"], "partial")
+        self.assertIsNone(mcp["measurements"]["success_rate"]["value"])
+        self.assertEqual(mcp["measurements"]["invocation_completion_rate"]["value"], 1.0)
+        self.assertEqual(mcp["measurements"]["peak_rss_bytes"]["value"], 4096)
+        self.assertEqual(mcp["measurements"]["input_tokens"]["value"], 100)
+        self.assertEqual(mcp["measurements"]["wall_time_seconds"]["value"], 1.5)
+        self.assertNotIn("details", result)
+        self.assertNotIn("prompt_bytes", mcp["measurements"])
+
+    def test_main_result_flag_requires_records_mode(self):
+        schedule, payload = _records_payload()
+        with tempfile.TemporaryDirectory() as directory:
+            records = Path(directory) / "records.json"
+            records.write_text(json.dumps(payload), encoding="utf-8")
+            argv = ["benchmark_agent_ab.py", "--records", str(records), "--result", "-"]
+            with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as stdout, patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                benchmark_agent_ab.main()
+            result = wr.validate_result(json.loads(stdout.getvalue()))
+            self.assertEqual(result["workload"]["name"], "agent-ab")
+            self.assertEqual(json.loads(stderr.getvalue())["benchmark"], "agent-ab")
+
+            for extra in (["--result", "-"], ["--experiment", "policy-ab"], ["--metadata", "model=x"], ["--redact", "owner"]):
+                argv = ["benchmark_agent_ab.py", "--schedule-output", str(Path(directory) / "s.json"), *extra]
+                with patch("sys.argv", argv), patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+                    benchmark_agent_ab.main()
+                self.assertEqual(raised.exception.code, 2, extra)
+                self.assertIn("require --records", stderr.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

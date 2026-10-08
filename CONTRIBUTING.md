@@ -20,7 +20,15 @@ development lock file:
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
+.venv/bin/python -m pip install --no-deps -e .
 ```
+
+Runtime code lives in `src/ephemeral_buffer_mcp/`. The supported Python
+embedding API is the package-level `create_mcp_server` and
+`create_service_context` exports; implementation modules are internal.
+Benchmarks live in `benchmarks/` and run with `python -m benchmarks.<name>`.
+Tests are grouped under `tests/unit/`, `tests/integration/`,
+`tests/benchmarks/`, and `tests/tooling/`.
 
 Run the focused suite and coverage checks described in `AGENTS.md` before
 opening a pull request. At minimum, run the tests relevant to your change.

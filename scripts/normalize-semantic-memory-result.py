@@ -12,9 +12,6 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
 def read_native_record(path: Path) -> dict[str, Any]:
     """Find the benchmark JSON object after any model-loader log lines."""
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -42,8 +39,19 @@ def main() -> int:
     parser.add_argument("--result-output", type=Path, required=True)
     args = parser.parse_args()
 
-    sys.path.insert(0, str(ROOT))
-    benchmark = importlib.import_module("benchmark_semantic_memory")
+    revision_root = args.revision_dir.resolve()
+    package_benchmark = revision_root / "benchmarks" / "benchmark_semantic_memory.py"
+    legacy_benchmark = revision_root / "benchmark_semantic_memory.py"
+    if package_benchmark.is_file():
+        sys.path[:0] = [str(revision_root), str(revision_root / "src")]
+        benchmark = importlib.import_module("benchmarks.benchmark_semantic_memory")
+    elif legacy_benchmark.is_file():
+        sys.path.insert(0, str(revision_root))
+        benchmark = importlib.import_module("benchmark_semantic_memory")
+    else:
+        raise FileNotFoundError(
+            f"no semantic-memory benchmark found in {revision_root}"
+        )
     native = read_native_record(args.log)
     result = benchmark.workload_result(native)
     result["environment"]["source_revision"] = args.source_revision

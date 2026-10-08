@@ -50,7 +50,7 @@ source "$dir/ephemeral-session-env"
 if [[ -x "$dir/ephemeral-config" ]]; then
     mcp_env_config="$("$dir/ephemeral-config" --codex-env-config)"
 else
-    mcp_env_config="$(python3 "$dir/config.py" --codex-env-config)"
+    mcp_env_config="$(PYTHONPATH="$dir/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m ephemeral_buffer_mcp.config --codex-env-config)"
 fi
 
 exec codex --config "$mcp_env_config" "$@"

@@ -34,8 +34,12 @@ Repository = "https://github.com/k-rister/ephemeral-buffer-mcp"
 Issues = "https://github.com/k-rister/ephemeral-buffer-mcp/issues"
 
 [project.scripts]
-ephbuf = "cli:main"
-ephemeral-config = "config:main"
+ephbuf = "ephemeral_buffer_mcp.cli:main"
+ephemeral-config = "ephemeral_buffer_mcp.config:main"
 
 [tool.setuptools]
-py-modules = ["admission", "capture_utils", "cli", "config", "engine", "execution", "fastmcp_adapter", "logging_utils", "metrics", "server", "socket_protocol"]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ephemeral_buffer_mcp*"]

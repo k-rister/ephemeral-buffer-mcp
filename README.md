@@ -92,6 +92,23 @@ The editable install exposes the same `ephbuf` command and MCP server as the
 PyPI installation. The reproducible, locked contributor environment is
 documented in [Testing the Server](#-testing-the-server).
 
+### Repository layout and Python interface
+
+The supported Python embedding interface is exported by the
+`ephemeral_buffer_mcp` package:
+
+```python
+from ephemeral_buffer_mcp import create_mcp_server, create_service_context
+```
+
+These package-level exports are the maintained Python callable API.
+`python -m ephemeral_buffer_mcp.server` is the documented server process entry
+point. The remaining package modules implement service internals. The source
+tree keeps runtime code in `src/`, benchmark programs and their data in
+`benchmarks/`, tests grouped under `tests/`, and repository maintenance tools
+in `scripts/`. Run benchmark programs as modules, for example
+`python -m benchmarks.benchmark_latency`.
+
 When launching from a source checkout with `run.sh`, the launcher prefers
 `.venv/bin/python`, then supports the legacy `venv/bin/python` layout, before
 using an explicit `PYTHON` override or `python3`. An invalid `PYTHON` override
@@ -103,7 +120,7 @@ The MCP server uses stdio for communication with the MCP host. Start it with
 the Python interpreter from the environment where the package was installed:
 
 ```bash
-.venv/bin/python -m server
+.venv/bin/python -m ephemeral_buffer_mcp.server
 ```
 
 Normally you should let your MCP client start this process automatically. Do
@@ -119,7 +136,7 @@ to it. The context owns its engine, metrics, lazy execution manager, and metrics
 snapshot destination; call `close()` when the host is done with the app.
 
 ```python
-from server import create_mcp_server, create_service_context
+from ephemeral_buffer_mcp import create_mcp_server, create_service_context
 
 context = create_service_context(metrics_file=None)
 app = create_mcp_server(context)
@@ -136,7 +153,8 @@ execution-state directory; durable execution creates it on first use. Pass a
 distinct `state_dir` when contexts need separate durable namespaces. Contexts
 created with `create_service_context()` keep metrics in memory by default; pass
 a context-specific `metrics_file` to persist a snapshot. The standard
-`python -m server` entrypoint continues to use the default context.
+`python -m ephemeral_buffer_mcp.server` entrypoint continues to use the
+default context.
 
 ### Start an isolated Codex session
 
@@ -627,7 +645,7 @@ so unusually long shell commands cannot re-expand the initial response.
 To generate the machine-readable benchmark record:
 
 ```bash
-.venv/bin/python benchmark_effectiveness.py --summary --output /tmp/capture-summary.json
+.venv/bin/python -m benchmarks.benchmark_effectiveness --summary --output /tmp/capture-summary.json
 ```
 
 Choose the execution path based on the output and inspection goal:
@@ -1023,6 +1041,7 @@ Set up a local development environment from a fresh checkout:
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
+.venv/bin/python -m pip install --no-deps -e .
 ```
 
 The committed `requirements-dev-lock-py312.txt` file is the reproducible
@@ -1057,32 +1076,32 @@ embeddings in an isolated per-command namespace:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
-  --source=. --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,render_agent_ab_report.py,release_checks.py' \
-  -m unittest test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py \
-  test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py \
-  test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
-  test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py \
-  test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py \
-  test_compare_workload_results.py test_list_workload_results.py test_ci_workflow.py \
-  test_engine.py test_capture_utils.py test_config.py test_cli.py test_socket_protocol.py test_fastmcp_adapter.py test_server.py \
-  test_execution.py test_execution_server.py test_metrics.py test_logging_utils.py
-.venv/bin/python -m coverage report -m \
-  --omit='test_*.py,setup.py,benchmark_admission.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,render_agent_ab_report.py,release_checks.py' \
-  --fail-under=100
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
+  --source=ephemeral_buffer_mcp -m unittest \
+  tests.unit.test_admission tests.benchmarks.test_benchmark_concurrency tests.benchmarks.test_benchmark_effectiveness \
+  tests.benchmarks.test_benchmark_latency tests.benchmarks.test_benchmark_routing tests.benchmarks.test_benchmark_prefetch \
+  tests.benchmarks.test_benchmark_semantic_index tests.benchmarks.test_benchmark_semantic_memory tests.benchmarks.test_benchmark_warmup \
+  tests.benchmarks.test_benchmark_relevance tests.benchmarks.test_benchmark_agent_ab tests.benchmarks.test_benchmark_agent_ab_fixtures \
+  tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
+  tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.benchmarks.test_workload_results \
+  tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
+  tests.unit.test_fastmcp_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
+  tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
+  tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
+.venv/bin/python -m coverage report -m --fail-under=100
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest tests.integration.test_e2e_pipe
 ```
 
-CI requires 100% coverage for application runtime modules using the same omit
-list. Coverage reports are uploaded for inspection, and new runtime paths
-should include targeted tests.
+CI requires 100% coverage for the `ephemeral_buffer_mcp` runtime package.
+Coverage reports are uploaded for inspection, and new runtime paths should
+include targeted tests.
 
 Track release guardrail coverage separately from application coverage:
 
 ```bash
 COVERAGE_FILE=.coverage.release EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
-  --source=. -m unittest test_release_checks.py
+  --source=scripts.release_checks -m unittest tests.tooling.test_release_checks
 COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report \
-  --include='release_checks.py' --fail-under=100
+  --include='scripts/release_checks.py' --fail-under=100
 ```
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
@@ -1125,11 +1144,11 @@ publisher, the workflow publishes the distributions to PyPI automatically.
 
 Run the concurrency benchmark:
 ```bash
-.venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
+.venv/bin/python -m benchmarks.benchmark_concurrency --captures 32 --workers 8
 ```
 The benchmark accepts `--min-ingest-per-second` and `--min-reads-per-second`
 thresholds for direct checks. For repeatable regression checks, pass
-`--baseline benchmark_baseline.json --output benchmark-concurrency.json`.
+`--baseline benchmarks/data/benchmark_baseline.json --output benchmark-concurrency.json`.
 The checked-in baseline uses a 20% tolerance: a run fails only when ingest or
 read throughput drops below 80% of its baseline. Each scheduled or manually
 dispatched GitHub Actions run records the raw JSON result as an artifact and
@@ -1170,7 +1189,7 @@ snippet-formatting time. These results are specific to this host and workload.
 Measure MCP and Unix-socket admission under controlled saturation:
 
 ```bash
-.venv/bin/python benchmark_admission.py \
+.venv/bin/python -m benchmarks.benchmark_admission \
   --repetitions 3 \
   --output /tmp/benchmark-admission.json \
   --result /tmp/benchmark-admission.result.json
@@ -1191,7 +1210,7 @@ document.
 
 Measure command-capture latency by output size and pipeline phase:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_latency \
   --samples 5 --output benchmark-latency.json
 ```
 The latency harness reports cold-start time plus warm median and p95 timings
@@ -1206,7 +1225,7 @@ optional, not a required pull-request check.
 
 Compare lazy semantic indexing with the default asynchronous prefetch:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_prefetch.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_prefetch \
   --line-count 256 --samples 5 --output benchmark-prefetch.json
 ```
 The prefetch harness reports ingestion, first semantic search, and subsequent
@@ -1219,7 +1238,7 @@ evidence rather than a guaranteed improvement.
 
 Measure semantic indexing cost and first hybrid-search latency by capture size:
 ```bash
-.venv/bin/python benchmark_semantic_index.py \
+.venv/bin/python -m benchmarks.benchmark_semantic_index \
   --samples 3 --output benchmark-semantic-index.json
 ```
 The semantic-index harness ingests a fresh deterministic log-like capture per
@@ -1271,7 +1290,7 @@ Measure process RSS for model loading and bounded semantic indexing with the
 memory harness:
 
 ```bash
-.venv/bin/python benchmark_semantic_memory.py --threads 1
+.venv/bin/python -m benchmarks.benchmark_semantic_memory --threads 1
 ```
 
 It reports the model-load and indexing sampled peaks, whether semantic indexing
@@ -1292,15 +1311,15 @@ For a release comparison, record the same workload under each model and compare
 the selected run with the versioned result tool:
 
 ```bash
-.venv/bin/python benchmark_semantic_index.py \
+.venv/bin/python -m benchmarks.benchmark_semantic_index \
   --embedding-model BAAI/bge-small-en-v1.5-fp32 --line-counts 1024 --samples 3 \
   --result results/fp32.result.json --experiment embedding-model \
   --metadata variant=fp32 --metadata host_class=linux-x86_64
-.venv/bin/python benchmark_semantic_index.py \
+.venv/bin/python -m benchmarks.benchmark_semantic_index \
   --embedding-model BAAI/bge-small-en-v1.5 --line-counts 1024 --samples 3 \
   --result results/catalogue.result.json --experiment embedding-model \
   --metadata variant=catalogue --metadata host_class=linux-x86_64
-.venv/bin/python compare_workload_results.py \
+.venv/bin/python -m benchmarks.compare_workload_results \
   results/fp32.result.json#lines-1024 results/catalogue.result.json#lines-1024 \
   --statistic median --metric semantic_index --metric throughput_per_second
 ```
@@ -1312,7 +1331,7 @@ a regression.
 
 Compare lazy model loading with background startup warm-up:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_warmup.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_warmup \
   --samples 5 --output benchmark-warmup.json
 ```
 The warm-up harness reports engine initialization, time to embedding readiness,
@@ -1328,7 +1347,7 @@ Results are deployment-specific and the benchmark is optional.
 
 Measure direct-versus-captured routing tradeoffs with synthetic output profiles:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_routing.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_routing \
   --samples 5 --output benchmark-routing.json
 ```
 The routing harness compares direct command completion with bounded capture and
@@ -1343,7 +1362,7 @@ rank `ceil(0.95 * n)`, with ranks starting at one.
 
 Measure command-output handling effectiveness with deterministic synthetic data:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_effectiveness \
   --mode both --output benchmark-effectiveness.json
 ```
 The effectiveness harness compares a full-output baseline with an
@@ -1358,8 +1377,8 @@ evaluation, not a claim about any particular coding agent or model.
 Evaluate search relevance across supported modes with deterministic synthetic
 fixtures:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
-  --top-k 3 --baseline benchmark_relevance_baseline.json \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_relevance \
+  --top-k 3 --baseline benchmarks/data/benchmark_relevance_baseline.json \
   --output search-relevance.json
 ```
 The relevance benchmark covers exact errors, punctuation-heavy queries,
@@ -1416,7 +1435,7 @@ project-specific claims.
 
 Run a controlled local A/B evaluation with repeated paired measurements:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_effectiveness \
   --ab-runs 5 --seed 20260907 --output benchmark-effectiveness-ab.json
 ```
 The A/B report uses the same deterministic fixtures in both modes, seeded task
@@ -1432,7 +1451,7 @@ results.
 For an end-to-end coding-agent evaluation, generate a counterbalanced,
 privacy-safe schedule:
 ```bash
-.venv/bin/python benchmark_agent_ab.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab \
   --schedule-output agent-ab-schedule.json --repetitions 5 --seed 20260909
 ```
 Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
@@ -1446,7 +1465,7 @@ invocation's process. On hosts without a supported
 per-process RSS interface, peak RSS is recorded as zero and should be treated
 as unavailable. Summarize it with:
 ```bash
-.venv/bin/python benchmark_agent_ab.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab \
   --records agent-ab-records.json --output agent-ab-summary.json
 ```
 The analyzer validates balanced paired runs, reports per-mode and per-criterion
@@ -1509,13 +1528,13 @@ prompt, signal marker, and objective success criteria for each scheduled task:
 Run the adapter from the repository checkout:
 
 ```bash
-.venv/bin/python run_codex_agent_ab.py \
+.venv/bin/python -m benchmarks.run_codex_agent_ab \
   --schedule agent-ab-schedule.json \
   --tasks /path/to/private-agent-tasks.json \
   --repository /path/to/privacy-reviewed-fixture \
   --model gpt-5.6-luna \
   --output /tmp/agent-ab-records.json
-.venv/bin/python benchmark_agent_ab.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab \
   --records /tmp/agent-ab-records.json \
   --output /tmp/agent-ab-summary.json
 ```
@@ -1523,8 +1542,9 @@ Run the adapter from the repository checkout:
 The runner requires a locally authenticated `codex` CLI. It uses
 `codex exec --json --ephemeral`, uses a read-only sandbox by default. `context_bytes_proxy` is an observable prompt/event-envelope
 proxy because the CLI does not expose the model's internal context size.
-When the fixture does not contain an importable `server` module, pass
-`--mcp-server-script /absolute/path/to/server.py`.
+When the fixture does not contain the application package, select the source
+checkout's server module and add its `src` directory, for example
+`--mcp-module ephemeral_buffer_mcp.server --mcp-python-path /path/to/checkout/src`.
 For MCP experiments where the client must be allowed to call the configured
 server, add `--allow-mcp-approvals`. This uses Codex automatic review with a
 `workspace-write` sandbox, and should only be used with a disposable,
@@ -1607,7 +1627,7 @@ boundaries; phrase absence does not establish semantic irrelevance.
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
 
 ```bash
-.venv/bin/python benchmark_agent_ab_fixtures.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab_fixtures \
   --fixture-output /tmp/agent-ab-fixture \
   --manifest-output /tmp/agent-ab-tasks.json
 ```
@@ -1622,7 +1642,7 @@ For a repository-shaped evaluation, set `AGENT_AB_FIXTURE_PROFILE`:
 ```bash
 AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1 \
   CODEX_HOME=/path/to/writable/authenticated-codex-home \
-  ./run_agent_ab_experiment.sh
+  ./benchmarks/run_agent_ab_experiment.sh
 ```
 
 This profile contains source, tests, configuration, and repository workflow
@@ -1637,7 +1657,7 @@ records, and lifecycle logs remain under a unique temporary directory (normally
 
 ```bash
 CODEX_HOME=/path/to/writable/authenticated-codex-home \
-  ./run_agent_ab_experiment.sh
+  ./benchmarks/run_agent_ab_experiment.sh
 ```
 
 Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
@@ -1657,13 +1677,13 @@ privacy-reviewed production-repository fixture and private task manifest.
 Create and compare an aggregate agent A/B baseline after a privacy review:
 
 ```bash
-.venv/bin/python benchmark_agent_ab_baseline.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab_baseline \
   --summary /tmp/agent-ab-summary.json \
   --create-baseline \
-  --output benchmark_agent_ab_baseline.json
-.venv/bin/python benchmark_agent_ab_baseline.py \
+  --output benchmarks/data/benchmark_agent_ab_baseline.json
+.venv/bin/python -m benchmarks.benchmark_agent_ab_baseline \
   --summary /tmp/agent-ab-summary.json \
-  --baseline benchmark_agent_ab_baseline.json \
+  --baseline benchmarks/data/benchmark_agent_ab_baseline.json \
   --fail-on-regression \
   --output /tmp/agent-ab-comparison.json
 ```
@@ -1690,7 +1710,7 @@ cumulative or per-turn.
 
 Compare sequential per-capture retrieval with the consolidated workflow:
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_effectiveness \
   --consolidation-runs 5 --seed 20260907 \
   --output benchmark-effectiveness-consolidation.json
 ```
@@ -1715,19 +1735,19 @@ stdout; the human-readable report then moves to stderr so stdout stays valid
 JSON:
 
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_latency \
   --samples 3 --result benchmark-latency.result.json
-.venv/bin/python benchmark_semantic_index.py --samples 3 --result - > semantic-index.result.json
-.venv/bin/python benchmark_semantic_memory.py --threads 1 --result semantic-memory.result.json
-.venv/bin/python workload_results.py benchmark-latency.result.json semantic-index.result.json semantic-memory.result.json
+.venv/bin/python -m benchmarks.benchmark_semantic_index --samples 3 --result - > semantic-index.result.json
+.venv/bin/python -m benchmarks.benchmark_semantic_memory --threads 1 --result semantic-memory.result.json
+.venv/bin/python -m benchmarks.workload_results benchmark-latency.result.json semantic-index.result.json semantic-memory.result.json
 ```
 
 The document is a `coding-agent-workload-result` (format version 1). It is
 tool- and task-agnostic: it records *what* was measured, never how, so a
 consumer does not need to know about embeddings, BM25, or any other producer
-mechanism. The reference validator is `workload_results.py` (also usable as a
-CLI, as above) and the same contract is published as JSON Schema in
-`workload_result.schema.json`.
+mechanism. The reference validator is `benchmarks/workload_results.py` (also
+usable as a CLI, as above) and the same contract is published as JSON Schema
+in `benchmarks/schemas/workload_result.schema.json`.
 
 The fixed result structure is closed. Adding a field to the result envelope,
 workload descriptor, run, measurement, phase, or experiment record requires a
@@ -1822,11 +1842,11 @@ The example below records a baseline, halves the semantic chunk size, and
 compares the two:
 
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_latency \
   --samples 3 --line-counts 256 2048 --result before.result.json
-EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=2 .venv/bin/python benchmark_latency.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=2 .venv/bin/python -m benchmarks.benchmark_latency \
   --samples 3 --line-counts 256 2048 --result after.result.json
-.venv/bin/python compare_workload_results.py before.result.json after.result.json \
+.venv/bin/python -m benchmarks.compare_workload_results before.result.json after.result.json \
   --tolerance 5 --statistic median --metric wall_time_seconds --metric ingest --metric semantic_index
 ```
 
@@ -1883,20 +1903,20 @@ search times. First-search time includes any wait for background indexing.
 ```bash
 # Agent configurations: control versus MCP in one A/B summary, or two
 # agent-run documents recorded under different models or policies.
-.venv/bin/python benchmark_agent_ab.py --records runs.json --result summary.result.json
-.venv/bin/python compare_workload_results.py summary.result.json#control summary.result.json#mcp --statistic mean
-.venv/bin/python compare_workload_results.py codex-gpt5.result.json codex-candidate.result.json \
+.venv/bin/python -m benchmarks.benchmark_agent_ab --records runs.json --result summary.result.json
+.venv/bin/python -m benchmarks.compare_workload_results summary.result.json#control summary.result.json#mcp --statistic mean
+.venv/bin/python -m benchmarks.compare_workload_results codex-gpt5.result.json codex-candidate.result.json \
   --select mode=mcp --metric input_tokens --metric output_tokens --metric wall_time_seconds --metric tool_calls
 
 # Semantic-prefetch policies: compare phase medians for the same synthetic workload.
-.venv/bin/python benchmark_prefetch.py --line-count 256 --samples 5 --result semantic-prefetch.result.json
-.venv/bin/python compare_workload_results.py semantic-prefetch.result.json#prefetch-off semantic-prefetch.result.json#prefetch-on \
+.venv/bin/python -m benchmarks.benchmark_prefetch --line-count 256 --samples 5 --result semantic-prefetch.result.json
+.venv/bin/python -m benchmarks.compare_workload_results semantic-prefetch.result.json#prefetch-off semantic-prefetch.result.json#prefetch-on \
   --metric ingest --metric first_search --metric subsequent_search --statistic median
 
 # Summarization strategies: retained-summary size and prompt-token proxies per
 # task; the reduction ratios need an explicit direction.
-.venv/bin/python benchmark_effectiveness.py --summary --result summary-a.result.json
-.venv/bin/python compare_workload_results.py summary-a.result.json summary-b.result.json \
+.venv/bin/python -m benchmarks.benchmark_effectiveness --summary --result summary-a.result.json
+.venv/bin/python -m benchmarks.compare_workload_results summary-a.result.json summary-b.result.json \
   --metric retained_summary_tokens --metric estimated_tokens --metric summary_token_reduction \
   --direction summary_token_reduction=higher
 ```
@@ -1939,13 +1959,13 @@ so documents order by instant. A value that breaks these rules is rejected
 when the arguments are parsed, before the workload runs:
 
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_latency --samples 3 --line-counts 256 \
   --result results/chunk-8.result.json --experiment chunk-sweep \
   --metadata variant=chunk-8 --metadata model=bge-small-fp32
-EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=4 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
+EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=4 .venv/bin/python -m benchmarks.benchmark_latency --samples 3 --line-counts 256 \
   --result results/chunk-4.result.json --experiment chunk-sweep \
   --metadata variant=chunk-4 --metadata model=bge-small-fp32
-EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=16 .venv/bin/python benchmark_latency.py --samples 3 --line-counts 256 \
+EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=16 .venv/bin/python -m benchmarks.benchmark_latency --samples 3 --line-counts 256 \
   --result results/chunk-16.result.json --experiment chunk-sweep \
   --metadata variant=chunk-16 --metadata model=bge-small-fp32
 ```
@@ -1958,7 +1978,7 @@ takes the group from `AGENT_AB_EXPERIMENT` and the variant from
 
 ```bash
 AGENT_AB_EXPERIMENT=policy-ab AGENT_AB_VARIANT=summarize-first \
-  CODEX_HOME=/path/to/writable/authenticated-codex-home ./run_agent_ab_experiment.sh
+  CODEX_HOME=/path/to/writable/authenticated-codex-home ./benchmarks/run_agent_ab_experiment.sh
 ```
 
 **List.** `list_workload_results.py` searches files and directories
@@ -1971,7 +1991,7 @@ run with its labels and status so failed, timed-out, and partial runs inside a
 document are visible:
 
 ```bash
-.venv/bin/python list_workload_results.py results --field variant --field model
+.venv/bin/python -m benchmarks.list_workload_results results --field variant --field model
 ```
 
 ```text
@@ -1999,7 +2019,7 @@ earliest; naming two selectors picks the baseline explicitly, and `#RUN_ID`
 still selects one run from each document:
 
 ```bash
-.venv/bin/python compare_workload_results.py results@chunk-sweep,variant=chunk-8 results@chunk-sweep,variant=chunk-4 \
+.venv/bin/python -m benchmarks.compare_workload_results results@chunk-sweep,variant=chunk-8 results@chunk-sweep,variant=chunk-4 \
   --statistic median --metric wall_time_seconds --metric semantic_index
 ```
 
