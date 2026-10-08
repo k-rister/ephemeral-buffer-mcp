@@ -7,6 +7,7 @@ from tests.paths import REPOSITORY_ROOT
 
 
 CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
 RELEASE_BENCHMARK_SCRIPT = REPOSITORY_ROOT / "scripts" / "collect-release-benchmarks.sh"
 AGENT_AB_REPORTER = REPOSITORY_ROOT / "benchmarks" / "render_agent_ab_report.py"
 
@@ -62,6 +63,15 @@ class TestCiWorkflow(unittest.TestCase):
 
         self.assertTrue(AGENT_AB_REPORTER.is_file())
         self.assertIn('"$repo_dir/benchmarks/render_agent_ab_report.py"', source)
+
+    def test_release_notes_import_release_checks_from_scripts_package(self):
+        source = RELEASE_WORKFLOW.read_text()
+
+        self.assertIn(
+            "from scripts.release_checks import extract_changelog_notes, tag_version",
+            source,
+        )
+        self.assertNotIn("from release_checks import", source)
 
     def test_runner_temp_paths_are_scoped_to_steps(self):
         source = CI_WORKFLOW.read_text()
