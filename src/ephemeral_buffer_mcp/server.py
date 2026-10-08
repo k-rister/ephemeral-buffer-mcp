@@ -1025,9 +1025,16 @@ def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
     else:
         socket_status = f"Socket lifecycle is {socket_state}."
     return (
-        "Use execute_and_capture for large, noisy, or uncertain command output and for workflows "
-        "that need later search or follow-up retrieval. Use direct command execution for small, "
-        "targeted inspections. " + isolation + " " + socket_status
+        "Choose command execution by expected duration as well as output. Use start_execution "
+        "when a command may approach or exceed this MCP client's tool-call window, even for a "
+        "single command in one phase; follow progress with get_execution and retrieve bounded "
+        "output with get_execution_output. Use execute_and_capture for commands expected to "
+        "finish within that window when noisy, large, or uncertain output benefits from bounded "
+        "capture and later search. Use direct command execution for small, targeted inspections. "
+        "Durable start_execution requires Linux process-recovery support and has a combined limit "
+        "of eight active or queued executions; inspect get_execution_capacity when needed. For "
+        "execution state that must survive a server restart, configure EPHEMERAL_SESSION_ID, "
+        "EPHEMERAL_SOCKET_PATH, or EPHEMERAL_EXECUTION_STATE_DIR. " + isolation + " " + socket_status
     )
 
 
@@ -1838,9 +1845,20 @@ def start_execution(
 ) -> str:
     """Start a sequential, durably checkpointed set of command phases.
 
-    Returns a durable execution ID promptly; use get_execution to follow
-    progress. Caller disconnection detaches from this work. Use cancel_execution
-    to request intentional termination.
+    Use this when a command may approach or exceed the MCP client's tool-call
+    window, even when running one command as one phase. Choose by expected
+    duration independently of output size. Returns a durable execution ID
+    promptly; use get_execution to follow progress and get_execution_output to
+    retrieve bounded output. Caller disconnection detaches from this work. Use
+    cancel_execution to request intentional termination.
+
+    Durable execution requires Linux process-recovery support, including
+    leases, /proc identities, pidfd signaling, and selector support. Unsupported
+    hosts return a platform error. The manager admits up to eight active or
+    queued executions; inspect get_execution_capacity before scheduling more.
+    Configure EPHEMERAL_SESSION_ID, EPHEMERAL_SOCKET_PATH, or
+    EPHEMERAL_EXECUTION_STATE_DIR when execution state must survive a server
+    restart.
 
     Each phase requires ``name`` and ``command`` and accepts optional ``cwd``,
     ``timeout_seconds``, ``max_output_bytes``, ``structured_metrics``,
@@ -2370,10 +2388,13 @@ def execute_and_capture(
     thousands of lines. The summary includes status, duration, sizes,
     approximate token counts, truncation, signals, and optional named metrics.
 
-    Use this for noisy tests, builds, logs, and other output that benefits from
-    bounded capture and later search. Direct command execution is usually
-    faster for a small, targeted inspection; use capture once output may be
-    noisy, large, or uncertain. This is an advisory routing heuristic, not an
+    Use this for commands expected to finish within the current MCP client's
+    tool-call window when output benefits from bounded capture and later search.
+    For commands likely to approach or exceed that window, use ``start_execution``
+    instead, even for one command in one phase. Decide based on expected duration
+    separately from output size: noisy or large output alone does not require
+    synchronous execution. Direct command execution is usually faster for a
+    small, targeted inspection. This is an advisory routing heuristic, not an
     enforced threshold. Before running, verify the
     command, intended repository, and working directory: an omitted ``cwd``
     inherits the server process directory, and symlinks or shell expansion can
