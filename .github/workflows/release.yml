@@ -124,7 +124,7 @@ jobs:
           import os
           from pathlib import Path
 
-          from release_checks import extract_changelog_notes, tag_version
+          from scripts.release_checks import extract_changelog_notes, tag_version
 
           tag = os.environ["RELEASE_TAG"]
           notes = extract_changelog_notes(
