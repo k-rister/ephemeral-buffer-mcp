@@ -27,7 +27,8 @@ _ephemeral_session_config() {
     if [[ -x "$ephemeral_helper_dir/ephemeral-config" ]]; then
         "$ephemeral_helper_dir/ephemeral-config" "$@"
     else
-        python3 "$ephemeral_helper_dir/config.py" "$@"
+        PYTHONPATH="$ephemeral_helper_dir/src${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 -m ephemeral_buffer_mcp.config "$@"
     fi
 }
 if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" || -n "${EPHEMERAL_EXECUTION_STATE_DIR:-}" ]]; then

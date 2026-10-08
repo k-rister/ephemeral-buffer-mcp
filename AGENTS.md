@@ -35,6 +35,7 @@ development lock:
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
+.venv/bin/python -m pip install --no-deps -e .
 ```
 
 Run the focused suite and application coverage with deterministic test
@@ -42,34 +43,38 @@ embeddings in an isolated per-command namespace:
 
 ```bash
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
-  --source=. --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
-  -m unittest test_admission.py test_benchmark_concurrency.py test_benchmark_effectiveness.py \
-  test_benchmark_latency.py test_benchmark_routing.py test_benchmark_prefetch.py test_benchmark_semantic_index.py test_benchmark_semantic_memory.py test_benchmark_warmup.py test_benchmark_relevance.py \
-  test_benchmark_agent_ab.py test_benchmark_agent_ab_fixtures.py \
-  test_benchmark_agent_ab_repository_fixture.py test_benchmark_agent_ab_baseline.py \
-  test_run_codex_agent_ab.py test_release_checks.py test_workload_results.py \
-  test_compare_workload_results.py test_list_workload_results.py test_ci_workflow.py \
-  test_engine.py test_capture_utils.py test_config.py test_cli.py test_socket_protocol.py test_fastmcp_adapter.py test_server.py \
-  test_execution.py test_execution_server.py test_metrics.py test_logging_utils.py
-.venv/bin/python -m coverage report -m \
-  --omit='test_*.py,setup.py,benchmark_concurrency.py,benchmark_effectiveness.py,benchmark_latency.py,benchmark_relevance.py,benchmark_routing.py,benchmark_prefetch.py,benchmark_semantic_index.py,benchmark_semantic_memory.py,benchmark_warmup.py,benchmark_agent_ab.py,benchmark_agent_ab_fixtures.py,benchmark_agent_ab_repository_fixture.py,benchmark_agent_ab_baseline.py,run_codex_agent_ab.py,release_checks.py' \
-  --fail-under=100
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_e2e_pipe.py
+  --source=ephemeral_buffer_mcp -m unittest \
+  tests.unit.test_admission tests.benchmarks.test_benchmark_concurrency tests.benchmarks.test_benchmark_effectiveness \
+  tests.benchmarks.test_benchmark_latency tests.benchmarks.test_benchmark_routing tests.benchmarks.test_benchmark_prefetch \
+  tests.benchmarks.test_benchmark_semantic_index tests.benchmarks.test_benchmark_semantic_memory tests.benchmarks.test_benchmark_warmup \
+  tests.benchmarks.test_benchmark_relevance tests.benchmarks.test_benchmark_agent_ab tests.benchmarks.test_benchmark_agent_ab_fixtures \
+  tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
+  tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.benchmarks.test_workload_results \
+  tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
+  tests.unit.test_fastmcp_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
+  tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
+  tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
+.venv/bin/python -m coverage report -m --fail-under=100
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest tests.integration.test_e2e_pipe
 ```
+
+CI requires 100% coverage for the `ephemeral_buffer_mcp` runtime package.
+Coverage reports are uploaded for inspection, and new runtime paths should
+include targeted tests.
 
 Track release guardrail coverage separately from application coverage:
 
 ```bash
 COVERAGE_FILE=.coverage.release EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m coverage run \
-  --source=. -m unittest test_release_checks.py
+  --source=scripts.release_checks -m unittest tests.tooling.test_release_checks
 COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report \
-  --include='release_checks.py' --fail-under=100
+  --include='scripts/release_checks.py' --fail-under=100
 ```
 
 The concurrency benchmark is optional and may use the real FastEmbed model:
 
 ```bash
-.venv/bin/python benchmark_concurrency.py --captures 32 --workers 8
+.venv/bin/python -m benchmarks.benchmark_concurrency --captures 32 --workers 8
 ```
 
 Do not add the benchmark to required pull-request checks; it is intended for

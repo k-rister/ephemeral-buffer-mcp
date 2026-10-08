@@ -734,8 +734,8 @@ quality, token usage, or performance on arbitrary repositories. Run it with
 deterministic test embeddings and compare it with the checked-in baseline:
 
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_relevance.py \
-  --baseline benchmark_relevance_baseline.json \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_relevance \
+  --baseline benchmarks/data/benchmark_relevance_baseline.json \
   --fail-on-regression --output search-relevance.json
 ```
 
@@ -754,9 +754,9 @@ agent-level A/B evaluation. Generate its counterbalanced schedule, run matched
 metadata-only records envelope:
 
 ```bash
-.venv/bin/python benchmark_agent_ab.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab \
   --schedule-output agent-ab-schedule.json --repetitions 5 --seed 20260909
-.venv/bin/python benchmark_agent_ab.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab \
   --records agent-ab-records.json --output agent-ab-summary.json
 ```
 
@@ -776,8 +776,9 @@ Codex configuration with no MCP server. The adapter records metadata only and
 does not write transcripts or raw command output to the records file. Its
 `context_bytes_proxy` field is an observable prompt/event-envelope proxy, not a
 provider-reported model-context measurement.
-If the fixture does not contain an importable `server` module, provide the
-absolute server path with `--mcp-server-script`.
+If the fixture does not contain the application package, point the runner at
+the source checkout's package with `--mcp-module ephemeral_buffer_mcp.server`
+and `--mcp-python-path /absolute/path/to/checkout/src`.
 Records schema version 7 adds `criterion_passes`, an ordered list of booleans
 for the required answer phrases in each task. The one-based criterion indexes
 in summaries are scoped to the task ID and fixture version. Phrase text and
@@ -826,7 +827,7 @@ Issue #92's deterministic fixture generator is
 run manifest before an experiment:
 
 ```bash
-.venv/bin/python benchmark_agent_ab_fixtures.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab_fixtures \
   --fixture-output /tmp/agent-ab-fixture \
   --manifest-output /tmp/agent-ab-tasks.json
 ```
@@ -844,7 +845,7 @@ Repeat the complete synthetic five-repetition Codex run with:
 
 ```bash
 CODEX_HOME=/path/to/writable/authenticated-codex-home \
-  ./run_agent_ab_experiment.sh
+  ./benchmarks/run_agent_ab_experiment.sh
 ```
 
 The script checks Codex authentication, creates a unique run directory under
@@ -865,10 +866,10 @@ For issue #93, create a checked-in aggregate baseline only from a reviewed
 agent A/B summary:
 
 ```bash
-.venv/bin/python benchmark_agent_ab_baseline.py \
+.venv/bin/python -m benchmarks.benchmark_agent_ab_baseline \
   --summary /tmp/agent-ab-summary.json \
   --create-baseline \
-  --output benchmark_agent_ab_baseline.json
+  --output benchmarks/data/benchmark_agent_ab_baseline.json
 ```
 
 Compare later summaries with `--baseline` and `--fail-on-regression`. The
@@ -895,7 +896,7 @@ usage samples.
 Example:
 
 ```bash
-.venv/bin/python run_codex_agent_ab.py \
+.venv/bin/python -m benchmarks.run_codex_agent_ab \
   --schedule agent-ab-schedule.json \
   --tasks /path/to/private-agent-tasks.json \
   --repository /path/to/privacy-reviewed-fixture \
@@ -916,9 +917,9 @@ For a reproducible local report, run the benchmark with a fixed seed and keep
 the JSON output:
 
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_effectiveness \
   --ab-runs 5 --seed 20260907 --output benchmark-effectiveness-ab.json
-EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python benchmark_effectiveness.py \
+EPHEMERAL_TEST_EMBEDDINGS=1 .venv/bin/python -m benchmarks.benchmark_effectiveness \
   --consolidation-runs 5 --seed 20260907 \
   --output benchmark-effectiveness-consolidation.json
 ```
@@ -938,10 +939,10 @@ section "Machine-readable workload results"). Comparison tooling, regression
 checks, and dashboards should read that document instead of producer-specific
 records:
 
-- Validate first. `python workload_results.py result.json` rejects documents
+- Validate first. `python -m benchmarks.workload_results result.json` rejects documents
   that do not match the format; refuse to compare an invalid or differently
   versioned document rather than guessing at its contents. The JSON Schema in
-  `workload_result.schema.json` checks the same structure, including the unit
+  `benchmarks/schemas/workload_result.schema.json` checks the same structure, including the unit
   pinned to each canonical measurement name, but it cannot enforce unique run
   ids beyond rejecting identical runs, so a schema-only consumer must check
   ids itself before matching runs. The fixed result structure is closed:
@@ -1010,7 +1011,7 @@ series and `DIR@GROUP,variant=baseline` name the baseline without a fixed
 path:
 
 ```bash
-.venv/bin/python compare_workload_results.py baseline.result.json candidate.result.json \
+.venv/bin/python -m benchmarks.compare_workload_results baseline.result.json candidate.result.json \
   --metric wall_time_seconds --statistic median --tolerance 25 --check \
   --output comparison.json
 ```

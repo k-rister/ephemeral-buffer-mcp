@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+CLI Helper tool for piping command output into Ephemeral Buffer MCP Server.
+Usage:
+  # Pipe stdout/stderr directly:
+  pytest -v 2>&1 | ephbuf --label "pytest run"
+
+  # Force unified-diff parsing when automatic detection is ambiguous:
+  git diff HEAD~3 | ephbuf --label "feature diff" --type diff
+  
+  # Or wrap a command execution:
+  ephbuf --label "build" -- make all
+
+  --type accepts: auto (default), diff, log, or text.
+"""
+
+import sys
+import os
+import socket
+import json
+import argparse
+import shlex
+import time
+import selectors
+from .capture_utils import bound_chunks, run_command_bounded
+from .config import (
+    startup_settings,
+)
+from .socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
+
+SETTINGS = startup_settings()
+SOCKET_PATH = SETTINGS.identity.socket_path
+
+
+def send_to_mcp(
+    text: str,
+    label: str = "",
+    content_type: str = "auto",
+    truncated: bool = False,
+    original_byte_size: int = 0,
+    command_exit_code: int | None = None,
+    timed_out: bool = False,
+    duration_ms: float | None = None,
+) -> dict:
+    if SETTINGS.socket_require_isolation.value and not SETTINGS.identity.isolation_configured:
+        return {
+            "status": "error",
+            "message": "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH",
+        }
+    if not os.path.exists(SOCKET_PATH):
+        return {
+            "status": "error",
+            "message": f"MCP server socket not found at {SOCKET_PATH}. Is the ephemeral-buffer MCP server running?"
+        }
+
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(SETTINGS.socket_timeout_seconds.value)
+        sock.connect(SOCKET_PATH)
+        
+        payload = json.dumps({
+            "label": label,
+            "text": text,
+            "content_type": content_type,
+            "truncated": truncated,
+            "original_byte_size": original_byte_size if truncated else None,
+            "command_exit_code": command_exit_code,
+            "timed_out": timed_out,
+            "duration_ms": duration_ms,
+        }).encode("utf-8")
+        frame = encode_frame(payload)
+        if len(frame) <= 1024:
+            sock.sendall(frame)
+            return _recv_response(sock)
+        return _send_large_frame_with_early_response(sock, frame)
+    except socket.timeout:
+        return {
+            "status": "error",
+            "message": (
+                "Timed out communicating with MCP server after "
+                f"{SETTINGS.socket_timeout_seconds.value:g}s"
+            ),
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to communicate with MCP server: {e}"}
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    """Read exactly ``size`` bytes or fail on a truncated response."""
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ValueError("truncated socket response")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _recv_response(sock: socket.socket) -> dict:
+    header = _recv_exact(sock, FRAME_HEADER_SIZE)
+    response_length = decode_header(header)
+    resp_data = _recv_exact(sock, response_length)
+    return json.loads(resp_data.decode("utf-8"))
+
+
+def _send_large_frame_with_early_response(sock: socket.socket, frame: bytes) -> dict:
+    """Send large socket requests while listening for an early busy response."""
+    timeout = SETTINGS.socket_timeout_seconds.value
+    deadline = time.monotonic() + timeout
+    sent = 0
+    received = bytearray()
+    sock.setblocking(False)
+    with selectors.DefaultSelector() as selector:
+        selector.register(sock, selectors.EVENT_READ | selectors.EVENT_WRITE)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout
+            events = selector.select(remaining)
+            if not events:
+                raise socket.timeout
+            for _, mask in events:
+                # Read first so an admission error can stop a large upload before
+                # the client attempts to send the rest of its frame.
+                if mask & selectors.EVENT_READ:
+                    try:
+                        chunk = sock.recv(64 * 1024)
+                    except BlockingIOError:
+                        chunk = None
+                    if chunk == b"":
+                        raise ValueError("truncated socket response")
+                    if chunk:
+                        received.extend(chunk)
+                        response = _decode_available_response(received)
+                        if response is not None:
+                            return response
+                if mask & selectors.EVENT_WRITE and sent < len(frame):
+                    try:
+                        sent += sock.send(frame[sent:sent + 64 * 1024])
+                    except BlockingIOError:
+                        pass
+                    except OSError:
+                        response = _read_buffered_early_response(sock, received)
+                        if response is not None:
+                            return response
+                        raise
+                    if sent == len(frame):
+                        selector.modify(sock, selectors.EVENT_READ)
+
+
+def _read_buffered_early_response(sock: socket.socket, received: bytearray) -> dict | None:
+    """Read any already-arrived response after the peer closes an upload."""
+    response = _decode_available_response(received)
+    if response is not None:
+        return response
+    while True:
+        try:
+            chunk = sock.recv(64 * 1024)
+        except (BlockingIOError, OSError):
+            return _decode_available_response(received)
+        if not chunk:
+            return _decode_available_response(received)
+        received.extend(chunk)
+        response = _decode_available_response(received)
+        if response is not None:
+            return response
+
+
+def _decode_available_response(buffer: bytearray) -> dict | None:
+    if len(buffer) < FRAME_HEADER_SIZE:
+        return None
+    response_length = decode_header(bytes(buffer[:FRAME_HEADER_SIZE]))
+    frame_length = FRAME_HEADER_SIZE + response_length
+    if len(buffer) < frame_length:
+        return None
+    return json.loads(bytes(buffer[FRAME_HEADER_SIZE:frame_length]).decode("utf-8"))
+
+
+def _report_success(response: dict) -> None:
+    """Print the legacy confirmation and the compact capture summary."""
+    print(
+        f"\n[ephbuf] Successfully captured {response['line_count']:,} lines "
+        f"into buffer `{response['capture_id']}` ({response['label']})",
+        file=sys.stderr,
+    )
+    summary = response.get("summary")
+    if isinstance(summary, dict):
+        print(
+            "[ephbuf] Summary: "
+            + json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            file=sys.stderr,
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Pipe output into Ephemeral Buffer MCP server for hybrid search and agent analysis."
+    )
+    parser.add_argument("--label", "-l", default="", help="Optional descriptive label for this capture")
+    parser.add_argument("--type", "-t", choices=["auto", "diff", "log", "text"], default="auto", help="Optional content type hint (default: auto)")
+    parser.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=SETTINGS.max_buffer_bytes.value,
+        help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help="Maximum runtime for a wrapped command; timed-out commands exit with status 124",
+    )
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command to execute and capture")
+
+    args = parser.parse_args()
+    if args.max_output_bytes < 512:
+        parser.error("--max-output-bytes must be at least 512")
+
+    # If a command was passed after '--'
+    if args.command:
+        cmd_list = args.command
+        if cmd_list and cmd_list[0] == "--":
+            cmd_list = cmd_list[1:]
+            
+        cmd_str = shlex.join(cmd_list)
+        label = args.label or cmd_str
+        print(f"[ephbuf] Executing: {cmd_str}", file=sys.stderr)
+        
+        command_started = time.perf_counter()
+        try:
+            output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
+                cmd_str, None, args.max_output_bytes, args.timeout_seconds
+            )
+        except ValueError as e:
+            parser.error(str(e))
+        duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
+        # Also print output locally so user can see it if desired
+        sys.stdout.write(output)
+        sys.stdout.flush()
+        
+        res = send_to_mcp(
+            output,
+            label=label,
+            content_type=args.type,
+            truncated=truncated,
+            original_byte_size=original_byte_size,
+            command_exit_code=exit_code,
+            timed_out=timed_out,
+            duration_ms=duration_ms,
+        )
+        if res.get("status") == "ok":
+            _report_success(res)
+        else:
+            print(f"\n[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
+        if timed_out:
+            print(f"\n[ephbuf] Command timed out after {args.timeout_seconds:g}s", file=sys.stderr)
+        sys.exit(exit_code if res.get("status") == "ok" else max(exit_code, 1))
+
+    # Otherwise read from stdin (piped input)
+    if not sys.stdin.isatty():
+        input_stream = getattr(sys.stdin, "buffer", sys.stdin)
+        if input_stream is sys.stdin:
+            input_chunks = (chunk.encode("utf-8") for chunk in iter(lambda: sys.stdin.read(65536), ""))
+        else:
+            input_chunks = iter(lambda: input_stream.read(65536), b"")
+        input_text, truncated, original_byte_size = bound_chunks(input_chunks, args.max_output_bytes)
+        label = args.label or "Piped STDIN"
+        res = send_to_mcp(
+            input_text,
+            label=label,
+            content_type=args.type,
+            truncated=truncated,
+            original_byte_size=original_byte_size,
+        )
+        if res.get("status") == "ok":
+            _report_success(res)
+        else:
+            print(f"[ephbuf] Warning: {res.get('message')}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

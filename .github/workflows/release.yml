@@ -36,7 +36,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_MAIN_REF: origin/${{ github.event.repository.default_branch }}
-        run: python release_checks.py --tag "$RELEASE_TAG" --main-ref "$RELEASE_MAIN_REF"
+        run: python scripts/release_checks.py --tag "$RELEASE_TAG" --main-ref "$RELEASE_MAIN_REF"
 
       - name: Build distributions
         run: python -m build
@@ -48,7 +48,7 @@ jobs:
         run: |
           python -m venv /tmp/release-package-venv
           /tmp/release-package-venv/bin/python -m pip install dist/*.whl
-          /tmp/release-package-venv/bin/python -c 'import capture_utils, cli, config, engine, server'
+          /tmp/release-package-venv/bin/python -c 'import ephemeral_buffer_mcp.capture_utils, ephemeral_buffer_mcp.cli, ephemeral_buffer_mcp.config, ephemeral_buffer_mcp.engine, ephemeral_buffer_mcp.server'
           /tmp/release-package-venv/bin/ephbuf --help
 
       - name: Generate distribution checksums

@@ -14,7 +14,12 @@ from mcp.client.stdio import stdio_client
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-MODULES_FROM_DISTRIBUTION = ("server", "engine", "metrics")
+MODULES_FROM_DISTRIBUTION = (
+    "ephemeral_buffer_mcp",
+    "ephemeral_buffer_mcp.server",
+    "ephemeral_buffer_mcp.engine",
+    "ephemeral_buffer_mcp.metrics",
+)
 
 
 def _report_step(message: str) -> None:
@@ -40,7 +45,13 @@ def _assert_installed_modules() -> None:
             raise AssertionError(f"Could not locate installed module {module_name!r}")
 
         module_path = Path(spec.origin).resolve()
-        expected_path = Path(distribution.locate_file(f"{module_name}.py")).resolve()
+        module_parts = module_name.split(".")
+        expected_relative_path = (
+            Path(*module_parts) / "__init__.py"
+            if len(module_parts) == 1
+            else Path(*module_parts[:-1]) / f"{module_parts[-1]}.py"
+        )
+        expected_path = Path(distribution.locate_file(expected_relative_path)).resolve()
         if module_path != expected_path:
             raise AssertionError(
                 f"{module_name} resolved to {module_path}, expected the installed "
@@ -99,7 +110,7 @@ async def _exercise_mcp_roundtrip() -> None:
 
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "server"],
+            args=["-m", "ephemeral_buffer_mcp.server"],
             env=server_environment,
             cwd=str(runtime_directory),
         )
