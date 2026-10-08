@@ -347,7 +347,12 @@ durable phase, and rejects unsupported hosts rather than leaving a phase
 fence-pending. The execution tools return a platform error where the required
 restart-safe backends are unavailable.
 
-Long workflows can be represented as sequential phases with
+Use `start_execution` when a command may approach or exceed the MCP client's
+tool-call window, including one long command represented as a single phase.
+Expected duration determines whether work should run in the background;
+`execute_and_capture` remains useful for commands expected to finish within
+that window when bounded, searchable output is useful. Multi-step workflows
+with meaningful checkpoints can also be represented as sequential phases with
 `start_execution`. The server persists each phase transition and its bounded
 output in `EPHEMERAL_EXECUTION_STATE_DIR` (by default, a local temporary
 process-local directory allocated on first durable use and created securely
@@ -488,14 +493,25 @@ buffer should be released immediately instead of waiting for LRU eviction.
 MCP clients receive tool names, argument schemas, and tool descriptions; they
 do not automatically read this document. The corresponding routing and path
 validation reminders are therefore also kept in the `server.py` tool
-docstrings.
+docstrings and initialization instructions.
 
-Use direct command execution for small, bounded inspections. Use
-`execute_and_capture` when output may be noisy, large, or uncertain—especially
-tests, builds, and logs—where bounded output, search, and follow-up retrieval
-are useful. Use `capture_text` for output
-already held by the caller and `capture_file` only after intentionally selecting
-and checking the file.
+Choose command execution by expected duration as well as output. Use direct
+command execution for small, bounded inspections. Use `execute_and_capture`
+when a command is expected to finish within the current MCP client's tool-call
+window and noisy, large, or uncertain output benefits from bounded capture and
+later search. Use `start_execution` when a command may approach or exceed that
+window, regardless of output size; a single command can be submitted as one
+phase. Follow its ID with `get_execution` and retrieve bounded output with
+`get_execution_output`. Use `capture_text` for output already held by the
+caller and `capture_file` only after intentionally selecting and checking the
+file.
+
+`start_execution` requires Linux recovery support and admits at most eight
+active or queued executions; `get_execution_capacity` reports current counts.
+The default state directory is process-local. Configure
+`EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
+`EPHEMERAL_EXECUTION_STATE_DIR` when execution state must survive a server
+restart.
 
 This routing rule is advisory. The synthetic `benchmark_routing.py` harness
 compares direct and captured execution for 16-line targeted output, 256-line

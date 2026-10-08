@@ -778,11 +778,18 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("already-collected text", capture_text_doc)
         self.assertIn("resolve symlinks", capture_file_doc)
         self.assertIn("small, targeted inspection", execute_doc)
+        self.assertIn("expected to finish within the current MCP client's", execute_doc)
+        self.assertIn("approach or exceed that window", execute_doc)
+        self.assertIn("separately from output size", execute_doc)
         self.assertIn("omitted ``cwd``", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
         self.assertIn("filesystem safety", execute_doc)
         self.assertIn("structured_metrics", execute_doc)
         self.assertIn("structured_metrics", server.start_execution.__doc__)
+        self.assertIn("one command as one phase", start_execution_doc)
+        self.assertIn("get_execution_output", start_execution_doc)
+        self.assertIn("Linux process-recovery support", start_execution_doc)
+        self.assertIn("manager admits up to eight active or", start_execution_doc)
         self.assertIn("never executed", preflight_doc)
         self.assertIn("Shell expansion", preflight_doc)
         for argument in ("query", "mode", "capture_id", "top_k", "context_lines"):
@@ -1261,6 +1268,10 @@ class TestServerTools(unittest.TestCase):
             instructions = server._mcp_instructions()
 
         self.assertIn("execute_and_capture", instructions)
+        self.assertIn("by expected duration as well as output", instructions)
+        self.assertIn("approach or exceed this MCP client's tool-call window", instructions)
+        self.assertIn("get_execution_output", instructions)
+        self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", instructions)
         self.assertIn("Socket isolation is configured", instructions)
 
     def test_mcp_instructions_describe_legacy_socket_mode(self):

@@ -566,9 +566,9 @@ The agent has access to the following tools:
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. Cancelling or disconnecting the caller requests subprocess cleanup. |
+| `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Synchronously executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. Use when expected to finish within the client's tool-call window and noisy output benefits from later search; cancellation or caller disconnection requests subprocess cleanup. |
 | `preflight_command(command, cwd=None)` | Performs content-free path, symlink, local Git-root, and executable-resolution diagnostics without executing the requested command. |
-| `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Persists and starts a sequential, durably checkpointed execution, then returns its ID and current status promptly. Use `get_execution` to follow progress. |
+| `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Persists and starts a sequential, durably checkpointed execution, then returns its ID and current status promptly. Use when expected duration may approach or exceed the client's tool-call window, even for one command as one phase; follow with `get_execution` and `get_execution_output`. Requires Linux recovery support and has a combined capacity of eight active or queued executions. |
 | `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase and returns promptly; use `get_execution` to follow progress. Retries and unsafe side effects require explicit controls. |
 | `cancel_execution(execution_id)` | Requests cancellation of active durable work by ID. Completed phases remain checkpointed; process cleanup uses the existing interruption and fencing path. |
 | `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. |
@@ -648,14 +648,19 @@ To generate the machine-readable benchmark record:
 .venv/bin/python -m benchmarks.benchmark_effectiveness --summary --output /tmp/capture-summary.json
 ```
 
-Choose the execution path based on the output and inspection goal:
+Choose the execution path based on expected duration and output:
 
 - Use direct command execution for a small, targeted inspection where the
   output is already bounded and immediate terminal feedback is sufficient.
-- Use `execute_and_capture` once output may be noisy, large, or uncertain—such
-  as tests, builds, and logs—because it bounds context and makes later search
-  and exact retrieval available. This is an advisory heuristic, not a hard
-  line-count policy.
+- Use `execute_and_capture` when a command is expected to finish within the
+  current MCP client's tool-call window and noisy, large, or uncertain output
+  benefits from bounded capture and later search. A noisy test or build can use
+  this path when its expected runtime fits that window.
+- Use `start_execution` when a command may approach or exceed the current
+  tool-call window, regardless of output size. A single long-running command
+  can be submitted as one phase; use `get_execution` to follow progress and
+  `get_execution_output` to retrieve bounded output. This is an advisory
+  heuristic, not a fixed duration threshold.
 - Use `capture_text` when output is already in hand, or `capture_file` for a
   file that has been checked and intentionally selected for ingestion.
 
@@ -676,7 +681,26 @@ Bounded subprocess capture requires POSIX pipe and process-group support, and
 identities, pidfd signaling, and selector support; startup rejects the request
 with a clear platform error when those recovery backends are unavailable.
 
-Use `start_execution` when a long-running workflow has meaningful checkpoints:
+Use `start_execution` when a command may approach or exceed the MCP client's
+tool-call window, or when a longer workflow benefits from meaningful phase
+checkpoints. Expected runtime determines whether work should run in the
+background; output size is a separate choice. A single command is one phase:
+
+```text
+start_execution(
+  execution_id="long-tests",
+  phases=[{"name": "tests", "command": "python -m unittest", "cwd": "/path/to/repository"}],
+)
+```
+
+The call returns promptly with the execution ID. Follow its status with
+`get_execution(execution_id="long-tests")`, then retrieve that phase's
+persisted output with
+`get_execution_output(execution_id="long-tests", phase_name="tests")`.
+Use `cancel_execution` to request termination. Disconnecting the MCP caller
+detaches it from the durable execution and does not cancel it.
+
+For workflows with multiple checkpoints, pass multiple phases:
 
 ```text
 start_execution(
@@ -695,9 +719,14 @@ detaches the caller; call `cancel_execution(execution_id)` to request
 termination. Cancellation records the current phase as `interrupted`, keeps
 completed checkpoints, and fences the subprocess if cleanup cannot be
 confirmed. `resume_execution` also returns promptly after scheduling work.
-The manager accepts up to eight active or queued background executions;
-`get_execution_capacity` reports the current counts. If a background task
-fails outside normal phase handling, `get_execution` reports a
+Durable execution requires Linux leases, `/proc` process identities, pidfd
+signaling, and selector support; startup reports a platform error when these
+recovery backends are unavailable. The manager accepts up to eight active or
+queued background executions; `get_execution_capacity` reports the current
+counts. The default state directory is process-local; configure
+`EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
+`EPHEMERAL_EXECUTION_STATE_DIR` when state must survive a server restart. If a
+background task fails outside normal phase handling, `get_execution` reports a
 `background_error` with the recorded execution state.
 
 Each phase is persisted as `pending`, `started`, `completed`, `failed`,
