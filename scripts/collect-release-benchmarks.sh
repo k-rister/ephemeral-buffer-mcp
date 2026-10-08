@@ -476,7 +476,7 @@ fi
 } > "$output_dir/REPORT.md"
 
 if [[ -f "$output_dir/agent-ab/baseline/summary.json" || -f "$output_dir/agent-ab/candidate/summary.json" ]]; then
-    if ! "$python_bin" "$repo_dir/render_agent_ab_report.py" \
+    if ! "$python_bin" "$repo_dir/benchmarks/render_agent_ab_report.py" \
         "$output_dir/agent-ab/baseline/summary.json" \
         "$output_dir/agent-ab/candidate/summary.json" \
         "$output_dir/REPORT.md"; then

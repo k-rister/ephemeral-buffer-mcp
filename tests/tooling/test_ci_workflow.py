@@ -7,6 +7,8 @@ from tests.paths import REPOSITORY_ROOT
 
 
 CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_BENCHMARK_SCRIPT = REPOSITORY_ROOT / "scripts" / "collect-release-benchmarks.sh"
+AGENT_AB_REPORTER = REPOSITORY_ROOT / "benchmarks" / "render_agent_ab_report.py"
 
 
 class TestCiWorkflow(unittest.TestCase):
@@ -54,6 +56,12 @@ class TestCiWorkflow(unittest.TestCase):
             "tests.benchmarks.test_list_workload_results",
         ):
             self.assertIn(module, source)
+
+    def test_release_benchmark_runner_uses_agent_reporter_in_benchmarks_directory(self):
+        source = RELEASE_BENCHMARK_SCRIPT.read_text()
+
+        self.assertTrue(AGENT_AB_REPORTER.is_file())
+        self.assertIn('"$repo_dir/benchmarks/render_agent_ab_report.py"', source)
 
     def test_runner_temp_paths_are_scoped_to_steps(self):
         source = CI_WORKFLOW.read_text()
