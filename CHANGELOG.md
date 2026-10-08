@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 - 2026-10-08
+
+- Move the runtime into the `ephemeral_buffer_mcp` package and organize
+  benchmarks, tests, and release tooling into dedicated directories.
+- Establish `create_mcp_server` and `create_service_context` as the supported
+  Python embedding API. Previous imports from root-level implementation
+  modules are no longer available; installed commands and MCP behavior remain
+  available.
+
 ## 0.7.0 - 2026-10-07
 
 - Record per-criterion phrase exposure in successful MCP search and capture-slice
