@@ -159,14 +159,39 @@ default context.
 ### Start an isolated Codex session
 
 When using the global Codex MCP configuration, start Codex through the
-installed `codex-ephemeral` launcher. From a source checkout, use
-`./codex-ephemeral`. The launcher creates a unique `EPHEMERAL_SESSION_ID`
-when no session ID or explicit socket path was supplied. It forwards the
+`codex-ephemeral` launcher installed in the package environment. From a source
+checkout, use `./codex-ephemeral`. The launcher creates a unique
+`EPHEMERAL_SESSION_ID` when no session ID or explicit socket path was supplied.
+It forwards the
 session or explicit socket and state paths, along with supported EB settings,
 through Codex's MCP configuration so they remain available when Codex
 sanitizes the child environment.
 The global configuration requires this identity, so starting Codex directly
 will fail closed instead of attaching to another session's socket.
+
+#### Update Codex's MCP server command after an upgrade
+
+Codex stores its user configuration in `~/.codex/config.toml`, or in
+`$CODEX_HOME/config.toml` when `CODEX_HOME` is set ([Codex configuration
+reference](https://learn.chatgpt.com/docs/config-file/config-reference)). The
+`codex-ephemeral` launcher supplies session environment values; it does not
+change the configured server command or arguments. After upgrading from a
+release that used the old top-level `server` module, update the existing
+`ephemeral-buffer` entry to the package entry point:
+
+```toml
+[mcp_servers.ephemeral-buffer]
+command = "/absolute/path/to/.venv/bin/python"
+args = ["-m", "ephemeral_buffer_mcp.server"]
+```
+
+Use the Python executable from the environment where `ephemeral-buffer-mcp`
+is installed. Change the `command` and `args` in the existing table, keeping
+any other settings your setup needs. For a source checkout, the equivalent is
+the checkout's `run.sh` with `args = []`. Save the config and restart Codex.
+Confirm that the MCP tools appear, then call `get_runtime_diagnostics` and
+check that the package version and socket lifecycle are correct. A package
+upgrade does not rewrite Codex's config file.
 
 The launcher also enables `EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET=1` because some
 Codex execution environments deny Unix-socket creation. In that case MCP over
@@ -248,8 +273,9 @@ socket path. An MCP client that does not pass environment variables to child
 processes can still use the MCP tools, but its separate `ephbuf` shell
 commands will need the same identity configured independently.
 
-For other shell-launched agents, use the installed generic launcher. From a
-source checkout, use `./ephemeral-agent`:
+For other shell-launched agents, use the installed `ephemeral-agent` command
+when the package environment is active, or `./ephemeral-agent` from a source
+checkout:
 
 ```bash
 ephemeral-agent claude
@@ -281,7 +307,7 @@ start a stdio server. A portable configuration looks like this:
   "mcpServers": {
     "ephemeral-buffer": {
       "command": "/absolute/path/to/ephemeral-buffer-mcp/.venv/bin/python",
-      "args": ["-m", "server"]
+      "args": ["-m", "ephemeral_buffer_mcp.server"]
     }
   }
 }
@@ -297,7 +323,7 @@ same executable and arguments conceptually as:
 
 ```text
 command: /absolute/path/to/.venv/bin/python
-arguments: -m server
+arguments: -m ephemeral_buffer_mcp.server
 ```
 
 After saving the configuration, restart or reload the MCP client and confirm
@@ -480,7 +506,7 @@ MCP client.
 | Normal user | PyPI install in a virtual environment |
 | MCP host | PyPI install, then configure the installed server command |
 | Shell/CLI use | PyPI install, then run `ephbuf` |
-| CLI coding agent | PyPI install, then run `ephemeral-agent` or `codex-ephemeral` |
+| CLI coding agent | PyPI install in a virtual environment, then run `ephemeral-agent` or `codex-ephemeral` |
 | Contributor | Source checkout with `pip install -e .` |
 | Release validation | Follow the procedures in [OPERATIONS.md](OPERATIONS.md) |
 
