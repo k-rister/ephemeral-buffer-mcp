@@ -798,35 +798,37 @@ class TestServerTools(unittest.TestCase):
         search_doc = server.search_capture.__doc__
         list_doc = server.list_captures.__doc__
         start_execution_doc = server.start_execution.__doc__
+        resume_execution_doc = server.resume_execution.__doc__
 
         self.assertIn("already-collected text", capture_text_doc)
-        self.assertIn("resolve symlinks", capture_file_doc)
-        self.assertIn("small, targeted inspection", execute_doc)
-        self.assertIn("expected to finish within the current MCP client's", execute_doc)
-        self.assertIn("approach or exceed that window", execute_doc)
-        self.assertIn("separately from output size", execute_doc)
-        self.assertIn("omitted ``cwd``", execute_doc)
+        self.assertIn("Resolve symlinks", capture_file_doc)
+        self.assertIn("expected to finish within the MCP client's", execute_doc)
+        self.assertIn("duration may approach or exceed that window", execute_doc)
+        self.assertIn("duration independently of output size", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
         self.assertIn("filesystem safety", execute_doc)
-        self.assertIn("structured_metrics", execute_doc)
-        self.assertIn("structured_metrics", server.start_execution.__doc__)
+        self.assertIn("content_type accepts auto", execute_doc)
+        self.assertIn("returns exit code 124", execute_doc)
+        self.assertIn("JSON-compatible named metrics", execute_doc)
         self.assertIn("one command as one phase", start_execution_doc)
         self.assertIn("get_execution_output", start_execution_doc)
         self.assertIn("Linux process-recovery support", start_execution_doc)
-        self.assertIn("manager admits up to eight active or", start_execution_doc)
+        self.assertIn("admits eight active or queued", start_execution_doc)
+        self.assertIn("never rerun", start_execution_doc)
+        self.assertIn("confirm_unsafe=True", start_execution_doc)
+        self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", start_execution_doc)
+        self.assertIn("session identity", start_execution_doc)
+        self.assertIn("safe interrupted phases resume normally", resume_execution_doc)
+        self.assertIn("confirm_unsafe=True", resume_execution_doc)
         self.assertIn("never executed", preflight_doc)
         self.assertIn("Shell expansion", preflight_doc)
         for argument in ("query", "mode", "capture_id", "top_k", "context_lines"):
             self.assertIn(argument, search_doc)
         for mode in ("hybrid", "bm25", "semantic"):
             self.assertIn(mode, search_doc)
-        self.assertIn("structured match data", search_doc)
+        self.assertIn("structured matches", search_doc)
         self.assertIn("captures", list_doc)
         self.assertIn("capture_count", list_doc)
-        for field in ("unsafe_side_effects", "idempotency_key"):
-            self.assertIn(field, start_execution_doc)
-        self.assertIn("resolved from the session identity", start_execution_doc)
-        self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", start_execution_doc)
         self.assertIn("framed CLI request", server.handle_socket_client.__doc__)
 
     def test_bounded_summary_text_handles_marker_larger_than_budget(self):
@@ -1286,17 +1288,21 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Socket mode: explicit path", explicit)
         self.assertIn("Socket mode: shared default path", default)
 
-    def test_mcp_instructions_describe_routing_and_isolation(self):
+    def test_mcp_instructions_report_socket_state_without_routing_guidance(self):
         with patch.object(server, "socket_isolation_required", return_value=True), \
                 patch.object(server, "socket_isolation_configured", return_value=True):
             instructions = server._mcp_instructions()
 
-        self.assertIn("execute_and_capture", instructions)
-        self.assertIn("by expected duration as well as output", instructions)
-        self.assertIn("approach or exceed this MCP client's tool-call window", instructions)
-        self.assertIn("get_execution_output", instructions)
-        self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", instructions)
         self.assertIn("Socket isolation is configured", instructions)
+        self.assertIn("Socket lifecycle is", instructions)
+        self.assertLess(len(instructions), 200)
+        for routing_text in (
+            "execute_and_capture",
+            "start_execution",
+            "tool-call window",
+            "get_execution_output",
+        ):
+            self.assertNotIn(routing_text, instructions)
 
     def test_mcp_instructions_describe_legacy_socket_mode(self):
         with patch.object(server, "socket_isolation_required", return_value=False), \
@@ -1548,6 +1554,22 @@ class TestServerTools(unittest.TestCase):
     def test_registered_tools_match_fastmcp_inventory(self):
         fastmcp_tools = asyncio.run(server.mcp.list_tools())
         fastmcp_names = tuple(tool.name for tool in fastmcp_tools)
+        compact_catalog = json.dumps(
+            {
+                "tools": [
+                    tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    for tool in fastmcp_tools
+                ]
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        description_characters = sum(
+            len(tool.description or "") for tool in fastmcp_tools
+        )
+        self.assertLess(len(compact_catalog), 28000)
+        self.assertLess(description_characters, 7000)
+        self.assertLess(len(server._mcp_instructions()), 200)
 
         self.assertEqual(fastmcp_names, tuple(server._REGISTERED_MCP_TOOL_NAMES))
         self.assertEqual(

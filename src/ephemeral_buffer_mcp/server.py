@@ -1158,7 +1158,7 @@ def _register_mcp_tool_for_app(
     )
 
 def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
-    """Return client-visible operating guidance for this server instance."""
+    """Return the session-specific socket state for client initialization."""
     if context is None:
         isolation_required = socket_isolation_required()
         isolation_configured = socket_isolation_configured()
@@ -1176,18 +1176,7 @@ def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
         socket_status = f"Socket lifecycle is failed ({socket_failure})."
     else:
         socket_status = f"Socket lifecycle is {socket_state}."
-    return (
-        "Choose command execution by expected duration as well as output. Use start_execution "
-        "when a command may approach or exceed this MCP client's tool-call window, even for a "
-        "single command in one phase; follow progress with get_execution and retrieve bounded "
-        "output with get_execution_output. Use execute_and_capture for commands expected to "
-        "finish within that window when noisy, large, or uncertain output benefits from bounded "
-        "capture and later search. Use direct command execution for small, targeted inspections. "
-        "Durable start_execution requires Linux process-recovery support and has a combined limit "
-        "of eight active or queued executions; inspect get_execution_capacity when needed. For "
-        "execution state that must survive a server restart, configure EPHEMERAL_SESSION_ID, "
-        "EPHEMERAL_SOCKET_PATH, or EPHEMERAL_EXECUTION_STATE_DIR. " + isolation + " " + socket_status
-    )
+    return f"{isolation} {socket_status}"
 
 
 # Initialize FastMCP
@@ -1995,33 +1984,23 @@ def start_execution(
         Optional[int], Field(ge=512)
     ] = None,
 ) -> str:
-    """Start a sequential, durably checkpointed set of command phases.
+    """Start a sequential, durably checkpointed workflow.
 
-    Use this when a command may approach or exceed the MCP client's tool-call
-    window, even when running one command as one phase. Choose by expected
-    duration independently of output size. Returns a durable execution ID
-    promptly; use get_execution to follow progress and get_execution_output to
-    retrieve bounded output. Caller disconnection detaches from this work. Use
-    cancel_execution to request intentional termination.
+    Use for commands likely to approach or exceed the MCP client's tool-call
+    window, including one command as one phase, regardless of output size. Returns
+    an ID promptly; use get_execution and get_execution_output to follow work.
+    Caller disconnection detaches; cancel_execution requests termination.
 
-    Durable execution requires Linux process-recovery support, including
-    leases, /proc identities, pidfd signaling, and selector support. Unsupported
-    hosts return a platform error. The manager admits up to eight active or
-    queued executions; inspect get_execution_capacity before scheduling more.
-    Configure EPHEMERAL_SESSION_ID, EPHEMERAL_SOCKET_PATH, or
-    EPHEMERAL_EXECUTION_STATE_DIR when execution state must survive a server
-    restart.
+    Requires Linux process-recovery support and admits eight active or queued
+    executions. Check get_execution_capacity before scheduling. Configure
+    EPHEMERAL_SESSION_ID, EPHEMERAL_SOCKET_PATH, or
+    EPHEMERAL_EXECUTION_STATE_DIR to preserve state across restarts.
 
-    Each phase requires ``name`` and ``command`` and accepts optional ``cwd``,
-    ``timeout_seconds``, ``max_output_bytes``, ``structured_metrics``,
-    ``side_effects`` (``none`` or ``unsafe``), ``unsafe_side_effects``, and
-    ``idempotency_key``. A completed phase is never
-    rerun by ``resume_execution``. An unsafe phase that must be retried after
-    failure, timeout, or interruption requires ``confirm_unsafe=True`` or the
-    explicit ``resume_policy='allow-unsafe'``. Outputs and phase event history
-    are stored in the directory resolved from the session identity (or the
-    process-private default when no identity is configured). Set
-    ``EPHEMERAL_EXECUTION_STATE_DIR`` to override the resolved directory.
+    Each phase requires name and command. Completed phases are never rerun.
+    Failed or timed-out phases require retry_failed=True. Retrying an unsafe
+    phase also requires confirm_unsafe=True unless the execution used
+    resume_policy='allow-unsafe'. State uses the session identity or a
+    process-private directory by default.
     """
     phase_payloads = [
         phase.model_dump(exclude_none=True) if isinstance(phase, ExecutionPhaseInput) else phase
@@ -2059,16 +2038,12 @@ def resume_execution(
     retry_failed: bool = False,
     confirm_unsafe: bool = False,
 ) -> str:
-    """Resume an execution from its first incomplete phase and return promptly.
+    """Resume at the first incomplete phase and return promptly.
 
-    Use get_execution to follow progress. Caller disconnection detaches from
-    this durable work.
-
-    Completed phases are skipped. Failed and timed-out phases require
-    ``retry_failed=True``; a safe phase recovered as interrupted resumes on
-    the normal call. Retries of unsafe phases additionally need
-    ``confirm_unsafe=True`` unless the execution was created with the explicit
-    ``allow-unsafe`` resume policy.
+    Use get_execution for progress; caller disconnection detaches. Completed
+    phases are skipped, and safe interrupted phases resume normally. Failed or
+    timed-out phases require retry_failed=True. Unsafe retries also require
+    confirm_unsafe=True unless the execution used the allow-unsafe policy.
     """
     manager = _active_execution_manager()
     resume_method = (
@@ -2474,15 +2449,12 @@ def capture_file(
     max_bytes: Optional[int] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """
-    Reads a file or log output from disk and ingests it into the ephemeral
-    search index. Returns a compact versioned JSON summary and preserves
-    optional named metrics in ``structured_metrics``.
+    """Index a file and return a compact versioned JSON summary.
 
-    Validate the intended file path before calling: resolve symlinks when path
-    identity matters, confirm the file belongs to the expected workspace, and
-    use an explicit bounded ``max_bytes`` for large or untrusted files. Capture
-    limits control output handling; they do not validate filesystem intent.
+    Verify the path before reading. Symlinks are followed; pipes and devices are
+    rejected. Resolve symlinks when path identity matters, confirm the expected
+    workspace, and set max_bytes for large or untrusted files. Capture limits do
+    not validate filesystem intent. Optional structured_metrics are retained.
     """
     try:
         structured_metrics = normalize_structured_metrics(structured_metrics)
@@ -2534,34 +2506,26 @@ def execute_and_capture(
     timeout_seconds: Optional[float] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """
-    Runs a shell command, captures stdout/stderr, indexes it, and returns a
-    compact versioned JSON summary without flooding the prompt context with
-    thousands of lines. The summary includes status, duration, sizes,
-    approximate token counts, truncation, signals, and optional named metrics.
+    """Run a command, index bounded output, and return a compact JSON
+    summary with status, duration, sizes, token estimates, truncation, signals,
+    and optional metrics.
 
-    Use this for commands expected to finish within the current MCP client's
-    tool-call window when output benefits from bounded capture and later search.
-    For commands likely to approach or exceed that window, use ``start_execution``
-    instead, even for one command in one phase. Decide based on expected duration
-    separately from output size: noisy or large output alone does not require
-    synchronous execution. Direct command execution is usually faster for a
-    small, targeted inspection. This is an advisory routing heuristic, not an
-    enforced threshold. Before running, verify the
-    command, intended repository, and working directory: an omitted ``cwd``
-    inherits the server process directory, and symlinks or shell expansion can
-    target a different path than expected. This tool bounds output but does
-    not validate command intent, path identity, or filesystem safety.
-    
-    Args:
-        command: Shell command line to execute.
-        cwd: Optional working directory for command execution; pass an explicit
-            validated path for repository-sensitive commands.
-        label: Optional human-readable description/label for this capture.
-        content_type: Content type hint - 'auto' (default, detects diff/log/text), 'diff', 'log', or 'text'.
-        max_output_bytes: Maximum command output retained (default: configured buffer byte limit).
-        timeout_seconds: Optional maximum runtime; timed-out commands return exit code 124.
-        structured_metrics: Optional JSON-compatible named metrics attached to the capture summary.
+    Use for commands expected to finish within the MCP client's tool-call window
+    when output benefits from bounded capture and later search. Use
+    start_execution when duration may approach or exceed that window, even for a
+    single phase; use direct execution for small targeted inspections. Choose by
+    duration independently of output size; this routing guidance is advisory.
+
+    Verify the command, intended repository, and working directory. Omitted cwd
+    inherits the server process directory; symlinks and shell expansion may
+    target another path. Output bounds do not validate command intent, path
+    identity, or filesystem safety.
+
+    An omitted label is derived from the command. content_type accepts auto
+    (default), diff, log, or text. max_output_bytes defaults to the configured
+    buffer limit and cannot exceed it. timeout_seconds bounds runtime; timeout
+    retains collected output and returns exit code 124. structured_metrics accepts
+    JSON-compatible named metrics.
     """
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
@@ -2906,22 +2870,13 @@ def search_capture(
     top_k: int = 5,
     context_lines: int = 3,
 ) -> str:
-    """Search a capture by text and return readable and structured results.
+    """Search a capture by query text and return bounded readable and structured matches.
 
-    Args:
-        query: Text to find in the selected capture.
-        mode: Ranking mode: ``hybrid`` (default), ``bm25`` (lexical), or
-            ``semantic`` (embedding based).
-        capture_id: Capture to search, defaulting to ``latest``.
-        top_k: Maximum number of matches to return; defaults to 5 (maximum 20).
-        context_lines: Lines of context around each match; defaults to 3
-            (maximum 100).
-
-    Returns:
-        Readable match text plus structured match data, including status,
-        capture metadata, ``matches``, and ``match_count``. Errors include a
-        machine-readable code and message. Use ``get_capture_slice`` for full
-        capture content.
+    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic
+    (embedding based). capture_id defaults to latest; top_k defaults to 5
+    (maximum 20), and context_lines defaults to 3 (maximum 100). Use
+    get_capture_slice for complete or omitted content. Hybrid results may be
+    marked semantic pending or unavailable.
     """
     return search_capture_result(query, mode, capture_id, top_k, context_lines).text or ""
 

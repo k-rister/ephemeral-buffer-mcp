@@ -564,6 +564,13 @@ instead of silently clamping them.
 
 The agent has access to the following tools:
 
+The always-listed MCP tool descriptions stay concise. This guide retains the
+extended routing, argument, search, safety, and recovery details. See the
+[execution path guidance](#choose-the-execution-path-based-on-expected-duration-and-output),
+[resumable phase execution](#resumable-phase-execution), and
+[repository-sensitive paths and file capture](#repository-sensitive-paths-and-file-capture)
+sections for full workflows.
+
 | Tool | Purpose |
 | :--- | :--- |
 | `execute_and_capture(command, cwd, label, content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Synchronously executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. Use when expected to finish within the client's tool-call window and noisy output benefits from later search; cancellation or caller disconnection requests subprocess cleanup. |
@@ -656,7 +663,7 @@ To generate the machine-readable benchmark record:
 .venv/bin/python -m benchmarks.benchmark_effectiveness --summary --output /tmp/capture-summary.json
 ```
 
-Choose the execution path based on expected duration and output:
+### Choose the execution path based on expected duration and output
 
 - Use direct command execution for a small, targeted inspection where the
   output is already bounded and immediate terminal feedback is sufficient.
@@ -678,6 +685,12 @@ unavailable states without running the requested command or exposing command
 output. It cannot predict shell expansion, aliases, pipelines, redirections,
 environment changes, or arbitrary shell logic, so normal command validation
 and user intent checks remain necessary.
+
+For `execute_and_capture`, `content_type` accepts `auto` (default), `diff`, `log`, or `text`.
+An omitted `label` is derived from the command.
+`max_output_bytes` defaults to the configured buffer limit; values above it are rejected.
+`timeout_seconds` bounds runtime; timeout retains collected output and returns exit code 124.
+`structured_metrics` accepts JSON-compatible named metrics.
 
 ### Resumable phase execution
 
@@ -814,6 +827,8 @@ directory, explicit socket path, then session ID. Without an identity, each
 server process receives a fresh private state directory that is removed during
 normal shutdown on POSIX platforms. Windows may retain that temporary
 directory because secure owner-identity cleanup is not available there.
+
+### Repository-sensitive paths and file capture
 
 Before any repository-sensitive command or file capture, verify the intended
 working directory and target path. Prefer an explicit `cwd`, confirm the
