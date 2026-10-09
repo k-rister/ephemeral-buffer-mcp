@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Install the generic and Codex shell launchers with the PyPI package, and
+  document the Codex MCP config update required for the package server entry
+  point.
 - Compact MCP text results by default to avoid repeating capture payloads and
   search snippets already available in structured results. Set
   `EPHEMERAL_COMPACT_TOOL_RESULTS=0` to restore legacy text output.

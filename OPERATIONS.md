@@ -80,11 +80,12 @@ to inherit the same values. If the client supports per-session environment
 interpolation, use that facility; otherwise generate the ID in the launcher
 that starts both the agent and its shell environment.
 
-The package installs `ephemeral-agent`, `codex-ephemeral`, and
-`ephemeral-session-env` alongside `ephbuf` in the virtual environment's
-`bin` directory. Use the first launcher for generic CLI agents, the Codex
-launcher for Codex's explicit MCP configuration override, and source the
-environment helper when the agent is started separately:
+The PyPI package installs `ephemeral-agent`, `codex-ephemeral`, and
+`ephemeral-session-env` alongside `ephbuf` and `ephemeral-config` in the
+virtual environment's `bin` directory. The repository also includes these
+scripts at its root for source-checkout use. Use the first launcher for generic
+CLI agents, the Codex launcher for Codex's explicit MCP environment override,
+and source the environment helper when the agent is started separately:
 
 ```bash
 ephemeral-agent claude

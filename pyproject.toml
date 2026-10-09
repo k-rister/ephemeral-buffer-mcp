@@ -39,6 +39,8 @@ ephemeral-config = "ephemeral_buffer_mcp.config:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+# These Bash launchers source the session helper and must be installed as files.
+script-files = ["ephemeral-agent", "codex-ephemeral", "ephemeral-session-env"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
