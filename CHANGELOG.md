@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 - 2026-10-09
 
 - Install the generic and Codex shell launchers with the PyPI package, and
   document the Codex MCP config update required for the package server entry
