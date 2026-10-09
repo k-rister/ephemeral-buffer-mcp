@@ -1,4 +1,4 @@
-mcp>=1.29.1,<2
+mcp>=2.3.0,<3
 fastembed>=0.7.0
 numpy>=1.24.0
 urllib3>=2.8.0

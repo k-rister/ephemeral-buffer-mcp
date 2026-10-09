@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Upgrade the MCP Python SDK to v2.3.0 and advertise five-minute cache hints for
+  the deterministic tool catalog to modern clients, with modern and legacy
+  protocol caching coverage.
+
 ## 0.9.0 - 2026-10-09
 
 - Install the generic and Codex shell launchers with the PyPI package, and

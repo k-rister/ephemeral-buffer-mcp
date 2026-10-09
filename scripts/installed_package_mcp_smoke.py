@@ -68,10 +68,10 @@ def _assert_installed_modules() -> None:
 
 
 def _structured_result(result, tool_name: str) -> dict:
-    if result.isError:
+    if result.is_error:
         raise AssertionError(f"MCP tool {tool_name!r} returned an error: {result.content}")
 
-    structured = result.structuredContent
+    structured = result.structured_content
     if not isinstance(structured, dict):
         raise AssertionError(
             f"MCP tool {tool_name!r} did not return structured content: {result.content}"

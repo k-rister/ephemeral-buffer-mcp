@@ -1,11 +1,9 @@
-"""Narrow compatibility boundary for FastMCP SDK integrations.
+"""Narrow compatibility boundary for MCPServer SDK integrations.
 
-The application uses FastMCP's public API for normal tool registration,
-dispatch, and reading tool metadata. Two capabilities currently lack public
-write hooks in the supported SDK: observing argument-validation failures and
-refreshing instructions. All SDK-private access is kept in this module, and
-failure to install either capability never removes or disables a registered
-tool.
+Normal tool registration and dispatch use MCPServer's public API. Validation
+failure observation and instruction refresh still require contained SDK
+internals. Failure to install either capability never removes or disables a
+registered tool.
 """
 
 from __future__ import annotations
@@ -18,10 +16,10 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable
 
 from pydantic import PrivateAttr, ValidationError
-from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata
+from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
 
 
-_LOGGER = logging.getLogger("fastmcp_adapter")
+_LOGGER = logging.getLogger("mcpserver_adapter")
 _STATE_LOCK = threading.Lock()
 _VALIDATION_LIMITATIONS: dict[str, str] = {}
 _INSTRUCTION_REFRESH_LIMITATION: str | None = None
@@ -29,7 +27,7 @@ _VALIDATION_OBSERVATION_FAILURES: dict[str, str] = {}
 
 
 class _ObservedFuncMetadata(FuncMetadata):
-    """Delegate parsing to FastMCP and observe only SDK validation failures."""
+    """Delegate parsing to MCPServer and observe only argument validation failures."""
 
     _validation_scope: Callable[[], Any] = PrivateAttr()
     _validation_observer: Callable[[], None] = PrivateAttr()
@@ -50,58 +48,28 @@ class _ObservedFuncMetadata(FuncMetadata):
         observed._validation_observer = validation_observer
         return observed
 
-    async def call_fn_with_arg_validation(
-        self,
-        fn,
-        fn_is_async,
-        arguments_to_validate,
-        arguments_to_pass_directly,
-    ):
-        """Run the SDK's validator once, recording its failures when possible."""
-        called_tool = False
-
-        if fn_is_async:
-            async def observed_fn(*args, **kwargs):
-                nonlocal called_tool
-                called_tool = True
-                return await fn(*args, **kwargs)
-        else:
-            def observed_fn(*args, **kwargs):
-                nonlocal called_tool
-                called_tool = True
-                return fn(*args, **kwargs)
-
+    def validate_arguments(self, arguments_to_validate):
+        """Run the SDK validator once and observe its failures when possible."""
         scope = ExitStack()
         try:
             scope.enter_context(self._validation_scope())
         except Exception as exc:
             scope.close()
             _record_validation_limitation(self._tool_name, type(exc).__name__)
-            # Scope setup belongs to metrics only. Keep FastMCP's normal
+            # Scope setup belongs to metrics only. Keep MCPServer's normal
             # validation and dispatch path if it cannot be established.
-            return await super().call_fn_with_arg_validation(
-                fn,
-                fn_is_async,
-                arguments_to_validate,
-                arguments_to_pass_directly,
-            )
+            return super().validate_arguments(arguments_to_validate)
 
         try:
             try:
-                return await super().call_fn_with_arg_validation(
-                    observed_fn,
-                    fn_is_async,
-                    arguments_to_validate,
-                    arguments_to_pass_directly,
-                )
+                return super().validate_arguments(arguments_to_validate)
             except ValidationError:
-                if not called_tool:
-                    try:
-                        self._validation_observer()
-                    except Exception as exc:
-                        _record_validation_observation_failure(
-                            self._tool_name, type(exc).__name__
-                        )
+                try:
+                    self._validation_observer()
+                except Exception as exc:
+                    _record_validation_observation_failure(
+                        self._tool_name, type(exc).__name__
+                    )
                 raise
         finally:
             scope.close()
@@ -122,7 +90,7 @@ def register_tool(
 
     try:
         _check_supported_validation_hook()
-        # FastMCP 1.x does not expose a public hook for its argument validator.
+        # MCPServer exposes no registration hook for validation observations.
         # Keep this narrowly scoped SDK access here; registration has already
         # succeeded, so any incompatibility leaves ordinary dispatch intact.
         tool = app._tool_manager._tools[name]
@@ -137,16 +105,10 @@ def register_tool(
 
 
 def _check_supported_validation_hook() -> None:
-    parameters = tuple(inspect.signature(FuncMetadata.call_fn_with_arg_validation).parameters)
-    expected = (
-        "self",
-        "fn",
-        "fn_is_async",
-        "arguments_to_validate",
-        "arguments_to_pass_directly",
-    )
+    parameters = tuple(inspect.signature(FuncMetadata.validate_arguments).parameters)
+    expected = ("self", "arguments_to_validate")
     if parameters != expected:
-        raise RuntimeError("unsupported argument-validation hook signature")
+        raise RuntimeError("unsupported argument-validation signature")
 
 
 def refresh_instructions(app, instructions: str) -> bool:
@@ -162,9 +124,9 @@ def refresh_instructions(app, instructions: str) -> bool:
         pass
 
     try:
-        # FastMCP 1.29.1 exposes a read-only instructions property. Isolate the
-        # required backing-server update here until the SDK offers a setter.
-        app._mcp_server.instructions = instructions
+        # MCPServer 2.3.0 exposes a read-only instructions property. Isolate
+        # the backing-server update here until the SDK offers a setter.
+        app._lowlevel_server.instructions = instructions
         with _STATE_LOCK:
             _INSTRUCTION_REFRESH_LIMITATION = None
         return True
@@ -173,7 +135,7 @@ def refresh_instructions(app, instructions: str) -> bool:
         with _STATE_LOCK:
             _INSTRUCTION_REFRESH_LIMITATION = reason
         _LOGGER.warning(
-            "fastmcp_instruction_refresh_unavailable error_type=%s", reason
+            "mcpserver_instruction_refresh_unavailable error_type=%s", reason
         )
         return False
 
@@ -206,7 +168,7 @@ def _record_validation_limitation(tool_name: str, error_type: str) -> None:
     with _STATE_LOCK:
         _VALIDATION_LIMITATIONS[tool_name] = error_type
     _LOGGER.warning(
-        "fastmcp_validation_metrics_unavailable tool=%s error_type=%s",
+        "mcpserver_validation_metrics_unavailable tool=%s error_type=%s",
         tool_name,
         error_type,
     )
@@ -216,7 +178,7 @@ def _record_validation_observation_failure(tool_name: str, error_type: str) -> N
     with _STATE_LOCK:
         _VALIDATION_OBSERVATION_FAILURES[tool_name] = error_type
     _LOGGER.warning(
-        "fastmcp_validation_observation_failed tool=%s error_type=%s",
+        "mcpserver_validation_observation_failed tool=%s error_type=%s",
         tool_name,
         error_type,
     )
