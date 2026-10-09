@@ -269,11 +269,18 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", stderr.getvalue())
 
     def test_settings_snapshot_records_origins_and_invalid_boolean_fallback(self):
+        default = load_settings(
+            {}, warn_on_legacy_state_transition=False
+        ).compact_tool_results_enabled
+        self.assertTrue(default.value)
+        self.assertEqual(default.status, "unset")
+
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             settings = load_settings({
                 "EPHEMERAL_MAX_ACTIVE_TOOL_WORK": "3",
                 "EPHEMERAL_SEMANTIC_PREFETCH": "perhaps",
+                "EPHEMERAL_COMPACT_TOOL_RESULTS": "perhaps",
             }, warn_on_legacy_state_transition=False)
 
         self.assertEqual(settings.max_active_tool_work.value, 3)
@@ -281,6 +288,15 @@ class TestPositiveIntEnv(unittest.TestCase):
         self.assertEqual(settings.semantic_prefetch_enabled.value, True)
         self.assertEqual(settings.semantic_prefetch_enabled.status, "invalid-fallback")
         self.assertIn("Ignoring invalid EPHEMERAL_SEMANTIC_PREFETCH", stderr.getvalue())
+        self.assertTrue(settings.compact_tool_results_enabled.value)
+        self.assertEqual(settings.compact_tool_results_enabled.status, "invalid-fallback")
+        self.assertIn("Ignoring invalid EPHEMERAL_COMPACT_TOOL_RESULTS", stderr.getvalue())
+        legacy = load_settings(
+            {"EPHEMERAL_COMPACT_TOOL_RESULTS": "false"},
+            warn_on_legacy_state_transition=False,
+        ).compact_tool_results_enabled
+        self.assertFalse(legacy.value)
+        self.assertEqual(legacy.source, "environment")
         empty_boolean = load_settings(
             {"EPHEMERAL_SEMANTIC_PREFETCH": ""},
             warn_on_legacy_state_transition=False,
@@ -367,6 +383,7 @@ class TestPositiveIntEnv(unittest.TestCase):
             "EPHEMERAL_SHUTDOWN_GRACE_SECONDS": "3.5",
             "EPHEMERAL_LOG_DIAGNOSTICS": "1",
             "EPHEMERAL_SEMANTIC_PREFETCH": "0",
+            "EPHEMERAL_COMPACT_TOOL_RESULTS": "0",
         })
         self.assertIn('EPHEMERAL_SESSION_ID="session-1"', rendered)
         self.assertIn('EPHEMERAL_SOCKET_PATH="/tmp/a\\"b.sock"', rendered)
@@ -374,6 +391,7 @@ class TestPositiveIntEnv(unittest.TestCase):
         self.assertIn('EPHEMERAL_SHUTDOWN_GRACE_SECONDS="3.5"', rendered)
         self.assertIn('EPHEMERAL_LOG_DIAGNOSTICS="1"', rendered)
         self.assertIn('EPHEMERAL_SEMANTIC_PREFETCH="0"', rendered)
+        self.assertIn('EPHEMERAL_COMPACT_TOOL_RESULTS="0"', rendered)
         relative_rendered = codex_mcp_env_config({
             "EPHEMERAL_SOCKET_PATH": "relative.sock",
             "EPHEMERAL_EXECUTION_STATE_DIR": "relative-state",

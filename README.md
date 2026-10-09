@@ -621,6 +621,14 @@ page's `data["content"]` value to reconstruct the retained content. Cursor
 offsets count UTF-8 bytes from the start of the current line; treat the cursor
 itself as opaque and pass it back unchanged.
 
+MCP text content is compact by default: it reports status, useful IDs and
+counts, and follow-up guidance without repeating full capture content or
+search snippets already present in `structuredContent`. This policy is the
+same for every model and client. Set `EPHEMERAL_COMPACT_TOOL_RESULTS=0` on the
+server to restore legacy text output, including JSON text from capture tools,
+for clients that consume only `TextContent`. The setting does not change
+Python helper return values or the existing serialized response limits.
+
 Python engine callers receive a frozen `CaptureView` from `ingest`,
 `get_capture`, and `get_capture_view`. The historical `get_capture` method
 remains as a compatibility wrapper; these views expose supported metadata but

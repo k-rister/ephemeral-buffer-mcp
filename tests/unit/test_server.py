@@ -171,7 +171,31 @@ def mcp_result_text(result):
     return content[0].text
 
 
+def mcp_result_payload(result):
+    """Read structured MCP data when available, retaining JSON-text fallbacks."""
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return structured
+    return json.loads(mcp_result_text(result))
+
+
 class TestServerTools(unittest.TestCase):
+    async def call_mcp_tool_inline(self, name, arguments):
+        """Exercise the registered response adapter with deterministic inline work."""
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(server, "_run_admitted_thread", new=run_inline):
+            return await server.mcp.call_tool(name, arguments)
+
     def test_package_exports_the_supported_embedding_api(self):
         self.assertIs(ephemeral_buffer_mcp.create_mcp_server, server.create_mcp_server)
         self.assertIs(ephemeral_buffer_mcp.create_service_context, server.create_service_context)
@@ -520,7 +544,7 @@ class TestServerTools(unittest.TestCase):
                 with patch.object(server, "admission_gate", return_value=BusyGate()) as gate:
                     result = await adapters[name]()
                 gate.assert_called_once_with(category)
-                payload = json.loads(mcp_result_text(result))
+                payload = mcp_result_payload(result)
                 self.assertEqual(payload["status"], "error")
                 self.assertEqual(payload["error"]["code"], "server_busy")
 
@@ -693,7 +717,7 @@ class TestServerTools(unittest.TestCase):
             )
             diagnostic = await app.call_tool("get_buffer_stats", {})
             for result in (structured, execution, diagnostic):
-                payload = json.loads(mcp_result_text(result))
+                payload = mcp_result_payload(result)
                 self.assertEqual(payload["status"], "error")
                 self.assertEqual(
                     payload["error"]["code"],
@@ -716,7 +740,7 @@ class TestServerTools(unittest.TestCase):
                 self.assertTrue(gate.ticket.released)
                 with context._lifecycle_lock:
                     context._closing = False
-                payload = json.loads(mcp_result_text(result))
+                payload = mcp_result_payload(result)
                 self.assertEqual(payload["status"], "error")
                 self.assertEqual(
                     payload["error"]["code"],
@@ -759,7 +783,7 @@ class TestServerTools(unittest.TestCase):
             )
 
         self.assertEqual(server._REQUEST_CANCEL_EVENT.get(), None)
-        self.assertIn('"command_cancelled":false', result.content[0].text)
+        self.assertFalse(result.structuredContent["data"]["command_cancelled"])
         context.close()
 
     def test_mcp_tool_requires_known_category(self):
@@ -2125,19 +2149,26 @@ class TestServerTools(unittest.TestCase):
     def test_capture_search_and_retrieval_mcp_results_include_typed_data(self):
         captured = json.loads(server.capture_text("needle αβ\nsecond line", label="typed-result"))
         capture_id = captured["capture_id"]
+        compact_settings = settings_with_environment(
+            EPHEMERAL_COMPACT_TOOL_RESULTS="true"
+        )
 
-        capture_response = asyncio.run(server.mcp.call_tool(
-            "capture_text",
-            {"content": "another capture", "label": "mcp-envelope"},
-        ))
+        with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
+            capture_response = asyncio.run(self.call_mcp_tool_inline(
+                "capture_text",
+                {"content": "another capture", "label": "mcp-envelope"},
+            ))
         self.assertEqual(capture_response.structuredContent["schema_version"], 1)
         self.assertEqual(capture_response.structuredContent["status"], "ok")
         self.assertIn("capture_id", capture_response.structuredContent["data"])
+        self.assertIn("capture_id=", capture_response.content[0].text)
+        self.assertIn("EPHEMERAL_COMPACT_TOOL_RESULTS=false", capture_response.content[0].text)
 
-        search_response = asyncio.run(server.mcp.call_tool(
-            "search_capture",
-            {"query": "needle", "mode": "bm25", "capture_id": capture_id},
-        ))
+        with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
+            search_response = asyncio.run(self.call_mcp_tool_inline(
+                "search_capture",
+                {"query": "needle", "mode": "bm25", "capture_id": capture_id},
+            ))
         self.assertEqual(search_response.structuredContent["schema_version"], 1)
         self.assertEqual(search_response.structuredContent["status"], "ok")
         expected_match = server.engine.search(
@@ -2147,32 +2178,170 @@ class TestServerTools(unittest.TestCase):
             search_response.structuredContent["data"]["matches"][0]["matched_range"],
             expected_match["matched_range"],
         )
-        self.assertEqual(search_response.content[0].text, server.search_capture_result(
-            "needle", mode="bm25", capture_id=capture_id
-        ).text)
+        self.assertIn("matched_ranges=", search_response.content[0].text)
+        self.assertIn("get_capture_slice", search_response.content[0].text)
+        self.assertNotIn(expected_match["snippet"], search_response.content[0].text)
         self.assertLessEqual(
             len(search_response.model_dump_json(by_alias=True).encode("utf-8")),
             server.MCP_TOOL_RESPONSE_MAX_BYTES,
         )
 
-        slice_response = asyncio.run(server.mcp.call_tool(
-            "get_capture_slice",
-            {
-                "start_line": 1,
-                "end_line": 2,
-                "capture_id": capture_id,
-                "max_bytes": 8192,
-            },
-        ))
+        with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
+            slice_response = asyncio.run(self.call_mcp_tool_inline(
+                "get_capture_slice",
+                {
+                    "start_line": 1,
+                    "end_line": 2,
+                    "capture_id": capture_id,
+                    "max_bytes": 8192,
+                },
+            ))
         self.assertEqual(slice_response.structuredContent["schema_version"], 1)
         self.assertEqual(slice_response.structuredContent["data"]["content"], "needle αβ\nsecond line")
-        self.assertEqual(slice_response.content[0].text, server.get_capture_slice_result(
-            1, 2, capture_id=capture_id, max_bytes=8192
-        ).text)
+        self.assertIn("content=structuredContent.data.content", slice_response.content[0].text)
+        self.assertNotIn("needle αβ", slice_response.content[0].text)
         self.assertLessEqual(
             len(slice_response.model_dump_json(by_alias=True).encode("utf-8")),
             8192,
         )
+
+    def test_compact_tool_text_keeps_metadata_and_follow_up_handles(self):
+        envelope = server.ToolResponseEnvelope(
+            status="ok",
+            data={
+                "status": "captured",
+                "capture_id": "cap-123",
+                "label": "x" * 200,
+                "query": "needle",
+                "mode": "bm25",
+                "total_lines": 12,
+                "byte_size": 128,
+                "content_bytes": 32,
+                "capture_count": 2,
+                "truncated": True,
+                "matches": [{"matched_range": "L2-L4", "snippet": "large payload"}],
+            },
+            truncated=True,
+            next_cursor="opaque-cursor",
+        )
+        summary = server._compact_tool_text(envelope)
+        self.assertIn("status=ok", summary)
+        self.assertIn("result_status=captured", summary)
+        self.assertIn("capture_id=\"cap-123\"", summary)
+        self.assertIn("label=\"", summary)
+        self.assertIn("query=\"needle\"", summary)
+        self.assertIn("total_lines=12", summary)
+        self.assertIn("truncated=true", summary)
+        self.assertIn('next_cursor="opaque-cursor"', summary)
+        self.assertIn('matched_ranges=["L2-L4"]', summary)
+        self.assertNotIn("large payload", summary)
+
+        captures_summary = server._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"capture_count": 1, "captures": [{"capture_id": "cap-list"}]},
+        ))
+        self.assertIn('capture_ids=["cap-list"]', captures_summary)
+        self.assertIn("capture_details=structuredContent.data.captures", captures_summary)
+
+        error_summary = server._compact_tool_text(server.ToolResponseEnvelope(
+            status="error",
+            error=server.ToolErrorEnvelope(code="capture_not_found", message="private details"),
+            text="private details",
+        ))
+        self.assertIn("error_code=capture_not_found", error_summary)
+        self.assertIn("details=structuredContent.error.message", error_summary)
+        self.assertNotIn("private details", error_summary)
+
+        clear_summary = server._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"message": "Cleared capture 'cap-123'."},
+        ))
+        self.assertIn("Cleared capture", clear_summary)
+        self.assertIn("cap-123", clear_summary)
+
+    def test_compact_mcp_results_reduce_bytes_and_legacy_mode_preserves_text(self):
+        content = "\n".join(
+            f"line {index:03d} needle {'context-segment ' * 24}"
+            for index in range(1, 13)
+        )
+        capture_id = json.loads(
+            server.capture_text(content, label="issue-386-measurement-source")
+        )["capture_id"]
+        legacy_settings = settings_with_environment(
+            EPHEMERAL_COMPACT_TOOL_RESULTS="false"
+        )
+        compact_settings = settings_with_environment(
+            EPHEMERAL_COMPACT_TOOL_RESULTS="true"
+        )
+        requests = (
+            (
+                "capture",
+                "capture_text",
+                {"content": content, "label": "issue-386-measurement"},
+            ),
+            (
+                "search",
+                "search_capture",
+                {
+                    "query": "needle",
+                    "mode": "bm25",
+                    "capture_id": capture_id,
+                    "top_k": 5,
+                },
+            ),
+            (
+                "retrieval",
+                "get_capture_slice",
+                {
+                    "start_line": 1,
+                    "end_line": 12,
+                    "capture_id": capture_id,
+                    "max_bytes": 32768,
+                },
+            ),
+        )
+        byte_sizes = {}
+        for label, tool, arguments in requests:
+            with self.subTest(tool=tool):
+                with patch.object(server.DEFAULT_SERVICES, "settings", legacy_settings):
+                    legacy = asyncio.run(self.call_mcp_tool_inline(tool, arguments))
+                with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
+                    compact = asyncio.run(self.call_mcp_tool_inline(tool, arguments))
+
+                legacy_bytes = len(legacy.model_dump_json(by_alias=True).encode("utf-8"))
+                compact_bytes = len(compact.model_dump_json(by_alias=True).encode("utf-8"))
+                byte_sizes[label] = (legacy_bytes, compact_bytes)
+                self.assertLess(compact_bytes, legacy_bytes)
+                self.assertEqual(compact.structuredContent["status"], "ok")
+                self.assertEqual(
+                    compact.structuredContent["schema_version"],
+                    legacy.structuredContent["schema_version"],
+                )
+                self.assertNotIn("Compact result:", legacy.content[0].text)
+
+                if tool == "capture_text":
+                    self.assertEqual(
+                        json.loads(legacy.content[0].text)["label"],
+                        legacy.structuredContent["data"]["label"],
+                    )
+                    self.assertNotIn('"schema_version"', compact.content[0].text)
+                elif tool == "search_capture":
+                    self.assertIn("### Match #", legacy.content[0].text)
+                    self.assertTrue(legacy.structuredContent["data"]["matches"])
+                    self.assertEqual(
+                        compact.structuredContent["data"]["matches"],
+                        legacy.structuredContent["data"]["matches"],
+                    )
+                else:
+                    self.assertIn("needle", legacy.content[0].text)
+                    self.assertEqual(
+                        compact.structuredContent["data"]["content"],
+                        legacy.structuredContent["data"]["content"],
+                    )
+                    self.assertEqual(compact.structuredContent["next_cursor"], None)
+
+        self.assertEqual(set(byte_sizes), {"capture", "search", "retrieval"})
+        self.byte_sizes = byte_sizes
 
     def test_server_slice_pages_reconstruct_long_unicode_line_with_bounded_wire_results(self):
         content = "λ" * 5_000 + "\nsecond line"

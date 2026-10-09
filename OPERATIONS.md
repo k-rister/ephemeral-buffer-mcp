@@ -315,14 +315,21 @@ summary and report omitted entries; retrieve the underlying diff slices for a
 complete file map.
 
 Capture, search, retrieval, and clear MCP tools also publish a versioned
-structured result alongside their readable text. Applications should read the
-stable `status`, `data`, and optional `error.code` fields from
-`structuredContent`; text-oriented callers continue to receive the existing
-human-readable response. Retrieval pages are bounded to 64 KiB by default.
-For a long line or range, pass the returned opaque `next_cursor` back with the
-same capture ID and line range. Cursor offsets are zero-based UTF-8 byte
-positions within a retained line, and concatenating page `data.content` values
-reconstructs the retained newline-joined text.
+structured result alongside their readable text. Applications should read
+the stable `status`, `data`, and optional `error.code` fields from
+`structuredContent`. Retrieval pages are bounded to 64 KiB. For a long line
+or range, pass the returned opaque `next_cursor` back with the same capture ID
+and line range. Cursor offsets are zero-based UTF-8 byte positions within a
+retained line, and concatenating page `data.content` values reconstructs the
+retained newline-joined text.
+
+MCP text content is compact by default: it reports status, useful IDs and
+counts, and follow-up guidance without repeating full capture content or
+search snippets already present in `structuredContent`. This policy is the
+same for every model and client. Set `EPHEMERAL_COMPACT_TOOL_RESULTS=0` on the
+server to restore legacy text output, including JSON text from capture tools,
+for clients that consume only `TextContent`. The setting does not change
+Python helper return values or the existing serialized response limits.
 
 Use `timeout_seconds` with `execute_and_capture` or `--timeout-seconds` with
 `ephbuf` when a command might block or run indefinitely. A timed-out command is

@@ -146,6 +146,7 @@ class SettingsSnapshot:
     allow_stdio_without_socket: ConfigSetting[bool]
     disable_socket_server: ConfigSetting[bool]
     metrics_enabled: ConfigSetting[bool]
+    compact_tool_results_enabled: ConfigSetting[bool]
     metrics_file: ConfigSetting[str | None]
     max_active_tool_work: ConfigSetting[int]
     max_queued_tool_work: ConfigSetting[int]
@@ -653,6 +654,7 @@ def load_settings(
         allow_stdio_without_socket=boolean("EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET", False),
         disable_socket_server=boolean("EPHEMERAL_DISABLE_SOCKET_SERVER", False),
         metrics_enabled=boolean("EPHEMERAL_METRICS", False),
+        compact_tool_results_enabled=boolean("EPHEMERAL_COMPACT_TOOL_RESULTS", True),
         metrics_file=_read_string_setting(
             "EPHEMERAL_METRICS_FILE", None, values, empty_is_default=True,
         ),
@@ -728,6 +730,7 @@ CODEX_MCP_ENV_NAMES = (
     "EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET",
     "EPHEMERAL_DISABLE_SOCKET_SERVER",
     "EPHEMERAL_METRICS",
+    "EPHEMERAL_COMPACT_TOOL_RESULTS",
     "EPHEMERAL_METRICS_FILE",
     "EPHEMERAL_LOG_LEVEL",
     "EPHEMERAL_LOG_FILE",
