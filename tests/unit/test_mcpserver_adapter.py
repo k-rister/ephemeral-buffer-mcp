@@ -1,4 +1,4 @@
-"""Compatibility-boundary tests for FastMCP integration."""
+"""Compatibility-boundary tests for MCPServer integration."""
 
 import asyncio
 from contextlib import nullcontext
@@ -6,13 +6,13 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from pydantic import TypeAdapter
 
-import ephemeral_buffer_mcp.fastmcp_adapter as adapter
+import ephemeral_buffer_mcp.mcpserver_adapter as adapter
 
 
-class TestFastMCPAdapter(TestCase):
+class TestMCPServerAdapter(TestCase):
     def setUp(self):
         self._limitations = patch.dict(adapter._VALIDATION_LIMITATIONS, {}, clear=True)
         self._observation_failures = patch.dict(
@@ -29,7 +29,7 @@ class TestFastMCPAdapter(TestCase):
         adapter._INSTRUCTION_REFRESH_LIMITATION = self._instruction_limitation
 
     def test_sdk_validation_runs_once_and_reports_invalid_input(self):
-        app = FastMCP("validation-observer")
+        app = MCPServer("validation-observer")
         calls = []
         observations = []
 
@@ -55,7 +55,7 @@ class TestFastMCPAdapter(TestCase):
         self.assertEqual(observations, ["validation"])
 
     def test_async_tool_and_tool_validation_error_are_not_misclassified(self):
-        app = FastMCP("async-validation-observer")
+        app = MCPServer("async-validation-observer")
         calls = []
         observations = []
 
@@ -77,7 +77,7 @@ class TestFastMCPAdapter(TestCase):
         self.assertEqual(observations, [])
 
     def test_scope_failure_keeps_sdk_validation_and_dispatch(self):
-        app = FastMCP("scope-fallback")
+        app = MCPServer("scope-fallback")
         calls = []
 
         def probe(value: int) -> str:
@@ -102,9 +102,9 @@ class TestFastMCPAdapter(TestCase):
         self.assertNotIn("private scope detail", repr(status))
 
     def test_observer_failure_does_not_replace_sdk_validation_error(self):
-        app = FastMCP("observer-fallback")
+        app = MCPServer("observer-fallback")
 
-        def probe(value: int) -> str:
+        async def probe(value: int) -> str:
             return str(value)
 
         def broken_observer():
@@ -150,7 +150,7 @@ class TestFastMCPAdapter(TestCase):
         )
 
     def test_registration_without_validation_instrumentation_uses_public_api(self):
-        app = FastMCP("no-observer")
+        app = MCPServer("no-observer")
 
         def probe(value: int) -> str:
             return str(value)
@@ -180,7 +180,7 @@ class TestFastMCPAdapter(TestCase):
         self.assertEqual(app.instructions, "updated")
 
     def test_instruction_refresh_uses_contained_sdk_compatibility_path(self):
-        app = FastMCP("instructions", instructions="initial")
+        app = MCPServer("instructions", instructions="initial")
         self.assertTrue(adapter.refresh_instructions(app, "updated"))
         self.assertEqual(app.instructions, "updated")
 

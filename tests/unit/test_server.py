@@ -173,8 +173,13 @@ def mcp_result_text(result):
 
 def mcp_result_payload(result):
     """Read structured MCP data when available, retaining JSON-text fallbacks."""
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
+        if set(structured) == {"result"} and isinstance(structured["result"], str):
+            try:
+                return json.loads(structured["result"])
+            except json.JSONDecodeError:
+                pass
         return structured
     return json.loads(mcp_result_text(result))
 
@@ -489,7 +494,7 @@ class TestServerTools(unittest.TestCase):
                 with patch.object(server, "to_thread", offload):
                     result = await server.mcp.call_tool("blocking_probe", {})
 
-                self.assertEqual(result[0].text, "worker result")
+                self.assertEqual(result.content[0].text, "worker result")
                 offload.assert_awaited_once_with(blocking_probe)
             finally:
                 server.mcp.remove_tool("blocking_probe")
@@ -522,7 +527,7 @@ class TestServerTools(unittest.TestCase):
                 with (
                     patch.object(
                         server,
-                        "_register_fastmcp_tool",
+                        "_register_mcpserver_tool",
                         side_effect=capture_registered_tool,
                     ),
                     patch.object(server, "_MCP_TOOL_REGISTRATIONS", []),
@@ -718,7 +723,11 @@ class TestServerTools(unittest.TestCase):
             diagnostic = await app.call_tool("get_buffer_stats", {})
             for result in (structured, execution, diagnostic):
                 payload = mcp_result_payload(result)
-                self.assertEqual(payload["status"], "error")
+                self.assertEqual(
+                    payload.get("status"),
+                    "error",
+                    result.model_dump(mode="json", by_alias=True),
+                )
                 self.assertEqual(
                     payload["error"]["code"],
                     "server_shutting_down",
@@ -752,8 +761,9 @@ class TestServerTools(unittest.TestCase):
                     raise RuntimeError("admission failed")
 
             with patch.object(server, "admission_gate", return_value=FailingGate()):
-                with self.assertRaisesRegex(Exception, "admission failed"):
+                with self.assertRaises(Exception) as raised:
                     await app.call_tool("get_buffer_stats", {})
+            self.assertEqual(str(raised.exception.__cause__), "admission failed")
             self.assertEqual(context._active_tool_calls, {})
 
         try:
@@ -783,7 +793,7 @@ class TestServerTools(unittest.TestCase):
             )
 
         self.assertEqual(server._REQUEST_CANCEL_EVENT.get(), None)
-        self.assertFalse(result.structuredContent["data"]["command_cancelled"])
+        self.assertFalse(result.structured_content["data"]["command_cancelled"])
         context.close()
 
     def test_mcp_tool_requires_known_category(self):
@@ -1206,12 +1216,12 @@ class TestServerTools(unittest.TestCase):
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
 
-    def test_runtime_diagnostics_exposes_fastmcp_observability_limitations(self):
+    def test_runtime_diagnostics_exposes_mcpserver_observability_limitations(self):
         with patch.object(
             server,
-            "_fastmcp_compatibility_diagnostics",
+            "_mcpserver_compatibility_diagnostics",
             return_value={
-                "sdk_version": "1.test",
+                "sdk_version": "2.test",
                 "validation_metrics": "partial",
                 "tools_without_validation_metrics": ["capture_text"],
                 "validation_observation_failures": {"search_capture": "RuntimeError"},
@@ -1221,7 +1231,7 @@ class TestServerTools(unittest.TestCase):
         ):
             result = server.get_runtime_diagnostics()
 
-        self.assertIn("FastMCP 1.test compatibility limitation:", result)
+        self.assertIn("MCPServer 2.test compatibility limitation:", result)
         self.assertIn("validation metrics unavailable for capture_text", result)
         self.assertIn("validation metrics failed during observation for search_capture", result)
         self.assertIn("runtime instruction refresh unavailable", result)
@@ -1436,14 +1446,9 @@ class TestServerTools(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
         try:
-            with patch.object(
-                server.mcp,
-                "get_context",
-                side_effect=AttributeError("no context"),
-            ):
-                with server._bind_mcp_metrics_scope():
-                    with metrics.measure("no_context_probe"):
-                        pass
+            with server._bind_mcp_metrics_scope():
+                with metrics.measure("no_context_probe"):
+                    pass
         finally:
             server.METRICS = original_metrics
 
@@ -1455,32 +1460,41 @@ class TestServerTools(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
 
-        class FakeSession:
+        class FakeConnection:
             pass
 
-        session_a = FakeSession()
-        session_b = FakeSession()
+        connection_a = FakeConnection()
+        connection_b = FakeConnection()
 
-        def context_for(session):
+        def request_context_for(connection, method="tools/call"):
             return SimpleNamespace(
-                request_context=SimpleNamespace(session=session),
+                method=method,
+                session=SimpleNamespace(_connection=connection),
             )
 
-        try:
-            with patch.object(server.mcp, "get_context", return_value=context_for(session_a)):
-                with server._bind_mcp_metrics_scope():
+        middleware = server._MCPRequestMetricsMiddleware(server.DEFAULT_SERVICES)
+
+        async def snapshot_for(request_context, *, measure=False):
+            async def call_next(_context):
+                if measure:
                     with metrics.measure("capture_text"):
                         pass
-                    first = metrics.snapshot(
-                        available_tools=("capture_text",),
-                        include_snapshot_token=True,
-                    )
-                with server._bind_mcp_metrics_scope():
-                    repeat = metrics.snapshot(available_tools=("capture_text",))
+                return metrics.snapshot(
+                    available_tools=("capture_text",),
+                    include_snapshot_token=True,
+                )
 
-            with patch.object(server.mcp, "get_context", return_value=context_for(session_b)):
-                with server._bind_mcp_metrics_scope():
-                    second = metrics.snapshot(available_tools=("capture_text",))
+            return await middleware(request_context, call_next)
+
+        try:
+            first, repeat, second = asyncio.run(
+                self._exercise_mcp_scope(
+                    snapshot_for,
+                    request_context_for(connection_a),
+                    request_context_for(connection_a),
+                    request_context_for(connection_b),
+                )
+            )
         finally:
             server.METRICS = original_metrics
 
@@ -1493,7 +1507,7 @@ class TestServerTools(unittest.TestCase):
             metrics.snapshot(scope_key="process")["tools"]["capture_text"]["calls"],
             1,
         )
-        self.assertNotIn("FakeSession", json.dumps(first))
+        self.assertNotIn("FakeConnection", json.dumps(first))
 
     def test_nonweak_mcp_session_fallback_is_bounded_and_identity_safe(self):
         original_metrics = server.METRICS
@@ -1501,40 +1515,51 @@ class TestServerTools(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
 
-        class NonWeakSession:
+        class NonWeakConnection:
             __slots__ = ()
             __hash__ = None
 
-        session_a = NonWeakSession()
-        session_b = NonWeakSession()
+        connection_a = NonWeakConnection()
+        connection_b = NonWeakConnection()
 
-        def context_for(session):
+        def request_context_for(connection):
             return SimpleNamespace(
-                request_context=SimpleNamespace(session=session),
+                method="tools/call",
+                session=SimpleNamespace(_connection=connection),
             )
+
+        middleware = server._MCPRequestMetricsMiddleware(server.DEFAULT_SERVICES)
+
+        async def snapshot_for(request_context, *, measure=False):
+            async def call_next(_context):
+                if measure:
+                    with metrics.measure("capture_text"):
+                        pass
+                return metrics.snapshot(available_tools=("capture_text",))
+
+            return await middleware(request_context, call_next)
 
         try:
             server._MCP_SESSION_SCOPE_FALLBACK.clear()
-            with patch.object(server.mcp, "get_context", return_value=context_for(session_a)):
-                with server._bind_mcp_metrics_scope():
-                    with metrics.measure("capture_text"):
-                        pass
-                    first = metrics.snapshot(available_tools=("capture_text",))
-                with server._bind_mcp_metrics_scope():
-                    repeat = metrics.snapshot(available_tools=("capture_text",))
+            first, repeat, second = asyncio.run(
+                self._exercise_mcp_scope(
+                    snapshot_for,
+                    request_context_for(connection_a),
+                    request_context_for(connection_a),
+                    request_context_for(connection_b),
+                )
+            )
 
-            with patch.object(server.mcp, "get_context", return_value=context_for(session_b)):
-                with server._bind_mcp_metrics_scope():
-                    second = metrics.snapshot(available_tools=("capture_text",))
-            for index in range(server.MAX_MCP_SESSION_SCOPE_FALLBACK + 1):
-                session = NonWeakSession()
-                with patch.object(
-                    server.mcp,
-                    "get_context",
-                    return_value=context_for(session),
-                ):
-                    with server._bind_mcp_metrics_scope():
-                        pass
+            async def fill_nonweak_fallback():
+                for _ in range(server.MAX_MCP_SESSION_SCOPE_FALLBACK + 1):
+                    request_context = request_context_for(NonWeakConnection())
+
+                    async def call_next(_context):
+                        return None
+
+                    await middleware(request_context, call_next)
+
+            asyncio.run(fill_nonweak_fallback())
             self.assertEqual(
                 len(server._MCP_SESSION_SCOPE_FALLBACK),
                 server.MAX_MCP_SESSION_SCOPE_FALLBACK,
@@ -1551,29 +1576,41 @@ class TestServerTools(unittest.TestCase):
             server.MAX_MCP_SESSION_SCOPE_FALLBACK,
         )
 
-    def test_registered_tools_match_fastmcp_inventory(self):
-        fastmcp_tools = asyncio.run(server.mcp.list_tools())
-        fastmcp_names = tuple(tool.name for tool in fastmcp_tools)
+    async def _exercise_mcp_scope(
+        self,
+        snapshot_for,
+        first_context,
+        repeat_context,
+        second_context,
+    ):
+        first = await snapshot_for(first_context, measure=True)
+        repeat = await snapshot_for(repeat_context)
+        second = await snapshot_for(second_context)
+        return first, repeat, second
+
+    def test_registered_tools_match_mcpserver_inventory(self):
+        mcp_tools = asyncio.run(server.mcp.list_tools())
+        mcp_names = tuple(tool.name for tool in mcp_tools)
         compact_catalog = json.dumps(
             {
                 "tools": [
                     tool.model_dump(mode="json", by_alias=True, exclude_none=True)
-                    for tool in fastmcp_tools
+                    for tool in mcp_tools
                 ]
             },
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
         description_characters = sum(
-            len(tool.description or "") for tool in fastmcp_tools
+            len(tool.description or "") for tool in mcp_tools
         )
         self.assertLess(len(compact_catalog), 28000)
         self.assertLess(description_characters, 7000)
         self.assertLess(len(server._mcp_instructions()), 200)
 
-        self.assertEqual(fastmcp_names, tuple(server._REGISTERED_MCP_TOOL_NAMES))
+        self.assertEqual(mcp_names, tuple(server._REGISTERED_MCP_TOOL_NAMES))
         self.assertEqual(
-            set(fastmcp_names),
+            set(mcp_names),
             set(server._REGISTERED_MCP_TOOL_CATEGORIES),
         )
         self.assertEqual(
@@ -1603,7 +1640,58 @@ class TestServerTools(unittest.TestCase):
                 "set_semantic_index_budget": "configuration",
             },
         )
-        self.assertEqual(len(fastmcp_names), 22)
+        self.assertEqual(len(mcp_names), 22)
+
+    def test_mcp_tools_list_advertises_cache_hint_and_client_reuses_listing(self):
+        from mcp import Client
+
+        class CountingMiddleware:
+            def __init__(self):
+                self.tool_list_requests = 0
+
+            async def __call__(self, request_context, call_next):
+                if request_context.method == "tools/list":
+                    self.tool_list_requests += 1
+                return await call_next(request_context)
+
+        app = server.create_mcp_server()
+        counting = CountingMiddleware()
+        app.middleware.append(counting)
+
+        async def list_twice():
+            async with Client(app) as client:
+                first = await client.list_tools()
+                second = await client.list_tools()
+                return first, second
+
+        first, second = asyncio.run(list_twice())
+        self.assertEqual(
+            tuple(tool.name for tool in first.tools),
+            tuple(tool.name for tool in second.tools),
+        )
+        self.assertEqual(
+            first.model_dump_json(by_alias=True).encode("utf-8"),
+            second.model_dump_json(by_alias=True).encode("utf-8"),
+        )
+        self.assertEqual(counting.tool_list_requests, 1)
+        self.assertEqual(
+            app._lowlevel_server.cache_hints["tools/list"],
+            server.MCP_TOOL_LIST_CACHE_HINTS["tools/list"],
+        )
+        self.assertEqual(
+            server.MCP_TOOL_LIST_CACHE_HINTS["tools/list"].ttl_ms,
+            server.MCP_TOOL_LIST_CACHE_TTL_MS,
+        )
+
+        counting.tool_list_requests = 0
+
+        async def list_twice_legacy():
+            async with Client(app, mode="legacy") as client:
+                await client.list_tools()
+                await client.list_tools()
+
+        asyncio.run(list_twice_legacy())
+        self.assertEqual(counting.tool_list_requests, 2)
 
     def test_usage_metrics_reports_disabled_state_as_versioned_json(self):
         original_metrics = server.METRICS
@@ -2180,9 +2268,9 @@ class TestServerTools(unittest.TestCase):
                 "capture_text",
                 {"content": "another capture", "label": "mcp-envelope"},
             ))
-        self.assertEqual(capture_response.structuredContent["schema_version"], 1)
-        self.assertEqual(capture_response.structuredContent["status"], "ok")
-        self.assertIn("capture_id", capture_response.structuredContent["data"])
+        self.assertEqual(capture_response.structured_content["schema_version"], 1)
+        self.assertEqual(capture_response.structured_content["status"], "ok")
+        self.assertIn("capture_id", capture_response.structured_content["data"])
         self.assertIn("capture_id=", capture_response.content[0].text)
         self.assertIn("EPHEMERAL_COMPACT_TOOL_RESULTS=false", capture_response.content[0].text)
 
@@ -2191,13 +2279,13 @@ class TestServerTools(unittest.TestCase):
                 "search_capture",
                 {"query": "needle", "mode": "bm25", "capture_id": capture_id},
             ))
-        self.assertEqual(search_response.structuredContent["schema_version"], 1)
-        self.assertEqual(search_response.structuredContent["status"], "ok")
+        self.assertEqual(search_response.structured_content["schema_version"], 1)
+        self.assertEqual(search_response.structured_content["status"], "ok")
         expected_match = server.engine.search(
             "needle", mode="bm25", capture_id=capture_id
         )["matches"][0]
         self.assertEqual(
-            search_response.structuredContent["data"]["matches"][0]["matched_range"],
+            search_response.structured_content["data"]["matches"][0]["matched_range"],
             expected_match["matched_range"],
         )
         self.assertIn("matched_ranges=", search_response.content[0].text)
@@ -2218,8 +2306,8 @@ class TestServerTools(unittest.TestCase):
                     "max_bytes": 8192,
                 },
             ))
-        self.assertEqual(slice_response.structuredContent["schema_version"], 1)
-        self.assertEqual(slice_response.structuredContent["data"]["content"], "needle αβ\nsecond line")
+        self.assertEqual(slice_response.structured_content["schema_version"], 1)
+        self.assertEqual(slice_response.structured_content["data"]["content"], "needle αβ\nsecond line")
         self.assertIn("content=structuredContent.data.content", slice_response.content[0].text)
         self.assertNotIn("needle αβ", slice_response.content[0].text)
         self.assertLessEqual(
@@ -2334,33 +2422,33 @@ class TestServerTools(unittest.TestCase):
                 compact_bytes = len(compact.model_dump_json(by_alias=True).encode("utf-8"))
                 byte_sizes[label] = (legacy_bytes, compact_bytes)
                 self.assertLess(compact_bytes, legacy_bytes)
-                self.assertEqual(compact.structuredContent["status"], "ok")
+                self.assertEqual(compact.structured_content["status"], "ok")
                 self.assertEqual(
-                    compact.structuredContent["schema_version"],
-                    legacy.structuredContent["schema_version"],
+                    compact.structured_content["schema_version"],
+                    legacy.structured_content["schema_version"],
                 )
                 self.assertNotIn("Compact result:", legacy.content[0].text)
 
                 if tool == "capture_text":
                     self.assertEqual(
                         json.loads(legacy.content[0].text)["label"],
-                        legacy.structuredContent["data"]["label"],
+                        legacy.structured_content["data"]["label"],
                     )
                     self.assertNotIn('"schema_version"', compact.content[0].text)
                 elif tool == "search_capture":
                     self.assertIn("### Match #", legacy.content[0].text)
-                    self.assertTrue(legacy.structuredContent["data"]["matches"])
+                    self.assertTrue(legacy.structured_content["data"]["matches"])
                     self.assertEqual(
-                        compact.structuredContent["data"]["matches"],
-                        legacy.structuredContent["data"]["matches"],
+                        compact.structured_content["data"]["matches"],
+                        legacy.structured_content["data"]["matches"],
                     )
                 else:
                     self.assertIn("needle", legacy.content[0].text)
                     self.assertEqual(
-                        compact.structuredContent["data"]["content"],
-                        legacy.structuredContent["data"]["content"],
+                        compact.structured_content["data"]["content"],
+                        legacy.structured_content["data"]["content"],
                     )
-                    self.assertEqual(compact.structuredContent["next_cursor"], None)
+                    self.assertEqual(compact.structured_content["next_cursor"], None)
 
         self.assertEqual(set(byte_sizes), {"capture", "search", "retrieval"})
         self.byte_sizes = byte_sizes
@@ -4467,7 +4555,7 @@ class TestSocketServerStartup(unittest.TestCase):
                 patch.object(config, "_STARTUP_SETTINGS", None), \
                 patch.object(server.threading, "Thread", return_value=fake_thread), \
                 patch.object(server.threading, "Event", return_value=ReadyEvent()), \
-                patch("mcp.server.fastmcp.FastMCP", return_value=server.mcp), \
+                patch("mcp.server.MCPServer", return_value=server.mcp), \
                 patch.object(server.mcp, "run") as mcp_run:
             runpy.run_module("ephemeral_buffer_mcp.server", run_name="__main__")
 

@@ -35,7 +35,7 @@ When coding agents run commands that generate large outputs (thousands of lines 
 ### Requirements
 
 - Python 3.10 or newer
-- FastMCP (the `mcp` package) 1.29.1 or newer within the 1.x series
+- MCP Python SDK (`mcp`) 2.3.0 or newer within the 2.x series
 - A supported MCP client if you want to use the server from an AI coding assistant
 - Network access on first use if FastEmbed needs to download its embedding model
 
@@ -1049,7 +1049,7 @@ additive in task-window deltas. Failed calls include zero-filled,
 content-free `failure_categories` for `validation`, `timeout`, `socket`,
 `embedding`, `eviction`, and `other`. These categories contain no exception
 messages, commands, paths, queries, or capture identifiers.
-Schema-invalid MCP arguments are measured at the FastMCP validation boundary
+Schema-invalid MCP arguments are measured at the MCPServer validation boundary
 as failed calls in the `validation` category, even when the tool function does
 not run. If the installed SDK does not support that instrumentation, normal
 SDK validation and tool dispatch continue; `get_runtime_diagnostics` reports
@@ -1162,7 +1162,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m cover
   tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
   tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.benchmarks.test_workload_results \
   tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
-  tests.unit.test_fastmcp_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
+  tests.unit.test_mcpserver_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
   tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
   tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
 .venv/bin/python -m coverage report -m --fail-under=100
@@ -1184,7 +1184,7 @@ COVERAGE_FILE=.coverage.release .venv/bin/python -m coverage report \
 
 GitHub Actions runs the compile check, focused tests, and end-to-end test on
 Python 3.10 and 3.12 for pushes to `main` and pull requests. A compatibility
-matrix also checks FastMCP 1.29.1 and the latest 1.x release. The FastEmbed
+matrix also checks MCP Python SDK 2.3.0 and the latest 2.x release. The FastEmbed
 model is loaded on the first capture or semantic search rather than during
 server import. Set `EPHEMERAL_EMBEDDING_MODEL` to select a compatible model and
 `EPHEMERAL_FASTEMBED_CACHE_DIR` to control its cache directory. The model cache
@@ -1275,7 +1275,7 @@ Measure MCP and Unix-socket admission under controlled saturation:
 
 The benchmark uses the configured active and queued limits, adds four overflow
 requests by default, and reports successful throughput, request latency, and
-`server_busy` rejection rates for each transport. FastMCP tool dispatch runs a
+`server_busy` rejection rates for each transport. MCPServer tool dispatch runs a
 short local sleep command. Socket clients hold idle connections until the
 active slots and queue are full, then send complete requests; this lets the
 benchmark read overflow responses without unread request bytes. The MCP timings

@@ -49,12 +49,13 @@ from .config import (
 )
 
 SETTINGS = startup_settings()
-from mcp.server.fastmcp import FastMCP
+from mcp.server import CacheHint, MCPServer
+from mcp.server.context import ServerRequestContext
 from mcp.types import CallToolResult, TextContent
-from .fastmcp_adapter import (
-    compatibility_diagnostics as _fastmcp_compatibility_diagnostics,
-    refresh_instructions as _refresh_fastmcp_instructions,
-    register_tool as _register_fastmcp_tool,
+from .mcpserver_adapter import (
+    compatibility_diagnostics as _mcpserver_compatibility_diagnostics,
+    refresh_instructions as _refresh_mcpserver_instructions,
+    register_tool as _register_mcpserver_tool,
 )
 from .engine import (
     MAX_CAPTURE_SLICE_CONTENT_BYTES,
@@ -246,6 +247,10 @@ _MCP_SESSION_SCOPES: weakref.WeakKeyDictionary[Any, tuple[str, dict[str, str]]] 
     weakref.WeakKeyDictionary()
 )
 MAX_MCP_SESSION_SCOPE_FALLBACK = 128
+MCP_TOOL_LIST_CACHE_TTL_MS = 300_000
+MCP_TOOL_LIST_CACHE_HINTS = {
+    "tools/list": CacheHint(ttl_ms=MCP_TOOL_LIST_CACHE_TTL_MS, scope="public"),
+}
 _MCP_SESSION_SCOPE_FALLBACK: OrderedDict[
     int, tuple[Any, tuple[str, dict[str, str]]]
 ] = OrderedDict()
@@ -254,12 +259,12 @@ if _SOCKET_STATE == "disabled":
 
 
 @contextmanager
-def _bind_mcp_metrics_scope(app=None, service_context: "ServiceContext | None" = None) -> Any:
-    """Bind metrics to the current MCP transport session without exposing it."""
-    try:
-        request_context = (app or mcp).get_context().request_context
-        session = request_context.session
-    except (AttributeError, LookupError, ValueError):
+def _bind_mcp_metrics_scope(
+    session: Any = None,
+    service_context: "ServiceContext | None" = None,
+) -> Any:
+    """Bind metrics to a stable MCP connection object when the transport has one."""
+    if session is None:
         yield
         return
 
@@ -272,7 +277,7 @@ def _bind_mcp_metrics_scope(app=None, service_context: "ServiceContext | None" =
                 scope = (scope_id, attribution)
                 _MCP_SESSION_SCOPES[session] = scope
         except TypeError:
-            # Keep compatibility with transports whose session object is not
+            # Keep compatibility with transports whose connection object is not
             # weak-referenceable or hashable. Retain the actual session object
             # so a reused id cannot inherit a prior client's scope; bound this
             # fallback because such objects cannot provide a cleanup callback.
@@ -297,6 +302,30 @@ def _bind_mcp_metrics_scope(app=None, service_context: "ServiceContext | None" =
     )
     with metrics.bind_scope(scope[0], attribution=scope[1]):
         yield
+
+
+def _mcp_metrics_scope_key(request_context: ServerRequestContext) -> Any:
+    """Return the stable connection identity used for request-scoped metrics."""
+    session = getattr(request_context, "session", None)
+    # MCPServer 2.3.0 creates one ServerSession proxy per request; its
+    # connection is the lifetime-stable identity on stateful transports.
+    return getattr(session, "_connection", session)
+
+
+class _MCPRequestMetricsMiddleware:
+    """Bind MCP tool calls to their isolated metrics scope."""
+
+    def __init__(self, service_context: "ServiceContext") -> None:
+        self._service_context = service_context
+
+    async def __call__(self, request_context, call_next):
+        if request_context.method != "tools/call":
+            return await call_next(request_context)
+        with _activate_service_context(self._service_context):
+            with _bind_mcp_metrics_scope(
+                _mcp_metrics_scope_key(request_context), self._service_context
+            ):
+                return await call_next(request_context)
 
 
 def _classify_failure_text(text: str) -> str:
@@ -833,7 +862,7 @@ def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
     """Create an MCP result with readable text and its structured envelope."""
     return CallToolResult(
         content=[TextContent(type="text", text=envelope.text or "")],
-        structuredContent=envelope.model_dump(mode="json", exclude={"text"}),
+        structured_content=envelope.model_dump(mode="json", exclude={"text"}),
     )
 
 
@@ -963,7 +992,7 @@ def _service_rejection_result(
 def _mcp_tool(name, category, *, structured_result_factory=None):
     """Register a synchronous tool implementation behind an async MCP adapter.
 
-    The synchronous function remains the public Python API, while FastMCP sees
+    The synchronous function remains the public Python API, while MCPServer sees
     an async callable and therefore does not execute blocking work on its event
     loop.  The complete instrumented call runs in a worker thread so command
     execution, model loading, and searches all share the same non-blocking
@@ -995,9 +1024,11 @@ def _mcp_tool(name, category, *, structured_result_factory=None):
 def create_mcp_server(context: "ServiceContext | None" = None):
     """Build an MCP application whose tools use the supplied service context."""
     service_context = context or DEFAULT_SERVICES
-    app = FastMCP(
+    app = MCPServer(
         "ephemeral-buffer",
         instructions=_mcp_instructions(service_context),
+        cache_hints=MCP_TOOL_LIST_CACHE_HINTS,
+        middleware=[_MCPRequestMetricsMiddleware(service_context)],
     )
     for function, name, category, structured_result_factory in _MCP_TOOL_REGISTRATIONS:
         _register_mcp_tool_for_app(
@@ -1023,9 +1054,7 @@ def _register_mcp_tool_for_app(
     # Reuse the registration behavior installed by the decorator factory.
     @wraps(function)
     async def adapter(*args, **kwargs):
-        with _activate_service_context(service_context), _bind_mcp_metrics_scope(
-            app, service_context
-        ):
+        with _activate_service_context(service_context):
             compact_text = bool(
                 getattr(
                     getattr(
@@ -1138,9 +1167,7 @@ def _register_mcp_tool_for_app(
         }
     @contextmanager
     def validation_scope():
-        with _activate_service_context(service_context), _bind_mcp_metrics_scope(
-            app, service_context
-        ):
+        with _activate_service_context(service_context):
             yield
 
     def observe_validation_failure():
@@ -1149,7 +1176,7 @@ def _register_mcp_tool_for_app(
             state["failure_category"] = "validation"
         _write_metrics_snapshot(service_context)
 
-    _register_fastmcp_tool(
+    _register_mcpserver_tool(
         app,
         adapter,
         name=name,
@@ -1179,14 +1206,18 @@ def _mcp_instructions(context: "ServiceContext | None" = None) -> str:
     return f"{isolation} {socket_status}"
 
 
-# Initialize FastMCP
-mcp = FastMCP("ephemeral-buffer", instructions=_mcp_instructions())
+# Initialize MCPServer
+mcp = MCPServer(
+    "ephemeral-buffer",
+    instructions=_mcp_instructions(),
+    cache_hints=MCP_TOOL_LIST_CACHE_HINTS,
+)
 
 
 def _refresh_mcp_instructions(app=None, context: "ServiceContext | None" = None) -> None:
     """Refresh client guidance immediately before MCP request serving."""
     target = app or mcp
-    _refresh_fastmcp_instructions(target, _mcp_instructions(context))
+    _refresh_mcpserver_instructions(target, _mcp_instructions(context))
 
 
 def _runtime_package_version() -> str:
@@ -1499,6 +1530,7 @@ def create_service_context(
 
 
 DEFAULT_SERVICES = ServiceContext(SETTINGS, metrics=METRICS)
+mcp.middleware.append(_MCPRequestMetricsMiddleware(DEFAULT_SERVICES))
 engine = DEFAULT_SERVICES.engine
 
 
@@ -3288,23 +3320,23 @@ def get_runtime_diagnostics() -> str:
         f"Local metrics: {'enabled' if _active_metrics().enabled else 'disabled'}",
         "Captured content, labels, and command arguments are not included.",
     ]
-    fastmcp_status = _fastmcp_compatibility_diagnostics()
+    mcpserver_status = _mcpserver_compatibility_diagnostics()
     limitations = []
-    if fastmcp_status["tools_without_validation_metrics"]:
+    if mcpserver_status["tools_without_validation_metrics"]:
         limitations.append(
             "validation metrics unavailable for "
-            + ", ".join(fastmcp_status["tools_without_validation_metrics"])
+            + ", ".join(mcpserver_status["tools_without_validation_metrics"])
         )
-    if fastmcp_status["validation_observation_failures"]:
+    if mcpserver_status["validation_observation_failures"]:
         limitations.append(
             "validation metrics failed during observation for "
-            + ", ".join(fastmcp_status["validation_observation_failures"])
+            + ", ".join(mcpserver_status["validation_observation_failures"])
         )
-    if fastmcp_status["instruction_refresh"] == "unavailable":
+    if mcpserver_status["instruction_refresh"] == "unavailable":
         limitations.append("runtime instruction refresh unavailable")
     if limitations:
         lines.append(
-            f"FastMCP {fastmcp_status['sdk_version']} compatibility limitation: "
+            f"MCPServer {mcpserver_status['sdk_version']} compatibility limitation: "
             + "; ".join(limitations)
             + ". Tool dispatch remains available."
         )

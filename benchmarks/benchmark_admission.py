@@ -83,8 +83,8 @@ async def _wait_for_idle(admission, work_type: str, timeout_seconds: float) -> d
 
 
 def _mcp_payload(result: Any) -> dict[str, Any]:
-    """Extract structured content from a public FastMCP app call result."""
-    structured = getattr(result, "structuredContent", None)
+    """Extract structured content from a public MCPServer app call result."""
+    structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
 
@@ -120,7 +120,7 @@ def _outcome(payload: dict[str, Any], elapsed_seconds: float) -> dict[str, Any]:
 
 
 async def _mcp_request(app, command: str, label: str, timeout_seconds: float) -> dict[str, Any]:
-    """Run one public FastMCP tool call and return its privacy-safe outcome."""
+    """Run one public MCPServer tool call and return its privacy-safe outcome."""
     started = time.perf_counter()
     try:
         result = await app.call_tool(

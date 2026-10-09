@@ -51,7 +51,7 @@ EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m cover
   tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
   tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.benchmarks.test_workload_results \
   tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
-  tests.unit.test_fastmcp_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
+  tests.unit.test_mcpserver_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
   tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
   tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
 .venv/bin/python -m coverage report -m --fail-under=100

@@ -41,12 +41,12 @@ class TestReleaseChecks(unittest.TestCase):
         self.assertEqual(setuptools["packages"]["find"]["where"], ["src"])
         self.assertNotIn("py-modules", setuptools)
 
-    def test_fastmcp_dependency_declares_the_tested_1x_range(self):
+    def test_mcp_sdk_dependency_declares_the_tested_2x_range(self):
         project = REPOSITORY_ROOT / "pyproject.toml"
         with project.open("rb") as stream:
             dependencies = release_checks.tomllib.load(stream)["project"]["dependencies"]
 
-        self.assertIn("mcp>=1.29.1,<2", dependencies)
+        self.assertIn("mcp>=2.3.0,<3", dependencies)
 
     def test_changelog_parser_skips_non_heading_lines(self):
         changelog_version("# Changelog\n\n## 1.2.3 - 2026-09-06", "1.2.3")

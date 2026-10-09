@@ -560,7 +560,7 @@ class TestExecutionTools(unittest.TestCase):
             "retire_executions",
         ):
             self.assertIn(name, names)
-        start_schema = names["start_execution"].inputSchema
+        start_schema = names["start_execution"].input_schema
         phase_schema = start_schema["properties"]["phases"]["items"]
         if "$ref" in phase_schema:
             phase_schema = start_schema["$defs"][phase_schema["$ref"].rsplit("/", 1)[-1]]
@@ -583,19 +583,19 @@ class TestExecutionTools(unittest.TestCase):
             512,
         )
         self.assertNotIn("maximum", start_schema["properties"]["max_output_bytes"]["anyOf"][0])
-        list_schema = names["list_executions"].inputSchema
+        list_schema = names["list_executions"].input_schema
         self.assertEqual(list_schema["properties"]["limit"]["minimum"], 1)
         self.assertEqual(list_schema["properties"]["limit"]["maximum"], 100)
-        retirement_schema = names["retire_executions"].inputSchema
+        retirement_schema = names["retire_executions"].input_schema
         self.assertEqual(
             retirement_schema["properties"]["execution_ids"]["maxItems"], 20
         )
-        output_schema = names["get_execution_output"].inputSchema
+        output_schema = names["get_execution_output"].input_schema
         self.assertEqual(output_schema["properties"]["max_bytes"]["minimum"], 512)
         self.assertEqual(start_schema["properties"]["label"]["maxUtf8Bytes"], 1024)
         self.assertEqual(start_schema["properties"]["cwd"]["anyOf"][0]["maxUtf8Bytes"], 4096)
         for name in ("resume_execution", "get_execution", "get_execution_output"):
-            execution_id_schema = names[name].inputSchema["properties"]["execution_id"]
+            execution_id_schema = names[name].input_schema["properties"]["execution_id"]
             self.assertEqual(execution_id_schema["minLength"], 1)
             self.assertEqual(execution_id_schema["maxUtf8Bytes"], 256)
         self.assertEqual(output_schema["properties"]["phase_name"]["anyOf"][0]["minLength"], 1)

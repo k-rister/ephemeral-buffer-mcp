@@ -41,12 +41,12 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("tests.unit.test_execution", source)
         self.assertIn("tests.unit.test_execution_server", source)
 
-    def test_fastmcp_compatibility_matrix_checks_supported_1x_endpoints(self):
+    def test_mcp_sdk_compatibility_matrix_checks_supported_2x_endpoints(self):
         source = CI_WORKFLOW.read_text()
 
-        self.assertIn("fastmcp-compatibility:", source)
-        self.assertIn('mcp-spec: ["mcp==1.29.1", "mcp<2"]', source)
-        self.assertIn("tests.unit.test_fastmcp_adapter", source)
+        self.assertIn("mcp-sdk-compatibility:", source)
+        self.assertIn('mcp-spec: ["mcp==2.3.0", "mcp>=2.3.0,<3"]', source)
+        self.assertIn("tests.unit.test_mcpserver_adapter", source)
 
     def test_ci_compiles_and_executes_workload_result_tooling(self):
         source = CI_WORKFLOW.read_text()

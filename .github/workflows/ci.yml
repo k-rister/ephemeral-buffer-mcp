@@ -97,7 +97,7 @@ jobs:
             tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
             tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.benchmarks.test_workload_results \
             tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
-            tests.unit.test_fastmcp_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
+            tests.unit.test_mcpserver_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
             tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
             tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
 
@@ -193,16 +193,16 @@ jobs:
             search-relevance.json
             benchmark-latency.json
 
-  fastmcp-compatibility:
+  mcp-sdk-compatibility:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        mcp-spec: ["mcp==1.29.1", "mcp<2"]
+        mcp-spec: ["mcp==2.3.0", "mcp>=2.3.0,<3"]
     env:
       EPHEMERAL_TEST_EMBEDDINGS: "1"
       EPHEMERAL_REQUIRE_ISOLATION: "1"
-      EPHEMERAL_SESSION_ID: "fastmcp-compat-${{ github.run_id }}-${{ strategy.job-index }}"
+      EPHEMERAL_SESSION_ID: "mcp-sdk-compat-${{ github.run_id }}-${{ strategy.job-index }}"
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -220,7 +220,7 @@ jobs:
         run: python -m pip install --no-deps -e .
 
       - name: Check adapter and MCP behavior
-        run: ./scripts/with-test-env.sh python -m unittest -v tests.unit.test_fastmcp_adapter tests.unit.test_server tests.unit.test_execution_server
+        run: ./scripts/with-test-env.sh python -m unittest -v tests.unit.test_mcpserver_adapter tests.unit.test_server tests.unit.test_execution_server
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
