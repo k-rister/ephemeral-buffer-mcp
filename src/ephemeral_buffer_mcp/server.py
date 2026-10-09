@@ -675,7 +675,26 @@ def _instrument_tool(name):
                             name, exc, kwargs
                         )
                         raise
-                    response_text = result.text if isinstance(result, ToolResponseEnvelope) else result
+                    response_text = (
+                        result.text if isinstance(result, ToolResponseEnvelope) else result
+                    )
+                    if (
+                        _MCP_TOOL_INVOCATION.get()
+                        and _compact_tool_results_enabled_for_mcp()
+                        and _REGISTERED_MCP_TOOL_CATEGORIES.get(name)
+                        in {"capture", "retrieval", "search", "lifecycle"}
+                    ):
+                        # Keep byte metrics inside this measured call while using
+                        # the same compact, budget-fitted text the adapter returns.
+                        measured_envelope = result
+                        if not isinstance(measured_envelope, ToolResponseEnvelope):
+                            measured_envelope = _legacy_tool_envelope(
+                                name, result, compact_text=True
+                            )
+                        measured_envelope = _fit_tool_envelope(
+                            measured_envelope, compact_text=True
+                        )
+                        response_text = measured_envelope.text
                     if isinstance(response_text, str):
                         response_bytes = len(response_text.encode("utf-8"))
                         metrics.record_bytes("tool_response_bytes", response_bytes)
@@ -711,6 +730,105 @@ def _instrument_tool(name):
     return decorator
 
 
+_COMPACT_RESULT_SUMMARY_FIELDS = (
+    "capture_id",
+    "execution_id",
+    "label",
+    "query",
+    "mode",
+    "source",
+    "total_lines",
+    "byte_size",
+    "original_byte_size",
+    "content_bytes",
+    "capture_count",
+    "match_count",
+    "available_match_count",
+    "returned_count",
+    "omitted_count",
+    "requested_start_line",
+    "requested_end_line",
+    "start_line",
+    "end_line",
+    "partial",
+    "exit_code",
+)
+
+
+def _compact_tool_results_enabled_for_mcp() -> bool:
+    """Return this service's compact-result setting during an MCP invocation."""
+    if not _MCP_TOOL_INVOCATION.get():
+        return False
+    context = _SERVICE_CONTEXT_OVERRIDE.get() or DEFAULT_SERVICES
+    setting = getattr(
+        getattr(context, "settings", SETTINGS),
+        "compact_tool_results_enabled",
+        None,
+    )
+    return bool(getattr(setting, "value", False))
+
+
+def _compact_tool_text(envelope: ToolResponseEnvelope) -> str:
+    """Render concise MCP text without repeating structured payload fields."""
+    parts = [f"status={envelope.status}"]
+    if envelope.error is not None:
+        parts.append(f"error_code={envelope.error.code}")
+
+    data = envelope.data if isinstance(envelope.data, dict) else {}
+    if data.get("status") not in (None, envelope.status):
+        parts.append(f"result_status={data['status']}")
+    for key in _COMPACT_RESULT_SUMMARY_FIELDS:
+        value = data.get(key)
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        if isinstance(value, str):
+            value, _ = _bounded_summary_text(value, 160, "... [truncated]")
+            value = json.dumps(value, ensure_ascii=False)
+        else:
+            value = json.dumps(value, ensure_ascii=False)
+        parts.append(f"{key}={value}")
+    if envelope.error is None and isinstance(data.get("message"), str):
+        message, _ = _bounded_summary_text(data["message"], 160, "... [truncated]")
+        parts.append(f"message={json.dumps(message, ensure_ascii=False)}")
+
+    if envelope.truncated or data.get("truncated"):
+        parts.append("truncated=true")
+    next_cursor = envelope.next_cursor or data.get("next_cursor")
+    if next_cursor:
+        # The cursor is a bounded opaque continuation handle; preserve it exactly.
+        parts.append(f"next_cursor={json.dumps(next_cursor, ensure_ascii=False)}")
+
+    matches = data.get("matches")
+    if isinstance(matches, list) and matches:
+        ranges = [
+            str(match["matched_range"])
+            for match in matches[:5]
+            if isinstance(match, dict) and match.get("matched_range") is not None
+        ]
+        if ranges:
+            parts.append(f"matched_ranges={json.dumps(ranges, ensure_ascii=False)}")
+        parts.append("match_details=structuredContent.data.matches")
+        parts.append("Use get_capture_slice for full content.")
+    elif "content" in data:
+        parts.append("content=structuredContent.data.content")
+    elif isinstance(data.get("captures"), list):
+        capture_ids = [
+            capture["capture_id"]
+            for capture in data["captures"][:5]
+            if isinstance(capture, dict) and capture.get("capture_id") is not None
+        ]
+        if capture_ids:
+            parts.append(f"capture_ids={json.dumps(capture_ids, ensure_ascii=False)}")
+        parts.append("capture_details=structuredContent.data.captures")
+    elif envelope.error is not None:
+        parts.append("details=structuredContent.error.message")
+    else:
+        parts.append("details=structuredContent")
+
+    parts.append("Set EPHEMERAL_COMPACT_TOOL_RESULTS=false for legacy text output.")
+    return "Compact result: " + "; ".join(parts)
+
+
 def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
     """Create an MCP result with readable text and its structured envelope."""
     return CallToolResult(
@@ -719,12 +837,23 @@ def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
     )
 
 
-def _call_tool_result_bytes(envelope: ToolResponseEnvelope) -> int:
+def _call_tool_result_bytes(
+    envelope: ToolResponseEnvelope,
+    *,
+    compact_text: bool = False,
+) -> int:
     """Measure the JSON-encoded MCP result body, including both result channels."""
+    if compact_text:
+        envelope = envelope.model_copy(update={"text": _compact_tool_text(envelope)})
     return len(_call_tool_result(envelope).model_dump_json(by_alias=True).encode("utf-8"))
 
 
-def _legacy_tool_envelope(tool: str, result: Any) -> ToolResponseEnvelope:
+def _legacy_tool_envelope(
+    tool: str,
+    result: Any,
+    *,
+    compact_text: bool = False,
+) -> ToolResponseEnvelope:
     """Wrap an existing Python text result in the versioned MCP result shape."""
     text = result if isinstance(result, str) else str(result)
     data: Dict[str, Any] = {}
@@ -774,14 +903,18 @@ def _legacy_tool_envelope(tool: str, result: Any) -> ToolResponseEnvelope:
         data = {"message": text}
 
     envelope = ToolResponseEnvelope(status=status, data=data, error=error, text=text)
-    return _fit_tool_envelope(envelope)
+    return _fit_tool_envelope(envelope, compact_text=compact_text)
 
 
 def _fit_tool_envelope(
     envelope: ToolResponseEnvelope,
     max_bytes: int = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+    *,
+    compact_text: bool = False,
 ) -> ToolResponseEnvelope:
     """Keep the complete structured MCP result within the configured byte budget."""
+    if compact_text:
+        envelope = envelope.model_copy(update={"text": _compact_tool_text(envelope)})
     if _call_tool_result_bytes(envelope) <= max_bytes:
         return envelope
 
@@ -809,6 +942,7 @@ def _service_rejection_result(
     message: str,
     *,
     structured: bool,
+    compact_text: bool = False,
 ) -> CallToolResult | str:
     """Return a consistent JSON error body for busy and shutdown failures."""
     error_text = json.dumps(
@@ -823,7 +957,7 @@ def _service_rejection_result(
         error=ToolErrorEnvelope(code=code, message=message),
         text=error_text,
     )
-    return _call_tool_result(_fit_tool_envelope(response))
+    return _call_tool_result(_fit_tool_envelope(response, compact_text=compact_text))
 
 
 def _mcp_tool(name, category, *, structured_result_factory=None):
@@ -892,6 +1026,17 @@ def _register_mcp_tool_for_app(
         with _activate_service_context(service_context), _bind_mcp_metrics_scope(
             app, service_context
         ):
+            compact_text = bool(
+                getattr(
+                    getattr(
+                        getattr(service_context, "settings", None),
+                        "compact_tool_results_enabled",
+                        None,
+                    ),
+                    "value",
+                    False,
+                )
+            )
             registered_call = service_context.register_tool_call(name)
             if registered_call is None:
                 message = "The service is shutting down; retry after it restarts."
@@ -902,6 +1047,7 @@ def _register_mcp_tool_for_app(
                         structured_result_factory is not None
                         or category in {"capture", "retrieval", "search", "lifecycle"}
                     ),
+                    compact_text=compact_text,
                 )
             call_id, cancellation_event = registered_call
             try:
@@ -918,6 +1064,7 @@ def _register_mcp_tool_for_app(
                         structured_result_factory is not None
                         or category in {"capture", "retrieval", "search", "lifecycle"}
                     ),
+                    compact_text=compact_text,
                 )
             except BaseException:
                 service_context.finish_tool_call(call_id)
@@ -934,6 +1081,7 @@ def _register_mcp_tool_for_app(
                         structured_result_factory is not None
                         or category in {"capture", "retrieval", "search", "lifecycle"}
                     ),
+                    compact_text=compact_text,
                 )
 
             cancel_token = None
@@ -966,8 +1114,12 @@ def _register_mcp_tool_for_app(
                     )
                     if category not in {"capture", "retrieval", "search", "lifecycle"}:
                         return result
-                    response = _legacy_tool_envelope(name, result)
-                return _call_tool_result(_fit_tool_envelope(response))
+                    response = _legacy_tool_envelope(
+                        name, result, compact_text=compact_text
+                    )
+                return _call_tool_result(
+                    _fit_tool_envelope(response, compact_text=compact_text)
+                )
             finally:
                 if cancel_token is not None:
                     _REQUEST_CANCEL_EVENT.reset(cancel_token)
@@ -2716,7 +2868,10 @@ def _search_capture_response(
             text=_render_search_text(text_result, candidate_matches, omitted=omitted, query=query),
             truncated=omitted,
         )
-        if _call_tool_result_bytes(candidate) > response_budget:
+        if _call_tool_result_bytes(
+            candidate,
+            compact_text=_compact_tool_results_enabled_for_mcp(),
+        ) > response_budget:
             break
         selected.append(match)
         best = candidate
@@ -2906,7 +3061,10 @@ def _capture_slice_response(
             truncated=is_truncated,
             next_cursor=candidate_cursor,
         )
-        if _call_tool_result_bytes(candidate) > response_budget:
+        if _call_tool_result_bytes(
+            candidate,
+            compact_text=_compact_tool_results_enabled_for_mcp(),
+        ) > response_budget:
             break
         selected.append(segment)
         best = candidate

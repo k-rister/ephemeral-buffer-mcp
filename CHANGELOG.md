@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Compact MCP text results by default to avoid repeating capture payloads and
+  search snippets already available in structured results. Set
+  `EPHEMERAL_COMPACT_TOOL_RESULTS=0` to restore legacy text output.
+
 ## 0.8.0 - 2026-10-08
 
 - Move the runtime into the `ephemeral_buffer_mcp` package and organize
