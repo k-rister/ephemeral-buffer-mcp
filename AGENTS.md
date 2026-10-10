@@ -82,8 +82,17 @@ scheduled or manually dispatched workflow runs.
 
 ## Documentation and release expectations
 
-- Update `README.md`, `OPERATIONS.md`, or `CHANGELOG.md` when behavior,
-  configuration, operational procedures, or release content changes.
+- Update the documentation that covers the changed area:
+  - Keep `README.md` focused on the project overview, quick start, and links to
+    detailed guides; update it when those landing-page details or claims change.
+  - Put user setup and usage guidance in `docs/user-guide.md`, registered tool
+    behavior and protocol details in `docs/tool-reference.md`, and design
+    explanations in `docs/architecture.md`.
+  - Put benchmark methodology and interpretation in `docs/benchmarks.md`, and
+    recorded workload comparisons in `docs/workload-results.md`.
+  - Update `CONTRIBUTING.md` for contributor workflow, `OPERATIONS.md` for
+    operational and release procedures, and `CHANGELOG.md` for release
+    content. Update this file when contributor or agent instructions change.
 - Keep user-facing names and examples environment-neutral. Examples may
   describe environment-specific quirks when that helps users troubleshoot.
 - Follow `OPERATIONS.md` for release preparation and verification. Releases
