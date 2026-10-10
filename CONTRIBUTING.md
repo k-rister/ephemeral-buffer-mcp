@@ -61,6 +61,14 @@ Keep changes compatible with the supported Python versions declared in
 Add or update tests for changed behavior, including error paths and privacy
 boundaries where relevant.
 
+## CI and release checks
+
+CI covers Python 3.10 and 3.12, checks the supported MCP SDK range, enforces
+runtime coverage, audits dependencies, and builds and smoke-tests the package.
+The exact local validation commands are in [AGENTS.md](AGENTS.md); benchmark
+commands are in [the benchmark guide](docs/benchmarks.md). Follow
+[OPERATIONS.md](OPERATIONS.md) for release verification and publishing.
+
 ## Questions
 
 Open an issue with enough context for someone else to reproduce or evaluate
