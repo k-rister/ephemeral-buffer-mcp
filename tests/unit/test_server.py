@@ -2843,7 +2843,7 @@ class TestServerTools(unittest.TestCase):
             server.engine,
             "get_buffer_stats",
             return_value={
-                "capture_count": 0, "max_captures": 25, "total_bytes": 0,
+                "capture_count": 0, "max_captures": 256, "total_bytes": 0,
                 "max_buffer_bytes": 50, "total_lines": 0, "total_chunks": 0,
                 "embedding_model": "model", "embedding_model_loaded": False,
                 "embedding_cache_dir": None, "embedding_bytes": 0,
