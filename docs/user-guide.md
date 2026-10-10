@@ -556,7 +556,8 @@ one before automatic eviction occurs. Its memory metrics separate captured
 content and embedding bytes from process RSS; the unaccounted RSS value includes
 model, index, and Python object overhead and is approximate.
 
-The server defaults can be overridden with `EPHEMERAL_MAX_CAPTURES` and
+The server retains up to 256 captures by default. Override this limit with
+`EPHEMERAL_MAX_CAPTURES`; the byte budget can be set with
 `EPHEMERAL_MAX_BUFFER_BYTES`. Session-aware launchers can set
 `EPHEMERAL_SESSION_ID` so each server/CLI pair automatically derives a unique
 socket path; `EPHEMERAL_SOCKET_PATH` remains an explicit override. The byte

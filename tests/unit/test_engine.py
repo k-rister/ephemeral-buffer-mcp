@@ -18,7 +18,11 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
-from ephemeral_buffer_mcp.config import CATALOGUE_EMBEDDING_MODEL, FP32_EMBEDDING_MODEL
+from ephemeral_buffer_mcp.config import (
+    CATALOGUE_EMBEDDING_MODEL,
+    FP32_EMBEDDING_MODEL,
+    load_settings,
+)
 from ephemeral_buffer_mcp.engine import (
     Chunk,
     CaptureView,
@@ -1421,6 +1425,23 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.engine.max_buffer_bytes = original_limit
             self.engine.clear("all")
         print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
+
+    def test_default_capture_capacity_retains_more_than_25_captures(self):
+        engine = EphemeralEngine(
+            settings=load_settings(environ={}),
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        try:
+            for index in range(26):
+                engine._ingest_state(f"capture {index}", label=f"capture-{index}")
+
+            stats = engine.get_buffer_stats()
+            self.assertEqual(stats["max_captures"], 256)
+            self.assertEqual(stats["capture_count"], 26)
+            self.assertEqual(len(engine.list_captures()), 26)
+        finally:
+            engine.shutdown()
 
     def test_byte_budget_uses_actual_utf8_input_bytes(self):
         engine = EphemeralEngine(max_captures=3, max_buffer_bytes=7)

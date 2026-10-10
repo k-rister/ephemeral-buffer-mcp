@@ -16,6 +16,7 @@ from ephemeral_buffer_mcp.config import (
     DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES,
     DEFAULT_EXECUTION_STATE_DIR,
     DEFAULT_EXECUTION_STATE_QUOTA_BYTES,
+    DEFAULT_MAX_CAPTURES,
     DEFAULT_MAX_ACTIVE_SOCKET_CLIENTS,
     DEFAULT_MAX_ACTIVE_TOOL_WORK,
     DEFAULT_MAX_QUEUED_SOCKET_CLIENTS,
@@ -60,6 +61,14 @@ from ephemeral_buffer_mcp.config import (
 
 
 class TestPositiveIntEnv(unittest.TestCase):
+    def test_max_captures_default_and_environment_override(self):
+        self.assertEqual(DEFAULT_MAX_CAPTURES, 256)
+        self.assertEqual(load_settings(environ={}).max_captures.value, 256)
+        self.assertEqual(
+            load_settings(environ={"EPHEMERAL_MAX_CAPTURES": "32"}).max_captures.value,
+            32,
+        )
+
     def test_admission_limits_default_override_and_invalid_fallback(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(max_active_tool_work(), DEFAULT_MAX_ACTIVE_TOOL_WORK)

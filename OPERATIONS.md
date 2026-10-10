@@ -121,7 +121,7 @@ a nonzero result rather than leaving a shell pipeline blocked indefinitely.
 
 The buffer is intentionally transient. The defaults are:
 
-- 25 captures (`EPHEMERAL_MAX_CAPTURES`)
+- 256 captures (`EPHEMERAL_MAX_CAPTURES`)
 - 50 MiB of captured UTF-8 content (`EPHEMERAL_MAX_BUFFER_BYTES`)
 - least-recently-used (LRU) eviction when either limit is reached
 
