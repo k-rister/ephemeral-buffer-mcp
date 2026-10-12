@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 - 2026-10-12
 
 - Raise the default retained-capture limit from 25 to 256.
 - Upgrade the MCP Python SDK to v2.3.0 and advertise five-minute cache hints for
