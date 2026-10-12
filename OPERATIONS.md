@@ -1108,7 +1108,7 @@ the previous release from a clean candidate checkout:
 git fetch --tags
 CODEX_HOME=/path/to/writable/authenticated-codex-home \
   ./scripts/collect-release-benchmarks.sh \
-  --baseline-ref v0.6.3 \
+  --baseline-ref "$(git describe --tags --abbrev=0 HEAD)" \
   --model gpt-5.6-luna
 ```
 
