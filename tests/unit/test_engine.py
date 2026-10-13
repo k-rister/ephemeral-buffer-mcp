@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from ephemeral_buffer_mcp.config import (
     CATALOGUE_EMBEDDING_MODEL,
+    DEFAULT_MAX_CAPTURES,
     FP32_EMBEDDING_MODEL,
     load_settings,
 )
@@ -1426,20 +1427,37 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.engine.clear("all")
         print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
 
-    def test_default_capture_capacity_retains_more_than_25_captures(self):
+    def test_default_capture_capacity_and_lru_eviction(self):
         engine = EphemeralEngine(
             settings=load_settings(environ={}),
             semantic_prefetch=False,
             embedding_warmup=False,
         )
         try:
-            for index in range(26):
+            captures = [
                 engine._ingest_state(f"capture {index}", label=f"capture-{index}")
+                for index in range(DEFAULT_MAX_CAPTURES)
+            ]
 
             stats = engine.get_buffer_stats()
-            self.assertEqual(stats["max_captures"], 256)
-            self.assertEqual(stats["capture_count"], 26)
-            self.assertEqual(len(engine.list_captures()), 26)
+            self.assertEqual(stats["max_captures"], DEFAULT_MAX_CAPTURES)
+            self.assertEqual(stats["capture_count"], DEFAULT_MAX_CAPTURES)
+            self.assertLess(stats["total_bytes"], stats["max_buffer_bytes"])
+
+            # Refresh the oldest capture; the next-oldest must be evicted at capacity.
+            engine.get_summary(captures[0].capture_id)
+            newest = engine._ingest_state(
+                f"capture {DEFAULT_MAX_CAPTURES}",
+                label=f"capture-{DEFAULT_MAX_CAPTURES}",
+            )
+
+            active_ids = {capture["capture_id"] for capture in engine.list_captures()}
+            stats = engine.get_buffer_stats()
+            self.assertEqual(stats["capture_count"], DEFAULT_MAX_CAPTURES)
+            self.assertLess(stats["total_bytes"], stats["max_buffer_bytes"])
+            self.assertIn(captures[0].capture_id, active_ids)
+            self.assertNotIn(captures[1].capture_id, active_ids)
+            self.assertIn(newest.capture_id, active_ids)
         finally:
             engine.shutdown()
 
