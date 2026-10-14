@@ -3503,8 +3503,27 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 writer.close()
                 await writer.wait_closed()
             return
-        except BaseException:
+        except BaseException as admission_error:
             DEFAULT_SERVICES.finish_tool_call(call_id)
+            try:
+                if isinstance(admission_error, Exception):
+                    try:
+                        await _write_socket_error(
+                            writer,
+                            "socket_admission_failed",
+                            "Unable to admit this socket request; retry shortly.",
+                        )
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
             raise
 
         if DEFAULT_SERVICES.closing:
