@@ -807,8 +807,8 @@ class TestServerTools(unittest.TestCase):
         preflight_doc = server.preflight_command.__doc__
         search_doc = server.search_capture.__doc__
         list_doc = server.list_captures.__doc__
-        start_execution_doc = server.start_execution.__doc__
-        resume_execution_doc = server.resume_execution.__doc__
+        start_execution_doc = " ".join(server.start_execution.__doc__.split())
+        resume_execution_doc = " ".join(server.resume_execution.__doc__.split())
 
         self.assertIn("already-collected text", capture_text_doc)
         self.assertIn("Resolve symlinks", capture_file_doc)
@@ -822,12 +822,36 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("JSON-compatible named metrics", execute_doc)
         self.assertIn("one command as one phase", start_execution_doc)
         self.assertIn("get_execution_output", start_execution_doc)
+        self.assertIn(
+            "invoked through MCP, phases run in the background",
+            start_execution_doc,
+        )
+        self.assertIn(
+            "Direct Python calls run phases synchronously",
+            start_execution_doc,
+        )
+        self.assertIn(
+            "return after the workflow completes or encounters a stopping condition",
+            start_execution_doc,
+        )
         self.assertIn("Linux process-recovery support", start_execution_doc)
         self.assertIn("admits eight active or queued", start_execution_doc)
         self.assertIn("never rerun", start_execution_doc)
         self.assertIn("confirm_unsafe=True", start_execution_doc)
         self.assertIn("EPHEMERAL_EXECUTION_STATE_DIR", start_execution_doc)
         self.assertIn("session identity", start_execution_doc)
+        self.assertIn(
+            "invoked through MCP, remaining phases run in the background",
+            resume_execution_doc,
+        )
+        self.assertIn(
+            "Direct Python calls run resumed phases synchronously",
+            resume_execution_doc,
+        )
+        self.assertIn(
+            "return after the run completes or encounters a stopping condition",
+            resume_execution_doc,
+        )
         self.assertIn("safe interrupted phases resume normally", resume_execution_doc)
         self.assertIn("confirm_unsafe=True", resume_execution_doc)
         self.assertIn("never executed", preflight_doc)

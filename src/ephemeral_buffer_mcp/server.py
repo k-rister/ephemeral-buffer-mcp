@@ -2019,8 +2019,11 @@ def start_execution(
     """Start a sequential, durably checkpointed workflow.
 
     Use for commands likely to approach or exceed the MCP client's tool-call
-    window, including one command as one phase, regardless of output size. Returns
-    an ID promptly; use get_execution and get_execution_output to follow work.
+    window, including one command as one phase, regardless of output size. When
+    invoked through MCP, phases run in the background and the call returns an ID
+    promptly; use get_execution and get_execution_output to follow work. Direct
+    Python calls run phases synchronously and return after the workflow completes
+    or encounters a stopping condition.
     Caller disconnection detaches; cancel_execution requests termination.
 
     Requires Linux process-recovery support and admits eight active or queued
@@ -2070,7 +2073,11 @@ def resume_execution(
     retry_failed: bool = False,
     confirm_unsafe: bool = False,
 ) -> str:
-    """Resume at the first incomplete phase and return promptly.
+    """Resume at the first incomplete phase.
+
+    When invoked through MCP, remaining phases run in the background and the
+    call returns promptly. Direct Python calls run resumed phases synchronously
+    and return after the run completes or encounters a stopping condition.
 
     Use get_execution for progress; caller disconnection detaches. Completed
     phases are skipped, and safe interrupted phases resume normally. Failed or
