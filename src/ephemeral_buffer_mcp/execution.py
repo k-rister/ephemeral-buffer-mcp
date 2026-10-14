@@ -3510,24 +3510,36 @@ class PhaseExecutionManager:
             remaining = max_bytes
             for phase in phases:
                 full_output = phase.get("output", "")
-                phase_offset = offset if phase_name is not None else 0
-                source = full_output[phase_offset:]
-                retained = source.encode("utf-8")[:remaining]
+                full_output_bytes = full_output.encode("utf-8")
+                phase_offset = min(
+                    offset if phase_name is not None else 0,
+                    len(full_output_bytes),
+                )
+                # A caller-provided byte offset inside a character advances to
+                # the next UTF-8 boundary so returned text is always valid.
+                while (
+                    phase_offset < len(full_output_bytes)
+                    and (full_output_bytes[phase_offset] & 0xC0) == 0x80
+                ):
+                    phase_offset += 1
+                retained = full_output_bytes[phase_offset:phase_offset + remaining]
                 output = retained.decode("utf-8", errors="ignore")
-                next_offset = phase_offset + len(output)
+                output_byte_size = len(full_output_bytes)
+                output_bytes = len(output.encode("utf-8"))
+                next_offset = phase_offset + output_bytes
                 result = dict(phase.get("result") or {})
                 result.pop("structured_metrics", None)
                 output_phases.append({
                     "name": phase["name"],
                     "status": phase["status"],
                     "output": output,
-                    "output_byte_size": len(full_output.encode("utf-8")),
+                    "output_byte_size": output_byte_size,
                     "offset": phase_offset,
                     "next_offset": next_offset,
-                    "truncated": next_offset < len(full_output),
+                    "truncated": next_offset < output_byte_size,
                     "result": result,
                 })
-                remaining -= len(output.encode("utf-8"))
+                remaining -= output_bytes
                 if remaining <= 0:
                     remaining = 0
             return {

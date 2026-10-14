@@ -592,6 +592,9 @@ class TestExecutionTools(unittest.TestCase):
         )
         output_schema = names["get_execution_output"].input_schema
         self.assertEqual(output_schema["properties"]["max_bytes"]["minimum"], 512)
+        self.assertIn(
+            "UTF-8 byte offset", output_schema["properties"]["offset"]["description"]
+        )
         self.assertEqual(start_schema["properties"]["label"]["maxUtf8Bytes"], 1024)
         self.assertEqual(start_schema["properties"]["cwd"]["anyOf"][0]["maxUtf8Bytes"], 4096)
         for name in ("resume_execution", "get_execution", "get_execution_output"):
