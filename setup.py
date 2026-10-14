@@ -1,8 +1,6 @@
-"""Setuptools compatibility configuration for installing launcher scripts."""
+"""Setuptools compatibility shim; packaging configuration lives in pyproject.toml."""
 
 from setuptools import setup
 
 
-setup(
-    scripts=["codex-ephemeral", "ephemeral-agent", "ephemeral-session-env"],
-)
+setup()
