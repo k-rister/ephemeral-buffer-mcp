@@ -183,6 +183,8 @@ def _bounded_join_lines(
             used_bytes += char_bytes
         pieces.append("".join(line_prefix))
     return "".join(pieces), False
+
+
 def estimate_tokens(text: str) -> int:
     """Return a deterministic approximate token count for retained text.
 
