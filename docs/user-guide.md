@@ -579,6 +579,8 @@ error that can be retried. Configure these limits with
 `EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS`. `get_buffer_stats` reports active,
 queued, and rejected work and reader-pinned storage that remains after capture
 eviction, and has a reserved worker slot so it remains available under load.
+If socket admission fails unexpectedly, the server returns a generic
+`socket_admission_failed` error and closes that client connection.
 The CLI can receive a busy response while uploading a large socket frame. These
 concurrency limits make foreground work predictable; they do not cap process
 RSS.

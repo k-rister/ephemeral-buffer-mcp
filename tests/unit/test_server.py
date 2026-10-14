@@ -3063,9 +3063,12 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
             server, "admission_gate", return_value=FailingGate()
         ):
+            failed_writer = FakeWriter()
             with self.assertRaisesRegex(RuntimeError, "admission failed"):
-                await server.handle_socket_client(FakeReader(b""), FakeWriter())
+                await server.handle_socket_client(FakeReader(b""), failed_writer)
         self.assertEqual(context.finished, ["socket-call"])
+        self.assertEqual(response_json(failed_writer)["code"], "socket_admission_failed")
+        self.assertTrue(failed_writer.closed)
 
         class Ticket:
             def __init__(self):
@@ -3091,6 +3094,82 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response_json(writer)["code"], "server_shutting_down")
         self.assertTrue(gate.ticket.released)
         self.assertEqual(context.finished, ["socket-call", "socket-call"])
+        self.assertTrue(writer.closed)
+
+    async def test_socket_admission_failure_closes_when_error_response_fails(self):
+        class Context:
+            def __init__(self):
+                self.finished = []
+
+            def register_tool_call(self, _name):
+                return "socket-call", None
+
+            def finish_tool_call(self, call_id):
+                self.finished.append(call_id)
+
+        class FailingGate:
+            async def acquire(self, _name):
+                raise RuntimeError("admission failed")
+
+        class FailingCloseWriter(FakeWriter):
+            def __init__(self):
+                super().__init__()
+                self.wait_closed_called = False
+
+            def close(self):
+                self.closed = True
+                raise OSError("close failed")
+
+            async def wait_closed(self):
+                self.wait_closed_called = True
+                raise OSError("wait_closed failed")
+
+        context = Context()
+        writer = FailingCloseWriter()
+        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
+            server, "admission_gate", return_value=FailingGate()
+        ), patch.object(
+            server,
+            "_write_socket_error",
+            new=AsyncMock(side_effect=OSError("response write failed")),
+        ) as write_error:
+            with self.assertRaisesRegex(RuntimeError, "admission failed"):
+                await server.handle_socket_client(FakeReader(b""), writer)
+
+        write_error.assert_awaited_once_with(
+            writer,
+            "socket_admission_failed",
+            "Unable to admit this socket request; retry shortly.",
+        )
+        self.assertEqual(context.finished, ["socket-call"])
+        self.assertTrue(writer.closed)
+        self.assertTrue(writer.wait_closed_called)
+
+    async def test_socket_admission_cancellation_closes_without_error_response(self):
+        class Context:
+            def __init__(self):
+                self.finished = []
+
+            def register_tool_call(self, _name):
+                return "socket-call", None
+
+            def finish_tool_call(self, call_id):
+                self.finished.append(call_id)
+
+        class CancelledGate:
+            async def acquire(self, _name):
+                raise asyncio.CancelledError
+
+        context = Context()
+        writer = FakeWriter()
+        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
+            server, "admission_gate", return_value=CancelledGate()
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await server.handle_socket_client(FakeReader(b""), writer)
+
+        self.assertEqual(context.finished, ["socket-call"])
+        self.assertEqual(writer.writes, [])
         self.assertTrue(writer.closed)
 
     async def test_json_payload_returns_success_response(self):
