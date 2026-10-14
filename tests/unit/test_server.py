@@ -2577,6 +2577,26 @@ class TestServerTools(unittest.TestCase):
         fitted = server._fit_tool_envelope(oversized, max_bytes=256)
         self.assertTrue(fitted.truncated)
         self.assertLessEqual(server._call_tool_result_bytes(fitted), 256)
+
+        oversized_without_text = server.ToolResponseEnvelope(
+            status="ok",
+            data={"payload": "x" * 5_000},
+            text=None,
+        )
+        fitted_without_text = server._fit_tool_envelope(
+            oversized_without_text, max_bytes=512
+        )
+        self.assertTrue(fitted_without_text.truncated)
+        self.assertIn("response truncated", fitted_without_text.text)
+        self.assertLessEqual(server._call_tool_result_bytes(fitted_without_text), 512)
+
+        within_budget_without_text = server.ToolResponseEnvelope(status="ok", text=None)
+        fitted_within_budget = server._fit_tool_envelope(
+            within_budget_without_text, max_bytes=512
+        )
+        self.assertFalse(fitted_within_budget.truncated)
+        self.assertIsNone(fitted_within_budget.text)
+
         self.assertEqual(server._bounded_json_text("value", 1, "long marker"), ("", True))
         self.assertIsNone(server._truncate_utf8_with_marker("value", 1, "long marker"))
 

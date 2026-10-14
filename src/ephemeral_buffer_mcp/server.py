@@ -954,7 +954,7 @@ def _fit_tool_envelope(
     best = shortened.model_copy(update={"text": marker[:max(0, max_bytes // 4)]})
     while low <= high:
         middle = (low + high) // 2
-        candidate_text = _truncate_utf8_with_marker(envelope.text, middle, marker)
+        candidate_text = _truncate_utf8_with_marker(envelope.text or "", middle, marker)
         if candidate_text is None:
             candidate_text = ""
         candidate = shortened.model_copy(update={"text": candidate_text})

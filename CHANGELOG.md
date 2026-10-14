@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Handle oversized MCP result envelopes that have no text field.
 - Reject relative execution-state paths at runtime and the `:memory:` token
   before path normalization.
 
