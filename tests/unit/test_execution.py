@@ -2345,6 +2345,67 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertEqual(second_page["phases"][0]["offset"], 512)
         self.assertEqual(second_page["phases"][0]["output"], "b" * 188)
 
+    def test_phase_output_paging_uses_utf8_byte_offsets(self):
+        manager = self.manager()
+        manager.create(
+            [self.phase("unicode", "unicode")], execution_id="unicode-output"
+        )
+        record = manager.store.load("unicode-output", recover=False)
+        original = "a" * 511 + "é🙂" + "b" * 700
+        record["phases"][0]["output"] = original
+        manager.store.save(record)
+
+        pages = []
+        offset = 0
+        while True:
+            phase = manager.output(
+                "unicode-output", "unicode", offset=offset, max_bytes=512
+            )["phases"][0]
+            pages.append(phase)
+            self.assertLessEqual(len(phase["output"].encode("utf-8")), 512)
+            self.assertEqual(
+                phase["next_offset"],
+                phase["offset"] + len(phase["output"].encode("utf-8")),
+            )
+            self.assertEqual(
+                phase["output_byte_size"], len(original.encode("utf-8"))
+            )
+            if not phase["truncated"]:
+                break
+            offset = phase["next_offset"]
+
+        self.assertEqual(pages[0]["output"], "a" * 511)
+        self.assertEqual(pages[0]["next_offset"], 511)
+        self.assertEqual("".join(page["output"] for page in pages), original)
+        self.assertEqual(pages[-1]["next_offset"], len(original.encode("utf-8")))
+
+    def test_phase_output_byte_offset_advances_to_utf8_boundary(self):
+        manager = self.manager()
+        manager.create(
+            [self.phase("unicode", "unicode")], execution_id="unicode-offset"
+        )
+        record = manager.store.load("unicode-offset", recover=False)
+        original = "é🙂tail"
+        record["phases"][0]["output"] = original
+        manager.store.save(record)
+
+        middle_of_character = manager.output(
+            "unicode-offset", "unicode", offset=1
+        )["phases"][0]
+        self.assertEqual(middle_of_character["offset"], 2)
+        self.assertEqual(middle_of_character["output"], "🙂tail")
+        self.assertEqual(
+            middle_of_character["next_offset"], len(original.encode("utf-8"))
+        )
+
+        beyond_end = manager.output(
+            "unicode-offset", "unicode", offset=len(original.encode("utf-8")) + 10
+        )["phases"][0]
+        self.assertEqual(beyond_end["offset"], len(original.encode("utf-8")))
+        self.assertEqual(beyond_end["output"], "")
+        self.assertEqual(beyond_end["next_offset"], len(original.encode("utf-8")))
+        self.assertFalse(beyond_end["truncated"])
+
     def test_state_directory_rejects_symlink_redirection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

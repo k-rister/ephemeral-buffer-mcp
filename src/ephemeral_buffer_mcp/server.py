@@ -2136,10 +2136,12 @@ def get_execution_output(
     phase_name: Optional[Annotated[str, Field(
         min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_PHASE_NAME_BYTES}
     )]] = None,
-    offset: Annotated[int, Field(ge=0)] = 0,
+    offset: Annotated[
+        int, Field(ge=0, description="UTF-8 byte offset when paging one phase")
+    ] = 0,
     max_bytes: Annotated[int, Field(ge=512, le=MAX_EXECUTION_OUTPUT_CHUNK_BYTES)] = MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
 ) -> str:
-    """Retrieve bounded output; specify phase_name to page through one phase."""
+    """Retrieve bounded output; page one phase using UTF-8 byte offsets."""
     return _execution_json(
         lambda: _execution_public_payload(
             _active_execution_manager().output(
