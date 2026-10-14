@@ -3442,7 +3442,7 @@ class PhaseExecutionManager:
             )
             return self._public(completed)
 
-    def get(self, execution_id: str, *, include_output: bool = False) -> Dict[str, Any]:
+    def get(self, execution_id: str) -> Dict[str, Any]:
         """Return the internal validated execution record."""
         with self._lock:
             return self._load(execution_id)

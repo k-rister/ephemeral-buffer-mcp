@@ -92,6 +92,18 @@ class TestPhaseExecutionManager(unittest.TestCase):
         self.assertEqual(fresh_runner.calls, [])
         self.assertEqual(fresh.get("successful-execution")["label"], "release preparation")
 
+    def test_get_returns_internal_record_with_phase_output(self):
+        manager = self.manager()
+        manager.start(
+            [self.phase("build", "build")],
+            execution_id="get-output",
+        )
+
+        self.assertEqual(
+            manager.get("get-output")["phases"][0]["output"],
+            "output:build",
+        )
+
     def test_failed_phase_requires_explicit_retry_and_later_phases_wait(self):
         attempts = {"tests": 0}
 
