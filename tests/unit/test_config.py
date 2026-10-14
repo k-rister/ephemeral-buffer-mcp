@@ -129,6 +129,11 @@ class TestPositiveIntEnv(unittest.TestCase):
             self.assertEqual(execution_state_dir(), DEFAULT_EXECUTION_STATE_DIR)
         with patch.dict(os.environ, {"EPHEMERAL_EXECUTION_STATE_DIR": "/tmp/executions"}, clear=True):
             self.assertEqual(execution_state_dir(), "/tmp/executions")
+        with patch.dict(os.environ, {"EPHEMERAL_EXECUTION_STATE_DIR": "~/executions"}, clear=True):
+            self.assertEqual(
+                execution_state_dir(),
+                os.path.abspath(os.path.expanduser("~/executions")),
+            )
         with patch.dict(os.environ, {"EPHEMERAL_SESSION_ID": "session-1"}, clear=True):
             self.assertIn("ephemeral_buffer_executions-", execution_state_dir())
         with patch.dict(os.environ, {"EPHEMERAL_SOCKET_PATH": "/tmp/session-a.sock"}, clear=True):
@@ -137,6 +142,20 @@ class TestPositiveIntEnv(unittest.TestCase):
             second = execution_state_dir()
         self.assertIn("ephemeral_buffer_executions-socket-", first)
         self.assertNotEqual(first, second)
+
+    def test_explicit_execution_state_directory_rejects_memory_and_relative_values(self):
+        for value in (":memory:", "executions", "./executions"):
+            with self.subTest(value=value):
+                with patch.dict(
+                    os.environ,
+                    {"EPHEMERAL_EXECUTION_STATE_DIR": value},
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "EPHEMERAL_EXECUTION_STATE_DIR.*absolute filesystem path",
+                    ):
+                        execution_state_dir()
 
     def test_loading_settings_does_not_allocate_execution_storage(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -410,6 +429,19 @@ class TestPositiveIntEnv(unittest.TestCase):
             f'EPHEMERAL_EXECUTION_STATE_DIR="{os.path.abspath("relative-state")}"',
             relative_rendered,
         )
+
+    def test_identity_path_normalizers_reject_memory_state_token(self):
+        environment = {"EPHEMERAL_EXECUTION_STATE_DIR": ":memory:"}
+        for normalize in (
+            config.normalized_explicit_identity_paths,
+            codex_mcp_env_config,
+        ):
+            with self.subTest(normalizer=normalize.__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "EPHEMERAL_EXECUTION_STATE_DIR.*:memory:",
+                ):
+                    normalize(environment)
 
     def test_socket_isolation_defaults_to_optional(self):
         with patch.dict(os.environ, {}, clear=True):

@@ -100,6 +100,32 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(socket_path, expected_socket)
         self.assertEqual(log_file, f"{expected_socket.removesuffix('.sock')}.jsonl")
 
+    def test_session_helper_rejects_memory_state_directory(self):
+        environment = os.environ.copy()
+        environment.pop("EPHEMERAL_SOCKET_PATH", None)
+        environment.pop("EPHEMERAL_LOG_FILE", None)
+        environment["EPHEMERAL_SESSION_ID"] = "invalid-memory-state"
+        environment["EPHEMERAL_EXECUTION_STATE_DIR"] = ":memory:"
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1" || exit $?; printf "%s\\n" "$EPHEMERAL_EXECUTION_STATE_DIR"',
+                    "bash",
+                    str(SESSION_ENV_HELPER),
+                ],
+                env=environment,
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("':memory:' is not supported", result.stderr)
+            self.assertFalse((Path(directory) / ":memory:").exists())
+
     def test_recv_exact_rejects_truncated_response(self):
         class EmptySocket:
             def recv(self, _size):

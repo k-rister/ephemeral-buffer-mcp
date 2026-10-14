@@ -32,7 +32,9 @@ _ephemeral_session_config() {
     fi
 }
 if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" || -n "${EPHEMERAL_EXECUTION_STATE_DIR:-}" ]]; then
-    ephemeral_paths_json="$(_ephemeral_session_config --normalize-explicit-paths)"
+    if ! ephemeral_paths_json="$(_ephemeral_session_config --normalize-explicit-paths)"; then
+        return 1
+    fi
     if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" ]]; then
         EPHEMERAL_SOCKET_PATH="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["EPHEMERAL_SOCKET_PATH"], end="")' "$ephemeral_paths_json")"
         export EPHEMERAL_SOCKET_PATH
