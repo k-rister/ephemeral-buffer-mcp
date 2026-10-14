@@ -238,6 +238,9 @@ explicit. Identity-derived state is retained across normal server shutdowns;
 the private process directory is removed on normal shutdown where secure
 cleanup is available. State contains commands and bounded output, so protect
 explicitly configured directories when those contents are sensitive.
+An explicit state directory must resolve to an absolute filesystem path;
+tilde-prefixed paths are expanded, while relative paths and `:memory:` are
+rejected during startup.
 
 When both an explicit socket and session ID are set, the socket path now
 selects the derived state namespace. If an existing session-derived directory

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Reject relative execution-state paths at runtime and the `:memory:` token
+  before path normalization.
+
 ## 0.10.0 - 2026-10-12
 
 - Raise the default retained-capture limit from 25 to 256.

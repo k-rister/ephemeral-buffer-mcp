@@ -208,6 +208,10 @@ both paths. With neither identity value, EB keeps the legacy shared socket and
 uses a private process state directory that is removed on normal shutdown
 where secure cleanup is available. The session helper does not create an
 unrelated session ID when an explicit socket path is supplied.
+An explicit `EPHEMERAL_EXECUTION_STATE_DIR` must resolve to an absolute
+filesystem path. Tilde-prefixed paths are expanded; relative paths and the
+`:memory:` token are rejected during startup so state cannot be written under
+the process working directory by mistake.
 Use absolute paths for explicit socket and state directories in manually
 configured MCP clients; the supplied shell launchers normalize them before
 starting child processes.

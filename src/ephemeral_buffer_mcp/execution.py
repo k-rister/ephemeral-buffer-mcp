@@ -35,6 +35,7 @@ from .config import (
     DEFAULT_MAX_OUTPUT_BYTES,
     execution_checkpoint_reserve_bytes,
     execution_state_quota_bytes,
+    resolve_execution_state_directory,
 )
 
 try:
@@ -963,7 +964,7 @@ class ExecutionStore:
         quota_bytes: Optional[int] = None,
         checkpoint_reserve_bytes: Optional[int] = None,
     ):
-        self.state_dir = Path(os.path.abspath(os.path.expanduser(os.fspath(state_dir))))
+        self.state_dir = Path(resolve_execution_state_directory(state_dir))
         self.quota_bytes = (
             execution_state_quota_bytes() if quota_bytes is None else quota_bytes
         )

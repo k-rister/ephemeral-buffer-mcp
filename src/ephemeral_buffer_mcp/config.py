@@ -265,6 +265,30 @@ def execution_state_dir() -> str:
     return resolve_session_descriptor(os.environ).state_dir
 
 
+def _reject_memory_execution_state_directory(value: str, setting_name: str) -> None:
+    if value == ":memory:":
+        raise ValueError(
+            f"{setting_name} must be an absolute filesystem path; "
+            "':memory:' is not supported"
+        )
+
+
+def resolve_execution_state_directory(
+    path: str | os.PathLike[str],
+    *,
+    setting_name: str = "execution state directory",
+) -> str:
+    """Expand and validate an explicit absolute execution-state directory."""
+    value = os.fspath(path)
+    if not isinstance(value, str):
+        raise TypeError(f"{setting_name} must be a string path")
+    _reject_memory_execution_state_directory(value, setting_name)
+    expanded = os.path.expanduser(value)
+    if not os.path.isabs(expanded):
+        raise ValueError(f"{setting_name} must be an absolute filesystem path")
+    return os.path.abspath(expanded)
+
+
 def _identity_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
@@ -305,7 +329,10 @@ def resolve_session_descriptor(
 
     legacy_state_dir = None
     if explicit_state:
-        effective_state = os.path.abspath(os.path.expanduser(explicit_state))
+        effective_state = resolve_execution_state_directory(
+            explicit_state,
+            setting_name="EPHEMERAL_EXECUTION_STATE_DIR",
+        )
         state_source = "environment:EPHEMERAL_EXECUTION_STATE_DIR"
     elif explicit_socket:
         digest = _identity_digest(explicit_socket)
@@ -788,6 +815,8 @@ def normalized_explicit_identity_paths(
     for name in ("EPHEMERAL_SOCKET_PATH", "EPHEMERAL_EXECUTION_STATE_DIR"):
         value = values.get(name)
         if value:
+            if name == "EPHEMERAL_EXECUTION_STATE_DIR":
+                _reject_memory_execution_state_directory(value, name)
             normalized[name] = os.path.abspath(os.path.expanduser(value))
     raw_socket = values.get("EPHEMERAL_SOCKET_PATH") or None
     if (

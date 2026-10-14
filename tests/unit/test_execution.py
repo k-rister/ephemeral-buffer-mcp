@@ -2407,6 +2407,24 @@ class TestPhaseExecutionManager(unittest.TestCase):
             absent = ExecutionStore(Path(directory) / "absent")
             self.assertFalse(absent.is_locked("missing"))
 
+    def test_store_rejects_memory_and_relative_state_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous_directory = os.getcwd()
+            try:
+                os.chdir(directory)
+                for value in (":memory:", "relative-state", "./relative-state"):
+                    with self.subTest(value=value):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "absolute filesystem path",
+                        ):
+                            ExecutionStore(value)
+                        self.assertFalse((Path(directory) / value).exists())
+                with self.assertRaisesRegex(TypeError, "string path"):
+                    ExecutionStore(b"relative-state")
+            finally:
+                os.chdir(previous_directory)
+
     def test_capacity_reports_pairs_and_does_not_run_recovery(self):
         manager = self.manager()
         manager.create([self.phase("inspect", "inspect")], execution_id="capacity-record")
