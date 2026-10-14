@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Exercise the installed distribution through its public MCP stdio API."""
 
 import asyncio
