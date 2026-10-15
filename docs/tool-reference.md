@@ -100,7 +100,27 @@ available in `structuredContent`. The envelope's `status` is `ok` or `error`.
 Stable retrieval and search error codes include `capture_not_found`,
 `invalid_range`, `invalid_cursor`, `invalid_byte_budget`,
 `response_budget_too_small`, `invalid_query`, `query_too_large`, and
-`unsupported_search_mode`.
+`unsupported_search_mode`. Search argument errors also include `invalid_top_k`,
+`top_k_limit_exceeded`, `invalid_context_lines`, `context_limit_exceeded`, and
+`invalid_response_budget`.
+
+Execution tools preserve their successful JSON text responses and Python
+`str` return values. A failure returns JSON text with `status: "error"` and
+`error.code` / `error.message`; read-only record diagnostics retain their
+existing status and fields and add the same `error` object. When available,
+`error.details` preserves a record reason code and schema version. Stable
+execution error codes include `execution_busy`, `execution_not_found`,
+`phase_not_found`, `malformed_record`,
+`unsupported_schema_version`, `quota_exceeded`, `disk_full`,
+`execution_storage_error`, `response_too_large`, and `execution_failed`.
+`execution_not_found` covers IDs that never existed and IDs that have been
+retired. `phase_not_found` means the execution exists but has no phase with the
+requested name. Use `error.code` for handling; the message is for display and
+may change.
+
+MCP argument validation occurs in the SDK before an execution tool runs.
+Those validation failures follow the SDK's validation response and do not carry
+an execution `error.code`.
 
 When `capture_not_found` is returned, the message says the buffer is empty
 only if no captures remain; otherwise it says that other captures remain.

@@ -78,6 +78,18 @@ class ExecutionBusyError(RuntimeError):
     """Raised when another process currently owns an execution lease."""
 
 
+class ExecutionPhaseNotFoundError(KeyError):
+    """Raised when an execution exists but does not contain the requested phase."""
+
+
+class ExecutionQuotaError(ValueError):
+    """Raised when durable execution state exceeds its configured quota."""
+
+
+class ExecutionDiskSpaceError(ValueError):
+    """Raised when there is not enough free disk space for a checkpoint."""
+
+
 class ExecutionRecordError(ValueError):
     """A durable record cannot safely enter normal execution or recovery."""
 
@@ -1229,7 +1241,7 @@ class ExecutionStore:
                     + reserved_bytes
                     > self.quota_bytes - self.checkpoint_reserve_bytes
                 ):
-                    raise ValueError(
+                    raise ExecutionQuotaError(
                         "execution state quota has insufficient checkpoint headroom; "
                         "retire durable records or increase EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES"
                     )
@@ -1237,7 +1249,7 @@ class ExecutionStore:
                     other_reserved + reserved_bytes + self.checkpoint_reserve_bytes
                 )
                 if shutil.disk_usage(self.state_dir).free < required_free_bytes:
-                    raise ValueError(
+                    raise ExecutionDiskSpaceError(
                         "filesystem has insufficient free space for the next checkpoint"
                     )
                 self._write_reservation_locked(execution_id, reserved_bytes)
@@ -1456,7 +1468,7 @@ class ExecutionStore:
                     + (0 if consume_checkpoint_reservation else own_reservation)
                     > self.quota_bytes - self.checkpoint_reserve_bytes
                 ):
-                    raise ValueError(
+                    raise ExecutionQuotaError(
                         "execution state aggregate quota would be exceeded; "
                         "retire durable records or increase EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES"
                     )
@@ -3504,7 +3516,9 @@ class PhaseExecutionManager:
                 phase_name = _validate_text(phase_name, "phase_name", MAX_PHASE_NAME_BYTES)
                 matches = [phase for phase in phases if phase["name"] == phase_name]
                 if not matches:
-                    raise KeyError(f"Phase '{phase_name}' was not found in execution '{execution_id}'")
+                    raise ExecutionPhaseNotFoundError(
+                        f"Phase '{phase_name}' was not found in execution '{execution_id}'"
+                    )
                 phases = matches
             output_phases = []
             remaining = max_bytes
