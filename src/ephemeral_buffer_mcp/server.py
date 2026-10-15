@@ -2601,7 +2601,7 @@ def execute_and_capture(
         )
         output, exit_code, truncated, original_byte_size, timed_out = command_result
         duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
-        
+
         cap, summary = active_engine.ingest_with_summary(
             output,
             label=f"cmd: {label}",
