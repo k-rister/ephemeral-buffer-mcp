@@ -49,6 +49,8 @@ EXECUTION_STATE_SESSION_PREFIX = "ephemeral_buffer_executions-"
 EXECUTION_STATE_SOCKET_PREFIX = "ephemeral_buffer_executions-socket-"
 DEFAULT_EXECUTION_STATE_QUOTA_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_EXECUTION_CHECKPOINT_RESERVE_BYTES = 128 * 1024 * 1024
+# The checkpoint reserve must hold at least one maximum-sized execution record.
+MAX_EXECUTION_STATE_BYTES = 64 * 1024 * 1024
 
 
 def new_default_execution_state_dir() -> str:
@@ -662,7 +664,7 @@ def load_settings(
     def boolean(name: str, default: bool) -> ConfigSetting[bool]:
         return _read_bool_setting(name, default, values)
 
-    return SettingsSnapshot(
+    settings = SettingsSnapshot(
         identity=identity,
         max_captures=integer("EPHEMERAL_MAX_CAPTURES", DEFAULT_MAX_CAPTURES),
         max_buffer_bytes=integer("EPHEMERAL_MAX_BUFFER_BYTES", DEFAULT_MAX_BUFFER_BYTES),
@@ -732,6 +734,21 @@ def load_settings(
             ),
         ),
     )
+
+    quota_bytes = settings.execution_state_quota_bytes.value
+    checkpoint_reserve_bytes = settings.execution_checkpoint_reserve_bytes.value
+    if (
+        checkpoint_reserve_bytes < MAX_EXECUTION_STATE_BYTES
+        or checkpoint_reserve_bytes >= quota_bytes
+    ):
+        raise ValueError(
+            "Invalid execution storage configuration: "
+            "EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES="
+            f"{checkpoint_reserve_bytes} must be at least {MAX_EXECUTION_STATE_BYTES} bytes "
+            "and smaller than EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES="
+            f"{quota_bytes}"
+        )
+    return settings
 
 
 _STARTUP_SETTINGS: SettingsSnapshot | None = None

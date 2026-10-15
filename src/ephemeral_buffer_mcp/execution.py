@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .capture_utils import PROCESS_MARKER_ENV, run_command_bounded
 from .config import (
     DEFAULT_MAX_OUTPUT_BYTES,
+    MAX_EXECUTION_STATE_BYTES,
     execution_checkpoint_reserve_bytes,
     execution_state_quota_bytes,
     resolve_execution_state_directory,
@@ -56,7 +57,6 @@ MAX_EXECUTION_PHASES = 64
 MAX_PHASE_ATTEMPTS = 32
 # Durable execution recovery is supported on Linux, where pid_t is signed 32-bit.
 MAX_PROCESS_ID = (1 << 31) - 1
-MAX_EXECUTION_STATE_BYTES = 64 * 1024 * 1024
 EXECUTION_METADATA_RESERVE_BYTES = 4 * 1024 * 1024
 MAX_EXECUTION_RECORDS = 1000
 MAX_BACKGROUND_EXECUTIONS = 8
