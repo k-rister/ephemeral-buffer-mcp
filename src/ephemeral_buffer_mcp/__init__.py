@@ -1,9 +1,9 @@
-"""Runtime implementation for the Ephemeral Buffer MCP server.
+"""Public package interfaces for the Ephemeral Buffer MCP service.
 
-The supported interfaces are the installed commands and MCP protocol.
-Modules in this package are implementation details unless documented otherwise.
+The supported interfaces are the installed commands, the MCP protocol, and the
+Python embedding API exported here: ``create_mcp_server`` and
+``create_service_context``. Other package modules are implementation details.
 """
-"""Public Python interface for embedding the Ephemeral Buffer service."""
 
 from importlib import import_module
 
