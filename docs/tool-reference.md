@@ -307,6 +307,8 @@ list results are paginated with a maximum page size of 100. The aggregate state
 quota defaults to 4 GiB (`EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES`) with a 128 MiB
 checkpoint reserve (`EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES`). The reserve
 must be at least the per-record limit and smaller than the aggregate quota;
+the server refuses to start when this relationship is invalid, and the error
+identifies both configured values.
 servers sharing a state directory must use the same values.
 Record and summary JSON bytes, atomic-write temporary files (including crash
 leftovers), and active phase reservations use the quota;

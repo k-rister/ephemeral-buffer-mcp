@@ -24,6 +24,7 @@ from ephemeral_buffer_mcp.config import (
     DEFAULT_SOCKET_PATH,
     DEFAULT_SEMANTIC_PREFETCH_WORKERS,
     DEFAULT_SEMANTIC_WAIT_SECONDS,
+    MAX_EXECUTION_STATE_BYTES,
     cleanup_default_execution_state_dir,
     codex_mcp_env_config,
     embedding_batch_size,
@@ -182,6 +183,58 @@ class TestPositiveIntEnv(unittest.TestCase):
         }, clear=True):
             self.assertEqual(execution_state_quota_bytes(), 8 * 1024 * 1024 * 1024)
             self.assertEqual(execution_checkpoint_reserve_bytes(), 256 * 1024 * 1024)
+
+    def test_settings_accept_minimum_valid_checkpoint_reserve(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = os.path.join(directory, "ephemeral_buffer_executions-lazy")
+            settings = load_settings(
+                {
+                    "EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES": str(MAX_EXECUTION_STATE_BYTES + 1),
+                    "EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES": str(MAX_EXECUTION_STATE_BYTES),
+                },
+                warn_on_legacy_state_transition=False,
+                default_state_dir=state_dir,
+            )
+            self.assertEqual(
+                settings.execution_state_quota_bytes.value,
+                MAX_EXECUTION_STATE_BYTES + 1,
+            )
+            self.assertEqual(
+                settings.execution_checkpoint_reserve_bytes.value,
+                MAX_EXECUTION_STATE_BYTES,
+            )
+            self.assertFalse(os.path.exists(state_dir))
+
+    def test_settings_reject_invalid_execution_storage_cross_invariants(self):
+        invalid_pairs = (
+            (4 * MAX_EXECUTION_STATE_BYTES, MAX_EXECUTION_STATE_BYTES - 1),
+            (2 * MAX_EXECUTION_STATE_BYTES, 2 * MAX_EXECUTION_STATE_BYTES),
+            (2 * MAX_EXECUTION_STATE_BYTES, 2 * MAX_EXECUTION_STATE_BYTES + 1),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = os.path.join(directory, "ephemeral_buffer_executions-lazy")
+            for quota_bytes, reserve_bytes in invalid_pairs:
+                with self.subTest(quota_bytes=quota_bytes, reserve_bytes=reserve_bytes):
+                    with self.assertRaises(ValueError) as raised:
+                        load_settings(
+                            {
+                                "EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES": str(quota_bytes),
+                                "EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES": str(reserve_bytes),
+                            },
+                            warn_on_legacy_state_transition=False,
+                            default_state_dir=state_dir,
+                        )
+                    message = str(raised.exception)
+                    self.assertIn(
+                        f"EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES={reserve_bytes}",
+                        message,
+                    )
+                    self.assertIn(
+                        f"EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES={quota_bytes}",
+                        message,
+                    )
+                    self.assertIn(f"at least {MAX_EXECUTION_STATE_BYTES} bytes", message)
+                    self.assertFalse(os.path.exists(state_dir))
 
     def test_default_execution_state_cleanup_only_removes_private_default(self):
         with tempfile.TemporaryDirectory() as directory:
