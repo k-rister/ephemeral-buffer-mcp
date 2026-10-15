@@ -2575,7 +2575,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
             )
             store.save({"execution_id": "quota-a", "payload": "a" * 1100})
             store.save({"execution_id": "quota-b", "payload": "b" * 1100})
-            with self.assertRaisesRegex(ValueError, "aggregate quota"):
+            with self.assertRaisesRegex(execution.ExecutionQuotaError, "aggregate quota"):
                 store.save({"execution_id": "quota-c", "payload": "c" * 1100})
 
         with tempfile.TemporaryDirectory() as directory, patch.object(
@@ -2614,14 +2614,19 @@ class TestPhaseExecutionManager(unittest.TestCase):
             self.assertEqual(store.capacity()["stale_reserved_bytes"], 0)
 
             with store.lease("reserved"):
-                with self.assertRaisesRegex(ValueError, "insufficient checkpoint headroom"):
+                with self.assertRaisesRegex(
+                    execution.ExecutionQuotaError, "insufficient checkpoint headroom"
+                ):
                     store.reserve_checkpoint("reserved", 3000)
 
             with store.lease("reserved"), patch(
                 "ephemeral_buffer_mcp.execution.shutil.disk_usage",
                 return_value=SimpleNamespace(total=4096, used=4096, free=0),
             ):
-                with self.assertRaisesRegex(ValueError, "filesystem has insufficient free space"):
+                with self.assertRaisesRegex(
+                    execution.ExecutionDiskSpaceError,
+                    "filesystem has insufficient free space",
+                ):
                     store.reserve_checkpoint("reserved", 512)
 
     def test_storage_limits_and_checkpoint_reservation_validate_inputs(self):
