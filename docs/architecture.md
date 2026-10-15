@@ -19,7 +19,7 @@ flowchart TD
 
     subgraph Indexing["3. Classification & Search Indexing"]
         E --> F["SQLite FTS5 (BM25 Lexical) or Python lexical fallback"]
-        E --> G["Optional/background FastEmbed ONNX (Dense Vectors)"]
+        E --> G["Required FastEmbed dependency; model loads lazily or in background"]
         E --> K["Diff & Signal Parser (File Maps & Conflict Detection)"]
         E --> M["consolidate_captures: bounded source-aware JSON"]
         M --> E
@@ -33,5 +33,23 @@ flowchart TD
         I --> J["Precise Context Chunk + Line Numbers"]
     end
 ```
+
+## Admission and storage bounds
+
+Admission control limits active and queued MCP and socket work before requests
+run. The capture engine maintains a bounded LRU buffer; its default limits are
+256 captures and 50 MiB of captured UTF-8 content, with a separate lexical
+index-chunk budget. When a new capture would exceed a configured limit, least-
+recently-used captures are evicted to make room when possible; an individual
+capture that cannot fit within a configured budget is rejected.
+
+Durable execution records use a separate state directory and quota. The
+aggregate state quota defaults to 4 GiB, with a configurable checkpoint
+reserve for atomic writes. Capture eviction does not remove durable execution
+records.
+
+FastEmbed is an import-time dependency of the engine. Loading the dense model
+is lazy when semantic search first needs it; deployments may also warm the
+model in the background after startup.
 
 ---
