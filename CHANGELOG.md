@@ -1,7 +1,11 @@
 # Changelog
 
+Breaking changes are marked with the `Breaking:` prefix on the affected entry.
+
 ## Unreleased
 
+- Document response schema-version compatibility and mark breaking release
+  entries.
 - Handle oversized MCP result envelopes that have no text field.
 - Reject relative execution-state paths at runtime and the `:memory:` token
   before path normalization.
@@ -18,18 +22,18 @@
 - Install the generic and Codex shell launchers with the PyPI package, and
   document the Codex MCP config update required for the package server entry
   point.
-- Compact MCP text results by default to avoid repeating capture payloads and
-  search snippets already available in structured results. Set
+- Breaking: Compact MCP text results by default to avoid repeating capture
+  payloads and search snippets already available in structured results. Set
   `EPHEMERAL_COMPACT_TOOL_RESULTS=0` to restore legacy text output.
 
 ## 0.8.0 - 2026-10-08
 
 - Move the runtime into the `ephemeral_buffer_mcp` package and organize
   benchmarks, tests, and release tooling into dedicated directories.
-- Establish `create_mcp_server` and `create_service_context` as the supported
-  Python embedding API. Previous imports from root-level implementation
-  modules are no longer available; installed commands and MCP behavior remain
-  available.
+- Breaking: Establish `create_mcp_server` and `create_service_context` as the
+  supported Python embedding API. Previous imports from root-level
+  implementation modules are no longer available; installed commands and MCP
+  behavior remain available.
 
 ## 0.7.0 - 2026-10-07
 

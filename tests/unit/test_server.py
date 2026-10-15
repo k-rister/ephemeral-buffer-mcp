@@ -20,6 +20,9 @@ import unittest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+from pydantic import ValidationError
+
 import ephemeral_buffer_mcp
 from ephemeral_buffer_mcp.metrics import LocalMetrics
 from ephemeral_buffer_mcp.socket_protocol import (
@@ -32,6 +35,11 @@ from ephemeral_buffer_mcp.socket_protocol import (
 )
 import ephemeral_buffer_mcp.config as config
 from ephemeral_buffer_mcp.config import load_settings
+from ephemeral_buffer_mcp.schema_versions import (
+    CAPTURE_SUMMARY_SCHEMA_VERSION,
+    CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
+    TOOL_RESPONSE_SCHEMA_VERSION,
+)
 
 
 def settings_with_environment(**overrides):
@@ -1090,13 +1098,26 @@ class TestServerTools(unittest.TestCase):
 
         self.assertEqual(result["status"], "captured")
         self.assertEqual(result["source_capture_ids"], source_ids)
-        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["schema_version"], CAPTURE_SUMMARY_SCHEMA_VERSION)
         self.assertEqual(result["source_count"], 2)
         self.assertEqual(result["record_count"], 4)
         self.assertIn("estimated_tokens", result)
         self.assertIn("retrieval", result)
         self.assertIn(source_ids[0], server.search_capture("alpha", capture_id=result["capture_id"]))
         self.assertIn("source_line", server.get_capture_slice(1, 100, capture_id=result["capture_id"]))
+
+    def test_consolidated_json_uses_current_schema_version(self):
+        server.capture_text("schema version", label="schema-version")
+        source_id = server.engine.list_captures()[0]["capture_id"]
+
+        result = server._consolidated_jsonl(
+            [source_id], max_captures=1, max_bytes=4096
+        )
+
+        self.assertEqual(
+            json.loads(result["content"])["schema_version"],
+            CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
+        )
 
     def test_consolidate_captures_reports_omitted_records_and_missing_ids(self):
         server.capture_text("important failure " * 20, label="large")
@@ -1159,6 +1180,10 @@ class TestServerTools(unittest.TestCase):
 
         self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
         self.assertNotIn("\n  ", result["content"])
+        self.assertEqual(
+            json.loads(result["content"])["schema_version"],
+            CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
+        )
 
     def test_compact_consolidation_preserves_record_line_boundaries(self):
         source_text = "\n".join(f"record-{index}-" + ("x" * 150) for index in range(4))
@@ -1185,6 +1210,22 @@ class TestServerTools(unittest.TestCase):
         payload = json.loads(result["content"])
         self.assertTrue(payload["metadata_omitted"])
         self.assertEqual(payload["records"], [])
+        self.assertEqual(
+            payload["schema_version"],
+            CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
+        )
+
+    def test_tool_response_envelope_uses_current_schema_version(self):
+        envelope = server.ToolResponseEnvelope(status="ok", data={})
+
+        self.assertEqual(TOOL_RESPONSE_SCHEMA_VERSION, 1)
+        self.assertEqual(envelope.schema_version, TOOL_RESPONSE_SCHEMA_VERSION)
+        self.assertEqual(
+            envelope.model_dump()["schema_version"],
+            TOOL_RESPONSE_SCHEMA_VERSION,
+        )
+        with self.assertRaises(ValidationError):
+            server.ToolResponseEnvelope(schema_version=2, status="ok", data={})
 
     def test_consolidate_reports_ingest_failure(self):
         with patch.object(server.engine, "ingest_with_summary", side_effect=RuntimeError("storage unavailable")):
@@ -2102,6 +2143,15 @@ class TestServerTools(unittest.TestCase):
             {"status": "error", "message": "missing"},
         )
 
+    def test_summary_payload_defaults_to_current_schema_version(self):
+        payload = server._summary_payload({
+            "status": "ok",
+            "capture_id": "cap-summary-version",
+            "label": "summary version",
+        })
+
+        self.assertEqual(payload["schema_version"], CAPTURE_SUMMARY_SCHEMA_VERSION)
+
     def test_summary_json_accepts_capture_view(self):
         capture = server.engine.ingest("summary json payload", label="summary-json")
 
@@ -2300,7 +2350,10 @@ class TestServerTools(unittest.TestCase):
                 "capture_text",
                 {"content": "another capture", "label": "mcp-envelope"},
             ))
-        self.assertEqual(capture_response.structured_content["schema_version"], 1)
+        self.assertEqual(
+            capture_response.structured_content["schema_version"],
+            TOOL_RESPONSE_SCHEMA_VERSION,
+        )
         self.assertEqual(capture_response.structured_content["status"], "ok")
         self.assertIn("capture_id", capture_response.structured_content["data"])
         self.assertIn("capture_id=", capture_response.content[0].text)
@@ -2311,7 +2364,10 @@ class TestServerTools(unittest.TestCase):
                 "search_capture",
                 {"query": "needle", "mode": "bm25", "capture_id": capture_id},
             ))
-        self.assertEqual(search_response.structured_content["schema_version"], 1)
+        self.assertEqual(
+            search_response.structured_content["schema_version"],
+            TOOL_RESPONSE_SCHEMA_VERSION,
+        )
         self.assertEqual(search_response.structured_content["status"], "ok")
         expected_match = server.engine.search(
             "needle", mode="bm25", capture_id=capture_id
@@ -2338,7 +2394,10 @@ class TestServerTools(unittest.TestCase):
                     "max_bytes": 8192,
                 },
             ))
-        self.assertEqual(slice_response.structured_content["schema_version"], 1)
+        self.assertEqual(
+            slice_response.structured_content["schema_version"],
+            TOOL_RESPONSE_SCHEMA_VERSION,
+        )
         self.assertEqual(slice_response.structured_content["data"]["content"], "needle αβ\nsecond line")
         self.assertIn("content=structuredContent.data.content", slice_response.content[0].text)
         self.assertNotIn("needle αβ", slice_response.content[0].text)

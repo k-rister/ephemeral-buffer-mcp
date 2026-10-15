@@ -99,6 +99,21 @@ Stable retrieval and search error codes include `capture_not_found`,
 `response_budget_too_small`, `invalid_query`, `query_too_large`, and
 `unsupported_search_mode`.
 
+### Response schema versioning
+
+Capture summaries, consolidated-capture JSON, and structured MCP tool result
+envelopes have independently versioned schemas. Adding fields while preserving
+existing field types and meanings does not change a schema version. Removing
+or renaming fields, changing their types or meanings, or otherwise changing
+how existing data must be interpreted increments that surface's integer
+version by one. The private Unix-socket frame has its own version rule,
+described above.
+
+Clients should interpret structured data only when they recognize its
+`schema_version`. For an unknown version, treat the structured data as
+unsupported, preserve any readable text in `content[0].text`, and report the
+unsupported version instead of guessing at compatibility.
+
 The Python text helpers `search_capture` and `get_capture_slice` retain their
 string return values. Python callers that need the structured form can use
 `search_capture_result` and `get_capture_slice_result`; these return the same

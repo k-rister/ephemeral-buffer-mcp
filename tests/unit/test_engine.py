@@ -51,6 +51,7 @@ from ephemeral_buffer_mcp.engine import (
     process_rss_bytes,
     sqlite_fts5_available,
 )
+from ephemeral_buffer_mcp.schema_versions import CAPTURE_SUMMARY_SCHEMA_VERSION
 
 
 def _semantic_index_threads():
@@ -960,7 +961,7 @@ STEP 3: Summary
         self.assertEqual(summary["total_lines"], 100)
         self.assertIn("error", summary["keyword_signals"])
         self.assertEqual(summary["keyword_signals"]["error"], 1)
-        self.assertEqual(summary["schema_version"], 1)
+        self.assertEqual(summary["schema_version"], CAPTURE_SUMMARY_SCHEMA_VERSION)
         self.assertEqual(summary["execution_status"], "captured")
         self.assertEqual(summary["partial"], False)
         self.assertIsInstance(summary["duration_ms"], float)
