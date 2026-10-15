@@ -123,6 +123,16 @@ class TestSocketProtocol(unittest.TestCase):
         error = {"status": "error", "code": "server_busy", "message": "retry"}
         self.assertEqual(decode_socket_response(encode_socket_response(error)), error)
 
+        legacy_error = {"status": "error", "message": "legacy failure"}
+        self.assertEqual(
+            decode_socket_response(json.dumps(legacy_error).encode("utf-8")),
+            {
+                "status": "error",
+                "code": "socket_request_failed",
+                "message": "legacy failure",
+            },
+        )
+
     def test_socket_response_rejects_invalid_shapes_and_fields(self):
         invalid_responses = [
             [],
