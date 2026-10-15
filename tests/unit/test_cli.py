@@ -248,7 +248,10 @@ class TestCliConfiguration(unittest.TestCase):
             def __init__(self):
                 self.sent = None
                 self.closed = False
-                self.response = bytearray(encode_frame(b'{"status":"ok"}'))
+                self.response = bytearray(encode_frame(
+                    b'{"status":"ok","capture_id":"cap_test","label":"build",'
+                    b'"line_count":1,"byte_size":6}'
+                ))
 
             def settimeout(self, value):
                 self.timeout = value
@@ -275,7 +278,8 @@ class TestCliConfiguration(unittest.TestCase):
                 "output", label="build", content_type="log", truncated=True, original_byte_size=100
             )
 
-        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["capture_id"], "cap_test")
         self.assertEqual(fake_socket.path, "/tmp/ephemeral.sock")
         self.assertTrue(fake_socket.closed)
         sent_length = decode_header(fake_socket.sent[:FRAME_HEADER_SIZE])
@@ -356,7 +360,10 @@ class TestCliConfiguration(unittest.TestCase):
                 mask = self.events.pop(0)
                 return [(None, mask)]
 
-        response_frame = encode_frame(b'{"status":"ok"}')
+        response_frame = encode_frame(
+            b'{"status":"ok","capture_id":"cap_test","label":"build",'
+            b'"line_count":1,"byte_size":6}'
+        )
 
         class FakeSocket:
             def __init__(self):
@@ -390,7 +397,7 @@ class TestCliConfiguration(unittest.TestCase):
         with patch.object(cli.selectors, "DefaultSelector", return_value=fake_selector):
             result = cli._send_large_frame_with_early_response(fake_socket, b"z" * 2048)
 
-        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(fake_socket.sent, b"z" * 2048)
         self.assertEqual(fake_selector.modified, [cli.selectors.EVENT_READ])
 
@@ -436,7 +443,9 @@ class TestCliConfiguration(unittest.TestCase):
                 self.sent += len(payload)
                 return len(payload)
 
-        busy_frame = encode_frame(b'{"status":"error","code":"server_busy"}')
+        busy_frame = encode_frame(
+            b'{"status":"error","code":"server_busy","message":"retry"}'
+        )
         selector = FakeSelector([cli.selectors.EVENT_READ | cli.selectors.EVENT_WRITE])
         early_socket = FakeSocket([busy_frame])
         with patch.object(cli.selectors, "DefaultSelector", return_value=selector):
@@ -501,7 +510,7 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertEqual(result["message"], "retry")
 
     def test_read_buffered_early_response_handles_incomplete_and_closed_peers(self):
-        response = {"status": "error", "code": "server_busy"}
+        response = {"status": "error", "code": "server_busy", "message": "retry"}
         frame = encode_frame(json.dumps(response).encode("utf-8"))
 
         class FakeSocket:
@@ -551,10 +560,16 @@ class TestCliConfiguration(unittest.TestCase):
                 cli._send_large_frame_with_early_response(FakeSocket(), b"z" * 2048)
 
     def test_large_frame_decoder_waits_for_header_and_complete_payload(self):
-        frame = encode_frame(b'{"status":"ok"}')
+        frame = encode_frame(
+            b'{"status":"ok","capture_id":"cap_test","label":"build",'
+            b'"line_count":1,"byte_size":6}'
+        )
         self.assertIsNone(cli._decode_available_response(bytearray(frame[:3])))
         self.assertIsNone(cli._decode_available_response(bytearray(frame[:-1])))
-        self.assertEqual(cli._decode_available_response(bytearray(frame)), {"status": "ok"})
+        self.assertEqual(
+            cli._decode_available_response(bytearray(frame)),
+            {"status": "ok", "capture_id": "cap_test", "label": "build", "line_count": 1, "byte_size": 6},
+        )
 
     def test_send_to_mcp_reports_transport_failure(self):
         with patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \

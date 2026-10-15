@@ -22,7 +22,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import ephemeral_buffer_mcp
 from ephemeral_buffer_mcp.metrics import LocalMetrics
-from ephemeral_buffer_mcp.socket_protocol import FRAME_HEADER_SIZE, FRAME_MAGIC, decode_header, encode_frame
+from ephemeral_buffer_mcp.socket_protocol import (
+    FRAME_HEADER_SIZE,
+    FRAME_MAGIC,
+    decode_header,
+    decode_socket_response,
+    encode_frame,
+    encode_socket_request,
+)
 import ephemeral_buffer_mcp.config as config
 from ephemeral_buffer_mcp.config import load_settings
 
@@ -158,7 +165,7 @@ def successful_socket_probe_connector(response_payload=None):
 def response_json(writer):
     framed = writer.writes[0]
     length = decode_header(framed[:FRAME_HEADER_SIZE])
-    return json.loads(framed[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + length])
+    return decode_socket_response(framed[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + length])
 
 
 def mcp_result_text(result):
@@ -3482,7 +3489,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_ingest_is_offloaded_from_event_loop(self):
-        payload = encode_frame(json.dumps({"label": "offload-test", "text": "hello"}).encode())
+        payload = encode_frame(encode_socket_request({"label": "offload-test", "text": "hello"}))
         capture = SimpleNamespace(
             capture_id="cap_offload",
             label="offload-test",
@@ -3525,6 +3532,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "socket_request_failed")
         self.assertIn("exceeds", response["message"])
         self.assertTrue(writer.closed)
 
@@ -3552,6 +3560,47 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["label"], "CLI pipe")
 
+    async def test_unknown_request_fields_are_ignored(self):
+        capture = SimpleNamespace(
+            capture_id="cap_unknown_field",
+            label="known-label",
+            line_count=1,
+            byte_size=7,
+        )
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
+        ) as offload:
+            writer = await self.run_handler(encode_frame(json.dumps({
+                "text": "payload",
+                "label": "known-label",
+                "future_field": "ignored",
+            }).encode()))
+
+        self.assertEqual(response_json(writer)["status"], "ok")
+        self.assertEqual(offload.await_args.args[1], "payload")
+        self.assertEqual(offload.await_args.kwargs["label"], "known-label")
+
+    async def test_legacy_v1_request_without_text_defaults_to_empty_string(self):
+        capture = SimpleNamespace(
+            capture_id="cap_legacy_empty",
+            label="missing-text",
+            line_count=0,
+            byte_size=0,
+        )
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(return_value=(capture, {"status": "error"})),
+        ) as offload:
+            writer = await self.run_handler(encode_frame(b'{"label":"missing-text"}'))
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(offload.await_args.args[1], "")
+        self.assertEqual(offload.await_args.kwargs["label"], "missing-text")
+
     async def test_ingest_failure_returns_error_response(self):
         with patch.object(
             server,
@@ -3562,6 +3611,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "socket_request_failed")
         self.assertIn("invalid capture", response["message"])
 
     async def test_invalid_original_size_returns_error_without_retaining_capture(self):
@@ -3583,6 +3633,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "invalid_socket_payload")
         self.assertIn("original_byte_size", response["message"])
         self.assertEqual(server.engine._captures, {})
         self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
@@ -3598,7 +3649,22 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
-        self.assertIn("JSON object", response["message"])
+        self.assertEqual(response["code"], "invalid_socket_payload")
+        self.assertIn("structured_metrics", response["message"])
+        self.assertEqual(server.engine._captures, {})
+
+    async def test_oversized_socket_metrics_return_typed_payload_error(self):
+        payload = encode_frame(json.dumps({
+            "text": "payload",
+            "structured_metrics": {"value": "x" * (16 * 1024)},
+        }).encode())
+
+        writer = await self.run_handler(payload)
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "invalid_socket_payload")
+        self.assertIn("structured_metrics exceeds", response["message"])
         self.assertEqual(server.engine._captures, {})
 
     async def test_non_object_json_payload_returns_error_without_capturing(self):
@@ -3606,6 +3672,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "invalid_socket_payload")
         self.assertIn("JSON object", response["message"])
         self.assertEqual(server.engine._captures, {})
 
@@ -3613,12 +3680,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         writer = await self.run_handler(FRAME_MAGIC + b"\x01\x00")
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "socket_request_failed")
         self.assertIn("truncated socket frame", response["message"])
 
     async def test_unsupported_frame_version_returns_error_response(self):
         writer = await self.run_handler(FRAME_MAGIC + b"\x02\x00\x00\x00\x00")
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "socket_request_failed")
         self.assertIn("unsupported frame version", response["message"])
 
 

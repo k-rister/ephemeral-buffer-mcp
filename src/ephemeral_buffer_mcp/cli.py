@@ -26,7 +26,13 @@ from .capture_utils import bound_chunks, run_command_bounded
 from .config import (
     startup_settings,
 )
-from .socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
+from .socket_protocol import (
+    FRAME_HEADER_SIZE,
+    decode_header,
+    decode_socket_response,
+    encode_frame,
+    encode_socket_request,
+)
 
 SETTINGS = startup_settings()
 SOCKET_PATH = SETTINGS.identity.socket_path
@@ -59,7 +65,7 @@ def send_to_mcp(
         sock.settimeout(SETTINGS.socket_timeout_seconds.value)
         sock.connect(SOCKET_PATH)
         
-        payload = json.dumps({
+        payload = encode_socket_request({
             "label": label,
             "text": text,
             "content_type": content_type,
@@ -68,7 +74,7 @@ def send_to_mcp(
             "command_exit_code": command_exit_code,
             "timed_out": timed_out,
             "duration_ms": duration_ms,
-        }).encode("utf-8")
+        })
         frame = encode_frame(payload)
         if len(frame) <= 1024:
             sock.sendall(frame)
@@ -106,7 +112,7 @@ def _recv_response(sock: socket.socket) -> dict:
     header = _recv_exact(sock, FRAME_HEADER_SIZE)
     response_length = decode_header(header)
     resp_data = _recv_exact(sock, response_length)
-    return json.loads(resp_data.decode("utf-8"))
+    return decode_socket_response(resp_data)
 
 
 def _send_large_frame_with_early_response(sock: socket.socket, frame: bytes) -> dict:
@@ -179,7 +185,7 @@ def _decode_available_response(buffer: bytearray) -> dict | None:
     frame_length = FRAME_HEADER_SIZE + response_length
     if len(buffer) < frame_length:
         return None
-    return json.loads(bytes(buffer[FRAME_HEADER_SIZE:frame_length]).decode("utf-8"))
+    return decode_socket_response(bytes(buffer[FRAME_HEADER_SIZE:frame_length]))
 
 
 def _report_success(response: dict) -> None:

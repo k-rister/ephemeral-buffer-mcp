@@ -37,6 +37,44 @@ sections for full workflows.
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id)` | Clears buffer. |
 
+## Private CLI socket payload
+
+The `ephbuf` CLI and MCP server exchange length-prefixed JSON frames over a
+private Unix socket. Frame version 1 also identifies the request and response
+schemas; incompatible changes to either schema must increment the frame
+version. The server accepts these capture request fields; omitted fields use the defaults shown:
+
+| Field | Type | Required | Default |
+| :--- | :--- | :--- | :--- |
+| `text` | string | yes for current clients; earlier v1 peers may omit it | empty string |
+| `label` | string | no | `CLI pipe` |
+| `content_type` | `auto`, `diff`, `log`, or `text` | no | `auto` |
+| `truncated` | boolean | no | `false` |
+| `original_byte_size` | non-negative integer or null | no | `null` |
+| `command_exit_code` | integer or null | no | `null` |
+| `timed_out` | boolean | no | `false` |
+| `duration_ms` | finite number or null | no | `null` |
+| `structured_metrics` | JSON object or null | no | `null` |
+
+The server ignores unknown fields, rejects invalid values for known fields,
+and applies the defaults above. It accepts a missing `text` from earlier v1
+peers as an empty string for compatibility; current CLI requests include the
+field. The CLI does not send `structured_metrics`, but the server accepts it
+for callers that need to attach named metrics. Frames whose payload is not
+valid UTF-8 JSON are kept as plain-text captures using the `CLI pipe` label;
+valid JSON that is not an object returns an error.
+
+Successful responses contain `status: "ok"`, `capture_id`, `label`,
+`line_count`, and `byte_size`; `summary` is included when available. New error
+responses contain `status: "error"`, a stable `code`, and `message`. When the
+CLI receives an error from an earlier v1 server that omits `code`, it assigns
+`socket_request_failed` while preserving the server's message.
+Known socket error codes include `server_starting`, `server_shutting_down`,
+`server_busy`, `socket_admission_failed`, `socket_read_timeout`,
+`invalid_socket_payload`, and the fallback `socket_request_failed`. Unknown
+response fields are ignored, while required fields and their types are
+validated.
+
 Capture tools return a compact JSON summary so an agent can decide whether it
 needs the full output before spending context on retrieval. The summary uses
 `schema_version: 1` and includes `status` (`captured`, `success`, `failed`, or

@@ -78,7 +78,14 @@ from .execution import (
 )
 from .logging_utils import get_logger, log_event
 from .metrics import LocalMetrics
-from .socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
+from .socket_protocol import (
+    FRAME_HEADER_SIZE,
+    SocketRequestError,
+    decode_header,
+    decode_socket_request,
+    encode_frame,
+    encode_socket_response,
+)
 from .admission import (
     ADMISSION_METRICS,
     AdmissionBusy,
@@ -3430,10 +3437,7 @@ async def _write_socket_error(
     message: str,
 ) -> None:
     response_frame = encode_frame(
-        json.dumps(
-            {"status": "error", "code": code, "message": message},
-            separators=(",", ":"),
-        ).encode("utf-8")
+        encode_socket_response({"status": "error", "code": code, "message": message})
     )
     METRICS.record_bytes("socket_response_bytes", len(response_frame))
     writer.write(response_frame)
@@ -3570,30 +3574,21 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 return
             if not data:
                 return
+            # Frame v1 peers predating the JSON contract omitted ``text``;
+            # the original server treated that as an empty capture.
+            request = decode_socket_request(data, allow_legacy_missing_text=True)
+            label = request["label"]
+            text = request["text"]
+            content_type = request["content_type"]
+            truncated = request["truncated"]
+            original_byte_size = request["original_byte_size"]
+            command_exit_code = request["command_exit_code"]
+            timed_out = request["timed_out"]
+            duration_ms = request["duration_ms"]
             try:
-                payload = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                label = "CLI pipe"
-                text = data.decode("utf-8", errors="replace")
-                content_type = "auto"
-                truncated = False
-                original_byte_size = None
-                command_exit_code = None
-                timed_out = False
-                duration_ms = None
-                structured_metrics = None
-            else:
-                if not isinstance(payload, dict):
-                    raise ValueError("socket payload must be a JSON object")
-                label = payload.get("label", "CLI pipe")
-                text = payload.get("text", "")
-                content_type = payload.get("content_type", "auto")
-                truncated = bool(payload.get("truncated", False))
-                original_byte_size = payload.get("original_byte_size")
-                command_exit_code = payload.get("command_exit_code")
-                timed_out = bool(payload.get("timed_out", False))
-                duration_ms = payload.get("duration_ms")
-                structured_metrics = normalize_structured_metrics(payload.get("structured_metrics"))
+                structured_metrics = normalize_structured_metrics(request["structured_metrics"])
+            except (TypeError, ValueError) as exc:
+                raise SocketRequestError(str(exc)) from exc
 
             cap, summary = await _run_admitted_thread(
                 ticket,
@@ -3625,14 +3620,15 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             }
             if summary.get("status") == "ok":
                 resp["summary"] = _summary_payload(summary)
-            response_frame = encode_frame(json.dumps(resp).encode("utf-8"))
+            response_frame = encode_frame(encode_socket_response(resp))
             METRICS.record_bytes("socket_response_bytes", len(response_frame))
             writer.write(response_frame)
             await writer.drain()
         except Exception as e:
             log_event(LOGGER, logging.ERROR, "socket_client_failed", error_type=type(e).__name__)
-            err_resp = {"status": "error", "message": str(e)}
-            response_frame = encode_frame(json.dumps(err_resp).encode("utf-8"))
+            code = "invalid_socket_payload" if isinstance(e, SocketRequestError) else "socket_request_failed"
+            err_resp = {"status": "error", "code": code, "message": str(e)}
+            response_frame = encode_frame(encode_socket_response(err_resp))
             METRICS.record_bytes("socket_response_bytes", len(response_frame))
             writer.write(response_frame)
             await writer.drain()
