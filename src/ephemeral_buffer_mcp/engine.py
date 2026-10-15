@@ -29,6 +29,10 @@ from dataclasses import dataclass, field
 from functools import wraps
 from .logging_utils import get_logger, log_event
 from .metrics import LocalMetrics
+from .schema_versions import (
+    CAPTURE_SUMMARY_SCHEMA_VERSION,
+    CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
+)
 from fastembed import TextEmbedding
 from fastembed.common.model_description import ModelSource, PoolingType
 from .config import (
@@ -56,7 +60,6 @@ MAX_SEARCH_TOP_K = 20
 MAX_SEARCH_CONTEXT_LINES = 100
 MAX_CAPTURE_SLICE_CONTENT_BYTES = 64 * 1024
 CAPTURE_SLICE_SEGMENT_MAX_BYTES = 4 * 1024
-SUMMARY_SCHEMA_VERSION = 1
 TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
 
 
@@ -3048,7 +3051,7 @@ class EphemeralEngine:
 
         summary = {
             "status": "ok",
-            "schema_version": SUMMARY_SCHEMA_VERSION,
+            "schema_version": CAPTURE_SUMMARY_SCHEMA_VERSION,
             "capture_id": capture.capture_id,
             "label": capture.label,
             "source": capture.source,
@@ -3198,7 +3201,10 @@ class EphemeralEngine:
                 )
 
         metadata_before_records = json.dumps(
-            {"schema_version": 1, "sources": sources},
+            {
+                "schema_version": CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
+                "sources": sources,
+            },
             ensure_ascii=False,
             separators=(",", ":"),
         )[:-1] + ',"records":['
@@ -3245,7 +3251,7 @@ class EphemeralEngine:
             + compact_suffix(omitted_count, included_count)
         )
         payload: Dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
             "sources": sources,
             "records": records[:included_count],
             "requested_capture_count": len(requested_ids),
@@ -3261,7 +3267,7 @@ class EphemeralEngine:
             # supplied label). Keep the consolidated capture valid and bounded
             # rather than returning content that the caller cannot ingest.
             payload = {
-                "schema_version": 1,
+                "schema_version": CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
                 "records": [],
                 "omitted_record_count": len(records),
                 "metadata_omitted": True,

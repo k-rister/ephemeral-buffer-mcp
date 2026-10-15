@@ -78,6 +78,10 @@ from .execution import (
 )
 from .logging_utils import get_logger, log_event
 from .metrics import LocalMetrics
+from .schema_versions import (
+    CAPTURE_SUMMARY_SCHEMA_VERSION,
+    TOOL_RESPONSE_SCHEMA_VERSION,
+)
 from .socket_protocol import (
     FRAME_HEADER_SIZE,
     SocketRequestError,
@@ -241,7 +245,9 @@ class ToolErrorEnvelope(BaseModel):
 class ToolResponseEnvelope(BaseModel):
     """Versioned structured result paired with readable MCP text content."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[TOOL_RESPONSE_SCHEMA_VERSION] = (
+        TOOL_RESPONSE_SCHEMA_VERSION
+    )
     status: Literal["ok", "error"]
     data: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[ToolErrorEnvelope] = None
@@ -2360,7 +2366,9 @@ def _summary_payload(summary: Dict[str, Any], include_previews: bool = False) ->
         SUMMARY_LABEL_TRUNCATION_MARKER,
     )
     payload: Dict[str, Any] = {
-        "schema_version": summary.get("schema_version", 1),
+        "schema_version": summary.get(
+            "schema_version", CAPTURE_SUMMARY_SCHEMA_VERSION
+        ),
         "capture_id": summary["capture_id"],
         "label": bounded_label,
         "label_truncated": label_truncated,
