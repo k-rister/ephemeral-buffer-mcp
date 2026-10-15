@@ -24,6 +24,8 @@ EVENT_NAMES = (
     "cleanups",
 )
 
+CAPTURE_REMOVAL_REASONS = ("count", "bytes", "chunks", "clear", "budget")
+
 BYTE_COUNTER_NAMES = (
     "capture_input_bytes",
     "capture_retained_bytes",
@@ -122,6 +124,7 @@ class LocalMetrics:
             "attribution": dict(attribution),
             "tools": defaultdict(cls._new_tool),
             "events": defaultdict(int),
+            "capture_removals_by_reason": defaultdict(int),
             "bytes": defaultdict(int),
             "semantic_index": cls._new_semantic_state(),
             "captured": set(),
@@ -472,6 +475,10 @@ class LocalMetrics:
                 target["scope_key"]: defaultdict(int)
                 for target in target_states
             },
+            "capture_removals_by_scope": {
+                target["scope_key"]: defaultdict(int)
+                for target in target_states
+            },
             "bytes": defaultdict(int),
             "semantic_index": self._new_semantic_state(),
             "result_count": 0,
@@ -552,6 +559,26 @@ class LocalMetrics:
                     target["bytes"][counter] += amount
                 if measurement is not None:
                     measurement["bytes"][counter] += amount
+
+    def record_capture_removal(self, reasons: Iterable[str]) -> None:
+        """Record one removed capture against its fixed, content-free reasons."""
+        reason_names = tuple(dict.fromkeys(reasons))
+        unknown = set(reason_names).difference(CAPTURE_REMOVAL_REASONS)
+        if unknown:
+            raise ValueError(f"unknown capture removal reason: {sorted(unknown)[0]}")
+        if not reason_names:
+            raise ValueError("at least one capture removal reason is required")
+        if self.enabled:
+            with self._lock:
+                measurement = self._active_measurement.get()
+                targets = self._current_scope_states(measurement)
+                for target in targets:
+                    for reason in reason_names:
+                        target["capture_removals_by_reason"][reason] += 1
+                        if measurement is not None:
+                            measurement["capture_removals_by_scope"][
+                                target["scope_key"]
+                            ][reason] += 1
 
     def record_result_count(self, tool: str, count: int) -> None:
         """Record results immediately for ``tool``.
@@ -707,6 +734,10 @@ class LocalMetrics:
             name: runtime_state["events"][name]
             for name in EVENT_NAMES
         }
+        capture_removals_by_reason = {
+            name: runtime_state["capture_removals_by_reason"][name]
+            for name in CAPTURE_REMOVAL_REASONS
+        }
         bytes_snapshot = {
             name: runtime_state["bytes"][name]
             for name in BYTE_COUNTER_NAMES
@@ -726,6 +757,13 @@ class LocalMetrics:
                 ).items():
                     if name in events:
                         events[name] = max(0, events[name] - amount)
+                for name, amount in measurement["capture_removals_by_scope"].get(
+                    runtime_state["scope_key"], {}
+                ).items():
+                    if name in capture_removals_by_reason:
+                        capture_removals_by_reason[name] = max(
+                            0, capture_removals_by_reason[name] - amount
+                        )
                 for name, amount in measurement["bytes"].items():
                     if name in bytes_snapshot:
                         bytes_snapshot[name] = max(0, bytes_snapshot[name] - amount)
@@ -737,6 +775,7 @@ class LocalMetrics:
             "snapshot_at": snapshot_at,
             "tools": tools,
             "events": events,
+            "capture_removals_by_reason": capture_removals_by_reason,
             "bytes": bytes_snapshot,
             "semantic_index": semantic_index,
         }
@@ -1119,6 +1158,13 @@ class LocalMetrics:
                         )
                         for name in EVENT_NAMES
                     },
+                    "capture_removals_by_reason": {
+                        name: self._delta_value(
+                            current_state["capture_removals_by_reason"].get(name, 0),
+                            baseline["capture_removals_by_reason"].get(name, 0),
+                        )
+                        for name in CAPTURE_REMOVAL_REASONS
+                    },
                     "bytes": {
                         name: self._delta_value(
                             current_state["bytes"].get(name, 0),
@@ -1186,6 +1232,7 @@ class LocalMetrics:
                     for name, stats in state["tools"].items()
                 },
                 "events": state["events"],
+                "capture_removals_by_reason": state["capture_removals_by_reason"],
                 "bytes": state["bytes"],
                 "semantic_index": self._public_semantic_index(state["semantic_index"]),
                 "workflow_effectiveness": self._workflow_effectiveness(

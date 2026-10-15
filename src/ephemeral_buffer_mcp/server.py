@@ -58,6 +58,7 @@ from .mcpserver_adapter import (
     register_tool as _register_mcpserver_tool,
 )
 from .engine import (
+    MAX_CAPTURE_EVICTION_DETAILS,
     MAX_CAPTURE_SLICE_CONTENT_BYTES,
     CAPTURE_SLICE_SEGMENT_MAX_BYTES,
     EphemeralEngine,
@@ -2365,6 +2366,15 @@ def _summary_payload(summary: Dict[str, Any], include_previews: bool = False) ->
         SUMMARY_LABEL_MAX_BYTES,
         SUMMARY_LABEL_TRUNCATION_MARKER,
     )
+    evicted_captures = summary.get("evicted_captures", [])
+    evicted_captures_omitted = max(
+        0, summary.get("evicted_captures_omitted", 0)
+    )
+    if len(evicted_captures) > MAX_CAPTURE_EVICTION_DETAILS:
+        evicted_captures_omitted += (
+            len(evicted_captures) - MAX_CAPTURE_EVICTION_DETAILS
+        )
+        evicted_captures = evicted_captures[:MAX_CAPTURE_EVICTION_DETAILS]
     payload: Dict[str, Any] = {
         "schema_version": summary.get(
             "schema_version", CAPTURE_SUMMARY_SCHEMA_VERSION
@@ -2390,6 +2400,8 @@ def _summary_payload(summary: Dict[str, Any], include_previews: bool = False) ->
         "errors": summary.get("errors", []),
         "warnings": summary.get("warnings", []),
         "structured_metrics": summary.get("structured_metrics", {}),
+        "evicted_captures": list(evicted_captures),
+        "evicted_captures_omitted": evicted_captures_omitted,
         "retrieval": {
             "search": f"search_capture(query='...', capture_id='{summary['capture_id']}')",
             "slice": f"get_capture_slice(start_line=..., end_line=..., capture_id='{summary['capture_id']}')",
@@ -3222,6 +3234,10 @@ def get_buffer_stats() -> str:
     admission_rejected_by_type = json.dumps(
         stats.get("admission_rejected_by_type", {}), sort_keys=True
     )
+    capture_removal_counts = stats.get(
+        "capture_removals_by_reason",
+        {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
+    )
     result = (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
@@ -3235,6 +3251,7 @@ def get_buffer_stats() -> str:
         f"{stats.get('admission_max_queued_socket_clients', 0)} queued\n"
         f"Foreground work by type: active={admission_active_by_type}, "
         f"queued={admission_queued_by_type}, rejected={admission_rejected_by_type}\n"
+        f"Capture removals by reason: {json.dumps(capture_removal_counts, sort_keys=True)}\n"
         f"Deferred storage: {stats.get('deferred_storage_capture_count', 0)} captures, "
         f"{stats.get('deferred_storage_readers', 0)} readers, "
         f"{stats.get('deferred_storage_bytes', 0):,} accounted bytes\n"

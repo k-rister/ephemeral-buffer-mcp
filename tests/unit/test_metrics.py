@@ -35,6 +35,53 @@ class TestMetrics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown event: secret-event"):
             metrics.record_event("secret-event")
 
+    def test_capture_removal_reasons_are_fixed_and_validated(self):
+        metrics = LocalMetrics(enabled=True)
+
+        with self.assertRaisesRegex(ValueError, "unknown capture removal reason"):
+            metrics.record_capture_removal(("unknown",))
+        with self.assertRaisesRegex(ValueError, "at least one capture removal reason"):
+            metrics.record_capture_removal(())
+
+    def test_capture_removal_reasons_are_scoped_and_delta_aware(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope(
+            "client-a",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-a"},
+        ):
+            baseline = metrics.snapshot(include_snapshot_token=True)
+            with metrics.measure("capture_text"):
+                metrics.record_capture_removal(("count", "bytes", "chunks"))
+                metrics.record_capture_removal(("clear",))
+                metrics.record_capture_removal(("budget",))
+                in_flight = metrics.snapshot(
+                    since_snapshot=baseline["snapshot_token"]
+                )
+                self.assertEqual(
+                    in_flight["capture_removals_by_reason"],
+                    {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
+                )
+            delta = metrics.snapshot(since_snapshot=in_flight["snapshot_token"])
+
+        self.assertEqual(
+            delta["capture_removals_by_reason"],
+            {"count": 1, "bytes": 1, "chunks": 1, "clear": 1, "budget": 1},
+        )
+        process = metrics.snapshot(scope_key="process")
+        self.assertEqual(
+            process["capture_removals_by_reason"],
+            {"count": 1, "bytes": 1, "chunks": 1, "clear": 1, "budget": 1},
+        )
+        with metrics.bind_scope(
+            "client-b",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-b"},
+        ):
+            client_b = metrics.snapshot()
+        self.assertEqual(
+            client_b["capture_removals_by_reason"],
+            {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
+        )
+
     def test_scoped_compatibility_views_and_measurement_handle(self):
         disabled = LocalMetrics(enabled=False)
         with disabled.bind_scope("disabled-client"):

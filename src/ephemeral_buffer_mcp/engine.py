@@ -28,7 +28,7 @@ from typing import Callable, List, Dict, Any, Optional, Tuple, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
 from .logging_utils import get_logger, log_event
-from .metrics import LocalMetrics
+from .metrics import CAPTURE_REMOVAL_REASONS, LocalMetrics
 from .schema_versions import (
     CAPTURE_SUMMARY_SCHEMA_VERSION,
     CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
@@ -60,6 +60,7 @@ MAX_SEARCH_TOP_K = 20
 MAX_SEARCH_CONTEXT_LINES = 100
 MAX_CAPTURE_SLICE_CONTENT_BYTES = 64 * 1024
 CAPTURE_SLICE_SEGMENT_MAX_BYTES = 4 * 1024
+MAX_CAPTURE_EVICTION_DETAILS = 25
 TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
 
 
@@ -748,6 +749,10 @@ class _CaptureState:
     # construction compatibility for the state record.
     deferred_storage_tracked: bool = False
     deferred_storage_accounted_bytes: int = 0
+    # Admission details are retained with the new capture so its immediate
+    # response can identify exactly which captures were displaced.
+    evicted_captures: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    evicted_captures_omitted: int = 0
 
     @property
     def line_count(self) -> int:
@@ -803,6 +808,8 @@ class CaptureView:
     source: str
     duration_ms: Optional[float]
     structured_metrics: Mapping[str, Any]
+    evicted_captures: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    evicted_captures_omitted: int = 0
 
     @property
     def byte_size(self) -> int:
@@ -977,6 +984,8 @@ class EphemeralEngine:
             "previous": self.max_indexed_chunks,
             "effective": self.max_indexed_chunks,
             "evicted_captures": 0,
+            "evicted_capture_details": [],
+            "evicted_capture_details_omitted": 0,
         }
         self._next_id = 1
         self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
@@ -1043,6 +1052,9 @@ class EphemeralEngine:
         self.embedding_warmup_failure = None
         self._embedding_warmup_thread: Optional[threading.Thread] = None
         self.metrics = metrics or LocalMetrics(enabled=False)
+        self._capture_removals_by_reason = dict.fromkeys(
+            CAPTURE_REMOVAL_REASONS, 0
+        )
         self._metrics_snapshot_callback: Optional[Callable[[], None]] = None
         self._metrics_snapshot_pending = False
         self.semantic_prefetch_enabled = (
@@ -1460,18 +1472,24 @@ class EphemeralEngine:
             projected_count = len(self.capture_order) + 1
             projected_bytes = self._total_bytes + capture.retained_byte_size
             projected_chunks = self._indexed_chunks + len(capture.chunks)
-            eviction_ids: List[str] = []
+
+            def exceeded_reasons() -> Tuple[str, ...]:
+                return tuple(
+                    reason
+                    for reason, exceeded in (
+                        ("count", projected_count > self.max_captures),
+                        ("bytes", projected_bytes > self.max_buffer_bytes),
+                        ("chunks", projected_chunks > self.max_indexed_chunks),
+                    )
+                    if exceeded
+                )
+
             for candidate_id in self.capture_order:
-                if not (
-                    projected_count > self.max_captures
-                    or projected_bytes > self.max_buffer_bytes
-                    or projected_chunks > self.max_indexed_chunks
-                ):
+                if not exceeded_reasons():
                     break
                 if candidate_id in protected_ids:
                     continue
                 old_cap = self._captures[candidate_id]
-                eviction_ids.append(candidate_id)
                 projected_count -= 1
                 projected_bytes -= old_cap.retained_byte_size
                 projected_chunks -= len(old_cap.chunks)
@@ -1486,8 +1504,34 @@ class EphemeralEngine:
                     f"(count={len(protected_ids)})"
                 )
 
-            for evicted_id in eviction_ids:
-                self._evict_capture_locked(evicted_id)
+            # The preflight pass proved admission can succeed. Repeat the LRU
+            # selection while removing captures, retaining only bounded public
+            # details instead of a second unbounded eviction plan.
+            projected_count = len(self.capture_order) + 1
+            projected_bytes = self._total_bytes + capture.retained_byte_size
+            projected_chunks = self._indexed_chunks + len(capture.chunks)
+            evicted_details: List[Tuple[str, Tuple[str, ...]]] = []
+            evicted_count = 0
+            while exceeded_reasons():
+                evicted_id = next(
+                    (
+                        candidate_id
+                        for candidate_id in self.capture_order
+                        if candidate_id not in protected_ids
+                    )
+                )
+                reasons = exceeded_reasons()
+                old_cap = self._captures[evicted_id]
+                self._evict_capture_locked(evicted_id, reasons)
+                evicted_count += 1
+                if len(evicted_details) < MAX_CAPTURE_EVICTION_DETAILS:
+                    evicted_details.append((evicted_id, reasons))
+                projected_count -= 1
+                projected_bytes -= old_cap.retained_byte_size
+                projected_chunks -= len(old_cap.chunks)
+
+            capture.evicted_captures = tuple(evicted_details)
+            capture.evicted_captures_omitted = evicted_count - len(evicted_details)
 
             if self.lexical_backend == "fts5":
                 # Captures may be ingested by the CLI socket listener thread
@@ -1524,7 +1568,34 @@ class EphemeralEngine:
         self._schedule_semantic_prefetch(capture)
         return capture
 
-    def _evict_capture_locked(self, capture_id: str) -> bool:
+    def _record_capture_removal_locked(
+        self,
+        capture_id: str,
+        capture: _CaptureState,
+        reasons: Tuple[str, ...],
+        *,
+        event_name: str,
+    ) -> None:
+        """Record bounded reasons for one removed capture under ``self._lock``."""
+        for reason in reasons:
+            self._capture_removals_by_reason[reason] += 1
+        self.metrics.record_capture_removal(reasons)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            event_name,
+            capture_id=capture_id,
+            capture_bytes=capture.byte_size,
+            label_bytes=capture.label_byte_size,
+            retained_bytes=capture.retained_byte_size,
+            removal_reasons=list(reasons),
+        )
+
+    def _evict_capture_locked(
+        self,
+        capture_id: str,
+        reasons: Tuple[str, ...],
+    ) -> bool:
         """Evict one capture; the caller must hold ``self._lock``."""
         self.capture_order.pop(capture_id, None)
         old_cap = self._captures.pop(capture_id, None)
@@ -1532,14 +1603,11 @@ class EphemeralEngine:
             return False
         self._total_bytes -= old_cap.retained_byte_size
         self._indexed_chunks -= len(old_cap.chunks)
-        log_event(
-            LOGGER,
-            logging.INFO,
-            "capture_evicted",
-            capture_id=capture_id,
-            capture_bytes=old_cap.byte_size,
-            label_bytes=old_cap.label_byte_size,
-            retained_bytes=old_cap.retained_byte_size,
+        self._record_capture_removal_locked(
+            capture_id,
+            old_cap,
+            reasons,
+            event_name="capture_evicted",
         )
         old_cap.semantic_index_state = "evicted"
         self._mark_semantic_job_disposition_locked(capture_id, "evicted")
@@ -1557,20 +1625,30 @@ class EphemeralEngine:
             raise ValueError("max_indexed_chunks must be a positive integer")
         previous = self.max_indexed_chunks
         self.max_indexed_chunks = new_limit
-        evicted = 0
+        evicted_count = 0
+        evicted_details: List[Dict[str, Any]] = []
         while self._indexed_chunks > new_limit and self.capture_order:
             candidate_id = next(iter(self.capture_order))
-            evicted += int(self._evict_capture_locked(candidate_id))
+            if self._evict_capture_locked(candidate_id, ("budget",)):
+                evicted_count += 1
+                if len(evicted_details) < MAX_CAPTURE_EVICTION_DETAILS:
+                    evicted_details.append(
+                        {"capture_id": candidate_id, "reasons": ["budget"]}
+                    )
         result = {
             "status": "unchanged" if previous == new_limit else "updated",
             "previous": previous,
             "effective": new_limit,
             "indexed_chunks": self._indexed_chunks,
             "remaining_indexed_chunks": new_limit - self._indexed_chunks,
-            "evicted_captures": evicted,
+            "evicted_captures": evicted_count,
+            "evicted_capture_details": evicted_details,
+            "evicted_capture_details_omitted": max(
+                0, evicted_count - len(evicted_details)
+            ),
         }
         self._last_index_budget_adjustment = result
-        return dict(result)
+        return copy.deepcopy(result)
 
     def _record_semantic_job_metrics_locked(
         self,
@@ -2097,6 +2175,8 @@ class EphemeralEngine:
             source=capture.source,
             duration_ms=capture.duration_ms,
             structured_metrics=structured_metrics,
+            evicted_captures=capture.evicted_captures,
+            evicted_captures_omitted=capture.evicted_captures_omitted,
         )
 
     @synchronized
@@ -2437,10 +2517,17 @@ class EphemeralEngine:
 
         capture = self._acquire_capture_reader(capture_id)
         if not capture:
+            with self._lock:
+                buffer_is_empty = not self._captures
+            buffer_detail = (
+                "Buffer is currently empty."
+                if buffer_is_empty
+                else "Other captures remain in the buffer."
+            )
             return {
                 "status": "error",
                 "error_code": "capture_not_found",
-                "message": f"No capture found for ID '{capture_id}'. Buffer is currently empty."
+                "message": f"No capture found for ID '{capture_id}'. {buffer_detail}",
             }
 
         try:
@@ -3079,6 +3166,11 @@ class EphemeralEngine:
             "errors": _signal_details(signals, {"error", "exception", "failure", "timeout", "conflicts"}),
             "warnings": _signal_details(signals, {"warning"}),
             "structured_metrics": dict(capture.structured_metrics),
+            "evicted_captures": [
+                {"capture_id": capture_id, "reasons": list(reasons)}
+                for capture_id, reasons in capture.evicted_captures
+            ],
+            "evicted_captures_omitted": capture.evicted_captures_omitted,
         }
         if include_previews:
             summary["head_preview"] = _bounded_preview(
@@ -3299,6 +3391,7 @@ class EphemeralEngine:
         admission = admission_snapshot()
         return {
             "capture_count": len(self._captures),
+            "capture_removals_by_reason": dict(self._capture_removals_by_reason),
             "max_captures": self.max_captures,
             "total_lines": total_lines,
             "total_chunks": total_chunks,
@@ -3308,7 +3401,9 @@ class EphemeralEngine:
             "semantic_chunk_overlap": self.semantic_chunk_overlap,
             "indexed_chunks": self._indexed_chunks,
             "max_indexed_chunks": self.max_indexed_chunks,
-            "last_index_budget_adjustment": dict(self._last_index_budget_adjustment),
+            "last_index_budget_adjustment": copy.deepcopy(
+                self._last_index_budget_adjustment
+            ),
             "remaining_indexed_chunks": self.max_indexed_chunks - self._indexed_chunks,
             "total_bytes": self._total_bytes,
             "max_buffer_bytes": self.max_buffer_bytes,
@@ -3367,6 +3462,12 @@ class EphemeralEngine:
         if capture_id == "all":
             capture_ids = list(self._captures)
             for cap in self._captures.values():
+                self._record_capture_removal_locked(
+                    cap.capture_id,
+                    cap,
+                    ("clear",),
+                    event_name="capture_cleared",
+                )
                 self._mark_semantic_job_disposition_locked(cap.capture_id, "cleared")
                 self._cancel_prefetch(cap.capture_id, outcome="cleared")
                 self._cancel_on_demand_job(cap.capture_id, outcome="cleared")
@@ -3382,6 +3483,12 @@ class EphemeralEngine:
             return "Cleared all captures from ephemeral buffer."
         elif capture_id in self._captures:
             cap = self._captures.pop(capture_id)
+            self._record_capture_removal_locked(
+                capture_id,
+                cap,
+                ("clear",),
+                event_name="capture_cleared",
+            )
             self._mark_semantic_job_disposition_locked(capture_id, "cleared")
             self._cancel_prefetch(capture_id, outcome="cleared")
             self._cancel_on_demand_job(capture_id, outcome="cleared")

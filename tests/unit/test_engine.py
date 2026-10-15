@@ -32,6 +32,7 @@ from ephemeral_buffer_mcp.engine import (
     register_bundled_embedding_models,
     _CaptureState,
     EphemeralEngine,
+    MAX_CAPTURE_EVICTION_DETAILS,
     MAX_SEARCH_TOP_K,
     PREVIEW_MAX_BYTES,
     SEARCH_SNIPPET_MAX_BYTES,
@@ -1219,6 +1220,9 @@ STEP 3: Summary
 
     def test_05_lru_buffer_eviction(self):
         # max_captures is 3 for this focused eviction test
+        previous_count_evictions = self.engine.get_buffer_stats()[
+            "capture_removals_by_reason"
+        ]["count"]
         self.engine.clear("all")
         self.assertEqual(len(self.engine._captures), 0)
 
@@ -1228,7 +1232,7 @@ STEP 3: Summary
 
         # Refresh Run 1 so Run 2 becomes the least recently used capture.
         self.engine.get_summary(initial_captures[0].capture_id)
-        with self.assertLogs("ephemeral_buffer.engine", level="INFO") as events:
+        with patch("ephemeral_buffer_mcp.engine.log_event") as logged_events:
             self.engine._ingest_state("Content for run 4\nDone 4", label="Run 4")
             self.engine._ingest_state("Content for run 5\nDone 5", label="Run 5")
 
@@ -1241,8 +1245,18 @@ STEP 3: Summary
         self.assertIn("Run 1", labels)
         self.assertNotIn("Run 2", labels)
         self.assertNotIn("Run 3", labels)
-        self.assertGreaterEqual(
-            sum("capture_evicted" in event for event in events.output),
+        eviction_events = [
+            event
+            for event in logged_events.call_args_list
+            if event.args[2] == "capture_evicted"
+        ]
+        self.assertGreaterEqual(len(eviction_events), 2)
+        self.assertTrue(
+            any("count" in event.kwargs["removal_reasons"] for event in eviction_events)
+        )
+        self.assertEqual(
+            self.engine.get_buffer_stats()["capture_removals_by_reason"]["count"]
+            - previous_count_evictions,
             2,
         )
         print("\n[LRU Eviction Passed] Least recently used captures evicted, memory bound maintained.")
@@ -1420,6 +1434,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(stats["total_bytes"], second.retained_byte_size + third.retained_byte_size)
             self.assertEqual(stats["max_buffer_bytes"], 50)
             self.assertNotIn(first.capture_id, self.engine._captures)
+            self.assertGreaterEqual(
+                stats["capture_removals_by_reason"]["bytes"], 1
+            )
 
             with self.assertRaises(ValueError):
                 self.engine._ingest_state("x" * 100, label="oversized")
@@ -1516,6 +1533,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         stats = engine.get_buffer_stats()
         self.assertEqual(stats["indexed_chunks"], 3)
         self.assertEqual(stats["remaining_indexed_chunks"], 0)
+        self.assertGreaterEqual(stats["capture_removals_by_reason"]["chunks"], 1)
 
         rejecting = EphemeralEngine(max_captures=1, max_indexed_chunks=2)
         with self.assertRaisesRegex(ValueError, "indexed chunks"):
@@ -1533,10 +1551,23 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["effective"], 3)
         self.assertEqual(result["evicted_captures"], 1)
+        self.assertEqual(
+            result["evicted_capture_details"],
+            [{"capture_id": second.capture_id, "reasons": ["budget"]}],
+        )
+        result["evicted_capture_details"][0]["reasons"].append("caller-mutation")
+        self.assertEqual(
+            engine.get_buffer_stats()["last_index_budget_adjustment"][
+                "evicted_capture_details"
+            ],
+            [{"capture_id": second.capture_id, "reasons": ["budget"]}],
+        )
         self.assertNotIn(first.capture_id, engine._captures)
         self.assertNotIn(second.capture_id, engine._captures)
         self.assertIn(third.capture_id, engine._captures)
-        self.assertEqual(engine.get_buffer_stats()["indexed_chunks"], 3)
+        stats = engine.get_buffer_stats()
+        self.assertEqual(stats["indexed_chunks"], 3)
+        self.assertEqual(stats["capture_removals_by_reason"]["budget"], 1)
 
     def test_runtime_index_budget_rejects_invalid_values(self):
         engine = EphemeralEngine(max_indexed_chunks=3)
@@ -1544,10 +1575,76 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             with self.assertRaises(ValueError):
                 engine.set_max_indexed_chunks(value)
 
+    def test_runtime_budget_adjustment_bounds_eviction_details(self):
+        engine = EphemeralEngine(
+            max_captures=100,
+            max_indexed_chunks=100,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        for index in range(40):
+            engine._ingest_state("payload", label=f"capture-{index}")
+
+        result = engine.set_max_indexed_chunks(1)
+
+        self.assertEqual(result["evicted_captures"], 39)
+        self.assertEqual(
+            len(result["evicted_capture_details"]),
+            MAX_CAPTURE_EVICTION_DETAILS,
+        )
+        self.assertEqual(result["evicted_capture_details_omitted"], 14)
+        self.assertEqual(
+            engine.get_buffer_stats()["last_index_budget_adjustment"][
+                "evicted_capture_details_omitted"
+            ],
+            14,
+        )
+
     def test_eviction_of_missing_capture_is_reported_without_mutation(self):
         engine = EphemeralEngine(max_indexed_chunks=3, embedding_warmup=False)
         with engine._lock:
-            self.assertFalse(engine._evict_capture_locked("missing"))
+            self.assertFalse(engine._evict_capture_locked("missing", ("count",)))
+
+    def test_eviction_records_every_limit_exceeded_for_each_removed_capture(self):
+        engine = EphemeralEngine(
+            max_captures=1,
+            max_buffer_bytes=50,
+            embedding_warmup=False,
+        )
+        first = engine._ingest_state("a" * 30, label="first")
+        with patch("ephemeral_buffer_mcp.engine.log_event") as logged_events:
+            second, summary = engine.ingest_with_summary("b" * 30, label="second")
+
+        self.assertNotIn(first.capture_id, engine._captures)
+        self.assertIn(second.capture_id, engine._captures)
+        self.assertEqual(
+            second.evicted_captures,
+            ((first.capture_id, ("count", "bytes")),),
+        )
+        expected_details = [
+            {"capture_id": first.capture_id, "reasons": ["count", "bytes"]}
+        ]
+        self.assertEqual(summary["evicted_captures"], expected_details)
+        self.assertEqual(
+            engine.get_summary(second.capture_id)["evicted_captures"],
+            expected_details,
+        )
+        reasons = engine.get_buffer_stats()["capture_removals_by_reason"]
+        self.assertEqual(reasons["count"], 1)
+        self.assertEqual(reasons["bytes"], 1)
+        self.assertEqual(reasons["chunks"], 0)
+        self.assertEqual(reasons["clear"], 0)
+        self.assertEqual(reasons["budget"], 0)
+        eviction_events = [
+            event
+            for event in logged_events.call_args_list
+            if event.args[2] == "capture_evicted"
+        ]
+        self.assertEqual(len(eviction_events), 1)
+        self.assertEqual(
+            eviction_events[0].kwargs["removal_reasons"],
+            ["count", "bytes"],
+        )
 
     def test_runtime_index_budget_adjustment_serializes_with_ingest(self):
         engine = EphemeralEngine(max_indexed_chunks=6, embedding_warmup=False)
@@ -2939,6 +3036,27 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             f"Cleared capture '{capture.capture_id}'.",
         )
         self.assertEqual(engine.clear(capture.capture_id), f"Capture '{capture.capture_id}' not found.")
+        self.assertEqual(
+            engine.get_buffer_stats()["capture_removals_by_reason"]["clear"],
+            1,
+        )
+        engine._ingest_state("first clear-all payload")
+        engine._ingest_state("second clear-all payload")
+        self.assertEqual(engine.clear("all"), "Cleared all captures from ephemeral buffer.")
+        self.assertEqual(
+            engine.get_buffer_stats()["capture_removals_by_reason"]["clear"],
+            3,
+        )
+
+    def test_search_missing_capture_message_distinguishes_empty_buffer(self):
+        engine = EphemeralEngine(max_captures=2, embedding_warmup=False)
+        empty = engine.search("query", capture_id="missing")
+        self.assertIn("Buffer is currently empty.", empty["message"])
+
+        engine._ingest_state("active capture")
+        nonempty = engine.search("query", capture_id="missing")
+        self.assertIn("Other captures remain in the buffer.", nonempty["message"])
+        self.assertNotIn("Buffer is currently empty.", nonempty["message"])
 
     def test_empty_capture_reader_returns_none(self):
         engine = EphemeralEngine(max_captures=1, embedding_model_name="test")
