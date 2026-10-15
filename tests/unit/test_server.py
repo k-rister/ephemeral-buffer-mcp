@@ -1106,6 +1106,83 @@ class TestServerTools(unittest.TestCase):
         self.assertIn(source_ids[0], server.search_capture("alpha", capture_id=result["capture_id"]))
         self.assertIn("source_line", server.get_capture_slice(1, 100, capture_id=result["capture_id"]))
 
+    def test_capture_responses_identify_admission_evictions(self):
+        from ephemeral_buffer_mcp.engine import EphemeralEngine
+
+        engine = EphemeralEngine(
+            max_captures=1,
+            max_buffer_bytes=50,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        token = server._ENGINE_OVERRIDE.set(engine)
+        try:
+            first = json.loads(server.capture_text("a" * 30, label="first"))
+            second = json.loads(server.capture_text("b" * 30, label="second"))
+        finally:
+            server._ENGINE_OVERRIDE.reset(token)
+            engine.shutdown()
+
+        self.assertEqual(
+            second["evicted_captures"],
+            [{"capture_id": first["capture_id"], "reasons": ["count", "bytes"]}],
+        )
+
+    def test_capture_response_bounds_bulk_eviction_details(self):
+        from ephemeral_buffer_mcp.engine import EphemeralEngine
+
+        engine = EphemeralEngine(
+            max_captures=100,
+            max_buffer_bytes=1024,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        token = server._ENGINE_OVERRIDE.set(engine)
+        try:
+            for _ in range(40):
+                server.capture_text("x", label="old")
+            engine.max_buffer_bytes = 20
+            response = json.loads(server.capture_text("n", label="new"))
+            capture = engine._captures[response["capture_id"]]
+        finally:
+            server._ENGINE_OVERRIDE.reset(token)
+            engine.shutdown()
+
+        self.assertEqual(len(response["evicted_captures"]), server.MAX_CAPTURE_EVICTION_DETAILS)
+        self.assertEqual(response["evicted_captures_omitted"], 36 - server.MAX_CAPTURE_EVICTION_DETAILS)
+        self.assertEqual(len(capture.evicted_captures), server.MAX_CAPTURE_EVICTION_DETAILS)
+        self.assertEqual(
+            capture.evicted_captures_omitted,
+            response["evicted_captures_omitted"],
+        )
+        self.assertLess(len(json.dumps(response).encode("utf-8")), 8192)
+
+    def test_consolidation_response_identifies_unrelated_evictions(self):
+        from ephemeral_buffer_mcp.engine import EphemeralEngine
+
+        engine = EphemeralEngine(
+            max_captures=3,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        token = server._ENGINE_OVERRIDE.set(engine)
+        try:
+            unrelated = json.loads(server.capture_text("unrelated", label="unrelated"))
+            source_a = json.loads(server.capture_text("alpha", label="source-a"))
+            source_b = json.loads(server.capture_text("beta", label="source-b"))
+            consolidated = json.loads(server.consolidate_captures(
+                [source_a["capture_id"], source_b["capture_id"]],
+                max_bytes=2048,
+            ))
+        finally:
+            server._ENGINE_OVERRIDE.reset(token)
+            engine.shutdown()
+
+        self.assertEqual(
+            consolidated["evicted_captures"],
+            [{"capture_id": unrelated["capture_id"], "reasons": ["count"]}],
+        )
+
     def test_consolidated_json_uses_current_schema_version(self):
         server.capture_text("schema version", label="schema-version")
         source_id = server.engine.list_captures()[0]["capture_id"]
@@ -1242,6 +1319,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Captures:", result)
         self.assertIn("Foreground work:", result)
         self.assertIn("rejected=", result)
+        self.assertIn("Capture removals by reason: {", result)
         self.assertIn("Deferred storage:", result)
         self.assertIn("Embedding bytes:", result)
         self.assertIn("Embedding model:", result)
@@ -1467,6 +1545,10 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["scope"], "process")
+        self.assertEqual(
+            payload["capture_removals_by_reason"],
+            {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
+        )
         self.assertIn("started_at", payload)
         self.assertIn("snapshot_at", payload)
         self.assertEqual(payload["interface_coverage"]["available"], 22)
@@ -1504,6 +1586,10 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(delta["tools"]["capture_text"]["calls"], 1)
         self.assertEqual(delta["tools"]["get_usage_metrics"]["calls"], 1)
         self.assertEqual(delta["events"]["captures"], 1)
+        self.assertEqual(
+            delta["capture_removals_by_reason"],
+            {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
+        )
         self.assertEqual(delta["interface_coverage"]["used"], 2)
         self.assertIn("snapshot_token", delta)
 
@@ -2151,6 +2237,24 @@ class TestServerTools(unittest.TestCase):
         })
 
         self.assertEqual(payload["schema_version"], CAPTURE_SUMMARY_SCHEMA_VERSION)
+        self.assertEqual(payload["evicted_captures"], [])
+        self.assertEqual(payload["evicted_captures_omitted"], 0)
+
+    def test_summary_payload_caps_eviction_details_and_accumulates_omissions(self):
+        details = [
+            {"capture_id": f"cap-{index}", "reasons": ["bytes"]}
+            for index in range(server.MAX_CAPTURE_EVICTION_DETAILS + 5)
+        ]
+        payload = server._summary_payload({
+            "status": "ok",
+            "capture_id": "cap-summary-evictions",
+            "label": "summary evictions",
+            "evicted_captures": details,
+            "evicted_captures_omitted": 2,
+        })
+
+        self.assertEqual(len(payload["evicted_captures"]), server.MAX_CAPTURE_EVICTION_DETAILS)
+        self.assertEqual(payload["evicted_captures_omitted"], 7)
 
     def test_summary_json_accepts_capture_view(self):
         capture = server.engine.ingest("summary json payload", label="summary-json")

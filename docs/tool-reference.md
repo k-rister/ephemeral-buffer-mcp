@@ -30,10 +30,10 @@ sections for full workflows.
 | `search_capture(query, mode='hybrid', capture_id='latest', top_k=5, context_lines=3)` | Hybrid/BM25/Semantic search over the selected capture. BM25 splits underscores and punctuation—including regex-like characters—into alphanumeric terms, then combines those terms with OR. For example, `database_connection` searches for `database` or `connection`, not one underscore-containing term. Hybrid ranking gives lexical matches priority over semantic-only matches. Returns bounded match snippets, exact numeric context boundaries, bounded raw-context previews, line numbers, and whether the match came from the lexical or semantic chunk grid. `top_k` is limited to 20 and `context_lines` to 100. The complete structured MCP result is capped at 64 KiB; use `get_capture_slice` for omitted content. Hybrid search waits at most `EPHEMERAL_SEMANTIC_WAIT_SECONDS` for a large capture's semantic index and otherwise returns lexical results marked `semantic pending`; repeat the search for hybrid ranking. Captures beyond the semantic-input budget return BM25 results with semantic coverage `unavailable`. |
 | `get_capture_slice(start_line, end_line, capture_id='latest', max_bytes=65536, cursor=None)` | Retrieves one byte-bounded page from a 1-indexed line range. A long line can continue across pages; repeat the original range and pass back `next_cursor` until it is null. `max_bytes` bounds the serialized MCP result and must be between 4 KiB and 64 KiB. The cursor is opaque; each segment reports a zero-based UTF-8 byte offset within its line, and pages never split a Unicode character. Joining `structuredContent.data.content` from successive pages reconstructs the retained newline-joined text exactly. |
 | `get_capture_summary(capture_id='latest', include_previews=False)` | Returns the compact JSON summary; opt into bounded head/tail previews only when needed. |
-| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, semantic memory limits, accounted bytes, and process RSS. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
+| `get_buffer_stats()` | Reports aggregate capture count, content bytes, lines, chunks, embedding model readiness, embedding bytes, semantic memory limits, accounted bytes, and process RSS. It always includes fixed `capture_removals_by_reason` counts for `count`, `bytes`, `chunks`, `clear`, and `budget`; overlapping limit reasons increment each matching count. When local metrics are enabled, it also includes the content-free metrics snapshot for the active MCP session (or the aggregate process scope for direct calls). |
 | `get_runtime_diagnostics()` | Opt-in, content-free report of runtime version, platform, uptime, socket and durable-state identity, durability, startup setting values and origins, active log file and level, buffer limits, embedding readiness, and process memory. |
-| `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, and scope- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
-| `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. |
+| `get_usage_metrics(since=None)` | Returns a versioned, content-free JSON snapshot of local usage metrics, including interface coverage, per-tool counters, workflow events, byte counters, fixed `capture_removals_by_reason` counts, and scope- or task-window measurement timestamps. Pass a prior `snapshot_token` as `since` for a task-window delta. |
+| `set_semantic_index_budget(max_indexed_chunks)` | Adjusts the session's semantic-index chunk budget when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1`; decreases evict least-recently-used captures as needed. The result includes the total count, up to 25 ID/reason entries in `evicted_capture_details`, and an `evicted_capture_details_omitted` count. |
 | `list_captures()` | Lists active captures in the ring buffer. |
 | `clear_captures(capture_id='all')` | Clears buffer. |
 
@@ -80,9 +80,12 @@ needs the full output before spending context on retrieval. The summary uses
 `schema_version: 1` and includes `status` (`captured`, `success`, `failed`, or
 `timed_out`), `duration_ms`, retained and original byte sizes, approximate
 token counts, truncation and partial-execution flags, typed warning/error
-signals, and bounded caller-provided `structured_metrics`. The token values
-are deterministic planning estimates based on four UTF-8 bytes per token;
-they are not provider billing counts. Use `get_capture_summary` for the
+signals, bounded caller-provided `structured_metrics`, and `evicted_captures`.
+That array contains up to 25 IDs and all applicable cap reasons for captures
+removed to admit the new capture. `evicted_captures_omitted` reports any
+additional removals; the array is empty and the count is zero when none occur.
+The token values are deterministic planning estimates based on four UTF-8 bytes
+per token; they are not provider billing counts. Use `get_capture_summary` for the
 compact form, set `include_previews=True` only when a head/tail sample is
 useful, and use `get_capture_slice` or `search_capture` for complete or
 targeted content. Diff file maps are also bounded and report omitted entries;
@@ -98,6 +101,9 @@ Stable retrieval and search error codes include `capture_not_found`,
 `invalid_range`, `invalid_cursor`, `invalid_byte_budget`,
 `response_budget_too_small`, `invalid_query`, `query_too_large`, and
 `unsupported_search_mode`.
+
+When `capture_not_found` is returned, the message says the buffer is empty
+only if no captures remain; otherwise it says that other captures remain.
 
 ### Response schema versioning
 
@@ -366,6 +372,12 @@ the original source IDs; use those original IDs to retrieve complete detail
 when the consolidated byte budget is reached. Calling the tool without
 `capture_ids` consolidates the currently active captures, up to
 `max_captures`.
+
+Consolidated captures count against the global capture-count, retained-byte,
+and indexed-chunk limits. Admission may evict unrelated least-recently-used
+captures to make room; the returned `evicted_captures` array identifies them
+and lists every applicable reason. `get_buffer_stats` also reports aggregate
+removal counts by reason.
 
 This workflow keeps the server responsible for bounded execution, storage, and
 retrieval while leaving prioritization and interpretation to the coding agent.

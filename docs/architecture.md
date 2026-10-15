@@ -43,6 +43,14 @@ index-chunk budget. When a new capture would exceed a configured limit, least-
 recently-used captures are evicted to make room when possible; an individual
 capture that cannot fit within a configured budget is rejected.
 
+Each evicted capture records every limit still exceeded when that LRU removal
+is planned (`count`, `bytes`, and/or `chunks`). Runtime index-budget reductions
+and explicit clears are recorded as `budget` and `clear`. Fixed reason counters
+are available in buffer stats and opt-in usage metrics. Capture admission
+responses include up to 25 evicted capture IDs and their reasons, plus an
+omitted count; runtime budget adjustment results use the same bound. A missing
+capture is reported as an empty buffer only when no captures remain.
+
 Durable execution records use a separate state directory and quota. The
 aggregate state quota defaults to 4 GiB, with a configurable checkpoint
 reserve for atomic writes. Capture eviction does not remove durable execution
