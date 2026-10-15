@@ -202,6 +202,7 @@ class TestServerTools(unittest.TestCase):
             return await server.mcp.call_tool(name, arguments)
 
     def test_package_exports_the_supported_embedding_api(self):
+        self.assertIn("Python embedding API", ephemeral_buffer_mcp.__doc__)
         self.assertIs(ephemeral_buffer_mcp.create_mcp_server, server.create_mcp_server)
         self.assertIs(ephemeral_buffer_mcp.create_service_context, server.create_service_context)
         self.assertEqual(
