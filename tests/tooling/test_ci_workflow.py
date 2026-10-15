@@ -1,8 +1,12 @@
 """Tests for the GitHub Actions CI workflow policy."""
 
+import inspect
 import re
 import unittest
 from pathlib import Path
+
+import ephemeral_buffer_mcp.server as server
+
 from tests.paths import REPOSITORY_ROOT
 
 
@@ -10,9 +14,43 @@ CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 RELEASE_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
 RELEASE_BENCHMARK_SCRIPT = REPOSITORY_ROOT / "scripts" / "collect-release-benchmarks.sh"
 AGENT_AB_REPORTER = REPOSITORY_ROOT / "benchmarks" / "render_agent_ab_report.py"
+TOOL_REFERENCE = REPOSITORY_ROOT / "docs" / "tool-reference.md"
+
+
+def _registered_signature(function, name):
+    """Render the registered argument names and defaults in reference format."""
+    parameters = []
+    for parameter in inspect.signature(function).parameters.values():
+        if parameter.default is inspect.Parameter.empty:
+            parameters.append(parameter.name)
+        else:
+            parameters.append(f"{parameter.name}={parameter.default!r}")
+    return f"{name}({', '.join(parameters)})"
 
 
 class TestCiWorkflow(unittest.TestCase):
+    def test_tool_reference_signatures_match_registered_tools(self):
+        source = TOOL_REFERENCE.read_text()
+        documented = {}
+        row_pattern = re.compile(
+            r"^\| `(?P<signature>[A-Za-z_]\w*\([^`]*\))` \|",
+            re.MULTILINE,
+        )
+        for match in row_pattern.finditer(source):
+            signature = match.group("signature")
+            name = signature[:signature.index("(")]
+            self.assertNotIn(name, documented, f"duplicate tool-reference row: {name}")
+            documented[name] = signature
+
+        registered = {
+            name: _registered_signature(function, name)
+            for function, name, _category, _result_factory in server._MCP_TOOL_REGISTRATIONS
+        }
+        self.assertEqual(set(documented), set(registered))
+        for name in sorted(registered):
+            with self.subTest(tool=name):
+                self.assertEqual(documented[name], registered[name])
+
     def test_pull_request_concurrency_cancels_only_superseded_pr_runs(self):
         source = CI_WORKFLOW.read_text()
 

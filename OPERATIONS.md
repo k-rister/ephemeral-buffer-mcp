@@ -1109,7 +1109,7 @@ git fetch --tags
 CODEX_HOME=/path/to/writable/authenticated-codex-home \
   ./scripts/collect-release-benchmarks.sh \
   --baseline-ref "$(git describe --tags --abbrev=0 HEAD)" \
-  --model gpt-5.6-luna
+  --model gpt-6-luna
 ```
 
 The runner creates a temporary worktree at the baseline ref, runs every
