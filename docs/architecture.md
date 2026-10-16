@@ -2,30 +2,39 @@
 
 ```mermaid
 flowchart TD
-    subgraph Ingestion["1. Ingestion & Diagnostics"]
-        A["CLI Pipe: command 2>&1 | ephbuf"] --> D["Unix Socket (platform temp dir)"]
-        B["Agent Tool: execute_and_capture(cmd)"] --> E["Ephemeral Ring Buffer Engine"]
-        C["Agent Tool: capture_text / capture_file"] --> E
-        D --> E
-        P["Agent Tool: preflight_command(cmd, cwd)"] --> Q["Path, executable & repository diagnostics"]
+    subgraph Transports["1. Protocol Transports"]
+        A["CLI Pipe: command 2>&1 | ephbuf"] --> S["Unix Socket Transport"]
+        B["MCP Client"] --> MT["MCP stdio Transport"]
     end
 
-    subgraph Execution["2. Durable Phase Execution"]
-        X["Agent Tools: start_execution / resume_execution"] --> Y["Phase Execution Manager"]
+    subgraph Tools["2. Shared Tool Layer"]
+        S --> R["Tool Registry"]
+        MT --> R
+        R --> T["Capture, execution, search, retrieval, diagnostics, configuration"]
+    end
+
+    subgraph Ingestion["3. Service and Ingestion"]
+        T --> C["Service Context"]
+        C --> E["Ephemeral Ring Buffer Engine"]
+        T --> Y["Phase Execution Manager"]
+        P["preflight_command(cmd, cwd)"] --> Q["Path, executable & repository diagnostics"]
+    end
+
+    subgraph Execution["4. Durable Phase Execution"]
         Y --> Z["Persistent Execution State & Bounded Phase Output"]
         Y --> E
         Z --> AA["get_execution / get_execution_output / list_executions / capacity / retirement"]
     end
 
-    subgraph Indexing["3. Classification & Search Indexing"]
+    subgraph Indexing["5. Classification & Search Indexing"]
         E --> F["SQLite FTS5 (BM25 Lexical) or Python lexical fallback"]
         E --> G["Required FastEmbed dependency; model loads lazily or in background"]
         E --> K["Diff & Signal Parser (File Maps & Conflict Detection)"]
-        E --> M["consolidate_captures: bounded source-aware JSON"]
-        M --> E
+        E --> CO["consolidate_captures: bounded source-aware JSON"]
+        CO --> E
     end
 
-    subgraph Querying["4. Agent Query & Retrieval"]
+    subgraph Querying["6. Agent Query & Retrieval"]
         F & G --> H["Reciprocal Rank Fusion (RRF)"]
         H --> I["search_capture(query, mode='hybrid')"]
         K --> L["get_capture_summary: diff stats & bounded file map"]
@@ -33,6 +42,13 @@ flowchart TD
         I --> J["Precise Context Chunk + Line Numbers"]
     end
 ```
+
+`server` owns service configuration, contexts, and shared runtime resources.
+The MCP and Unix socket adapters are loaded only when their transports start;
+the core server import does not import the MCP SDK. The tool registry imports
+domain modules in a stable order and exposes the same handlers to both
+transports. The supported Python embedding API remains `create_mcp_server`
+and `create_service_context`.
 
 ## Admission and storage bounds
 
