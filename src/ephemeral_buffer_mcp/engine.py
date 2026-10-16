@@ -62,6 +62,7 @@ MAX_CAPTURE_SLICE_CONTENT_BYTES = 64 * 1024
 CAPTURE_SLICE_SEGMENT_MAX_BYTES = 4 * 1024
 MAX_CAPTURE_EVICTION_DETAILS = 25
 TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
+EMBEDDING_MODEL_LOAD_RETRY_SECONDS = 60.0
 
 
 class SemanticIndexBudgetExceeded(RuntimeError):
@@ -1041,6 +1042,7 @@ class EphemeralEngine:
             raise ValueError("semantic_chunk_overlap must be non-negative and smaller than semantic_chunk_lines")
         self.embedding_cache_path = embedding_cache_path or settings.embedding_cache_dir.value
         self.embedding_model = None
+        self._embedding_model_load_failure: Optional[Tuple[type, float]] = None
         self.embedding_warmup_enabled = (
             settings.embedding_warmup_enabled.value
             if embedding_warmup is None
@@ -1189,8 +1191,23 @@ class EphemeralEngine:
                 return self.embedding_model
             if os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1":
                 self.embedding_model = _DeterministicTestEmbedding()
+                self._embedding_model_load_failure = None
                 log_event(LOGGER, logging.INFO, "embedding_model_ready", model="deterministic-test")
                 return self.embedding_model
+            load_failure = self._embedding_model_load_failure
+            if load_failure is not None:
+                failure_type, retry_at = load_failure
+                if time.monotonic() < retry_at:
+                    try:
+                        cached_failure = failure_type(
+                            "Embedding model load is in retry backoff."
+                        )
+                    except Exception:
+                        cached_failure = RuntimeError(
+                            "Embedding model load is in retry backoff after "
+                            f"{failure_type.__name__}."
+                        )
+                    raise cached_failure
             log_event(
                 LOGGER,
                 logging.INFO,
@@ -1206,11 +1223,15 @@ class EphemeralEngine:
             if self.embedding_threads is not None:
                 kwargs["threads"] = self.embedding_threads
             kwargs["enable_cpu_mem_arena"] = self.embedding_cpu_mem_arena_enabled
-            if self.embedding_model_name == FP32_EMBEDDING_MODEL:
-                register_bundled_embedding_models()
             try:
+                if self.embedding_model_name == FP32_EMBEDDING_MODEL:
+                    register_bundled_embedding_models()
                 self.embedding_model = TextEmbedding(**kwargs)
-            except Exception:
+            except Exception as exc:
+                self._embedding_model_load_failure = (
+                    type(exc),
+                    time.monotonic() + EMBEDDING_MODEL_LOAD_RETRY_SECONDS,
+                )
                 log_event(
                     LOGGER,
                     logging.ERROR,
@@ -1220,6 +1241,7 @@ class EphemeralEngine:
                 )
                 LOGGER.exception("embedding_model_load_exception")
                 raise
+            self._embedding_model_load_failure = None
             sys.stderr.write("Embedding model ready.\n")
             sys.stderr.flush()
             log_event(LOGGER, logging.INFO, "embedding_model_ready", model=self.embedding_model_name)
@@ -3389,6 +3411,12 @@ class EphemeralEngine:
         accounted_bytes = self._total_bytes + self._deferred_storage_bytes + embedding_bytes
         rss_bytes = process_rss_bytes()
         admission = admission_snapshot()
+        embedding_load_failure = self._embedding_model_load_failure
+        embedding_retry_after_seconds = (
+            max(0.0, embedding_load_failure[1] - time.monotonic())
+            if embedding_load_failure is not None
+            else 0.0
+        )
         return {
             "capture_count": len(self._captures),
             "capture_removals_by_reason": dict(self._capture_removals_by_reason),
@@ -3413,6 +3441,12 @@ class EphemeralEngine:
             "embedding_bytes": embedding_bytes,
             "embedding_model": self.embedding_model_name,
             "embedding_model_loaded": self.embedding_model is not None,
+            "embedding_model_load_failure": (
+                embedding_load_failure[0].__name__
+                if embedding_load_failure is not None
+                else None
+            ),
+            "embedding_model_retry_after_seconds": embedding_retry_after_seconds,
             "embedding_threads": self.embedding_threads,
             "embedding_batch_size": self.embedding_batch_size,
             "embedding_max_batch_tokens": self.embedding_max_batch_tokens,
