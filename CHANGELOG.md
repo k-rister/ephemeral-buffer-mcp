@@ -9,6 +9,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Handle oversized MCP result envelopes that have no text field.
 - Reject relative execution-state paths at runtime and the `:memory:` token
   before path normalization.
+- Back off for 60 seconds after embedding model load failures, report the retry
+  delay in buffer stats, and preserve lexical hybrid-search results meanwhile.
 
 ## 0.10.0 - 2026-10-12
 

@@ -47,6 +47,17 @@ def get_buffer_stats() -> str:
     )
     model_state = "loaded" if stats["embedding_model_loaded"] else "not loaded"
     model_line = f"Embedding model: {stats['embedding_model']} ({model_state})"
+    load_failure = stats.get("embedding_model_load_failure")
+    retry_after = stats.get("embedding_model_retry_after_seconds", 0.0)
+    if load_failure and retry_after > 0:
+        load_backoff_line = (
+            f"Embedding model load backoff: {load_failure} "
+            f"(retry in {retry_after:g}s)"
+        )
+    elif load_failure:
+        load_backoff_line = f"Embedding model load retry: available ({load_failure})"
+    else:
+        load_backoff_line = "Embedding model load backoff: inactive"
     warmup_state = stats.get("embedding_warmup_state", "not-started")
     warmup_failure = stats.get("embedding_warmup_failure")
     warmup_line = f"Embedding warm-up: {warmup_state}"
@@ -94,6 +105,7 @@ def get_buffer_stats() -> str:
         f"({remaining_indexed_chunks:,} remaining)\n"
         f"Index budget adjustment: {json.dumps(stats.get('last_index_budget_adjustment', {}), sort_keys=True)}\n"
         f"{model_line}\n"
+        f"{load_backoff_line}\n"
         f"{warmup_line}\n"
         f"{cache_line}\n"
         f"Embedding bytes: {stats['embedding_bytes']:,}\n"

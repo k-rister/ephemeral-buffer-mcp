@@ -1358,6 +1358,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Deferred storage:", result)
         self.assertIn("Embedding bytes:", result)
         self.assertIn("Embedding model:", result)
+        self.assertIn("Embedding model load backoff: inactive", result)
         self.assertIn("Embedding warm-up:", result)
         self.assertIn("Process RSS:", result)
         self.assertIn("Unaccounted RSS bytes:", result)
@@ -1374,6 +1375,25 @@ class TestServerTools(unittest.TestCase):
             server.engine.embedding_warmup_failure = original_failure
 
         self.assertIn("Embedding warm-up: failed (RuntimeError)", result)
+
+    def test_buffer_stats_reports_embedding_model_load_backoff(self):
+        original_failure = server.engine._embedding_model_load_failure
+        server.engine._embedding_model_load_failure = (
+            RuntimeError,
+            time.monotonic() + 60,
+        )
+        try:
+            result = server.get_buffer_stats()
+            server.engine._embedding_model_load_failure = (
+                RuntimeError,
+                time.monotonic() - 1,
+            )
+            expired_result = server.get_buffer_stats()
+        finally:
+            server.engine._embedding_model_load_failure = original_failure
+
+        self.assertIn("Embedding model load backoff: RuntimeError (retry in ", result)
+        self.assertIn("Embedding model load retry: available (RuntimeError)", expired_result)
 
     def test_runtime_diagnostics_reports_content_free_metadata(self):
         server.capture_text("secret command output", label="private-label")

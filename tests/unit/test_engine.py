@@ -3090,11 +3090,131 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIn("Embedding model ready", stderr.getvalue())
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                patch("ephemeral_buffer_mcp.engine.TextEmbedding", side_effect=RuntimeError("load failed")):
+                patch("ephemeral_buffer_mcp.engine.TextEmbedding", side_effect=RuntimeError("load failed")) as embedding:
             failing = EphemeralEngine(max_captures=1)
             with self.assertRaisesRegex(RuntimeError, "load failed"):
                 failing._get_embedding_model()
+            with self.assertRaisesRegex(RuntimeError, "retry backoff"):
+                failing._get_embedding_model()
+            embedding.assert_called_once()
+            stats = failing.get_buffer_stats()
+            self.assertEqual(stats["embedding_model_load_failure"], "RuntimeError")
+            self.assertGreater(stats["embedding_model_retry_after_seconds"], 0)
         self.assertIsNone(failing.embedding_model)
+
+    def test_embedding_model_load_retries_after_backoff_and_clears_failure(self):
+        import ephemeral_buffer_mcp.engine as engine_module
+
+        class FakeEmbedding:
+            pass
+
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        try:
+            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                    patch(
+                        "ephemeral_buffer_mcp.engine.TextEmbedding",
+                        side_effect=[RuntimeError("load failed"), FakeEmbedding()],
+                    ) as embedding, \
+                    patch.object(
+                        engine_module.time,
+                        "monotonic",
+                        side_effect=[100.0, 159.9, 160.0, 160.0],
+                    ), \
+                    patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaisesRegex(RuntimeError, "load failed"):
+                    engine._get_embedding_model()
+                with self.assertRaisesRegex(RuntimeError, "retry backoff"):
+                    engine._get_embedding_model()
+                expired_stats = engine.get_buffer_stats()
+                self.assertEqual(expired_stats["embedding_model_load_failure"], "RuntimeError")
+                self.assertEqual(expired_stats["embedding_model_retry_after_seconds"], 0.0)
+                loaded = engine._get_embedding_model()
+
+            self.assertIsInstance(loaded, FakeEmbedding)
+            self.assertEqual(embedding.call_count, 2)
+            stats = engine.get_buffer_stats()
+            self.assertIsNone(stats["embedding_model_load_failure"])
+            self.assertEqual(stats["embedding_model_retry_after_seconds"], 0.0)
+        finally:
+            engine.shutdown()
+
+    def test_embedding_backoff_handles_non_reconstructible_load_exception(self):
+        class MultiArgumentLoadError(Exception):
+            def __init__(self, code, reason):
+                super().__init__(code, reason)
+
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        try:
+            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                    patch(
+                        "ephemeral_buffer_mcp.engine.TextEmbedding",
+                        side_effect=MultiArgumentLoadError("model", "unavailable"),
+                    ):
+                with self.assertRaises(MultiArgumentLoadError):
+                    engine._get_embedding_model()
+                with self.assertRaisesRegex(RuntimeError, "after MultiArgumentLoadError"):
+                    engine._get_embedding_model()
+        finally:
+            engine.shutdown()
+
+    def test_concurrent_embedding_model_load_failure_is_attempted_once(self):
+        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        load_started = threading.Event()
+        allow_failure = threading.Event()
+
+        def fail_load(**_kwargs):
+            load_started.set()
+            if not allow_failure.wait(timeout=2):
+                raise AssertionError("test did not release the model load")
+            raise RuntimeError("load failed")
+
+        def load_model():
+            with self.assertRaises(RuntimeError):
+                engine._get_embedding_model()
+
+        try:
+            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                    patch("ephemeral_buffer_mcp.engine.TextEmbedding", side_effect=fail_load) as embedding:
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    first = executor.submit(load_model)
+                    self.assertTrue(load_started.wait(timeout=2))
+                    remaining = [executor.submit(load_model) for _ in range(3)]
+                    allow_failure.set()
+                    first.result(timeout=2)
+                    for future in remaining:
+                        future.result(timeout=2)
+                embedding.assert_called_once()
+        finally:
+            engine.shutdown()
+
+    def test_failed_model_load_is_cached_and_hybrid_search_stays_available(self):
+        engine = EphemeralEngine(
+            max_captures=1,
+            embedding_warmup=False,
+            semantic_prefetch=False,
+            semantic_wait_seconds=1,
+        )
+        try:
+            capture = engine._ingest_state("lexical fallback marker", label="fallback")
+            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                    patch(
+                        "ephemeral_buffer_mcp.engine.TextEmbedding",
+                        side_effect=RuntimeError("model unavailable"),
+                    ) as embedding:
+                first = engine.search("marker", mode="hybrid", capture_id=capture.capture_id)
+                second = engine.search("marker", mode="hybrid", capture_id=capture.capture_id)
+
+            embedding.assert_called_once()
+            for result in (first, second):
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["semantic_coverage"], "unavailable")
+                self.assertEqual(result["semantic_fallback"], "RuntimeError")
+                self.assertEqual(result["match_count"], 1)
+            stats = engine.get_buffer_stats()
+            self.assertEqual(stats["embedding_model_load_failure"], "RuntimeError")
+            self.assertGreater(stats["embedding_model_retry_after_seconds"], 0)
+        finally:
+            engine.shutdown()
 
     def test_embedding_warmup_succeeds_once_and_reports_readiness(self):
         class WarmEmbedding:
@@ -3131,6 +3251,8 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(engine.wait_for_embedding_warmup(timeout=2), "failed")
             stats = engine.get_buffer_stats()
             self.assertEqual(stats["embedding_warmup_failure"], "RuntimeError")
+            self.assertIsNone(stats["embedding_model_load_failure"])
+            self.assertEqual(stats["embedding_model_retry_after_seconds"], 0.0)
 
             capture = engine._ingest_state("lexical fallback marker", label="fallback")
             result = engine.search("marker", mode="hybrid", capture_id=capture.capture_id)
