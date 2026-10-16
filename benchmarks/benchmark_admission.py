@@ -510,7 +510,8 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     """Run repeated MCP and socket saturation bursts using configured limits."""
     # Import only after main disables semantic prefetch for this isolated run.
     import ephemeral_buffer_mcp.admission as admission
-    import ephemeral_buffer_mcp.server as server
+    from ephemeral_buffer_mcp import create_mcp_server, create_service_context
+    from ephemeral_buffer_mcp.socket_transport import handle_socket_client
 
     snapshot = admission.admission_snapshot()
     capacities = {
@@ -531,10 +532,10 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 f"limit {args.max_requests}"
             )
 
-    context = server.create_service_context(
+    context = create_service_context(
         engine_options={"semantic_prefetch": False, "embedding_warmup": False}
     )
-    app = server.create_mcp_server(context)
+    app = create_mcp_server(context)
     scenarios: dict[str, list[dict[str, Any]]] = {"mcp": [], "socket": []}
     timeout_seconds = max(5.0, args.hold_seconds * 2 + 2)
 
@@ -542,7 +543,7 @@ async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="ephemeral-admission-") as temp_dir:
             socket_path = str(Path(temp_dir) / "admission.sock")
             listener = await asyncio.start_unix_server(
-                server.handle_socket_client,
+                handle_socket_client,
                 path=socket_path,
                 backlog=max(100, args.max_requests),
             )

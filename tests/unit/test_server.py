@@ -19,7 +19,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import ValidationError
 
@@ -49,6 +49,14 @@ def settings_with_environment(**overrides):
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import ephemeral_buffer_mcp.server as server
+import ephemeral_buffer_mcp.socket_transport as socket_transport
+import ephemeral_buffer_mcp.mcp_transport as mcp_transport
+import ephemeral_buffer_mcp.tools.capture as capture_tools
+import ephemeral_buffer_mcp.tools.diagnostics as diagnostics_tools
+import ephemeral_buffer_mcp.tools.execution as execution_tools
+import ephemeral_buffer_mcp.tools.retrieval as retrieval_tools
+import ephemeral_buffer_mcp.tools.search as search_tools
+from ephemeral_buffer_mcp.tools.registry import get_tool_categories, get_tool_names, register_tool
 from ephemeral_buffer_mcp.admission import (
     AdmissionBusy,
     AdmissionMetrics,
@@ -123,7 +131,7 @@ class FakeBoundSocket:
         return 41
 
     def getsockname(self):
-        return server.SOCKET_PATH
+        return socket_transport.SOCKET_PATH
 
 
 class FakeProbeSocket:
@@ -151,7 +159,7 @@ class FakeStartupProbeReader:
     async def read(self, limit):
         if not self.payload:
             payload = (
-                server._SOCKET_STARTUP_PROBE_TOKEN
+                socket_transport._SOCKET_STARTUP_PROBE_TOKEN
                 if self.response_payload is None
                 else self.response_payload
             )
@@ -200,6 +208,35 @@ def mcp_result_payload(result):
 
 
 class TestServerTools(unittest.TestCase):
+    def build_mcp_adapter(
+        self,
+        function,
+        name,
+        category,
+        *,
+        structured_result_factory=None,
+        service_context=None,
+    ):
+        adapters = {}
+
+        def capture_registered_tool(_app, adapter, *, name, **_kwargs):
+            adapters[name] = adapter
+
+        with patch.object(
+            mcp_transport,
+            "_register_mcpserver_tool",
+            side_effect=capture_registered_tool,
+        ):
+            mcp_transport._register_mcp_tool_for_app(
+                None,
+                function,
+                name,
+                category,
+                structured_result_factory,
+                service_context or server.DEFAULT_SERVICES,
+            )
+        return adapters[name]
+
     async def call_mcp_tool_inline(self, name, arguments):
         """Exercise the registered response adapter with deterministic inline work."""
         async def run_inline(
@@ -213,8 +250,8 @@ class TestServerTools(unittest.TestCase):
         ):
             return function(*args, **kwargs)
 
-        with patch.object(server, "_run_admitted_thread", new=run_inline):
-            return await server.mcp.call_tool(name, arguments)
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            return await mcp_transport.mcp.call_tool(name, arguments)
 
     def test_package_exports_the_supported_embedding_api(self):
         self.assertIn("Python embedding API", ephemeral_buffer_mcp.__doc__)
@@ -243,6 +280,12 @@ class TestServerTools(unittest.TestCase):
         server.engine.max_indexed_chunks = self.original_index_limit
         server.engine.embedding_model = self.original_model
         server.engine.clear("all")
+
+    def test_service_context_start_starts_embedding_warmup(self):
+        with patch.object(server.engine, "start_embedding_warmup") as warmup:
+            server.DEFAULT_SERVICES.start()
+
+        warmup.assert_called_once_with()
 
     def test_service_contexts_isolate_engines_metrics_and_snapshot_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -478,10 +521,10 @@ class TestServerTools(unittest.TestCase):
         server.METRICS = metrics
         try:
             async def call_with_missing_required_argument():
-                await server.mcp.call_tool("capture_text", {})
+                await mcp_transport.mcp.call_tool("capture_text", {})
 
             async def call_with_valid_argument():
-                await server.mcp.call_tool(
+                await mcp_transport.mcp.call_tool(
                     "capture_text",
                     {"content": "valid validation-boundary probe"},
                 )
@@ -500,22 +543,26 @@ class TestServerTools(unittest.TestCase):
 
     def test_registered_mcp_tools_use_async_worker_adapter(self):
         async def exercise():
-            @server._mcp_tool("blocking_probe", "diagnostics")
-            @server._instrument_tool("blocking_probe")
             def blocking_probe():
                 return "worker result"
 
+            mcp_transport._register_mcp_tool_for_app(
+                mcp_transport.mcp,
+                blocking_probe,
+                "blocking_probe",
+                "diagnostics",
+                None,
+                server.DEFAULT_SERVICES,
+            )
             try:
                 offload = AsyncMock(return_value="worker result")
                 with patch.object(server, "to_thread", offload):
-                    result = await server.mcp.call_tool("blocking_probe", {})
+                    result = await mcp_transport.mcp.call_tool("blocking_probe", {})
 
                 self.assertEqual(result.content[0].text, "worker result")
                 offload.assert_awaited_once_with(blocking_probe)
             finally:
-                server.mcp.remove_tool("blocking_probe")
-                server._REGISTERED_MCP_TOOL_NAMES.remove("blocking_probe")
-                server._REGISTERED_MCP_TOOL_CATEGORIES.pop("blocking_probe")
+                mcp_transport.mcp.remove_tool("blocking_probe")
 
         asyncio.run(exercise())
 
@@ -537,24 +584,12 @@ class TestServerTools(unittest.TestCase):
                     if structured else None
                 )
 
-                def capture_registered_tool(_app, fn, *, name, **_kwargs):
-                    adapters[name] = fn
-
-                with (
-                    patch.object(
-                        server,
-                        "_register_mcpserver_tool",
-                        side_effect=capture_registered_tool,
-                    ),
-                    patch.object(server, "_MCP_TOOL_REGISTRATIONS", []),
-                    patch.object(server, "_REGISTERED_MCP_TOOL_NAMES", []),
-                    patch.object(server, "_REGISTERED_MCP_TOOL_CATEGORIES", {}),
-                ):
-                    server._mcp_tool(
-                        name,
-                        category,
-                        structured_result_factory=factory,
-                    )(lambda: "unused")
+                adapters[name] = self.build_mcp_adapter(
+                    lambda: "unused",
+                    name,
+                    category,
+                    structured_result_factory=factory,
+                )
 
             for name, category in (
                 ("busy_retrieval_probe", "mcp"),
@@ -562,7 +597,7 @@ class TestServerTools(unittest.TestCase):
                 ("busy_diagnostics_probe", "mcp"),
                 ("get_buffer_stats", "diagnostics"),
             ):
-                with patch.object(server, "admission_gate", return_value=BusyGate()) as gate:
+                with patch.object(mcp_transport, "admission_gate", return_value=BusyGate()) as gate:
                     result = await adapters[name]()
                 gate.assert_called_once_with(category)
                 payload = mcp_result_payload(result)
@@ -760,7 +795,7 @@ class TestServerTools(unittest.TestCase):
                 gate = ClosingGate()
                 with context._lifecycle_lock:
                     context._closing = False
-                with patch.object(server, "admission_gate", return_value=gate):
+                with patch.object(mcp_transport, "admission_gate", return_value=gate):
                     result = await app.call_tool(name, arguments)
                 self.assertTrue(gate.ticket.released)
                 with context._lifecycle_lock:
@@ -776,7 +811,7 @@ class TestServerTools(unittest.TestCase):
                 async def acquire(self, _work_type):
                     raise RuntimeError("admission failed")
 
-            with patch.object(server, "admission_gate", return_value=FailingGate()):
+            with patch.object(mcp_transport, "admission_gate", return_value=FailingGate()):
                 with self.assertRaises(Exception) as raised:
                     await app.call_tool("get_buffer_stats", {})
             self.assertEqual(str(raised.exception.__cause__), "admission failed")
@@ -800,7 +835,7 @@ class TestServerTools(unittest.TestCase):
         from ephemeral_buffer_mcp.capture_utils import BoundedCommandResult
 
         with patch.object(
-            server,
+            capture_tools,
             "run_command_bounded",
             return_value=BoundedCommandResult("ok\n", 0, False, 3, False),
         ):
@@ -812,9 +847,9 @@ class TestServerTools(unittest.TestCase):
         self.assertFalse(result.structured_content["data"]["command_cancelled"])
         context.close()
 
-    def test_mcp_tool_requires_known_category(self):
-        with self.assertRaisesRegex(ValueError, "unknown MCP tool category"):
-            server._mcp_tool("invalid_category_probe", "unknown")
+    def test_tool_registry_rejects_unknown_category(self):
+        with self.assertRaisesRegex(ValueError, "unknown tool category"):
+            register_tool("invalid_category_probe", "unknown")
 
     def test_tool_descriptions_include_agent_routing_and_path_guidance(self):
         capture_text_doc = server.capture_text.__doc__
@@ -882,12 +917,12 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("framed CLI request", server.handle_socket_client.__doc__)
 
     def test_bounded_summary_text_handles_marker_larger_than_budget(self):
-        text, truncated = server._bounded_summary_text("a long value", 4, "[cut]")
+        text, truncated = capture_tools._bounded_summary_text("a long value", 4, "[cut]")
 
         self.assertTrue(truncated)
         self.assertEqual(text, "[cut"[:4])
         self.assertLessEqual(len(text.encode("utf-8")), 4)
-        self.assertEqual(server._bounded_summary_text("value", 0, "[cut]"), ("", True))
+        self.assertEqual(capture_tools._bounded_summary_text("value", 0, "[cut]"), ("", True))
 
     def test_preflight_reports_repo_executable_and_does_not_run_command(self):
         result = json.loads(server.preflight_command("printf 'secret output'", cwd=os.getcwd()))
@@ -1015,7 +1050,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(unavailable["repository"]["status"], "unavailable")
         self.assertEqual(unavailable["repository"]["reason"], "OSError")
 
-        with patch.object(server, "_resolve_preflight_cwd", side_effect=RuntimeError("unexpected")):
+        with patch.object(execution_tools, "_resolve_preflight_cwd", side_effect=RuntimeError("unexpected")):
             error = json.loads(server.preflight_command("echo hello"))
         self.assertEqual(error, {"reason": "RuntimeError", "status": "error"})
 
@@ -1049,7 +1084,7 @@ class TestServerTools(unittest.TestCase):
 
     def test_capture_file_reports_read_failure(self):
         with tempfile.NamedTemporaryFile() as file_handle, \
-                patch.object(server, "read_file_bounded", side_effect=OSError("permission denied")):
+                patch.object(capture_tools, "read_file_bounded", side_effect=OSError("permission denied")):
             result = server.capture_file(file_handle.name)
 
         self.assertIn("Error reading file", result)
@@ -1069,7 +1104,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("at least 512", result)
 
     def test_execute_reports_command_failure(self):
-        with patch.object(server, "run_command_bounded", side_effect=OSError("unable to start command")):
+        with patch.object(capture_tools, "run_command_bounded", side_effect=OSError("unable to start command")):
             result = server.execute_and_capture("missing-command")
 
         self.assertIn("Error executing command", result)
@@ -1077,7 +1112,7 @@ class TestServerTools(unittest.TestCase):
 
     def test_execute_reports_timeout(self):
         with patch.object(
-            server,
+            capture_tools,
             "run_command_bounded",
             return_value=("partial output", 124, False, 14, True),
         ) as run:
@@ -1351,7 +1386,7 @@ class TestServerTools(unittest.TestCase):
             result = server.get_runtime_diagnostics()
 
         self.assertIn("Runtime diagnostics (content-free):", result)
-        self.assertIn(f"Package version: {server._runtime_package_version()}", result)
+        self.assertIn(f"Package version: {diagnostics_tools._runtime_package_version()}", result)
         self.assertIn("Python:", result)
         self.assertIn("Socket mode: session-derived path", result)
         self.assertIn("Socket lifecycle:", result)
@@ -1369,7 +1404,7 @@ class TestServerTools(unittest.TestCase):
 
     def test_runtime_diagnostics_exposes_mcpserver_observability_limitations(self):
         with patch.object(
-            server,
+            diagnostics_tools,
             "_mcpserver_compatibility_diagnostics",
             return_value={
                 "sdk_version": "2.test",
@@ -1395,7 +1430,7 @@ class TestServerTools(unittest.TestCase):
             handler = server.logging.FileHandler(log_path, encoding="utf-8")
             logger.addHandler(handler)
             try:
-                with patch.object(server, "LOGGER", logger):
+                with patch.object(diagnostics_tools, "LOGGER", logger):
                     result = server.get_runtime_diagnostics()
             finally:
                 handler.close()
@@ -1406,11 +1441,11 @@ class TestServerTools(unittest.TestCase):
     def test_runtime_diagnostics_distinguishes_unavailable_and_unconfigured_log_file(self):
         logger = server.logging.Logger("diagnostics-test", level=server.logging.WARNING)
         configured_path = "/tmp/unavailable-diagnostics-test.jsonl"
-        with patch.object(server, "LOGGER", logger), patch.dict(
+        with patch.object(diagnostics_tools, "LOGGER", logger), patch.dict(
             os.environ, {"EPHEMERAL_LOG_FILE": configured_path}, clear=False
         ):
             unavailable = server.get_runtime_diagnostics()
-        with patch.object(server, "LOGGER", logger), patch.dict(
+        with patch.object(diagnostics_tools, "LOGGER", logger), patch.dict(
             os.environ, {"EPHEMERAL_LOG_FILE": ""}, clear=False
         ):
             unconfigured = server.get_runtime_diagnostics()
@@ -1450,9 +1485,9 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Socket mode: shared default path", default)
 
     def test_mcp_instructions_report_socket_state_without_routing_guidance(self):
-        with patch.object(server, "socket_isolation_required", return_value=True), \
-                patch.object(server, "socket_isolation_configured", return_value=True):
-            instructions = server._mcp_instructions()
+        with patch.object(mcp_transport, "socket_isolation_required", return_value=True), \
+                patch.object(mcp_transport, "socket_isolation_configured", return_value=True):
+            instructions = mcp_transport._mcp_instructions()
 
         self.assertIn("Socket isolation is configured", instructions)
         self.assertIn("Socket lifecycle is", instructions)
@@ -1466,30 +1501,30 @@ class TestServerTools(unittest.TestCase):
             self.assertNotIn(routing_text, instructions)
 
     def test_mcp_instructions_describe_legacy_socket_mode(self):
-        with patch.object(server, "socket_isolation_required", return_value=False), \
-                patch.object(server, "socket_isolation_configured", return_value=False):
-            instructions = server._mcp_instructions()
+        with patch.object(mcp_transport, "socket_isolation_required", return_value=False), \
+                patch.object(mcp_transport, "socket_isolation_configured", return_value=False):
+            instructions = mcp_transport._mcp_instructions()
 
         self.assertIn("legacy single-session mode", instructions)
 
     def test_mcp_instructions_report_missing_required_isolation(self):
-        with patch.object(server, "socket_isolation_required", return_value=True), \
-                patch.object(server, "socket_isolation_configured", return_value=False):
-            instructions = server._mcp_instructions()
+        with patch.object(mcp_transport, "socket_isolation_required", return_value=True), \
+                patch.object(mcp_transport, "socket_isolation_configured", return_value=False):
+            instructions = mcp_transport._mcp_instructions()
 
         self.assertIn("startup must fail", instructions)
 
     def test_mcp_instructions_report_failed_socket(self):
-        with patch.object(server, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
-            instructions = server._mcp_instructions()
+        with patch.object(socket_transport, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
+            instructions = mcp_transport._mcp_instructions()
 
         self.assertIn("Socket lifecycle is failed (RuntimeError: unavailable)", instructions)
 
     def test_mcp_instructions_refresh_before_serving(self):
-        with patch.object(server, "_mcp_instructions", return_value="ready-state guidance"):
-            server._refresh_mcp_instructions()
+        with patch.object(mcp_transport, "_mcp_instructions", return_value="ready-state guidance"):
+            mcp_transport._refresh_mcp_instructions()
 
-        self.assertEqual(server.mcp.instructions, "ready-state guidance")
+        self.assertEqual(mcp_transport.mcp.instructions, "ready-state guidance")
 
     def test_runtime_diagnostics_includes_enabled_local_metrics(self):
         original_metrics = server.METRICS
@@ -1605,7 +1640,7 @@ class TestServerTools(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
         try:
-            with server._bind_mcp_metrics_scope():
+            with mcp_transport._bind_mcp_metrics_scope():
                 with metrics.measure("no_context_probe"):
                     pass
         finally:
@@ -1631,7 +1666,7 @@ class TestServerTools(unittest.TestCase):
                 session=SimpleNamespace(_connection=connection),
             )
 
-        middleware = server._MCPRequestMetricsMiddleware(server.DEFAULT_SERVICES)
+        middleware = mcp_transport._MCPRequestMetricsMiddleware(server.DEFAULT_SERVICES)
 
         async def snapshot_for(request_context, *, measure=False):
             async def call_next(_context):
@@ -1670,7 +1705,7 @@ class TestServerTools(unittest.TestCase):
 
     def test_nonweak_mcp_session_fallback_is_bounded_and_identity_safe(self):
         original_metrics = server.METRICS
-        original_fallback = server._MCP_SESSION_SCOPE_FALLBACK.copy()
+        original_fallback = mcp_transport._MCP_SESSION_SCOPE_FALLBACK.copy()
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
 
@@ -1687,7 +1722,7 @@ class TestServerTools(unittest.TestCase):
                 session=SimpleNamespace(_connection=connection),
             )
 
-        middleware = server._MCPRequestMetricsMiddleware(server.DEFAULT_SERVICES)
+        middleware = mcp_transport._MCPRequestMetricsMiddleware(server.DEFAULT_SERVICES)
 
         async def snapshot_for(request_context, *, measure=False):
             async def call_next(_context):
@@ -1699,7 +1734,7 @@ class TestServerTools(unittest.TestCase):
             return await middleware(request_context, call_next)
 
         try:
-            server._MCP_SESSION_SCOPE_FALLBACK.clear()
+            mcp_transport._MCP_SESSION_SCOPE_FALLBACK.clear()
             first, repeat, second = asyncio.run(
                 self._exercise_mcp_scope(
                     snapshot_for,
@@ -1710,7 +1745,7 @@ class TestServerTools(unittest.TestCase):
             )
 
             async def fill_nonweak_fallback():
-                for _ in range(server.MAX_MCP_SESSION_SCOPE_FALLBACK + 1):
+                for _ in range(mcp_transport.MAX_MCP_SESSION_SCOPE_FALLBACK + 1):
                     request_context = request_context_for(NonWeakConnection())
 
                     async def call_next(_context):
@@ -1720,19 +1755,19 @@ class TestServerTools(unittest.TestCase):
 
             asyncio.run(fill_nonweak_fallback())
             self.assertEqual(
-                len(server._MCP_SESSION_SCOPE_FALLBACK),
-                server.MAX_MCP_SESSION_SCOPE_FALLBACK,
+                len(mcp_transport._MCP_SESSION_SCOPE_FALLBACK),
+                mcp_transport.MAX_MCP_SESSION_SCOPE_FALLBACK,
             )
         finally:
-            server._MCP_SESSION_SCOPE_FALLBACK.clear()
-            server._MCP_SESSION_SCOPE_FALLBACK.update(original_fallback)
+            mcp_transport._MCP_SESSION_SCOPE_FALLBACK.clear()
+            mcp_transport._MCP_SESSION_SCOPE_FALLBACK.update(original_fallback)
             server.METRICS = original_metrics
 
         self.assertEqual(repeat["attribution"]["id"], first["attribution"]["id"])
         self.assertNotEqual(second["attribution"]["id"], first["attribution"]["id"])
         self.assertLessEqual(
-            len(server._MCP_SESSION_SCOPE_FALLBACK),
-            server.MAX_MCP_SESSION_SCOPE_FALLBACK,
+            len(mcp_transport._MCP_SESSION_SCOPE_FALLBACK),
+            mcp_transport.MAX_MCP_SESSION_SCOPE_FALLBACK,
         )
 
     async def _exercise_mcp_scope(
@@ -1748,7 +1783,7 @@ class TestServerTools(unittest.TestCase):
         return first, repeat, second
 
     def test_registered_tools_match_mcpserver_inventory(self):
-        mcp_tools = asyncio.run(server.mcp.list_tools())
+        mcp_tools = asyncio.run(mcp_transport.mcp.list_tools())
         mcp_names = tuple(tool.name for tool in mcp_tools)
         compact_catalog = json.dumps(
             {
@@ -1765,15 +1800,15 @@ class TestServerTools(unittest.TestCase):
         )
         self.assertLess(len(compact_catalog), 28000)
         self.assertLess(description_characters, 7000)
-        self.assertLess(len(server._mcp_instructions()), 200)
+        self.assertLess(len(mcp_transport._mcp_instructions()), 200)
 
-        self.assertEqual(mcp_names, tuple(server._REGISTERED_MCP_TOOL_NAMES))
+        self.assertEqual(mcp_names, tuple(get_tool_names()))
         self.assertEqual(
             set(mcp_names),
-            set(server._REGISTERED_MCP_TOOL_CATEGORIES),
+            set(get_tool_categories()),
         )
         self.assertEqual(
-            server._REGISTERED_MCP_TOOL_CATEGORIES,
+            get_tool_categories(),
             {
                 "preflight_command": "diagnostics",
                 "start_execution": "execution",
@@ -1984,8 +2019,12 @@ class TestServerTools(unittest.TestCase):
 
     def test_runtime_package_version_falls_back_to_source_checkout(self):
         with patch.object(server.Path, "read_text", side_effect=OSError("missing metadata")), \
-                patch.object(server, "package_version", side_effect=server.PackageNotFoundError()):
-            self.assertEqual(server._runtime_package_version(), "source checkout")
+                patch.object(
+                    diagnostics_tools,
+                    "package_version",
+                    side_effect=diagnostics_tools.PackageNotFoundError(),
+                ):
+            self.assertEqual(diagnostics_tools._runtime_package_version(), "source checkout")
 
     def test_capture_file_reads_and_labels_content(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2017,7 +2056,7 @@ class TestServerTools(unittest.TestCase):
     def test_execute_reports_failed_and_truncated_command(self):
         output = "x" * 700
         with patch.object(
-            server,
+            capture_tools,
             "run_command_bounded",
             return_value=(output, 7, True, 700, False),
         ):
@@ -2034,7 +2073,7 @@ class TestServerTools(unittest.TestCase):
     def test_execute_bounds_long_command_metadata(self):
         command = "echo " + ("x" * 10_000)
         with patch.object(
-            server,
+            capture_tools,
             "run_command_bounded",
             return_value=("output", 0, False, 6, False),
         ):
@@ -2048,7 +2087,7 @@ class TestServerTools(unittest.TestCase):
         self.assertTrue(result["command"].endswith(server.SUMMARY_COMMAND_TRUNCATION_MARKER))
 
     def test_invalid_command_metrics_are_rejected_before_execution(self):
-        with patch.object(server, "run_command_bounded") as run:
+        with patch.object(capture_tools, "run_command_bounded") as run:
             result = server.execute_and_capture(
                 "would-not-run",
                 structured_metrics={"value": float("nan")},
@@ -2061,7 +2100,7 @@ class TestServerTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             file_path = Path(directory) / "capture.log"
             file_path.write_text("file content", encoding="utf-8")
-            with patch.object(server, "read_file_bounded") as read:
+            with patch.object(capture_tools, "read_file_bounded") as read:
                 result = server.capture_file(
                     str(file_path),
                     structured_metrics={"value": float("nan")},
@@ -2080,7 +2119,7 @@ class TestServerTools(unittest.TestCase):
     def test_execute_formats_diff_command_response(self):
         diff = "diff --git a/old.txt b/new.txt\n--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-old\n+new\n"
         with patch.object(
-            server,
+            capture_tools,
             "run_command_bounded",
             return_value=(diff, 0, False, len(diff.encode()), False),
         ):
@@ -2201,7 +2240,7 @@ class TestServerTools(unittest.TestCase):
         reductions = {}
         for name, (output, exit_code, truncated, original_size, timed_out) in cases.items():
             with patch.object(
-                server,
+                capture_tools,
                 "run_command_bounded",
                 return_value=(output, exit_code, truncated, original_size, timed_out),
             ):
@@ -2225,12 +2264,12 @@ class TestServerTools(unittest.TestCase):
 
     def test_summary_payload_preserves_engine_errors(self):
         self.assertEqual(
-            server._summary_payload({"status": "error", "message": "missing"}),
+            capture_tools._summary_payload({"status": "error", "message": "missing"}),
             {"status": "error", "message": "missing"},
         )
 
     def test_summary_payload_defaults_to_current_schema_version(self):
-        payload = server._summary_payload({
+        payload = capture_tools._summary_payload({
             "status": "ok",
             "capture_id": "cap-summary-version",
             "label": "summary version",
@@ -2245,7 +2284,7 @@ class TestServerTools(unittest.TestCase):
             {"capture_id": f"cap-{index}", "reasons": ["bytes"]}
             for index in range(server.MAX_CAPTURE_EVICTION_DETAILS + 5)
         ]
-        payload = server._summary_payload({
+        payload = capture_tools._summary_payload({
             "status": "ok",
             "capture_id": "cap-summary-evictions",
             "label": "summary evictions",
@@ -2260,7 +2299,7 @@ class TestServerTools(unittest.TestCase):
         capture = server.engine.ingest("summary json payload", label="summary-json")
 
         summary = json.loads(
-            server._summary_json(capture.capture_id, include_previews=False, capture=capture)
+            capture_tools._summary_json(capture.capture_id, include_previews=False, capture=capture)
         )
 
         self.assertEqual(summary["status"], "captured")
@@ -2271,7 +2310,7 @@ class TestServerTools(unittest.TestCase):
             f"  - file-{index:05d}.txt (+1, -0) | Buffer Lines: L1-L2"
             for index in range(10_000)
         )
-        payload = server._summary_payload({
+        payload = capture_tools._summary_payload({
             "status": "ok",
             "schema_version": 1,
             "capture_id": "cap-diff",
@@ -2299,12 +2338,12 @@ class TestServerTools(unittest.TestCase):
         })
         self.assertLessEqual(
             len(payload["diff"]["file_map"].encode("utf-8")),
-            server.SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
+            capture_tools.SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
         )
         self.assertTrue(payload["diff"]["file_map_truncated"])
         self.assertGreater(payload["diff"]["omitted_file_count"], 0)
 
-        structured_bounded, structured_omitted = server._bounded_diff_file_map(
+        structured_bounded, structured_omitted = capture_tools._bounded_diff_file_map(
             "unused legacy map",
             {
                 "files": [
@@ -2316,23 +2355,23 @@ class TestServerTools(unittest.TestCase):
                         "start_line": 1,
                         "end_line": 6,
                     }
-                    for _ in range(server.SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES + 1)
+                    for _ in range(capture_tools.SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES + 1)
                 ]
             },
         )
         self.assertIn("added.py [ADDED]", structured_bounded)
         self.assertEqual(structured_omitted, 1)
 
-        bounded, omitted = server._bounded_diff_file_map(
-            "x" * (server.SUMMARY_DIFF_FILE_MAP_MAX_BYTES - 1) + "\nsmall"
+        bounded, omitted = capture_tools._bounded_diff_file_map(
+            "x" * (capture_tools.SUMMARY_DIFF_FILE_MAP_MAX_BYTES - 1) + "\nsmall"
         )
         self.assertLessEqual(
-            len(bounded.encode("utf-8")), server.SUMMARY_DIFF_FILE_MAP_MAX_BYTES
+            len(bounded.encode("utf-8")), capture_tools.SUMMARY_DIFF_FILE_MAP_MAX_BYTES
         )
         self.assertEqual(omitted, 2)
 
-        with patch.object(server, "SUMMARY_DIFF_FILE_MAP_MAX_BYTES", 10):
-            bounded, omitted = server._bounded_diff_file_map("long line\nsmall")
+        with patch.object(capture_tools, "SUMMARY_DIFF_FILE_MAP_MAX_BYTES", 10):
+            bounded, omitted = capture_tools._bounded_diff_file_map("long line\nsmall")
         self.assertLessEqual(len(bounded.encode("utf-8")), 10)
         self.assertGreater(len(bounded.encode("utf-8")), 0)
         self.assertEqual(omitted, 2)
@@ -2529,8 +2568,13 @@ class TestServerTools(unittest.TestCase):
             truncated=True,
             next_cursor="opaque-cursor",
         )
-        summary = server._compact_tool_text(envelope)
+        summary = mcp_transport._compact_tool_text(envelope)
+        compact_result_size = mcp_transport._call_tool_result_bytes(
+            envelope,
+            compact_text=True,
+        )
         self.assertIn("status=ok", summary)
+        self.assertGreater(compact_result_size, 0)
         self.assertIn("result_status=captured", summary)
         self.assertIn("capture_id=\"cap-123\"", summary)
         self.assertIn("label=\"", summary)
@@ -2541,14 +2585,14 @@ class TestServerTools(unittest.TestCase):
         self.assertIn('matched_ranges=["L2-L4"]', summary)
         self.assertNotIn("large payload", summary)
 
-        captures_summary = server._compact_tool_text(server.ToolResponseEnvelope(
+        captures_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
             status="ok",
             data={"capture_count": 1, "captures": [{"capture_id": "cap-list"}]},
         ))
         self.assertIn('capture_ids=["cap-list"]', captures_summary)
         self.assertIn("capture_details=structuredContent.data.captures", captures_summary)
 
-        error_summary = server._compact_tool_text(server.ToolResponseEnvelope(
+        error_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
             status="error",
             error=server.ToolErrorEnvelope(code="capture_not_found", message="private details"),
             text="private details",
@@ -2557,7 +2601,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("details=structuredContent.error.message", error_summary)
         self.assertNotIn("private details", error_summary)
 
-        clear_summary = server._compact_tool_text(server.ToolResponseEnvelope(
+        clear_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
             status="ok",
             data={"message": "Cleared capture 'cap-123'."},
         ))
@@ -2714,7 +2758,11 @@ class TestServerTools(unittest.TestCase):
             1, 1, capture_id=capture_id, cursor="invalid"
         )
         missing_search = server.search_capture_result("query", mode="bm25", capture_id="missing")
-        with patch.object(server, "_call_tool_result_bytes", return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2):
+        with patch.object(
+            retrieval_tools,
+            "_call_tool_result_bytes",
+            return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2,
+        ):
             too_small = server.get_capture_slice_result(
                 1, 1, capture_id=capture_id, max_bytes=4096
             )
@@ -2728,8 +2776,8 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(too_small.error.code, "response_budget_too_small")
 
     def test_legacy_mcp_envelopes_keep_text_and_assign_stable_errors(self):
-        plain_text = server._legacy_tool_envelope("get_buffer_stats", "not JSON")
-        parsed_json = server._legacy_tool_envelope(
+        plain_text = mcp_transport._legacy_tool_envelope("get_buffer_stats", "not JSON")
+        parsed_json = mcp_transport._legacy_tool_envelope(
             "capture_text", '{"schema_version":1,"capture_id":"cap-test"}'
         )
         self.assertEqual(plain_text.status, "ok")
@@ -2745,7 +2793,7 @@ class TestServerTools(unittest.TestCase):
         ]
         for tool, result, code in json_errors:
             with self.subTest(tool=tool, code=code):
-                envelope = server._legacy_tool_envelope(tool, result)
+                envelope = mcp_transport._legacy_tool_envelope(tool, result)
                 self.assertEqual(envelope.status, "error")
                 self.assertEqual(envelope.error.code, code)
 
@@ -2760,7 +2808,7 @@ class TestServerTools(unittest.TestCase):
         ]
         for tool, result, code in text_errors:
             with self.subTest(tool=tool, result=result):
-                envelope = server._legacy_tool_envelope(tool, result)
+                envelope = mcp_transport._legacy_tool_envelope(tool, result)
                 self.assertEqual(envelope.status, "error")
                 self.assertEqual(envelope.error.code, code)
 
@@ -2769,7 +2817,7 @@ class TestServerTools(unittest.TestCase):
             data={"payload": "x" * 5_000},
             text="legacy text " * 500,
         )
-        fitted = server._fit_tool_envelope(oversized, max_bytes=256)
+        fitted = mcp_transport._fit_tool_envelope(oversized, max_bytes=256)
         self.assertTrue(fitted.truncated)
         self.assertLessEqual(server._call_tool_result_bytes(fitted), 256)
 
@@ -2778,7 +2826,7 @@ class TestServerTools(unittest.TestCase):
             data={"payload": "x" * 5_000},
             text=None,
         )
-        fitted_without_text = server._fit_tool_envelope(
+        fitted_without_text = mcp_transport._fit_tool_envelope(
             oversized_without_text, max_bytes=512
         )
         self.assertTrue(fitted_without_text.truncated)
@@ -2786,26 +2834,25 @@ class TestServerTools(unittest.TestCase):
         self.assertLessEqual(server._call_tool_result_bytes(fitted_without_text), 512)
 
         within_budget_without_text = server.ToolResponseEnvelope(status="ok", text=None)
-        fitted_within_budget = server._fit_tool_envelope(
+        fitted_within_budget = mcp_transport._fit_tool_envelope(
             within_budget_without_text, max_bytes=512
         )
         self.assertFalse(fitted_within_budget.truncated)
         self.assertIsNone(fitted_within_budget.text)
 
-        self.assertEqual(server._bounded_json_text("value", 1, "long marker"), ("", True))
-        self.assertIsNone(server._truncate_utf8_with_marker("value", 1, "long marker"))
+        self.assertEqual(capture_tools._bounded_json_text("value", 1, "long marker"), ("", True))
+        self.assertIsNone(capture_tools._truncate_utf8_with_marker("value", 1, "long marker"))
 
     def test_mcp_adapter_rejects_non_envelope_factory_results(self):
-        with (
-            patch.object(server.mcp, "add_tool") as add_tool,
-            patch.object(server, "_REGISTERED_MCP_TOOL_NAMES", []),
-            patch.object(server, "_REGISTERED_MCP_TOOL_CATEGORIES", {}),
-        ):
-            server._mcp_tool(
+        with patch.object(mcp_transport.mcp, "add_tool") as add_tool:
+            mcp_transport._register_mcp_tool_for_app(
+                mcp_transport.mcp,
+                lambda: "unused",
                 "coverage_invalid_result_factory",
                 "retrieval",
-                structured_result_factory=lambda: "not an envelope",
-            )(lambda: "unused")
+                lambda: "not an envelope",
+                server.DEFAULT_SERVICES,
+            )
             adapter = add_tool.call_args.args[0]
             with self.assertRaisesRegex(TypeError, "must return ToolResponseEnvelope"):
                 asyncio.run(adapter())
@@ -2827,7 +2874,11 @@ class TestServerTools(unittest.TestCase):
         }
         with (
             patch.object(server.engine, "search", return_value=result),
-            patch.object(server, "_call_tool_result_bytes", return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2),
+            patch.object(
+                search_tools,
+                "_call_tool_result_bytes",
+                return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2,
+            ),
         ):
             response = server.search_capture_result("needle", mode="bm25")
 
@@ -2968,7 +3019,7 @@ class TestServerTools(unittest.TestCase):
             },
         ]
         with (
-            patch.object(server, "SEARCH_STRUCTURED_MATCH_MAX_BYTES", first_snippet_size),
+            patch.object(search_tools, "SEARCH_STRUCTURED_MATCH_MAX_BYTES", first_snippet_size),
             patch.object(
                 server.engine,
                 "search",
@@ -3020,7 +3071,7 @@ class TestServerTools(unittest.TestCase):
             },
         ]
         with (
-            patch.object(server, "SEARCH_STRUCTURED_MATCH_MAX_BYTES", first_snippet_size),
+            patch.object(search_tools, "SEARCH_STRUCTURED_MATCH_MAX_BYTES", first_snippet_size),
             patch.object(
                 server.engine,
                 "search",
@@ -3079,24 +3130,24 @@ class TestServerTools(unittest.TestCase):
 
 class TestServerSocket(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        server.engine.clear("all")
-        self.original_limit = server.engine.max_buffer_bytes
-        self.original_model = server.engine.embedding_model
-        server.engine.max_buffer_bytes = 1024
-        server.engine.embedding_model = type(
+        socket_transport.engine.clear("all")
+        self.original_limit = socket_transport.engine.max_buffer_bytes
+        self.original_model = socket_transport.engine.embedding_model
+        socket_transport.engine.max_buffer_bytes = 1024
+        socket_transport.engine.embedding_model = type(
             "TestEmbedding",
             (),
             {"embed": lambda _self, texts: [[0.0] * 384 for _ in texts]},
         )()
 
     def tearDown(self):
-        server.engine.max_buffer_bytes = self.original_limit
-        server.engine.embedding_model = self.original_model
-        server.engine.clear("all")
+        socket_transport.engine.max_buffer_bytes = self.original_limit
+        socket_transport.engine.embedding_model = self.original_model
+        socket_transport.engine.clear("all")
 
     async def run_handler(self, payload):
         writer = FakeWriter()
-        task = server.handle_socket_client(FakeReader(payload), writer)
+        task = socket_transport.handle_socket_client(FakeReader(payload), writer)
         await task
         await asyncio.sleep(0)
         return writer
@@ -3118,10 +3169,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("startup probe must not register tool work")
 
         writer = ProbeWriter()
-        with patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", address), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", token), \
-                patch.object(server, "DEFAULT_SERVICES", Services()):
-            await server.handle_socket_client(FakeReader(b""), writer)
+        with patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_ADDRESS", address), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_TOKEN", token), \
+                patch.object(socket_transport, "DEFAULT_SERVICES", Services()):
+            await socket_transport.handle_socket_client(FakeReader(b""), writer)
 
         self.assertEqual(writer.writes, [encode_frame(token)])
         self.assertTrue(writer.closed)
@@ -3140,11 +3191,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("startup-gated clients must not be dispatched")
 
         writer = ClientWriter()
-        with patch.object(server, "_SOCKET_STARTUP_GATED", True), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", None), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", None), \
-                patch.object(server, "DEFAULT_SERVICES", Services()):
-            await server.handle_socket_client(FakeReader(b""), writer)
+        with patch.object(socket_transport, "_SOCKET_STARTUP_GATED", True), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_ADDRESS", None), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_TOKEN", None), \
+                patch.object(socket_transport, "DEFAULT_SERVICES", Services()):
+            await socket_transport.handle_socket_client(FakeReader(b""), writer)
 
         response = response_json(writer)
         self.assertEqual(response["code"], "server_starting")
@@ -3152,15 +3203,15 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_gate_closes_when_error_reply_fails(self):
         writer = FakeWriter()
-        with patch.object(server, "_SOCKET_STARTUP_GATED", True), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", None), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", None), \
+        with patch.object(socket_transport, "_SOCKET_STARTUP_GATED", True), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_ADDRESS", None), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_TOKEN", None), \
                 patch.object(
-                    server,
+                    socket_transport,
                     "_write_socket_error",
                     new=AsyncMock(side_effect=OSError("client disconnected")),
                 ) as write_error:
-            await server.handle_socket_client(FakeReader(b""), writer)
+            await socket_transport.handle_socket_client(FakeReader(b""), writer)
 
         write_error.assert_awaited_once()
         self.assertTrue(writer.closed)
@@ -3183,15 +3234,15 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             "text": "client request must be preserved",
         }).encode())
         writer = ClientWriter()
-        with patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", probe_address), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", token):
-            task = server.handle_socket_client(FakeReader(payload), writer)
+        with patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_ADDRESS", probe_address), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_TOKEN", token):
+            task = socket_transport.handle_socket_client(FakeReader(payload), writer)
             await task
 
         self.assertEqual(response_json(writer)["status"], "ok")
         self.assertTrue(any(
             capture.label == "startup-race"
-            for capture in server.engine._captures.values()
+            for capture in socket_transport.engine._captures.values()
         ))
 
     async def test_client_without_peer_address_uses_regular_shutdown_path(self):
@@ -3200,10 +3251,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 return None
 
         writer = FakeWriter()
-        with patch.object(server, "_SOCKET_STARTUP_PROBE_ADDRESS", "/tmp/probe.sock"), \
-                patch.object(server, "_SOCKET_STARTUP_PROBE_TOKEN", b"probe-token"), \
-                patch.object(server, "DEFAULT_SERVICES", ShuttingDownServices()):
-            await server.handle_socket_client(FakeReader(b""), writer)
+        with patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_ADDRESS", "/tmp/probe.sock"), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_PROBE_TOKEN", b"probe-token"), \
+                patch.object(socket_transport, "DEFAULT_SERVICES", ShuttingDownServices()):
+            await socket_transport.handle_socket_client(FakeReader(b""), writer)
 
         self.assertEqual(response_json(writer)["code"], "server_shutting_down")
 
@@ -3231,19 +3282,19 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 return Ticket()
 
         writer = FakeWriter()
-        with patch.object(server, "DEFAULT_SERVICES", Context()), patch.object(
-            server, "admission_gate", return_value=Gate()
+        with patch.object(socket_transport, "DEFAULT_SERVICES", Context()), patch.object(
+            socket_transport, "admission_gate", return_value=Gate()
         ):
-            task = server.handle_socket_client(FakeReader(b""), writer)
+            task = socket_transport.handle_socket_client(FakeReader(b""), writer)
             try:
                 await gate_entered.wait()
-                self.assertIn(task, server._SOCKET_CLIENT_TASKS)
+                self.assertIn(task, socket_transport._SOCKET_CLIENT_TASKS)
             finally:
                 release_gate.set()
             await task
             await asyncio.sleep(0)
 
-        self.assertNotIn(task, server._SOCKET_CLIENT_TASKS)
+        self.assertNotIn(task, socket_transport._SOCKET_CLIENT_TASKS)
         self.assertTrue(writer.closed)
 
     async def test_socket_handler_rejects_shutdown_and_admission_failure(self):
@@ -3264,8 +3315,8 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         shutting_down = Context(closing=True)
         writer = FakeWriter()
-        with patch.object(server, "DEFAULT_SERVICES", shutting_down):
-            await server.handle_socket_client(FakeReader(b""), writer)
+        with patch.object(socket_transport, "DEFAULT_SERVICES", shutting_down):
+            await socket_transport.handle_socket_client(FakeReader(b""), writer)
         self.assertEqual(response_json(writer)["code"], "server_shutting_down")
         self.assertTrue(writer.closed)
 
@@ -3275,12 +3326,12 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             async def acquire(self, _name):
                 raise RuntimeError("admission failed")
 
-        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
-            server, "admission_gate", return_value=FailingGate()
+        with patch.object(socket_transport, "DEFAULT_SERVICES", context), patch.object(
+            socket_transport, "admission_gate", return_value=FailingGate()
         ):
             failed_writer = FakeWriter()
             with self.assertRaisesRegex(RuntimeError, "admission failed"):
-                await server.handle_socket_client(FakeReader(b""), failed_writer)
+                await socket_transport.handle_socket_client(FakeReader(b""), failed_writer)
         self.assertEqual(context.finished, ["socket-call"])
         self.assertEqual(response_json(failed_writer)["code"], "socket_admission_failed")
         self.assertTrue(failed_writer.closed)
@@ -3302,10 +3353,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         gate = ClosingGate()
         writer = FakeWriter()
-        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
-            server, "admission_gate", return_value=gate
+        with patch.object(socket_transport, "DEFAULT_SERVICES", context), patch.object(
+            socket_transport, "admission_gate", return_value=gate
         ):
-            await server.handle_socket_client(FakeReader(b""), writer)
+            await socket_transport.handle_socket_client(FakeReader(b""), writer)
         self.assertEqual(response_json(writer)["code"], "server_shutting_down")
         self.assertTrue(gate.ticket.released)
         self.assertEqual(context.finished, ["socket-call", "socket-call"])
@@ -3341,15 +3392,15 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         context = Context()
         writer = FailingCloseWriter()
-        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
-            server, "admission_gate", return_value=FailingGate()
+        with patch.object(socket_transport, "DEFAULT_SERVICES", context), patch.object(
+            socket_transport, "admission_gate", return_value=FailingGate()
         ), patch.object(
-            server,
+            socket_transport,
             "_write_socket_error",
             new=AsyncMock(side_effect=OSError("response write failed")),
         ) as write_error:
             with self.assertRaisesRegex(RuntimeError, "admission failed"):
-                await server.handle_socket_client(FakeReader(b""), writer)
+                await socket_transport.handle_socket_client(FakeReader(b""), writer)
 
         write_error.assert_awaited_once_with(
             writer,
@@ -3377,11 +3428,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         context = Context()
         writer = FakeWriter()
-        with patch.object(server, "DEFAULT_SERVICES", context), patch.object(
-            server, "admission_gate", return_value=CancelledGate()
+        with patch.object(socket_transport, "DEFAULT_SERVICES", context), patch.object(
+            socket_transport, "admission_gate", return_value=CancelledGate()
         ):
             with self.assertRaises(asyncio.CancelledError):
-                await server.handle_socket_client(FakeReader(b""), writer)
+                await socket_transport.handle_socket_client(FakeReader(b""), writer)
 
         self.assertEqual(context.finished, ["socket-call"])
         self.assertEqual(writer.writes, [])
@@ -3413,8 +3464,8 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         writer = FakeWriter()
         reader = FakeReader(encode_frame(b"request that must not be read"))
         try:
-            with patch.object(server, "admission_gate", return_value=gate):
-                await server.handle_socket_client(reader, writer)
+            with patch.object(socket_transport, "admission_gate", return_value=gate):
+                await socket_transport.handle_socket_client(reader, writer)
         finally:
             reserved.release()
 
@@ -3428,10 +3479,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         reserved = await gate.acquire("socket_blocker")
         writer = FakeWriter()
         try:
-            with patch.object(server, "admission_gate", return_value=gate), patch.object(
-                server, "_write_socket_error", new=AsyncMock(side_effect=OSError("closed peer"))
+            with patch.object(socket_transport, "admission_gate", return_value=gate), patch.object(
+                socket_transport, "_write_socket_error", new=AsyncMock(side_effect=OSError("closed peer"))
             ):
-                await server.handle_socket_client(FakeReader(b""), writer)
+                await socket_transport.handle_socket_client(FakeReader(b""), writer)
         finally:
             reserved.release()
 
@@ -3441,10 +3492,10 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         gate = BoundedAdmissionGate(max_active=1, max_queued=0)
         writer = FakeWriter()
         reader = StalledReader(FRAME_MAGIC + b"\x01")
-        with patch.object(server, "admission_gate", return_value=gate), patch.object(
-            server, "SOCKET_CLIENT_READ_TIMEOUT_SECONDS", 0.01
+        with patch.object(socket_transport, "admission_gate", return_value=gate), patch.object(
+            socket_transport, "SOCKET_CLIENT_READ_TIMEOUT_SECONDS", 0.01
         ):
-            await server.handle_socket_client(reader, writer)
+            await socket_transport.handle_socket_client(reader, writer)
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
@@ -3525,18 +3576,18 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertLessEqual(
             len(response["label"].encode("utf-8")),
-            server.SUMMARY_LABEL_MAX_BYTES,
+            socket_transport.SUMMARY_LABEL_MAX_BYTES,
         )
         self.assertTrue(response["summary"]["label_truncated"])
         self.assertLessEqual(
             len(json.dumps(response).encode("utf-8")),
-            3 * server.SUMMARY_LABEL_MAX_BYTES,
+            3 * socket_transport.SUMMARY_LABEL_MAX_BYTES,
         )
 
     async def test_socket_byte_metrics_count_framed_request_and_response(self):
-        original_metrics = server.METRICS
+        original_metrics = socket_transport.METRICS
         metrics = LocalMetrics(enabled=True)
-        server.METRICS = metrics
+        socket_transport.METRICS = metrics
         try:
             payload = encode_frame(json.dumps({"label": "socket-metrics", "text": "hello"}).encode())
             capture = SimpleNamespace(
@@ -3546,13 +3597,13 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 byte_size=5,
             )
             with patch.object(
-                server,
+                socket_transport,
                 "to_thread",
                 new=AsyncMock(return_value=(capture, {"status": "error"})),
             ):
                 writer = await self.run_handler(payload)
         finally:
-            server.METRICS = original_metrics
+            socket_transport.METRICS = original_metrics
 
         counters = metrics.snapshot()["bytes"]
         self.assertEqual(counters["socket_request_bytes"], len(payload))
@@ -3572,7 +3623,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             "to_thread",
             new=AsyncMock(return_value=(capture, {"status": "error"})),
         ):
-            await server.handle_socket_client(
+            await socket_transport.handle_socket_client(
                 ChunkedReader(payload[:7], payload[7:]),
                 writer,
             )
@@ -3582,18 +3633,18 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["label"], "chunked")
 
     async def test_escape_heavy_payload_within_capture_limit_is_accepted(self):
-        server.engine.max_buffer_bytes = 100_000
-        text = "\x00" * server.engine.max_buffer_bytes
+        socket_transport.engine.max_buffer_bytes = 100_000
+        text = "\x00" * socket_transport.engine.max_buffer_bytes
         payload = encode_frame(json.dumps({"label": "escaped", "text": text}).encode())
         self.assertGreater(
             len(payload),
-            server.engine.max_buffer_bytes + server.SOCKET_PAYLOAD_OVERHEAD,
+            socket_transport.engine.max_buffer_bytes + socket_transport.SOCKET_PAYLOAD_OVERHEAD,
         )
         capture = SimpleNamespace(
             capture_id="cap_escaped",
             label="escaped",
             line_count=1,
-            byte_size=server.engine.max_buffer_bytes,
+            byte_size=socket_transport.engine.max_buffer_bytes,
         )
         with patch.object(
             server,
@@ -3608,13 +3659,13 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_payload_is_rejected_across_socket_reads(self):
         payload = encode_frame(b"x" * (
-            server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
-            + server.SOCKET_PAYLOAD_OVERHEAD
+            socket_transport.engine.max_buffer_bytes * socket_transport.SOCKET_JSON_MAX_EXPANSION
+            + socket_transport.SOCKET_PAYLOAD_OVERHEAD
             + 1
         ))
         writer = FakeWriter()
 
-        await server.handle_socket_client(
+        await socket_transport.handle_socket_client(
             ChunkedReader(payload[:128], payload[128:]),
             writer,
         )
@@ -3622,8 +3673,8 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         enforced_limit = (
-            server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
-            + server.SOCKET_PAYLOAD_OVERHEAD
+            socket_transport.engine.max_buffer_bytes * socket_transport.SOCKET_JSON_MAX_EXPANSION
+            + socket_transport.SOCKET_PAYLOAD_OVERHEAD
         )
         self.assertEqual(
             response["message"],
@@ -3631,20 +3682,20 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_socket_byte_metrics_count_consumed_rejected_request_bytes(self):
-        original_metrics = server.METRICS
+        original_metrics = socket_transport.METRICS
         metrics = LocalMetrics(enabled=True)
-        server.METRICS = metrics
+        socket_transport.METRICS = metrics
         try:
             oversized = encode_frame(b"x" * (
-                server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
-                + server.SOCKET_PAYLOAD_OVERHEAD
+                socket_transport.engine.max_buffer_bytes * socket_transport.SOCKET_JSON_MAX_EXPANSION
+                + socket_transport.SOCKET_PAYLOAD_OVERHEAD
                 + 1
             ))
             await self.run_handler(oversized)
             truncated_header = FRAME_MAGIC + b"\x01\x00"
             await self.run_handler(truncated_header)
         finally:
-            server.METRICS = original_metrics
+            socket_transport.METRICS = original_metrics
 
         self.assertEqual(
             metrics.snapshot()["bytes"]["socket_request_bytes"],
@@ -3668,8 +3719,8 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(offload.await_count, 1)
         ingest_callable = offload.await_args.args[0]
-        self.assertIs(ingest_callable.__self__, server.engine)
-        self.assertIs(ingest_callable.__func__, server.engine.ingest_with_summary.__func__)
+        self.assertIs(ingest_callable.__self__, socket_transport.engine)
+        self.assertIs(ingest_callable.__func__, socket_transport.engine.ingest_with_summary.__func__)
         self.assertEqual(offload.await_args.args[1], "hello")
         self.assertEqual(offload.await_args.kwargs, {
             "label": "offload-test",
@@ -3686,8 +3737,8 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_payload_returns_error_response(self):
         payload = encode_frame(b"x" * (
-            server.engine.max_buffer_bytes * server.SOCKET_JSON_MAX_EXPANSION
-            + server.SOCKET_PAYLOAD_OVERHEAD
+            socket_transport.engine.max_buffer_bytes * socket_transport.SOCKET_JSON_MAX_EXPANSION
+            + socket_transport.SOCKET_PAYLOAD_OVERHEAD
             + 1
         ))
 
@@ -3778,11 +3829,11 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertIn("invalid capture", response["message"])
 
     async def test_invalid_original_size_returns_error_without_retaining_capture(self):
-        original_metrics = server.METRICS
-        original_engine_metrics = server.engine.metrics
+        original_metrics = socket_transport.METRICS
+        original_engine_metrics = socket_transport.engine.metrics
         metrics = LocalMetrics(enabled=True)
-        server.METRICS = metrics
-        server.engine.metrics = metrics
+        socket_transport.METRICS = metrics
+        socket_transport.engine.metrics = metrics
         try:
             payload = encode_frame(json.dumps({
                 "text": "payload",
@@ -3791,14 +3842,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             }).encode())
             writer = await self.run_handler(payload)
         finally:
-            server.METRICS = original_metrics
-            server.engine.metrics = original_engine_metrics
+            socket_transport.METRICS = original_metrics
+            socket_transport.engine.metrics = original_engine_metrics
 
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "invalid_socket_payload")
         self.assertIn("original_byte_size", response["message"])
-        self.assertEqual(server.engine._captures, {})
+        self.assertEqual(socket_transport.engine._captures, {})
         self.assertEqual(metrics.snapshot()["events"]["captures"], 0)
 
     async def test_invalid_socket_metrics_return_error_without_capturing_envelope(self):
@@ -3814,7 +3865,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "invalid_socket_payload")
         self.assertIn("structured_metrics", response["message"])
-        self.assertEqual(server.engine._captures, {})
+        self.assertEqual(socket_transport.engine._captures, {})
 
     async def test_oversized_socket_metrics_return_typed_payload_error(self):
         payload = encode_frame(json.dumps({
@@ -3828,7 +3879,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "invalid_socket_payload")
         self.assertIn("structured_metrics exceeds", response["message"])
-        self.assertEqual(server.engine._captures, {})
+        self.assertEqual(socket_transport.engine._captures, {})
 
     async def test_non_object_json_payload_returns_error_without_capturing(self):
         writer = await self.run_handler(encode_frame(b"[]"))
@@ -3837,7 +3888,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "invalid_socket_payload")
         self.assertIn("JSON object", response["message"])
-        self.assertEqual(server.engine._captures, {})
+        self.assertEqual(socket_transport.engine._captures, {})
 
     async def test_truncated_frame_returns_error_response(self):
         writer = await self.run_handler(FRAME_MAGIC + b"\x01\x00")
@@ -3856,7 +3907,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
 class TestSocketServerStartup(unittest.TestCase):
     def test_new_socket_probe_uses_unix_stream_socket(self):
-        probe = server._new_socket_probe()
+        probe = socket_transport._new_socket_probe()
         try:
             self.assertEqual(probe.family, socket.AF_UNIX)
             self.assertEqual(probe.type & socket.SOCK_STREAM, socket.SOCK_STREAM)
@@ -3876,8 +3927,8 @@ class TestSocketServerStartup(unittest.TestCase):
                 super().bind(address)
 
         probe = FallbackProbe()
-        with patch.object(server.tempfile, "gettempdir", return_value="/tmp"):
-            address = server._bind_socket_probe(probe, "/tmp/server.sock")
+        with patch.object(socket_transport.tempfile, "gettempdir", return_value="/tmp"):
+            address = socket_transport._bind_socket_probe(probe, "/tmp/socket_transport.sock")
 
         self.assertEqual(address, probe.address)
         self.assertTrue(address.startswith("/var/tmp/"))
@@ -3894,9 +3945,9 @@ class TestSocketServerStartup(unittest.TestCase):
                 raise OSError(f"cannot bind {address}")
 
         probe = FailingProbe()
-        with patch.object(server.tempfile, "gettempdir", return_value="/tmp"):
+        with patch.object(socket_transport.tempfile, "gettempdir", return_value="/tmp"):
             with self.assertRaisesRegex(OSError, "cannot bind"):
-                server._bind_socket_probe(probe, "/tmp/server.sock")
+                socket_transport._bind_socket_probe(probe, "/tmp/socket_transport.sock")
 
         self.assertEqual(len(probe.attempted_addresses), 2)
 
@@ -3904,10 +3955,10 @@ class TestSocketServerStartup(unittest.TestCase):
         regular_stat = os.stat_result(
             (stat.S_IFREG | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
         )
-        with patch.object(server.os, "fstat", return_value=regular_stat):
+        with patch.object(socket_transport.os, "fstat", return_value=regular_stat):
             with self.assertRaisesRegex(RuntimeError, "descriptor is not a socket"):
                 asyncio.run(
-                    server._verify_bound_socket_path(FAKE_BOUND_SOCKET, server.SOCKET_PATH)
+                    socket_transport._verify_bound_socket_path(FAKE_BOUND_SOCKET, socket_transport.SOCKET_PATH)
                 )
 
     def test_bound_socket_verification_rejects_wrong_listener_address(self):
@@ -3919,11 +3970,11 @@ class TestSocketServerStartup(unittest.TestCase):
             def getsockname(self):
                 return "/tmp/another.sock"
 
-        with patch.object(server.os, "fstat", return_value=socket_stat):
+        with patch.object(socket_transport.os, "fstat", return_value=socket_stat):
             with self.assertRaisesRegex(RuntimeError, "address does not match path"):
                 asyncio.run(
-                    server._verify_bound_socket_path(
-                        WrongAddressSocket(), server.SOCKET_PATH
+                    socket_transport._verify_bound_socket_path(
+                        WrongAddressSocket(), socket_transport.SOCKET_PATH
                     )
                 )
 
@@ -3934,11 +3985,11 @@ class TestSocketServerStartup(unittest.TestCase):
         regular_stat = os.stat_result(
             (stat.S_IFREG | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
         )
-        with patch.object(server.os, "fstat", return_value=socket_stat), \
-                patch.object(server.os, "lstat", return_value=regular_stat):
+        with patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                patch.object(socket_transport.os, "lstat", return_value=regular_stat):
             with self.assertRaisesRegex(RuntimeError, "path is not a socket"):
                 asyncio.run(
-                    server._verify_bound_socket_path(FAKE_BOUND_SOCKET, server.SOCKET_PATH)
+                    socket_transport._verify_bound_socket_path(FAKE_BOUND_SOCKET, socket_transport.SOCKET_PATH)
                 )
 
     def test_bound_socket_verification_reports_probe_os_error(self):
@@ -3946,17 +3997,17 @@ class TestSocketServerStartup(unittest.TestCase):
             (stat.S_IFSOCK | 0o600, 1, 2, 1, 0, 0, 0, 0, 0, 0)
         )
 
-        with patch.object(server.os, "fstat", return_value=socket_stat), \
-                patch.object(server.os, "lstat", return_value=socket_stat), \
-                patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+        with patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                patch.object(socket_transport.os, "lstat", return_value=socket_stat), \
+                patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
                 patch.object(
-                    server,
+                    socket_transport,
                     "_connect_socket_probe",
                     new=AsyncMock(side_effect=OSError("probe failed")),
                 ):
             with self.assertRaisesRegex(RuntimeError, "Unable to verify bound socket path"):
                 asyncio.run(
-                    server._verify_bound_socket_path(FAKE_BOUND_SOCKET, server.SOCKET_PATH)
+                    socket_transport._verify_bound_socket_path(FAKE_BOUND_SOCKET, socket_transport.SOCKET_PATH)
                 )
 
     def test_connect_socket_probe_uses_running_loop_and_streams(self):
@@ -3970,13 +4021,13 @@ class TestSocketServerStartup(unittest.TestCase):
                 calls.append(("connect", actual_probe, path))
 
         async def exercise():
-            with patch.object(server.asyncio, "get_running_loop", return_value=Loop()), \
+            with patch.object(socket_transport.asyncio, "get_running_loop", return_value=Loop()), \
                     patch.object(
-                        server.asyncio,
+                        socket_transport.asyncio,
                         "open_connection",
                         new=AsyncMock(return_value=(reader, writer)),
                     ) as open_connection:
-                result = await server._connect_socket_probe(probe, "/tmp/test.sock")
+                result = await socket_transport._connect_socket_probe(probe, "/tmp/test.sock")
             self.assertEqual(result, (reader, writer))
             open_connection.assert_awaited_once_with(sock=probe)
 
@@ -3984,11 +4035,11 @@ class TestSocketServerStartup(unittest.TestCase):
         self.assertEqual(calls, [("connect", probe, "/tmp/test.sock")])
 
     def test_socket_path_lock_closes_fd_when_lock_acquisition_fails(self):
-        with patch.object(server.os, "open", return_value=41), \
-                patch.object(server.fcntl, "flock", side_effect=OSError("lock failed")), \
-                patch.object(server.os, "close") as close:
+        with patch.object(socket_transport.os, "open", return_value=41), \
+                patch.object(socket_transport.fcntl, "flock", side_effect=OSError("lock failed")), \
+                patch.object(socket_transport.os, "close") as close:
             with self.assertRaisesRegex(OSError, "lock failed"):
-                with server._socket_path_lock("/tmp/ephemeral-buffer-test.sock"):
+                with socket_transport._socket_path_lock("/tmp/ephemeral-buffer-test.sock"):
                     pass
         close.assert_called_once_with(41)
 
@@ -4031,33 +4082,37 @@ class TestSocketServerStartup(unittest.TestCase):
             events.append("bind")
             return Listener()
 
-        with patch.object(server, "SOCKET_PATH", "/tmp/ephemeral-buffer-test.sock"), \
-                patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                patch.object(server.asyncio, "set_event_loop"), \
-                patch.object(server.os.path, "lexists", return_value=False), \
-                patch.object(server.os, "fstat", return_value=socket_stat), \
-                patch.object(server.os, "lstat", return_value=socket_stat), \
-                patch.object(server.asyncio, "start_unix_server", new=AsyncMock(side_effect=start_server)) as start_listener, \
-                patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                patch.object(server.os, "chmod"), \
-                patch.object(server, "_socket_path_lock", return_value=Lock()), \
-                patch.object(server, "_unlink_socket_if_identity", return_value=True), \
+        with patch.object(socket_transport, "SOCKET_PATH", "/tmp/ephemeral-buffer-test.sock"), \
+                patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                patch.object(socket_transport.asyncio, "set_event_loop"), \
+                patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                patch.object(socket_transport.os, "lstat", return_value=socket_stat), \
+                patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(side_effect=start_server)) as start_listener, \
+                patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                patch.object(socket_transport.os, "chmod"), \
+                patch.object(socket_transport, "_socket_path_lock", return_value=Lock()), \
+                patch.object(socket_transport, "_unlink_socket_if_identity", return_value=True), \
                 patch("sys.stderr", new_callable=io.StringIO):
-            server.run_socket_server()
+            socket_transport.run_socket_server()
 
         self.assertEqual(events[:2], ["enter", "bind"])
         self.assertEqual(events[-1], "exit")
         self.assertEqual(
             start_listener.await_args.kwargs["backlog"],
-            server.MAX_ACTIVE_SOCKET_CLIENTS + server.MAX_QUEUED_SOCKET_CLIENTS,
+            socket_transport.MAX_ACTIVE_SOCKET_CLIENTS + socket_transport.MAX_QUEUED_SOCKET_CLIENTS,
         )
 
     def test_disabled_socket_import_marks_startup_event_ready(self):
+        disabled_settings = settings_with_environment(
+            EPHEMERAL_DISABLE_SOCKET_SERVER="1"
+        )
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "1"}), \
-                patch.object(config, "_STARTUP_SETTINGS", None):
+                patch.object(config, "_STARTUP_SETTINGS", None), \
+                patch.object(server, "SETTINGS", disabled_settings):
             namespace = runpy.run_module(
-                "ephemeral_buffer_mcp.server", run_name="server_disabled_import"
+                "ephemeral_buffer_mcp.socket_transport", run_name="socket_disabled_import"
             )
 
         self.assertTrue(namespace["_SOCKET_STARTUP_EVENT"].is_set())
@@ -4068,75 +4123,75 @@ class TestSocketServerStartup(unittest.TestCase):
                 "EPHEMERAL_EMBEDDING_WARMUP": "0",
         }), \
                 patch.object(config, "_STARTUP_SETTINGS", None), \
-                patch.object(server.threading, "Thread") as thread:
+                patch.object(socket_transport.threading, "Thread") as thread:
             runpy.run_module("ephemeral_buffer_mcp.server", run_name="server_import")
 
         thread.assert_not_called()
 
     def test_explicit_socket_startup_honors_disabled_mode(self):
         with patch.object(
-            server,
+            socket_transport,
             "SETTINGS",
             settings_with_environment(EPHEMERAL_DISABLE_SOCKET_SERVER="1"),
         ):
-            self.assertIsNone(server.start_socket_server())
+            self.assertIsNone(socket_transport.start_socket_server())
 
-        self.assertEqual(server._socket_lifecycle()[0], "disabled")
+        self.assertEqual(socket_transport._socket_lifecycle()[0], "disabled")
 
     def test_allow_stdio_without_socket_uses_startup_snapshot(self):
         with patch.object(
-            server,
+            socket_transport,
             "SETTINGS",
             settings_with_environment(EPHEMERAL_ALLOW_STDIO_WITHOUT_SOCKET="1"),
         ):
-            self.assertTrue(server._allow_stdio_without_socket())
+            self.assertTrue(socket_transport._allow_stdio_without_socket())
 
     def test_socket_startup_timeout_is_reported(self):
         event = SimpleNamespace(wait=lambda timeout: False)
-        with patch.object(server, "_allow_stdio_without_socket", return_value=False), \
-                patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
-                patch.object(server, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
+        with patch.object(socket_transport, "_allow_stdio_without_socket", return_value=False), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_EVENT", event), \
+                patch.object(socket_transport, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
             with self.assertRaisesRegex(SystemExit, "did not become ready within 3 seconds"):
-                server._require_socket_ready()
+                socket_transport._require_socket_ready()
 
     def test_socket_startup_timeout_can_continue_stdio_only(self):
         event = SimpleNamespace(wait=lambda timeout: False)
-        with patch.object(server, "_allow_stdio_without_socket", return_value=True), \
-                patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
-                patch.object(server, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
-            server._require_socket_ready()
+        with patch.object(socket_transport, "_allow_stdio_without_socket", return_value=True), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_EVENT", event), \
+                patch.object(socket_transport, "SOCKET_STARTUP_TIMEOUT_SECONDS", 3):
+            socket_transport._require_socket_ready()
 
     def test_socket_startup_failure_is_reported_to_entrypoint(self):
         event = SimpleNamespace(wait=lambda timeout: True)
-        with patch.object(server, "_allow_stdio_without_socket", return_value=False), \
-                patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
-                patch.object(server, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
+        with patch.object(socket_transport, "_allow_stdio_without_socket", return_value=False), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_EVENT", event), \
+                patch.object(socket_transport, "_socket_lifecycle", return_value=("failed", "RuntimeError: unavailable")):
             with self.assertRaisesRegex(SystemExit, "failed to start: RuntimeError: unavailable"):
-                server._require_socket_ready()
+                socket_transport._require_socket_ready()
 
     def test_socket_startup_failure_can_continue_stdio_only(self):
         event = SimpleNamespace(wait=lambda timeout: True)
-        with patch.object(server, "_allow_stdio_without_socket", return_value=True), \
-                patch.object(server, "_SOCKET_STARTUP_EVENT", event), \
-                patch.object(server, "_socket_lifecycle", return_value=("failed", "PermissionError: denied")):
-            server._require_socket_ready()
+        with patch.object(socket_transport, "_allow_stdio_without_socket", return_value=True), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_EVENT", event), \
+                patch.object(socket_transport, "_socket_lifecycle", return_value=("failed", "PermissionError: denied")):
+            socket_transport._require_socket_ready()
 
     def test_strict_isolation_rejects_unconfigured_startup(self):
         class FailingLoop:
             def close(self):
                 pass
 
-        with patch.object(server, "socket_isolation_required", return_value=True), \
-                patch.object(server, "socket_isolation_configured", return_value=False), \
-                patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                patch.object(server.asyncio, "set_event_loop"), \
+        with patch.object(socket_transport, "socket_isolation_required", return_value=True), \
+                patch.object(socket_transport, "socket_isolation_configured", return_value=False), \
+                patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                patch.object(socket_transport.asyncio, "set_event_loop"), \
                 patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            server.run_socket_server()
+            socket_transport.run_socket_server()
 
         self.assertIn("Socket isolation is required", stderr.getvalue())
 
     def test_strict_isolation_fails_before_acquiring_active_session_socket_lock(self):
-        if server.fcntl is None:
+        if socket_transport.fcntl is None:
             self.skipTest("requires fcntl file locks")
 
         class FailingLoop:
@@ -4165,7 +4220,7 @@ class TestSocketServerStartup(unittest.TestCase):
 
             def start_unconfigured_server():
                 try:
-                    server.run_socket_server()
+                    socket_transport.run_socket_server()
                 finally:
                     startup_finished.set()
 
@@ -4188,12 +4243,12 @@ class TestSocketServerStartup(unittest.TestCase):
                     stop_lock_holder()
                     self.fail("could not acquire the active session socket lock")
 
-                with patch.object(server, "SOCKET_PATH", active_socket_path), \
-                        patch.object(server, "socket_isolation_required", return_value=True), \
-                        patch.object(server, "socket_isolation_configured", return_value=False), \
-                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                        patch.object(server.asyncio, "set_event_loop"), \
-                        patch.object(server, "_set_socket_state"), \
+                with patch.object(socket_transport, "SOCKET_PATH", active_socket_path), \
+                        patch.object(socket_transport, "socket_isolation_required", return_value=True), \
+                        patch.object(socket_transport, "socket_isolation_configured", return_value=False), \
+                        patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(socket_transport.asyncio, "set_event_loop"), \
+                        patch.object(socket_transport, "_set_socket_state"), \
                         patch("sys.stderr", new_callable=io.StringIO) as stderr:
                     startup_thread.start()
                     completed_while_lock_was_held = startup_finished.wait(timeout=1)
@@ -4235,13 +4290,13 @@ class TestSocketServerStartup(unittest.TestCase):
                 stale_listener.close()
                 self.skipTest(f"Unix socket bind unavailable: {exc}")
             stale_listener.close()
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.socket, "socket", return_value=Probe()), \
-                    patch.object(server.os, "unlink", side_effect=unlink) as unlink_mock, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.socket, "socket", return_value=Probe()), \
+                    patch.object(socket_transport.os, "unlink", side_effect=unlink) as unlink_mock, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
         return stderr.getvalue(), unlink_mock
 
     def test_socket_probe_stale_cleanup_tolerates_missing_path(self):
@@ -4284,11 +4339,11 @@ class TestSocketServerStartup(unittest.TestCase):
 
             for path in paths:
                 with self.subTest(path=path), \
-                        patch.object(server, "SOCKET_PATH", str(path)), \
-                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                        patch.object(server.asyncio, "set_event_loop"), \
+                        patch.object(socket_transport, "SOCKET_PATH", str(path)), \
+                        patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(socket_transport.asyncio, "set_event_loop"), \
                         patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                    server.run_socket_server()
+                    socket_transport.run_socket_server()
 
                 self.assertTrue(os.path.lexists(path))
                 self.assertIn("not a Unix socket", stderr.getvalue())
@@ -4320,15 +4375,15 @@ class TestSocketServerStartup(unittest.TestCase):
                 def close(self):
                     pass
 
-            with patch.object(server, "SOCKET_PATH", str(socket_path)), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=True), \
-                    patch.object(server.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
-                    patch.object(server.socket, "socket", return_value=RefusingProbe()), \
-                    patch.object(server.os, "unlink") as unlink, \
+            with patch.object(socket_transport, "SOCKET_PATH", str(socket_path)), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=True), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
+                    patch.object(socket_transport.socket, "socket", return_value=RefusingProbe()), \
+                    patch.object(socket_transport.os, "unlink") as unlink, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
             unlink.assert_not_called()
             self.assertTrue(socket_path.exists())
@@ -4361,14 +4416,14 @@ class TestSocketServerStartup(unittest.TestCase):
                 def close(self):
                     pass
 
-            with patch.object(server, "SOCKET_PATH", str(socket_path)), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=True), \
-                    patch.object(server.os, "lstat", side_effect=[initial_stat, FileNotFoundError()]), \
-                    patch.object(server.socket, "socket", return_value=RefusingProbe()), \
+            with patch.object(socket_transport, "SOCKET_PATH", str(socket_path)), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=True), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[initial_stat, FileNotFoundError()]), \
+                    patch.object(socket_transport.socket, "socket", return_value=RefusingProbe()), \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
             self.assertIn("socket unavailable", stderr.getvalue())
 
@@ -4401,15 +4456,15 @@ class TestSocketServerStartup(unittest.TestCase):
                 def close(self):
                     pass
 
-            with patch.object(server, "SOCKET_PATH", str(socket_path)), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=True), \
-                    patch.object(server.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
-                    patch.object(server.socket, "socket", return_value=RefusingProbe()), \
-                    patch.object(server.os, "unlink") as unlink, \
+            with patch.object(socket_transport, "SOCKET_PATH", str(socket_path)), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=True), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[initial_stat, replacement_stat]), \
+                    patch.object(socket_transport.socket, "socket", return_value=RefusingProbe()), \
+                    patch.object(socket_transport.os, "unlink") as unlink, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
             unlink.assert_not_called()
             self.assertIn("changed while probing", stderr.getvalue())
@@ -4439,11 +4494,11 @@ class TestSocketServerStartup(unittest.TestCase):
                         coroutine.close()
                         raise AssertionError("startup should stop before event loop execution")
 
-                with patch.object(server, "SOCKET_PATH", socket_path), \
-                        patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                        patch.object(server.asyncio, "set_event_loop"), \
+                with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                        patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(socket_transport.asyncio, "set_event_loop"), \
                         patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                    server.run_socket_server()
+                    socket_transport.run_socket_server()
                 self.assertIn("Socket already in use", stderr.getvalue())
             finally:
                 listener.close()
@@ -4469,11 +4524,11 @@ class TestSocketServerStartup(unittest.TestCase):
                     coroutine.close()
                     raise RuntimeError("socket unavailable")
 
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
                     patch("sys.stderr", new_callable=io.StringIO):
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
             self.assertFalse(os.path.exists(socket_path))
 
@@ -4487,15 +4542,15 @@ class TestSocketServerStartup(unittest.TestCase):
                 raise RuntimeError("socket unavailable")
 
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(server, "SOCKET_PATH", os.path.join(directory, "ephemeral.sock")), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
+            with patch.object(socket_transport, "SOCKET_PATH", os.path.join(directory, "ephemeral.sock")), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         self.assertIn("Socket server error: socket unavailable", stderr.getvalue())
-        self.assertEqual(server._socket_lifecycle()[0], "failed")
-        self.assertIn("RuntimeError: socket unavailable", server._socket_lifecycle()[1])
+        self.assertEqual(socket_transport._socket_lifecycle()[0], "failed")
+        self.assertIn("RuntimeError: socket unavailable", socket_transport._socket_lifecycle()[1])
 
     def test_successful_startup_runs_listener_until_shutdown(self):
         test_case = self
@@ -4510,7 +4565,7 @@ class TestSocketServerStartup(unittest.TestCase):
                 return False
 
             async def serve_forever(self):
-                test_case.assertEqual(server._socket_lifecycle()[0], "ready")
+                test_case.assertEqual(socket_transport._socket_lifecycle()[0], "ready")
                 raise RuntimeError("listener stopped")
 
         class RunningLoop:
@@ -4526,23 +4581,23 @@ class TestSocketServerStartup(unittest.TestCase):
             socket_stat = os.stat_result(
                 (stat.S_IFSOCK | 0o600, source_stat.st_ino, source_stat.st_dev, 1, 0, 0, 0, 0, 0, 0)
             )
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())) as start, \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=socket_stat) as fstat, \
-                    patch.object(server.os, "lstat", return_value=socket_stat), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                    patch.object(server.os, "chmod") as chmod, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())) as start, \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=socket_stat) as fstat, \
+                    patch.object(socket_transport.os, "lstat", return_value=socket_stat), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(socket_transport.os, "chmod") as chmod, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         start.assert_awaited_once_with(
-            server.handle_socket_client,
+            socket_transport.handle_socket_client,
             path=socket_path,
-            backlog=server.MAX_ACTIVE_SOCKET_CLIENTS + server.MAX_QUEUED_SOCKET_CLIENTS,
+            backlog=socket_transport.MAX_ACTIVE_SOCKET_CLIENTS + socket_transport.MAX_QUEUED_SOCKET_CLIENTS,
         )
         fstat.assert_any_call(41)
         chmod.assert_called_once_with(socket_path, 0o600)
@@ -4575,15 +4630,15 @@ class TestSocketServerStartup(unittest.TestCase):
         listener = Listener()
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "chmod") as chmod, \
-                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "chmod") as chmod, \
+                    patch.object(socket_transport, "_unlink_socket_if_identity") as cleanup, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         self.assertTrue(listener.closed)
         chmod.assert_not_called()
@@ -4623,19 +4678,19 @@ class TestSocketServerStartup(unittest.TestCase):
         listener = Listener()
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=bound_stat), \
-                    patch.object(server.os, "lstat", side_effect=[bound_stat, replacement_stat]), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                    patch.object(server.os, "chmod") as chmod, \
-                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=bound_stat), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[bound_stat, replacement_stat]), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(socket_transport.os, "chmod") as chmod, \
+                    patch.object(socket_transport, "_unlink_socket_if_identity") as cleanup, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         self.assertTrue(listener.closed)
         chmod.assert_not_called()
@@ -4668,23 +4723,23 @@ class TestSocketServerStartup(unittest.TestCase):
         listener = Listener()
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=socket_stat), \
-                    patch.object(server.os, "lstat", return_value=socket_stat), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=listener)), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                    patch.object(socket_transport.os, "lstat", return_value=socket_stat), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
                     patch.object(
-                        server,
+                        socket_transport,
                         "_connect_socket_probe",
                         new=successful_socket_probe_connector(b"wrong-token"),
                     ), \
-                    patch.object(server.os, "chmod") as chmod, \
-                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+                    patch.object(socket_transport.os, "chmod") as chmod, \
+                    patch.object(socket_transport, "_unlink_socket_if_identity") as cleanup, \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         chmod.assert_not_called()
         cleanup.assert_not_called()
@@ -4714,19 +4769,19 @@ class TestSocketServerStartup(unittest.TestCase):
         socket_stat = os.stat_result((stat.S_IFSOCK | 0o600, socket_stat.st_ino, socket_stat.st_dev, 1, 0, 0, 0, 0, 0, 0))
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=socket_stat), \
-                    patch.object(server.os, "lstat", return_value=socket_stat), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
-                    patch.object(server.os, "chmod"), \
-                    patch.object(server, "_unlink_socket_if_identity", return_value=True) as cleanup, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                    patch.object(socket_transport.os, "lstat", return_value=socket_stat), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(socket_transport.os, "chmod"), \
+                    patch.object(socket_transport, "_unlink_socket_if_identity", return_value=True) as cleanup, \
                     patch("sys.stderr", new_callable=io.StringIO):
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         cleanup.assert_called_once_with(socket_path, (socket_stat.st_dev, socket_stat.st_ino))
 
@@ -4756,20 +4811,20 @@ class TestSocketServerStartup(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=socket_stat), \
-                    patch.object(server.os, "lstat", side_effect=[socket_stat, socket_stat, socket_stat]), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
-                    patch.object(server.os, "chmod"), \
-                    patch.object(server, "_unlink_socket_if_identity", side_effect=FileNotFoundError()), \
-                    patch.object(server.os, "unlink") as unlink, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[socket_stat, socket_stat, socket_stat]), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(socket_transport.os, "chmod"), \
+                    patch.object(socket_transport, "_unlink_socket_if_identity", side_effect=FileNotFoundError()), \
+                    patch.object(socket_transport.os, "unlink") as unlink, \
                     patch("sys.stderr", new_callable=io.StringIO):
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         self.assertFalse(any(call.args == (socket_path,) for call in unlink.call_args_list))
 
@@ -4799,19 +4854,19 @@ class TestSocketServerStartup(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=socket_stat), \
-                    patch.object(server.os, "lstat", side_effect=[socket_stat, socket_stat, FileNotFoundError()]), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
-                    patch.object(server.os, "chmod"), \
-                    patch.object(server, "_unlink_socket_if_identity") as cleanup, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=socket_stat), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[socket_stat, socket_stat, FileNotFoundError()]), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(socket_transport.os, "chmod"), \
+                    patch.object(socket_transport, "_unlink_socket_if_identity") as cleanup, \
                     patch("sys.stderr", new_callable=io.StringIO):
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         cleanup.assert_not_called()
 
@@ -4840,19 +4895,19 @@ class TestSocketServerStartup(unittest.TestCase):
         replacement_stat = os.stat_result((stat.S_IFSOCK | 0o600, bound_stat.st_ino + 1, bound_stat.st_dev, 1, 0, 0, 0, 0, 0, 0))
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "ephemeral.sock")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=RunningLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.os.path, "lexists", return_value=False), \
-                    patch.object(server.os, "fstat", return_value=bound_stat), \
-                    patch.object(server.os, "lstat", side_effect=[bound_stat, bound_stat, replacement_stat]), \
-                    patch.object(server, "_new_socket_probe", return_value=FakeProbeSocket()), \
-                    patch.object(server, "_connect_socket_probe", new=successful_socket_probe_connector()), \
-                    patch.object(server.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
-                    patch.object(server.os, "chmod"), \
-                    patch.object(server.os, "unlink") as unlink, \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=RunningLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.os.path, "lexists", return_value=False), \
+                    patch.object(socket_transport.os, "fstat", return_value=bound_stat), \
+                    patch.object(socket_transport.os, "lstat", side_effect=[bound_stat, bound_stat, replacement_stat]), \
+                    patch.object(socket_transport, "_new_socket_probe", return_value=FakeProbeSocket()), \
+                    patch.object(socket_transport, "_connect_socket_probe", new=successful_socket_probe_connector()), \
+                    patch.object(socket_transport.asyncio, "start_unix_server", new=AsyncMock(return_value=Listener())), \
+                    patch.object(socket_transport.os, "chmod"), \
+                    patch.object(socket_transport.os, "unlink") as unlink, \
                     patch("sys.stderr", new_callable=io.StringIO):
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         self.assertFalse(any(call.args == (socket_path,) for call in unlink.call_args_list))
 
@@ -4871,12 +4926,12 @@ class TestSocketServerStartup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             socket_path = os.path.join(directory, "not-a-socket")
             Path(socket_path).write_text("occupied", encoding="utf-8")
-            with patch.object(server, "SOCKET_PATH", socket_path), \
-                    patch.object(server.asyncio, "new_event_loop", return_value=FailingLoop()), \
-                    patch.object(server.asyncio, "set_event_loop"), \
-                    patch.object(server.socket, "socket", return_value=FailingProbe()), \
+            with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                    patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                    patch.object(socket_transport.asyncio, "set_event_loop"), \
+                    patch.object(socket_transport.socket, "socket", return_value=FailingProbe()), \
                     patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                server.run_socket_server()
+                socket_transport.run_socket_server()
 
         self.assertIn("not a Unix socket", stderr.getvalue())
 
@@ -4907,16 +4962,34 @@ class TestSocketServerStartup(unittest.TestCase):
                 return self.alive
 
         fake_thread = FakeThread()
+        mcp_app = SimpleNamespace(run=Mock())
+        created_contexts = []
+
+        def create_mcp_app(context):
+            created_contexts.append(context)
+            return mcp_app
+
+        runtime_settings = settings_with_environment(EPHEMERAL_DISABLE_SOCKET_SERVER="0")
         with patch.dict(os.environ, {"EPHEMERAL_DISABLE_SOCKET_SERVER": "0"}), \
                 patch.object(config, "_STARTUP_SETTINGS", None), \
-                patch.object(server.threading, "Thread", return_value=fake_thread), \
-                patch.object(server.threading, "Event", return_value=ReadyEvent()), \
-                patch("mcp.server.MCPServer", return_value=server.mcp), \
-                patch.object(server.mcp, "run") as mcp_run:
-            runpy.run_module("ephemeral_buffer_mcp.server", run_name="__main__")
+                patch.object(server, "SETTINGS", runtime_settings), \
+                patch.object(socket_transport, "SETTINGS", runtime_settings), \
+                patch.object(server.DEFAULT_SERVICES, "start"), \
+                patch.object(server.DEFAULT_SERVICES, "close"), \
+                patch.object(socket_transport, "_SOCKET_STARTUP_EVENT", ReadyEvent()), \
+                patch.object(socket_transport.threading, "Thread", return_value=fake_thread), \
+                patch.object(mcp_transport, "create_mcp_server", side_effect=create_mcp_app), \
+                patch.object(mcp_transport, "_refresh_mcp_instructions") as refresh_instructions:
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_module("ephemeral_buffer_mcp.server", run_name="__main__")
 
         self.assertTrue(fake_thread.started)
-        mcp_run.assert_called_once_with()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(len(created_contexts), 1)
+        self.assertIs(created_contexts[0], server.DEFAULT_SERVICES)
+        self.assertIs(socket_transport.DEFAULT_SERVICES, server.DEFAULT_SERVICES)
+        refresh_instructions.assert_called_once_with(mcp_app, server.DEFAULT_SERVICES)
+        mcp_app.run.assert_called_once_with()
 
     def test_module_entrypoint_rejects_missing_required_isolation(self):
         with patch.dict(
@@ -4924,6 +4997,9 @@ class TestSocketServerStartup(unittest.TestCase):
             {"EPHEMERAL_REQUIRE_ISOLATION": "1"},
             clear=True,
         ), patch.object(config, "_STARTUP_SETTINGS", None), \
+                patch.object(server, "SETTINGS", settings_with_environment(
+                    EPHEMERAL_REQUIRE_ISOLATION="1"
+                )), \
                 self.assertRaisesRegex(SystemExit, "Socket isolation is required"):
             runpy.run_module("ephemeral_buffer_mcp.server", run_name="__main__")
 

@@ -2,7 +2,7 @@
 """Measure deterministic command-output workflows with and without the buffer."""
 
 import argparse
-from contextlib import ContextDecorator, contextmanager
+from contextlib import contextmanager
 import json
 import math
 import platform
@@ -14,8 +14,14 @@ from typing import Any, Dict, Iterable, Iterator, List
 from unittest.mock import patch
 
 import benchmarks.workload_results as wr
+from ephemeral_buffer_mcp import create_service_context
 from ephemeral_buffer_mcp.engine import EphemeralEngine, process_rss_bytes
-import ephemeral_buffer_mcp.server as server
+from ephemeral_buffer_mcp.server import _activate_service_context, _call_tool_result_bytes
+from ephemeral_buffer_mcp.tools.capture import execute_and_capture
+from ephemeral_buffer_mcp.tools.retrieval import (
+    get_capture_slice_result,
+    get_capture_summary,
+)
 
 
 SCHEMA_VERSION = 1
@@ -28,40 +34,30 @@ PRIVACY_NOTE = "fixtures are generated in code; no user content, captures, or pr
 @contextmanager
 def _benchmark_engine(max_captures: int) -> Iterator[EphemeralEngine]:
     """Create an isolated benchmark service without background indexing."""
-    context = server.create_service_context(
+    context = create_service_context(
         metrics_file=None,
         engine_options={"max_captures": max_captures, "semantic_prefetch": False},
     )
     try:
-        with server._activate_service_context(context):
-            yield context.engine
+        yield context.engine
     finally:
         context.close()
 
 
-class _IsolatedSummaryEngine(ContextDecorator):
-    """Give the summary benchmark a private engine without mutating callers."""
-
-    def _recreate_cm(self):
-        return type(self)()
-
+class _IsolatedSummaryEngine:
+    """Give the summary benchmark an isolated tool-handler context."""
     def __enter__(self):
-        self._service_context = server.create_service_context(
+        self._service_context = create_service_context(
             metrics_file=None,
             engine_options={
                 "max_captures": len(summary_scenarios()),
                 "semantic_prefetch": False,
             },
         )
-        self._activation = server._activate_service_context(self._service_context)
-        self._activation.__enter__()
-        return self._service_context.engine
+        return self._service_context
 
     def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            self._activation.__exit__(exc_type, exc_value, traceback)
-        finally:
-            self._service_context.close()
+        self._service_context.close()
         return False
 
 
@@ -200,14 +196,45 @@ def _legacy_execute_response(
     )
 
 
-def _parse_tool_json_response(response: str) -> Any:
+def _parse_tool_json_response(response: Any) -> Any:
     """Decode a JSON tool response while preserving plain-text server errors."""
+    if isinstance(response, dict):
+        structured = response
+    elif hasattr(response, "model_dump"):
+        structured = response.model_dump(mode="json", by_alias=True)
+    else:
+        structured = getattr(response, "structured_content", None)
+    if isinstance(structured, dict):
+        status = structured.get("status")
+        error = structured.get("error")
+        if status == "error":
+            message = error.get("message") if isinstance(error, dict) else None
+            raise RuntimeError(message or "MCP tool call failed")
+        data = structured.get("data")
+        if isinstance(data, dict):
+            payload = {"status": status or "ok", **data}
+            for key in ("truncated", "next_cursor"):
+                if key in structured:
+                    payload[key] = structured[key]
+            return payload
+        return structured
+    if not isinstance(response, str):
+        content = getattr(response, "content", None)
+        if isinstance(content, list) and content:
+            response = getattr(content[0], "text", "")
+        else:
+            response = str(response)
     if response.startswith("Error"):
         raise RuntimeError(response)
     return json.loads(response)
 
 
-@_IsolatedSummaryEngine()
+def _call_summary_handler(context, handler, *args, **kwargs):
+    """Invoke a synchronous tool handler with the benchmark's isolated context."""
+    with _activate_service_context(context):
+        return handler(*args, **kwargs)
+
+
 def run_summary_benchmark() -> Dict[str, Any]:
     """Measure public preview responses versus summary-first prompts.
 
@@ -219,112 +246,127 @@ def run_summary_benchmark() -> Dict[str, Any]:
     """
     selected = summary_scenarios()
     records = []
-    for scenario in selected:
-        with patch.object(
-            server,
-            "run_command_bounded",
-            return_value=(
-                scenario["text"],
-                scenario["command_exit_code"],
-                scenario["truncated"],
-                scenario["original_byte_size"],
-                scenario["timed_out"],
-            ),
-        ):
-            compact_summary = _parse_tool_json_response(server.execute_and_capture(
-                scenario["command"],
-                label=f"summary-benchmark-{scenario['id']}",
-                content_type=scenario["content_type"],
-                max_output_bytes=server._active_engine().max_buffer_bytes,
-            ))
-        capture_id = compact_summary["capture_id"]
-        detailed_summary = _parse_tool_json_response(
-            server.get_capture_summary(capture_id, include_previews=True)
-        )
-        raw_summary = server._active_engine().get_summary(capture_id, include_previews=True)
-        legacy_response = _legacy_execute_response(
-            scenario["command"],
-            raw_summary,
-            scenario["command_exit_code"],
-            scenario["timed_out"],
-            scenario.get("timeout_seconds"),
-        )
-        compact_core = {
-            key: value
-            for key, value in compact_summary.items()
-            if key not in {"command", "command_truncated", "command_cancelled"}
-        }
-        detailed_core = {
-            key: value for key, value in detailed_summary.items() if key != "previews"
-        }
-        payload_shapes_aligned = set(compact_core) == set(detailed_core)
-        if not payload_shapes_aligned:
-            raise RuntimeError("summary benchmark payload shapes are not aligned")
-        compact = json.dumps(
-            compact_summary,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        detailed = json.dumps(
-            detailed_summary,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        legacy_prompt = json.dumps(
-            {"task": scenario["task_prompt"], "tool_response": legacy_response},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        summary_prompt = json.dumps(
-            {"task": scenario["task_prompt"], "tool_response": compact_summary},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        retrieval_content = []
-        retrieval_bytes = 0
-        retrieval_ok = True
-        cursor = None
-        while True:
-            page = server.get_capture_slice_result(
-                1,
-                compact_summary["total_lines"],
-                capture_id=capture_id,
-                cursor=cursor,
+    with _IsolatedSummaryEngine() as context:
+        for scenario in selected:
+            with patch(
+                "ephemeral_buffer_mcp.tools.capture.run_command_bounded",
+                return_value=(
+                    scenario["text"],
+                    scenario["command_exit_code"],
+                    scenario["truncated"],
+                    scenario["original_byte_size"],
+                    scenario["timed_out"],
+                ),
+            ):
+                compact_result = _call_summary_handler(
+                    context,
+                    execute_and_capture,
+                    scenario["command"],
+                    label=f"summary-benchmark-{scenario['id']}",
+                    content_type=scenario["content_type"],
+                    max_output_bytes=context.engine.max_buffer_bytes,
+                )
+            compact_summary = _parse_tool_json_response(compact_result)
+            capture_id = compact_summary["capture_id"]
+            detailed_summary = _parse_tool_json_response(
+                _call_summary_handler(
+                    context,
+                    get_capture_summary,
+                    capture_id=capture_id,
+                    include_previews=True,
+                )
             )
-            retrieval_bytes += server._call_tool_result_bytes(page)
-            if page.status != "ok":
-                retrieval_ok = False
-                break
-            retrieval_content.append(page.data["content"])
-            cursor = page.next_cursor
-            if cursor is None:
-                break
-        expected_retained_text = "\n".join(scenario["text"].splitlines())
-        retrieval_verified = retrieval_ok and "".join(retrieval_content) == expected_retained_text
-        compact_tokens = math.ceil(len(compact) / 4)
-        detailed_tokens = math.ceil(len(detailed) / 4)
-        legacy_prompt_tokens = math.ceil(len(legacy_prompt) / 4)
-        summary_prompt_tokens = math.ceil(len(summary_prompt) / 4)
-        records.append({
-            "task_id": scenario["id"],
-            "status": compact_summary["status"],
-            "compact_summary_bytes": len(compact),
-            "preview_summary_bytes": len(detailed),
-            "compact_token_proxy": compact_tokens,
-            "preview_token_proxy": detailed_tokens,
-            "byte_reduction": 1 - (len(compact) / len(detailed)),
-            "token_proxy_reduction": 1 - (compact_tokens / detailed_tokens),
-            "legacy_prompt_bytes": len(legacy_prompt),
-            "summary_prompt_bytes": len(summary_prompt),
-            "legacy_prompt_token_proxy": legacy_prompt_tokens,
-            "summary_prompt_token_proxy": summary_prompt_tokens,
-            "prompt_byte_reduction": 1 - (len(summary_prompt) / len(legacy_prompt)),
-            "prompt_token_proxy_reduction": 1 - (summary_prompt_tokens / legacy_prompt_tokens),
-            "retrieval_bytes": retrieval_bytes,
-            "full_output_available_for_retrieval": retrieval_verified,
-            "retrieval_verified": retrieval_verified,
-            "payload_shapes_aligned": payload_shapes_aligned,
-        })
+            raw_summary = context.engine.get_summary(
+                capture_id, include_previews=True
+            )
+            legacy_response = _legacy_execute_response(
+                scenario["command"],
+                raw_summary,
+                scenario["command_exit_code"],
+                scenario["timed_out"],
+                scenario.get("timeout_seconds"),
+            )
+            compact_core = {
+                key: value
+                for key, value in compact_summary.items()
+                if key not in {"command", "command_truncated", "command_cancelled"}
+            }
+            detailed_core = {
+                key: value for key, value in detailed_summary.items() if key != "previews"
+            }
+            payload_shapes_aligned = set(compact_core) == set(detailed_core)
+            if not payload_shapes_aligned:
+                raise RuntimeError("summary benchmark payload shapes are not aligned")
+            compact = json.dumps(
+                compact_summary,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            detailed = json.dumps(
+                detailed_summary,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            legacy_prompt = json.dumps(
+                {"task": scenario["task_prompt"], "tool_response": legacy_response},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            summary_prompt = json.dumps(
+                {"task": scenario["task_prompt"], "tool_response": compact_summary},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            retrieval_content = []
+            retrieval_bytes = 0
+            retrieval_ok = True
+            cursor = None
+            while True:
+                page_result = _call_summary_handler(
+                    context,
+                    get_capture_slice_result,
+                    start_line=1,
+                    end_line=compact_summary["total_lines"],
+                    capture_id=capture_id,
+                    cursor=cursor,
+                )
+                page = _parse_tool_json_response(page_result)
+                retrieval_bytes += _call_tool_result_bytes(page_result)
+                if page.get("status") != "ok":
+                    retrieval_ok = False
+                    break
+                retrieval_content.append(page["content"])
+                cursor = page.get("next_cursor")
+                if cursor is None:
+                    break
+            expected_retained_text = "\n".join(scenario["text"].splitlines())
+            retrieval_verified = (
+                retrieval_ok and "".join(retrieval_content) == expected_retained_text
+            )
+            compact_tokens = math.ceil(len(compact) / 4)
+            detailed_tokens = math.ceil(len(detailed) / 4)
+            legacy_prompt_tokens = math.ceil(len(legacy_prompt) / 4)
+            summary_prompt_tokens = math.ceil(len(summary_prompt) / 4)
+            records.append({
+                "task_id": scenario["id"],
+                "status": compact_summary["status"],
+                "compact_summary_bytes": len(compact),
+                "preview_summary_bytes": len(detailed),
+                "compact_token_proxy": compact_tokens,
+                "preview_token_proxy": detailed_tokens,
+                "byte_reduction": 1 - (len(compact) / len(detailed)),
+                "token_proxy_reduction": 1 - (compact_tokens / detailed_tokens),
+                "legacy_prompt_bytes": len(legacy_prompt),
+                "summary_prompt_bytes": len(summary_prompt),
+                "legacy_prompt_token_proxy": legacy_prompt_tokens,
+                "summary_prompt_token_proxy": summary_prompt_tokens,
+                "prompt_byte_reduction": 1 - (len(summary_prompt) / len(legacy_prompt)),
+                "prompt_token_proxy_reduction": 1 - (summary_prompt_tokens / legacy_prompt_tokens),
+                "retrieval_bytes": retrieval_bytes,
+                "full_output_available_for_retrieval": retrieval_verified,
+                "retrieval_verified": retrieval_verified,
+                "payload_shapes_aligned": payload_shapes_aligned,
+            })
     result = {
         "schema_version": SCHEMA_VERSION,
         "benchmark": "capture-summary",

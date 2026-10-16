@@ -19,7 +19,8 @@ from benchmarks.benchmark_effectiveness import (
     write_results,
 )
 from ephemeral_buffer_mcp.engine import EphemeralEngine
-import ephemeral_buffer_mcp.server as server
+from ephemeral_buffer_mcp import create_service_context
+from ephemeral_buffer_mcp.config import DEFAULT_SHUTDOWN_GRACE_SECONDS
 
 
 class TestEffectivenessBenchmark(unittest.TestCase):
@@ -27,10 +28,10 @@ class TestEffectivenessBenchmark(unittest.TestCase):
         shutdown.assert_called_once()
         timeout_seconds = shutdown.call_args.kwargs["timeout_seconds"]
         self.assertGreaterEqual(timeout_seconds, 0.0)
-        self.assertLessEqual(timeout_seconds, server.DEFAULT_SHUTDOWN_GRACE_SECONDS)
+        self.assertLessEqual(timeout_seconds, DEFAULT_SHUTDOWN_GRACE_SECONDS)
 
     def test_benchmark_engine_disables_prefetch_and_shuts_down_after_failure(self):
-        with patch("benchmarks.benchmark_effectiveness.server.EphemeralEngine") as engine_type:
+        with patch("ephemeral_buffer_mcp.server.EphemeralEngine") as engine_type:
             engine = engine_type.return_value
             with self.assertRaisesRegex(RuntimeError, "benchmark failure"):
                 with benchmark_effectiveness._benchmark_engine(3):
@@ -42,7 +43,7 @@ class TestEffectivenessBenchmark(unittest.TestCase):
         self.assert_shutdown_receives_bounded_timeout(engine.shutdown)
 
     def test_summary_engine_disables_prefetch_and_shuts_down(self):
-        with patch("benchmarks.benchmark_effectiveness.server.EphemeralEngine") as engine_type:
+        with patch("ephemeral_buffer_mcp.server.EphemeralEngine") as engine_type:
             with benchmark_effectiveness._IsolatedSummaryEngine():
                 pass
 
@@ -144,40 +145,53 @@ class TestEffectivenessBenchmark(unittest.TestCase):
             embedding_warmup=False,
             semantic_prefetch=False,
         )
-        previous_engine = server.engine
-        server.engine = original_engine
+        capture = original_engine.ingest("caller capture", label="caller")
+        contexts = []
+        create_context = create_service_context
+
+        def create_isolated_context(*args, **kwargs):
+            context = create_context(*args, **kwargs)
+            contexts.append(context)
+            return context
+
         try:
-            capture = original_engine.ingest("caller capture", label="caller")
-            run_summary_benchmark()
-            self.assertIs(server.engine, original_engine)
+            with patch.object(
+                benchmark_effectiveness,
+                "create_service_context",
+                side_effect=create_isolated_context,
+            ):
+                run_summary_benchmark()
             self.assertIsNotNone(original_engine.get_capture(capture.capture_id))
-            with patch(
-                "benchmarks.benchmark_effectiveness.server.execute_and_capture",
-                side_effect=RuntimeError("benchmark failure"),
+            with patch.object(
+                benchmark_effectiveness,
+                "create_service_context", side_effect=create_isolated_context
+            ), patch.object(
+                benchmark_effectiveness,
+                "execute_and_capture",
+                return_value="Error: benchmark failure",
             ):
                 with self.assertRaisesRegex(RuntimeError, "benchmark failure"):
                     run_summary_benchmark()
-            self.assertIs(server.engine, original_engine)
             self.assertIsNotNone(original_engine.get_capture(capture.capture_id))
+            self.assertEqual(len(contexts), 2)
+            self.assertTrue(all(context.closing for context in contexts))
         finally:
-            server.engine = previous_engine
             original_engine.shutdown()
 
-    def test_summary_benchmark_surfaces_errors_from_both_mcp_calls(self):
+    def test_summary_benchmark_surfaces_errors_from_tool_handlers(self):
         with self.subTest(tool="execute_and_capture"):
-            with patch(
-                "benchmarks.benchmark_effectiveness.server.execute_and_capture",
+            with patch.object(
+                benchmark_effectiveness,
+                "execute_and_capture",
                 return_value="Error: command execution failed",
             ):
-                with self.assertRaisesRegex(RuntimeError, "Error: command execution failed"):
+                with self.assertRaisesRegex(RuntimeError, "command execution failed"):
                     run_summary_benchmark()
 
         with self.subTest(tool="get_capture_summary"):
-            with patch(
-                "benchmarks.benchmark_effectiveness.server.execute_and_capture",
-                return_value=json.dumps({"capture_id": "synthetic-capture"}),
-            ), patch(
-                "benchmarks.benchmark_effectiveness.server.get_capture_summary",
+            with patch.object(
+                benchmark_effectiveness,
+                "get_capture_summary",
                 return_value="Error: capture summary unavailable",
             ):
                 with self.assertRaisesRegex(RuntimeError, "Error: capture summary unavailable"):

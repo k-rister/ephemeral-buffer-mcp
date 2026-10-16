@@ -1,0 +1,1797 @@
+[
+  {
+    "description": "Request cancellation of an active durable execution by its ID.",
+    "inputSchema": {
+      "properties": {
+        "execution_id": {
+          "maxUtf8Bytes": 256,
+          "minLength": 1,
+          "title": "Execution Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution_id"
+      ],
+      "title": "cancel_executionArguments",
+      "type": "object"
+    },
+    "name": "cancel_execution",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "cancel_executionOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Index a file and return a compact versioned JSON summary.\n\n    Verify the path before reading. Symlinks are followed; pipes and devices are\n    rejected. Resolve symlinks when path identity matters, confirm the expected\n    workspace, and set max_bytes for large or untrusted files. Capture limits do\n    not validate filesystem intent. Optional structured_metrics are retained.\n    ",
+    "inputSchema": {
+      "properties": {
+        "content_type": {
+          "default": "auto",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "file_path": {
+          "title": "File Path",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "max_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Bytes"
+        },
+        "structured_metrics": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Structured Metrics"
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "title": "capture_fileArguments",
+      "type": "object"
+    },
+    "name": "capture_file",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Ingest already-collected text and return capture metadata.\n\n    Use this when the caller already has output to index. For a noisy or\n    potentially long command, use ``execute_and_capture`` so output remains\n    bounded before it reaches the agent context. The return value is a compact\n    versioned JSON summary; optional named metrics are retained in\n    ``structured_metrics``.\n    ",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "content_type": {
+          "default": "auto",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "structured_metrics": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Structured Metrics"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "title": "capture_textArguments",
+      "type": "object"
+    },
+    "name": "capture_text",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "\n    Clears all or a specific capture from the ephemeral buffer to free memory.\n    ",
+    "inputSchema": {
+      "properties": {
+        "capture_id": {
+          "default": "all",
+          "title": "Capture Id",
+          "type": "string"
+        }
+      },
+      "title": "clear_capturesArguments",
+      "type": "object"
+    },
+    "name": "clear_captures",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Create one bounded, searchable JSON capture from multiple captures.\n\n    The consolidated capture keeps source capture IDs and source line numbers.\n    If records do not fit, the complete source captures remain available through\n    their original IDs until normal LRU eviction. The operation fails if the\n    consolidated capture cannot be admitted while retaining those sources.\n    ",
+    "inputSchema": {
+      "properties": {
+        "capture_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capture Ids"
+        },
+        "label": {
+          "default": "consolidated captures",
+          "title": "Label",
+          "type": "string"
+        },
+        "max_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Bytes"
+        },
+        "max_captures": {
+          "default": 25,
+          "title": "Max Captures",
+          "type": "integer"
+        }
+      },
+      "title": "consolidate_capturesArguments",
+      "type": "object"
+    },
+    "name": "consolidate_captures",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Run a command, index bounded output, and return a compact JSON\n    summary with status, duration, sizes, token estimates, truncation, signals,\n    and optional metrics.\n\n    Use for commands expected to finish within the MCP client's tool-call window\n    when output benefits from bounded capture and later search. Use\n    start_execution when duration may approach or exceed that window, even for a\n    single phase; use direct execution for small targeted inspections. Choose by\n    duration independently of output size; this routing guidance is advisory.\n\n    Verify the command, intended repository, and working directory. Omitted cwd\n    inherits the server process directory; symlinks and shell expansion may\n    target another path. Output bounds do not validate command intent, path\n    identity, or filesystem safety.\n\n    An omitted label is derived from the command. content_type accepts auto\n    (default), diff, log, or text. max_output_bytes defaults to the configured\n    buffer limit and cannot exceed it. timeout_seconds bounds runtime; timeout\n    retains collected output and returns exit code 124. structured_metrics accepts\n    JSON-compatible named metrics.\n    ",
+    "inputSchema": {
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "content_type": {
+          "default": "auto",
+          "title": "Content Type",
+          "type": "string"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "max_output_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Output Bytes"
+        },
+        "structured_metrics": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Structured Metrics"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "execute_and_captureArguments",
+      "type": "object"
+    },
+    "name": "execute_and_capture",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Return aggregate capture, admission, accounting, and process RSS metrics.",
+    "inputSchema": {
+      "properties": {},
+      "title": "get_buffer_statsArguments",
+      "type": "object"
+    },
+    "name": "get_buffer_stats",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "get_buffer_statsOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Fetch a byte-bounded page of 1-indexed capture lines.\n\n    Repeat the range and capture ID from the first call, then pass the returned\n    opaque ``next_cursor`` to continue. Pages never split a Unicode character;\n    the cursor's line offset is a zero-based UTF-8 byte offset.\n    ",
+    "inputSchema": {
+      "properties": {
+        "capture_id": {
+          "default": "latest",
+          "title": "Capture Id",
+          "type": "string"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cursor"
+        },
+        "end_line": {
+          "title": "End Line",
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 65536,
+          "maximum": 65536,
+          "minimum": 4096,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "start_line": {
+          "title": "Start Line",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_line",
+        "end_line"
+      ],
+      "title": "get_capture_sliceArguments",
+      "type": "object"
+    },
+    "name": "get_capture_slice",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "\n    Returns a compact versioned JSON summary. Set ``include_previews`` when\n    head and tail samples are needed; full output remains available through\n    ``get_capture_slice``.\n    ",
+    "inputSchema": {
+      "properties": {
+        "capture_id": {
+          "default": "latest",
+          "title": "Capture Id",
+          "type": "string"
+        },
+        "include_previews": {
+          "default": false,
+          "title": "Include Previews",
+          "type": "boolean"
+        }
+      },
+      "title": "get_capture_summaryArguments",
+      "type": "object"
+    },
+    "name": "get_capture_summary",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Return durable phase metadata and event history for one execution.",
+    "inputSchema": {
+      "properties": {
+        "execution_id": {
+          "maxUtf8Bytes": 256,
+          "minLength": 1,
+          "title": "Execution Id",
+          "type": "string"
+        },
+        "include_output": {
+          "default": false,
+          "title": "Include Output",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "execution_id"
+      ],
+      "title": "get_executionArguments",
+      "type": "object"
+    },
+    "name": "get_execution",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "get_executionOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Report durable storage diagnostics and active/queued background execution counts.",
+    "inputSchema": {
+      "properties": {},
+      "title": "get_execution_capacityArguments",
+      "type": "object"
+    },
+    "name": "get_execution_capacity",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "get_execution_capacityOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Retrieve bounded output; page one phase using UTF-8 byte offsets.",
+    "inputSchema": {
+      "properties": {
+        "execution_id": {
+          "maxUtf8Bytes": 256,
+          "minLength": 1,
+          "title": "Execution Id",
+          "type": "string"
+        },
+        "max_bytes": {
+          "default": 8192,
+          "maximum": 8192,
+          "minimum": 512,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "description": "UTF-8 byte offset when paging one phase",
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "phase_name": {
+          "anyOf": [
+            {
+              "maxUtf8Bytes": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase Name"
+        }
+      },
+      "required": [
+        "execution_id"
+      ],
+      "title": "get_execution_outputArguments",
+      "type": "object"
+    },
+    "name": "get_execution_output",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "get_execution_outputOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Returns opt-in runtime metadata without exposing captured content.",
+    "inputSchema": {
+      "properties": {},
+      "title": "get_runtime_diagnosticsArguments",
+      "type": "object"
+    },
+    "name": "get_runtime_diagnostics",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "get_runtime_diagnosticsOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Return content-free usage metrics, optionally since a snapshot token.",
+    "inputSchema": {
+      "properties": {
+        "since": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Since"
+        }
+      },
+      "title": "get_usage_metricsArguments",
+      "type": "object"
+    },
+    "name": "get_usage_metrics",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "get_usage_metricsOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "List active captures with readable text and structured capture data.\n\n    The structured result contains ``captures`` and ``capture_count`` alongside\n    the text summary. Use ``get_capture_summary`` or ``get_capture_slice`` for\n    details about an individual capture.\n    ",
+    "inputSchema": {
+      "properties": {},
+      "title": "list_capturesArguments",
+      "type": "object"
+    },
+    "name": "list_captures",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "List durable executions with compact partial/completion summaries.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        }
+      },
+      "title": "list_executionsArguments",
+      "type": "object"
+    },
+    "name": "list_executions",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "list_executionsOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Return content-free path and executable diagnostics without running ``command``.\n\n    This resolves the working directory, symlink target, detectable Git\n    repository root, and first executable token. Relative and empty PATH entries\n    are resolved against the requested working directory. Shell expansion, aliases,\n    pipelines, redirections, environment changes, and arbitrary shell logic\n    cannot be verified here. The requested command is never executed.\n    ",
+    "inputSchema": {
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "preflight_commandArguments",
+      "type": "object"
+    },
+    "name": "preflight_command",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "preflight_commandOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Resume at the first incomplete phase.\n\n    When invoked through MCP, remaining phases run in the background and the\n    call returns promptly. Direct Python calls run resumed phases synchronously\n    and return after the run completes or encounters a stopping condition.\n\n    Use get_execution for progress; caller disconnection detaches. Completed\n    phases are skipped, and safe interrupted phases resume normally. Failed or\n    timed-out phases require retry_failed=True. Unsafe retries also require\n    confirm_unsafe=True unless the execution used the allow-unsafe policy.\n    ",
+    "inputSchema": {
+      "properties": {
+        "confirm_unsafe": {
+          "default": false,
+          "title": "Confirm Unsafe",
+          "type": "boolean"
+        },
+        "execution_id": {
+          "maxUtf8Bytes": 256,
+          "minLength": 1,
+          "title": "Execution Id",
+          "type": "string"
+        },
+        "retry_failed": {
+          "default": false,
+          "title": "Retry Failed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "execution_id"
+      ],
+      "title": "resume_executionArguments",
+      "type": "object"
+    },
+    "name": "resume_execution",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "resume_executionOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Preview selected durable records or archive and retire them.\n\n    A dry run is read-only and reports eligibility and projected space reclaimed.\n    Actual retirement requires an archive path outside the state directory; the\n    archived bundle is durably written before the source record pair is removed.\n    Active and fence-pending executions are never retired.\n    ",
+    "inputSchema": {
+      "properties": {
+        "archive_path": {
+          "anyOf": [
+            {
+              "maxUtf8Bytes": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Archive Path"
+        },
+        "dry_run": {
+          "default": true,
+          "title": "Dry Run",
+          "type": "boolean"
+        },
+        "execution_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Execution Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "execution_ids"
+      ],
+      "title": "retire_executionsArguments",
+      "type": "object"
+    },
+    "name": "retire_executions",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "retire_executionsOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Search a capture by query text and return bounded readable and structured matches.\n\n    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic\n    (embedding based). capture_id defaults to latest; top_k defaults to 5\n    (maximum 20), and context_lines defaults to 3 (maximum 100). Use\n    get_capture_slice for complete or omitted content. Hybrid results may be\n    marked semantic pending or unavailable.\n    ",
+    "inputSchema": {
+      "properties": {
+        "capture_id": {
+          "default": "latest",
+          "title": "Capture Id",
+          "type": "string"
+        },
+        "context_lines": {
+          "default": 3,
+          "title": "Context Lines",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "hybrid",
+          "title": "Mode",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "top_k": {
+          "default": 5,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "search_captureArguments",
+      "type": "object"
+    },
+    "name": "search_capture",
+    "outputSchema": {
+      "$defs": {
+        "ToolErrorEnvelope": {
+          "description": "Stable machine-readable error information for public tool results.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolErrorEnvelope",
+          "type": "object"
+        }
+      },
+      "description": "Versioned structured result paired with readable MCP text content.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolErrorEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Cursor"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ToolResponseEnvelope",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Adjust this session's semantic-index chunk budget when explicitly enabled.",
+    "inputSchema": {
+      "properties": {
+        "max_indexed_chunks": {
+          "title": "Max Indexed Chunks",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_indexed_chunks"
+      ],
+      "title": "set_semantic_index_budgetArguments",
+      "type": "object"
+    },
+    "name": "set_semantic_index_budget",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "set_semantic_index_budgetOutput",
+      "type": "object"
+    }
+  },
+  {
+    "description": "Start a sequential, durably checkpointed workflow.\n\n    Use for commands likely to approach or exceed the MCP client's tool-call\n    window, including one command as one phase, regardless of output size. When\n    invoked through MCP, phases run in the background and the call returns an ID\n    promptly; use get_execution and get_execution_output to follow work. Direct\n    Python calls run phases synchronously and return after the workflow completes\n    or encounters a stopping condition.\n    Caller disconnection detaches; cancel_execution requests termination.\n\n    Requires Linux process-recovery support and admits eight active or queued\n    executions. Check get_execution_capacity before scheduling. Configure\n    EPHEMERAL_SESSION_ID, EPHEMERAL_SOCKET_PATH, or\n    EPHEMERAL_EXECUTION_STATE_DIR to preserve state across restarts.\n\n    Each phase requires name and command. Completed phases are never rerun.\n    Failed or timed-out phases require retry_failed=True. Retrying an unsafe\n    phase also requires confirm_unsafe=True unless the execution used\n    resume_policy='allow-unsafe'. State uses the session identity or a\n    process-private directory by default.\n    ",
+    "inputSchema": {
+      "$defs": {
+        "ExecutionPhaseInput": {
+          "additionalProperties": false,
+          "description": "Schema contract for one phase exposed through the MCP tool.",
+          "properties": {
+            "command": {
+              "maxUtf8Bytes": 16384,
+              "minLength": 1,
+              "title": "Command",
+              "type": "string"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "maxUtf8Bytes": 4096,
+              "title": "Cwd"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "maxUtf8Bytes": 256,
+              "title": "Idempotency Key"
+            },
+            "max_output_bytes": {
+              "anyOf": [
+                {
+                  "minimum": 512,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Output Bytes"
+            },
+            "name": {
+              "maxUtf8Bytes": 256,
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            },
+            "side_effects": {
+              "default": "none",
+              "enum": [
+                "none",
+                "unsafe"
+              ],
+              "title": "Side Effects",
+              "type": "string"
+            },
+            "structured_metrics": {
+              "additionalProperties": true,
+              "maxJsonBytes": 16384,
+              "title": "Structured Metrics",
+              "type": "object"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timeout Seconds"
+            },
+            "unsafe_side_effects": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unsafe Side Effects"
+            }
+          },
+          "required": [
+            "name",
+            "command"
+          ],
+          "title": "ExecutionPhaseInput",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "cwd": {
+          "anyOf": [
+            {
+              "maxUtf8Bytes": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "maxUtf8Bytes": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execution Id"
+        },
+        "label": {
+          "default": "",
+          "maxUtf8Bytes": 1024,
+          "title": "Label",
+          "type": "string"
+        },
+        "max_output_bytes": {
+          "anyOf": [
+            {
+              "minimum": 512,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Output Bytes"
+        },
+        "phases": {
+          "items": {
+            "$ref": "#/$defs/ExecutionPhaseInput"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Phases",
+          "type": "array"
+        },
+        "resume_policy": {
+          "default": "safe",
+          "enum": [
+            "safe",
+            "allow-unsafe"
+          ],
+          "title": "Resume Policy",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        }
+      },
+      "required": [
+        "phases"
+      ],
+      "title": "start_executionArguments",
+      "type": "object"
+    },
+    "name": "start_execution",
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "start_executionOutput",
+      "type": "object"
+    }
+  }
+]

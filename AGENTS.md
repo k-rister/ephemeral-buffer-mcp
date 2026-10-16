@@ -53,7 +53,8 @@ EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m cover
   tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
   tests.unit.test_mcpserver_adapter tests.unit.test_engine tests.unit.test_capture_utils tests.unit.test_config \
   tests.unit.test_cli tests.unit.test_socket_protocol tests.unit.test_server tests.unit.test_metrics \
-  tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server
+  tests.unit.test_logging_utils tests.unit.test_execution tests.unit.test_execution_server \
+  tests.unit.test_transport_decomposition
 .venv/bin/python -m coverage report -m --fail-under=100
 EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest tests.integration.test_e2e_pipe
 ```

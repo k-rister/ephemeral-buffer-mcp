@@ -79,6 +79,11 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("tests.unit.test_execution", source)
         self.assertIn("tests.unit.test_execution_server", source)
 
+    def test_ci_coverage_suite_includes_transport_decomposition(self):
+        source = CI_WORKFLOW.read_text()
+
+        self.assertIn("tests.unit.test_transport_decomposition", source)
+
     def test_mcp_sdk_compatibility_matrix_checks_supported_2x_endpoints(self):
         source = CI_WORKFLOW.read_text()
 
