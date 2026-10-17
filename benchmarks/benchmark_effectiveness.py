@@ -2,6 +2,7 @@
 """Measure deterministic command-output workflows with and without the buffer."""
 
 import argparse
+import asyncio
 from contextlib import contextmanager
 import json
 import math
@@ -14,14 +15,8 @@ from typing import Any, Dict, Iterable, Iterator, List
 from unittest.mock import patch
 
 import benchmarks.workload_results as wr
-from ephemeral_buffer_mcp import create_service_context
+from ephemeral_buffer_mcp import create_mcp_server, create_service_context
 from ephemeral_buffer_mcp.engine import EphemeralEngine, process_rss_bytes
-from ephemeral_buffer_mcp.server import _activate_service_context, _call_tool_result_bytes
-from ephemeral_buffer_mcp.tools.capture import execute_and_capture
-from ephemeral_buffer_mcp.tools.retrieval import (
-    get_capture_slice_result,
-    get_capture_summary,
-)
 
 
 SCHEMA_VERSION = 1
@@ -44,8 +39,8 @@ def _benchmark_engine(max_captures: int) -> Iterator[EphemeralEngine]:
         context.close()
 
 
-class _IsolatedSummaryEngine:
-    """Give the summary benchmark an isolated tool-handler context."""
+class _IsolatedSummaryMcpServer:
+    """Give the summary benchmark an isolated MCP server and service context."""
     def __enter__(self):
         self._service_context = create_service_context(
             metrics_file=None,
@@ -54,7 +49,12 @@ class _IsolatedSummaryEngine:
                 "semantic_prefetch": False,
             },
         )
-        return self._service_context
+        try:
+            self._app = create_mcp_server(self._service_context)
+        except BaseException:
+            self._service_context.close()
+            raise
+        return self._service_context, self._app
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._service_context.close()
@@ -174,6 +174,7 @@ def _legacy_execute_response(
     exit_code: int,
     timed_out: bool,
     timeout_seconds: float | None,
+    source_text: str,
 ) -> str:
     """Reproduce the parent commit's formatted execute response contract."""
     if timed_out:
@@ -183,22 +184,44 @@ def _legacy_execute_response(
     truncation = ""
     if summary.get("truncated"):
         truncation = f"\nOutput: truncated from {summary['original_byte_size']:,} bytes\n"
-    signals = summary.get("signals_summary", "None detected")
+    signals = summary.get("signals_summary")
+    if signals is None:
+        signal_counts = summary.get("signals", {})
+        if signal_counts:
+            signals = ", ".join(f"{name}: {count}" for name, count in signal_counts.items())
+        elif summary.get("content_type") == "diff":
+            signals = "None (Clean patch)"
+        elif summary.get("content_type") != "log":
+            signals = "None (non-log content)"
+        elif (
+            exit_code == 0
+            and not timed_out
+            and re.search(r"\b\d+\s+tests?\s+passed\b", source_text, re.IGNORECASE)
+        ):
+            signals = "None (successful test run)"
+        else:
+            signals = "None detected"
+    previews = summary.get("previews", {})
+    head_preview = summary.get("head_preview", previews.get("head", ""))
+    tail_preview = summary.get("tail_preview", previews.get("tail", ""))
     return (
         f"Command: `{command}`\n"
         f"Status: {status}\n"
         f"Captured ID: `{summary['capture_id']}` ({summary['total_lines']:,} lines, {summary['byte_size']:,} bytes)\n"
         f"{truncation}"
         f"Detected Signals: {signals}\n\n"
-        f"--- Head (First 5 lines) ---\n{summary['head_preview']}\n\n"
-        f"--- Tail (Last 5 lines) ---\n{summary['tail_preview']}\n\n"
+        f"--- Head (First 5 lines) ---\n{head_preview}\n\n"
+        f"--- Tail (Last 5 lines) ---\n{tail_preview}\n\n"
         f"Query details using `search_capture(query='...', capture_id='{summary['capture_id']}')`."
     )
 
 
 def _parse_tool_json_response(response: Any) -> Any:
     """Decode a JSON tool response while preserving plain-text server errors."""
-    if isinstance(response, dict):
+    structured_content = getattr(response, "structured_content", None)
+    if isinstance(structured_content, dict):
+        structured = structured_content
+    elif isinstance(response, dict):
         structured = response
     elif hasattr(response, "model_dump"):
         structured = response.model_dump(mode="json", by_alias=True)
@@ -229,24 +252,37 @@ def _parse_tool_json_response(response: Any) -> Any:
     return json.loads(response)
 
 
-def _call_summary_handler(context, handler, *args, **kwargs):
-    """Invoke a synchronous tool handler with the benchmark's isolated context."""
-    with _activate_service_context(context):
-        return handler(*args, **kwargs)
+async def _call_mcp_tool(app, tool_name: str, arguments: Dict[str, Any]):
+    """Call one tool through the isolated MCP server's registered tool surface."""
+    call = asyncio.create_task(app.call_tool(tool_name, arguments))
+    return await call
+
+
+def _mcp_tool_result_bytes(result: Any) -> int:
+    """Measure the serialized MCP result, including text and structured content."""
+    serializer = getattr(result, "model_dump_json", None)
+    if not callable(serializer):
+        raise TypeError("MCP tool result does not support JSON serialization")
+    return len(serializer(by_alias=True).encode("utf-8"))
 
 
 def run_summary_benchmark() -> Dict[str, Any]:
+    """Run the synchronous summary benchmark over the MCP tool-call surface."""
+    return asyncio.run(_run_summary_benchmark())
+
+
+async def _run_summary_benchmark() -> Dict[str, Any]:
     """Measure public preview responses versus summary-first prompts.
 
     This is a deterministic prompt-size proxy. It does not invoke a model or
     claim provider-reported token usage. The baseline reconstructs the parent
     commit's formatted-text response, while the comparison path exercises the
-    public compact response from ``execute_and_capture``. Full retained output
-    is verified through the public slice-retrieval API.
+    MCP responses from ``execute_and_capture`` and ``get_capture_slice``. Full
+    retained output is verified through the public slice-retrieval tool.
     """
     selected = summary_scenarios()
     records = []
-    with _IsolatedSummaryEngine() as context:
+    with _IsolatedSummaryMcpServer() as (_, app):
         for scenario in selected:
             with patch(
                 "ephemeral_buffer_mcp.tools.capture.run_command_bounded",
@@ -258,33 +294,31 @@ def run_summary_benchmark() -> Dict[str, Any]:
                     scenario["timed_out"],
                 ),
             ):
-                compact_result = _call_summary_handler(
-                    context,
-                    execute_and_capture,
-                    scenario["command"],
-                    label=f"summary-benchmark-{scenario['id']}",
-                    content_type=scenario["content_type"],
-                    max_output_bytes=context.engine.max_buffer_bytes,
+                compact_result = await _call_mcp_tool(
+                    app,
+                    "execute_and_capture",
+                    {
+                        "command": scenario["command"],
+                        "label": f"summary-benchmark-{scenario['id']}",
+                        "content_type": scenario["content_type"],
+                    },
                 )
             compact_summary = _parse_tool_json_response(compact_result)
             capture_id = compact_summary["capture_id"]
             detailed_summary = _parse_tool_json_response(
-                _call_summary_handler(
-                    context,
-                    get_capture_summary,
-                    capture_id=capture_id,
-                    include_previews=True,
+                await _call_mcp_tool(
+                    app,
+                    "get_capture_summary",
+                    {"capture_id": capture_id, "include_previews": True},
                 )
-            )
-            raw_summary = context.engine.get_summary(
-                capture_id, include_previews=True
             )
             legacy_response = _legacy_execute_response(
                 scenario["command"],
-                raw_summary,
+                detailed_summary,
                 scenario["command_exit_code"],
                 scenario["timed_out"],
                 scenario.get("timeout_seconds"),
+                scenario["text"],
             )
             compact_core = {
                 key: value
@@ -322,16 +356,18 @@ def run_summary_benchmark() -> Dict[str, Any]:
             retrieval_ok = True
             cursor = None
             while True:
-                page_result = _call_summary_handler(
-                    context,
-                    get_capture_slice_result,
-                    start_line=1,
-                    end_line=compact_summary["total_lines"],
-                    capture_id=capture_id,
-                    cursor=cursor,
+                page_result = await _call_mcp_tool(
+                    app,
+                    "get_capture_slice",
+                    {
+                        "start_line": 1,
+                        "end_line": compact_summary["total_lines"],
+                        "capture_id": capture_id,
+                        "cursor": cursor,
+                    },
                 )
                 page = _parse_tool_json_response(page_result)
-                retrieval_bytes += _call_tool_result_bytes(page_result)
+                retrieval_bytes += _mcp_tool_result_bytes(page_result)
                 if page.get("status") != "ok":
                     retrieval_ok = False
                     break

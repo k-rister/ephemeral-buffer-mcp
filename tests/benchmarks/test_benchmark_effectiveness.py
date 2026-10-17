@@ -3,10 +3,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmarks.benchmark_effectiveness as benchmark_effectiveness
 import benchmarks.workload_results as wr
+from mcp.types import CallToolResult, TextContent
 from benchmarks.benchmark_effectiveness import (
     run_ab_evaluation,
     run_baseline,
@@ -44,7 +46,7 @@ class TestEffectivenessBenchmark(unittest.TestCase):
 
     def test_summary_engine_disables_prefetch_and_shuts_down(self):
         with patch("ephemeral_buffer_mcp.server.EphemeralEngine") as engine_type:
-            with benchmark_effectiveness._IsolatedSummaryEngine():
+            with benchmark_effectiveness._IsolatedSummaryMcpServer():
                 pass
 
         engine_type.assert_called_once()
@@ -139,6 +141,21 @@ class TestEffectivenessBenchmark(unittest.TestCase):
             {"successful-test", "failed-test", "noisy-build", "truncated-command", "timed-out-command"},
         )
 
+    def test_mcp_result_size_includes_text_and_structured_channels(self):
+        result = CallToolResult(
+            content=[TextContent(type="text", text="readable result")],
+            structured_content={"status": "ok", "data": {"capture_id": "capture-1"}},
+        )
+        serialized = result.model_dump_json(by_alias=True)
+        payload = json.loads(serialized)
+
+        self.assertIn("readable result", json.dumps(payload))
+        self.assertEqual(payload["structuredContent"]["status"], "ok")
+        self.assertEqual(
+            benchmark_effectiveness._mcp_tool_result_bytes(result),
+            len(serialized.encode("utf-8")),
+        )
+
     def test_summary_benchmark_preserves_caller_engine_on_success_and_failure(self):
         original_engine = EphemeralEngine(
             max_captures=2,
@@ -167,8 +184,8 @@ class TestEffectivenessBenchmark(unittest.TestCase):
                 "create_service_context", side_effect=create_isolated_context
             ), patch.object(
                 benchmark_effectiveness,
-                "execute_and_capture",
-                return_value="Error: benchmark failure",
+                "_call_mcp_tool",
+                side_effect=RuntimeError("benchmark failure"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "benchmark failure"):
                     run_summary_benchmark()
@@ -179,22 +196,43 @@ class TestEffectivenessBenchmark(unittest.TestCase):
             original_engine.shutdown()
 
     def test_summary_benchmark_surfaces_errors_from_tool_handlers(self):
-        with self.subTest(tool="execute_and_capture"):
-            with patch.object(
-                benchmark_effectiveness,
-                "execute_and_capture",
-                return_value="Error: command execution failed",
-            ):
-                with self.assertRaisesRegex(RuntimeError, "command execution failed"):
-                    run_summary_benchmark()
+        original_call = benchmark_effectiveness._call_mcp_tool
 
-        with self.subTest(tool="get_capture_summary"):
-            with patch.object(
-                benchmark_effectiveness,
-                "get_capture_summary",
-                return_value="Error: capture summary unavailable",
+        async def fail_selected_tool(app, tool_name, arguments, selected_tool, message):
+            if tool_name == selected_tool:
+                return SimpleNamespace(
+                    structured_content={
+                        "status": "error",
+                        "error": {"code": "benchmark_failure", "message": message},
+                    }
+                )
+            return await original_call(app, tool_name, arguments)
+
+        for tool_name, message in (
+            ("execute_and_capture", "command execution failed"),
+            ("get_capture_summary", "capture summary unavailable"),
+        ):
+            async def fail_current_tool(
+                app,
+                requested_tool,
+                arguments,
+                selected_tool=tool_name,
+                failure_message=message,
             ):
-                with self.assertRaisesRegex(RuntimeError, "Error: capture summary unavailable"):
+                return await fail_selected_tool(
+                    app,
+                    requested_tool,
+                    arguments,
+                    selected_tool,
+                    failure_message,
+                )
+
+            with self.subTest(tool=tool_name), patch.object(
+                benchmark_effectiveness,
+                "_call_mcp_tool",
+                side_effect=fail_current_tool,
+            ):
+                with self.assertRaisesRegex(RuntimeError, message):
                     run_summary_benchmark()
 
 
