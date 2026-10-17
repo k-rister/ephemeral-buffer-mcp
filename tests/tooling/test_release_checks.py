@@ -1,4 +1,5 @@
 import io
+import json
 import runpy
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from scripts.release_checks import (
     run,
     tag_version,
     validate_metadata,
+    validate_distribution_metadata,
     validate_source_state,
 )
 from tests.paths import REPOSITORY_ROOT
@@ -47,6 +49,103 @@ class TestReleaseChecks(unittest.TestCase):
             dependencies = release_checks.tomllib.load(stream)["project"]["dependencies"]
 
         self.assertIn("mcp>=2.3.0,<3", dependencies)
+
+    def test_distribution_set_uses_aligned_versions_and_dependency_boundaries(self):
+        validate_distribution_metadata(
+            REPOSITORY_ROOT / "pyproject.toml",
+            REPOSITORY_ROOT / "packaging" / "full" / "pyproject.toml",
+            REPOSITORY_ROOT / "packaging" / "lexical" / "pyproject.toml",
+            package_version(REPOSITORY_ROOT / "pyproject.toml"),
+        )
+
+    def test_distribution_set_rejects_version_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            core = temporary / "core.toml"
+            core.write_text(
+                '[project]\nname="ephemeral-buffer-mcp-core"\nversion="1.2.3"\n'
+                'dependencies=["mcp>=2.3.0,<3", "urllib3>=2.8.0"]\n'
+                '[project.optional-dependencies]\nsemantic=["fastembed>=0.7.0", "numpy>=1.24.0"]\n',
+                encoding="utf-8",
+            )
+            full = temporary / "full.toml"
+            full.write_text(
+                '[project]\nname="ephemeral-buffer-mcp"\nversion="1.2.3"\n'
+                'dependencies=["ephemeral-buffer-mcp-core[semantic]==1.2.3"]\n',
+                encoding="utf-8",
+            )
+            lexical = temporary / "lexical.toml"
+            lexical.write_text(
+                '[project]\nname="ephemeral-buffer-mcp-lexical"\nversion="1.2.2"\n'
+                'dependencies=["ephemeral-buffer-mcp-core==1.2.3"]\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ReleaseCheckError, "does not match release version"):
+                validate_distribution_metadata(core, full, lexical, "1.2.3")
+
+    def test_distribution_set_rejects_invalid_metadata_and_dependencies(self):
+        def write_set(directory, **overrides):
+            directory.mkdir(parents=True)
+            values = {
+                "core_name": "ephemeral-buffer-mcp-core",
+                "full_name": "ephemeral-buffer-mcp",
+                "lexical_name": "ephemeral-buffer-mcp-lexical",
+                "version": "1.2.3",
+                "core_dependencies": ["mcp>=2.3.0,<3", "urllib3>=2.8.0"],
+                "semantic_extra": ["fastembed>=0.7.0", "numpy>=1.24.0"],
+                "full_dependencies": ["ephemeral-buffer-mcp-core[semantic]==1.2.3"],
+                "lexical_dependencies": ["ephemeral-buffer-mcp-core==1.2.3"],
+            }
+            values.update(overrides)
+            core = directory / "core.toml"
+            core.write_text(
+                f'[project]\nname="{values["core_name"]}"\n'
+                f'version="{values["version"]}"\n'
+                f'dependencies={json.dumps(values["core_dependencies"])}\n'
+                "[project.optional-dependencies]\n"
+                f'semantic={json.dumps(values["semantic_extra"])}\n',
+                encoding="utf-8",
+            )
+            full = directory / "full.toml"
+            full.write_text(
+                f'[project]\nname="{values["full_name"]}"\n'
+                f'version="{values["version"]}"\n'
+                f'dependencies={json.dumps(values["full_dependencies"])}\n',
+                encoding="utf-8",
+            )
+            lexical = directory / "lexical.toml"
+            lexical.write_text(
+                f'[project]\nname="{values["lexical_name"]}"\n'
+                f'version="{values["version"]}"\n'
+                f'dependencies={json.dumps(values["lexical_dependencies"])}\n',
+                encoding="utf-8",
+            )
+            return core, full, lexical
+
+        invalid_cases = (
+            ({"core_name": "wrong-core-name"}, "core distribution must be named"),
+            ({"full_name": "wrong-full-name"}, "full distribution must be named"),
+            ({"lexical_name": "wrong-lexical-name"}, "lexical distribution must be named"),
+            ({"core_dependencies": []}, "only the base runtime dependencies"),
+            ({"semantic_extra": []}, "must declare FastEmbed and NumPy"),
+            ({"full_dependencies": []}, "matching semantic core"),
+            ({"lexical_dependencies": []}, "matching base core"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            for index, (overrides, message) in enumerate(invalid_cases):
+                with self.subTest(overrides=overrides):
+                    core, full, lexical = write_set(temporary / str(index), **overrides)
+                    with self.assertRaisesRegex(ReleaseCheckError, message):
+                        validate_distribution_metadata(core, full, lexical, "1.2.3")
+
+            with self.assertRaisesRegex(ReleaseCheckError, "unable to read project metadata"):
+                validate_distribution_metadata(
+                    temporary / "missing-core.toml",
+                    temporary / "missing-full.toml",
+                    temporary / "missing-lexical.toml",
+                    "1.2.3",
+                )
 
     def test_changelog_parser_skips_non_heading_lines(self):
         changelog_version("# Changelog\n\n## 1.2.3 - 2026-09-06", "1.2.3")

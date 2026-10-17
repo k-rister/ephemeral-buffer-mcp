@@ -3,10 +3,10 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ephemeral-buffer-mcp"
+name = "ephemeral-buffer-mcp-core"
 version = "0.10.0"
-description = "Ephemeral in-memory command output capture and hybrid search MCP server for coding agents"
-readme = "README.md"
+description = "Shared runtime core for the Ephemeral Buffer MCP server"
+readme = "CORE_README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
@@ -23,9 +23,13 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=2.3.0,<3",
+    "urllib3>=2.8.0"
+]
+
+[project.optional-dependencies]
+semantic = [
     "fastembed>=0.7.0",
     "numpy>=1.24.0",
-    "urllib3>=2.8.0"
 ]
 
 [project.urls]

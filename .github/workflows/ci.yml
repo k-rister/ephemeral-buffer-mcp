@@ -65,20 +65,31 @@ jobs:
           fi
 
       - name: Build wheel
-        run: python -m build --wheel
-
-      - name: Verify installed CLI entry point
         run: |
-          python -m venv /tmp/ephemeral-package-venv
-          /tmp/ephemeral-package-venv/bin/python -m pip install -c constraints.txt dist/*.whl
-          /tmp/ephemeral-package-venv/bin/ephbuf --help
-          /tmp/ephemeral-package-venv/bin/python -c "from ephemeral_buffer_mcp.metrics import LocalMetrics; assert LocalMetrics"
+          python -m build --wheel --outdir dist .
+          python -m build --wheel --outdir dist packaging/full
+          python -m build --wheel --outdir dist packaging/lexical
+          python -m twine check dist/*
+
+      - name: Verify full-featured installed distribution
+        run: |
+          python -m venv /tmp/ephemeral-package-full-venv
+          /tmp/ephemeral-package-full-venv/bin/python -m pip install -c constraints.txt --find-links dist dist/ephemeral_buffer_mcp-*.whl
+          /tmp/ephemeral-package-full-venv/bin/ephbuf --help
+          /tmp/ephemeral-package-full-venv/bin/python -c "from ephemeral_buffer_mcp.metrics import LocalMetrics; assert LocalMetrics"
           smoke_workdir="$(mktemp -d)"
           trap 'rm -rf "$smoke_workdir"' EXIT
           (
             cd "$smoke_workdir"
-            /tmp/ephemeral-package-venv/bin/python "$GITHUB_WORKSPACE/scripts/installed_package_mcp_smoke.py"
+            /tmp/ephemeral-package-full-venv/bin/python "$GITHUB_WORKSPACE/scripts/installed_package_mcp_smoke.py"
           )
+
+      - name: Verify lexical-only installed distribution
+        run: |
+          python -m venv /tmp/ephemeral-package-lexical-venv
+          /tmp/ephemeral-package-lexical-venv/bin/python -m pip install --find-links dist dist/ephemeral_buffer_mcp_lexical-*.whl
+          /tmp/ephemeral-package-lexical-venv/bin/ephbuf --help
+          /tmp/ephemeral-package-lexical-venv/bin/python scripts/installed_lexical_package_smoke.py
 
       - name: Compile sources
         run: python -m compileall -q src benchmarks scripts

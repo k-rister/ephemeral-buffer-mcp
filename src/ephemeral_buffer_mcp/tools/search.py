@@ -220,7 +220,8 @@ def search_capture(
     (embedding based). capture_id defaults to latest; top_k defaults to 5
     (maximum 20), and context_lines defaults to 3 (maximum 100). Use
     get_capture_slice for complete or omitted content. Hybrid results may be
-    marked semantic pending or unavailable.
+    marked semantic pending or unavailable. The lexical-only distribution
+    returns a semantic_backend_unavailable error for hybrid and semantic modes.
     """
     return search_capture_result(query, mode, capture_id, top_k, context_lines).text or ""
 

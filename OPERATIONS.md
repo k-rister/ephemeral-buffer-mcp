@@ -80,7 +80,8 @@ to inherit the same values. If the client supports per-session environment
 interpolation, use that facility; otherwise generate the ID in the launcher
 that starts both the agent and its shell environment.
 
-The PyPI package installs `ephemeral-agent`, `codex-ephemeral`, and
+The default `ephemeral-buffer-mcp` PyPI distribution installs the shared core,
+which provides `ephemeral-agent`, `codex-ephemeral`, and
 `ephemeral-session-env` alongside `ephbuf` and `ephemeral-config` in the
 virtual environment's `bin` directory. The repository also includes these
 scripts at its root for source-checkout use. Use the first launcher for generic
@@ -1195,8 +1196,9 @@ phrase appeared in any successful `search_capture` or `get_capture_slice`
 response. Those exposure measurements help distinguish missing retrieval
 content from details that were returned but absent from the final answer.
 
-1. Update the version in `pyproject.toml` and add release notes to
-   `CHANGELOG.md`.
+1. Update the matching version in `pyproject.toml`,
+   `packaging/full/pyproject.toml`, and `packaging/lexical/pyproject.toml`, and
+   add release notes to `CHANGELOG.md`.
 2. Run the focused and end-to-end test suites locally.
 3. Replace the matching `Unreleased` changelog heading with release notes under
    a heading in the exact form `## X.Y.Z - YYYY-MM-DD`; the date must be a real
@@ -1213,16 +1215,23 @@ content from details that were returned but absent from the final answer.
    sha256sum --check SHA256SUMS
    ```
 
-7. Inspect the installed entry point from the wheel before distributing it:
+7. Inspect both install modes from the built distributions before distributing
+   them:
 
    ```bash
    python -m venv /tmp/ephbuf-release-check
-   /tmp/ephbuf-release-check/bin/python -m pip install --no-deps ephemeral_buffer_mcp-*.whl
+   /tmp/ephbuf-release-check/bin/python -m pip install --find-links dist dist/ephemeral_buffer_mcp-*.whl
    /tmp/ephbuf-release-check/bin/ephbuf --help
+   python -m venv /tmp/ephbuf-lexical-release-check
+   /tmp/ephbuf-lexical-release-check/bin/python -m pip install --find-links dist dist/ephemeral_buffer_mcp_lexical-*.whl
+   /tmp/ephbuf-lexical-release-check/bin/python scripts/installed_lexical_package_smoke.py
    ```
 
-8. Confirm the package is available from PyPI and that its published metadata
-   and files match the verified workflow artifacts.
+8. Confirm all three packages are available from PyPI and their published
+   metadata and files match the verified workflow artifacts. Existing users
+   upgrading from the pre-split package must uninstall it once before installing
+   the new full distribution; lexical-only deployments should use a clean
+   virtual environment to avoid retaining semantic dependencies.
 
 The release workflow also checks tag format, package/changelog consistency
 (including the exact dated heading format `## X.Y.Z - YYYY-MM-DD`),
@@ -1233,8 +1242,11 @@ release blocker.
 
 ### PyPI trusted publishing setup
 
-The PyPI project owner must register a pending publisher for this GitHub
-repository before the first publish:
+The PyPI project owner must register the same publisher for each of
+`ephemeral-buffer-mcp`, `ephemeral-buffer-mcp-core`, and
+`ephemeral-buffer-mcp-lexical` before publishing the split distributions. The
+two new project names must be available and configured as pending publishers
+before the first upload:
 
 - Owner: `k-rister`
 - Repository: `ephemeral-buffer-mcp`

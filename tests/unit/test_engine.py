@@ -18,6 +18,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
+import ephemeral_buffer_mcp.engine as engine_module
 from ephemeral_buffer_mcp.config import (
     CATALOGUE_EMBEDDING_MODEL,
     DEFAULT_MAX_CAPTURES,
@@ -481,6 +482,83 @@ class TestEngineClassification(unittest.TestCase):
 
 
 class TestEphemeralEngine(unittest.TestCase):
+    def test_semantic_dependency_helpers_report_unavailable_backend(self):
+        with patch(
+            "ephemeral_buffer_mcp.engine.importlib.util.find_spec",
+            side_effect=ValueError("module has no import specification"),
+        ):
+            self.assertFalse(engine_module._semantic_dependencies_available())
+
+        with (
+            patch.object(engine_module, "np", object()),
+            patch.object(engine_module, "TextEmbedding", None),
+            patch.object(engine_module, "ModelSource", None),
+            patch.object(engine_module, "PoolingType", None),
+            patch("builtins.__import__", side_effect=ImportError("FastEmbed missing")),
+        ):
+            with self.assertRaisesRegex(
+                engine_module.SemanticBackendUnavailable, "full distribution"
+            ):
+                engine_module._load_semantic_dependencies()
+
+    def test_lazy_semantic_backend_import_failure_returns_typed_search_error(self):
+        with (
+            patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}),
+            patch(
+                "ephemeral_buffer_mcp.engine._semantic_dependencies_available",
+                return_value=True,
+            ),
+        ):
+            engine = EphemeralEngine(embedding_warmup=False, semantic_prefetch=False)
+        try:
+            unavailable = engine_module.SemanticBackendUnavailable("missing dependency")
+            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}):
+                with patch(
+                    "ephemeral_buffer_mcp.engine._load_semantic_dependencies",
+                    side_effect=unavailable,
+                ):
+                    with self.assertRaises(engine_module.SemanticBackendUnavailable):
+                        engine._get_embedding_model()
+            self.assertFalse(engine.semantic_backend_available)
+
+            engine.semantic_backend_available = True
+            capture = engine.ingest("semantic dependency probe content")
+            with patch.object(engine, "_await_semantic_index", side_effect=unavailable):
+                result = engine.search(
+                    "dependency probe", mode="semantic", capture_id=capture.capture_id
+                )
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["error_code"], "semantic_backend_unavailable")
+            self.assertFalse(engine.semantic_backend_available)
+        finally:
+            engine.shutdown()
+
+    def test_lexical_search_works_without_semantic_dependencies(self):
+        with patch("ephemeral_buffer_mcp.engine._semantic_dependencies_available", return_value=False):
+            engine = EphemeralEngine(
+                max_captures=1,
+                embedding_warmup=True,
+                semantic_prefetch=True,
+            )
+        try:
+            capture = engine.ingest("needle in lexical content", label="lexical-only")
+            bm25 = engine.search("needle", mode="bm25", capture_id=capture.capture_id)
+            self.assertEqual(bm25["status"], "ok")
+            self.assertTrue(bm25["matches"])
+
+            for mode in ("hybrid", "semantic"):
+                result = engine.search("needle", mode=mode, capture_id=capture.capture_id)
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["error_code"], "semantic_backend_unavailable")
+                self.assertIn("ephemeral-buffer-mcp", result["message"])
+
+            stats = engine.get_buffer_stats()
+            self.assertFalse(stats["semantic_backend_available"])
+            self.assertEqual(stats["embedding_warmup_state"], "unavailable")
+            self.assertFalse(engine.start_embedding_warmup())
+        finally:
+            engine.shutdown()
+
     @classmethod
     def setUpClass(cls):
         print("\n--- Initializing EphemeralEngine for testing ---")

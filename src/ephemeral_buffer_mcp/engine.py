@@ -4,6 +4,7 @@ Provides hybrid search (BM25 lexical + dense semantic embeddings) with RRF ranki
 """
 
 import copy
+import importlib.util
 import os
 import sys
 import time
@@ -23,7 +24,6 @@ import secrets
 from types import MappingProxyType
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import Counter, OrderedDict
-import numpy as np
 from typing import Callable, List, Dict, Any, Optional, Tuple, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
@@ -33,8 +33,6 @@ from .schema_versions import (
     CAPTURE_SUMMARY_SCHEMA_VERSION,
     CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
 )
-from fastembed import TextEmbedding
-from fastembed.common.model_description import ModelSource, PoolingType
 from .config import (
     BGE_SMALL_HF_REPO,
     DEFAULT_EMBEDDING_MODEL,
@@ -48,6 +46,10 @@ from .admission import admission_snapshot
 
 
 LOGGER = get_logger("engine")
+np = None
+TextEmbedding = None
+ModelSource = None
+PoolingType = None
 SEARCH_MODES = ("hybrid", "bm25", "semantic")
 HYBRID_LEXICAL_WEIGHT = 2.0
 PREVIEW_MAX_BYTES = 4 * 1024
@@ -67,6 +69,54 @@ EMBEDDING_MODEL_LOAD_RETRY_SECONDS = 60.0
 
 class SemanticIndexBudgetExceeded(RuntimeError):
     """Raised when semantic indexing would exceed its configured work envelope."""
+
+
+class SemanticBackendUnavailable(RuntimeError):
+    """Raised when optional semantic-search dependencies are not installed."""
+
+
+_SEMANTIC_INSTALL_GUIDANCE = (
+    "Semantic and hybrid search require the full distribution. Install it with "
+    "`python -m pip install --upgrade ephemeral-buffer-mcp`."
+)
+
+
+def _semantic_dependencies_available() -> bool:
+    """Return whether the optional semantic runtime packages can be located."""
+    try:
+        return all(importlib.util.find_spec(name) is not None for name in ("numpy", "fastembed"))
+    except (ImportError, ValueError):
+        return False
+
+
+def _load_semantic_dependencies() -> None:
+    """Import the semantic stack only when a dense-search path needs it."""
+    global np, TextEmbedding, ModelSource, PoolingType
+    try:
+        if np is None:
+            import numpy as numpy
+
+            np = numpy
+        if TextEmbedding is None:
+            from fastembed import TextEmbedding as text_embedding
+
+            TextEmbedding = text_embedding
+        if ModelSource is None or PoolingType is None:
+            from fastembed.common.model_description import (
+                ModelSource as model_source,
+                PoolingType as pooling_type,
+            )
+
+            ModelSource = model_source
+            PoolingType = pooling_type
+    except ImportError as exc:
+        raise SemanticBackendUnavailable(_SEMANTIC_INSTALL_GUIDANCE) from exc
+
+
+def _embedding_nbytes(embeddings: Any) -> int:
+    """Return retained dense-vector bytes, including for lexical empty markers."""
+    return int(getattr(embeddings, "nbytes", 0)) if embeddings is not None else 0
+
 
 MAX_STRUCTURED_METRICS_BYTES = 16 * 1024
 
@@ -726,7 +776,7 @@ class _CaptureState:
     raw_lines: List[str]
     input_byte_size: int
     chunks: List[Chunk] = field(default_factory=list)
-    embeddings: Optional[np.ndarray] = None
+    embeddings: Optional[Any] = None
     fts_conn: Optional[sqlite3.Connection] = None
     content_type: str = "text"
     diff_meta: Optional[Dict[str, Any]] = None
@@ -856,6 +906,7 @@ def register_bundled_embedding_models() -> None:
     global _BUNDLED_MODELS_REGISTERED
     if _BUNDLED_MODELS_REGISTERED:
         return
+    _load_semantic_dependencies()
     try:
         TextEmbedding.add_custom_model(
             model=FP32_EMBEDDING_MODEL,
@@ -921,6 +972,7 @@ class _DeterministicTestEmbedding:
     }
 
     def embed(self, texts):
+        _load_semantic_dependencies()
         vectors = []
         for text in texts:
             vector = np.zeros(384, dtype=np.float32)
@@ -1041,6 +1093,7 @@ class EphemeralEngine:
         if not 0 <= self.semantic_chunk_overlap < self.semantic_chunk_lines:
             raise ValueError("semantic_chunk_overlap must be non-negative and smaller than semantic_chunk_lines")
         self.embedding_cache_path = embedding_cache_path or settings.embedding_cache_dir.value
+        self.semantic_backend_available = _semantic_dependencies_available()
         self.embedding_model = None
         self._embedding_model_load_failure: Optional[Tuple[type, float]] = None
         self.embedding_warmup_enabled = (
@@ -1049,7 +1102,11 @@ class EphemeralEngine:
             else embedding_warmup
         )
         self.embedding_warmup_state = (
-            "not-started" if self.embedding_warmup_enabled else "disabled"
+            "not-started"
+            if self.embedding_warmup_enabled and self.semantic_backend_available
+            else "unavailable"
+            if self.embedding_warmup_enabled
+            else "disabled"
         )
         self.embedding_warmup_failure = None
         self._embedding_warmup_thread: Optional[threading.Thread] = None
@@ -1079,7 +1136,7 @@ class EphemeralEngine:
                 max_workers=self.semantic_prefetch_workers,
                 thread_name_prefix="semantic-prefetch",
             )
-            if self.semantic_prefetch_enabled
+            if self.semantic_prefetch_enabled and self.semantic_backend_available
             else None
         )
         # Eligible captures wait in an ordered queue that is drained newest-first,
@@ -1129,6 +1186,9 @@ class EphemeralEngine:
     def start_embedding_warmup(self) -> bool:
         """Start one non-blocking model warm-up and return whether work was started."""
         with self._lock:
+            if not self.semantic_backend_available:
+                self.embedding_warmup_state = "unavailable"
+                return False
             if self._shutdown or self.embedding_warmup_state != "not-started":
                 return False
             self.embedding_warmup_state = "loading"
@@ -1194,6 +1254,11 @@ class EphemeralEngine:
                 self._embedding_model_load_failure = None
                 log_event(LOGGER, logging.INFO, "embedding_model_ready", model="deterministic-test")
                 return self.embedding_model
+            try:
+                _load_semantic_dependencies()
+            except SemanticBackendUnavailable:
+                self.semantic_backend_available = False
+                raise
             load_failure = self._embedding_model_load_failure
             if load_failure is not None:
                 failure_type, retry_at = load_failure
@@ -1457,7 +1522,7 @@ class EphemeralEngine:
         # Semantic embeddings are materialized lazily by the first semantic or
         # hybrid search. Ingestion remains useful for fast BM25 search without
         # paying the model/indexing cost when semantic ranking is unnecessary.
-        embeddings = np.empty((0, 384), dtype=np.float32) if not semantic_chunks else None
+        embeddings = [] if not semantic_chunks else None
 
         capture = _CaptureState(
             capture_id=capture_id,
@@ -1747,6 +1812,9 @@ class EphemeralEngine:
 
     def _schedule_semantic_prefetch(self, capture: _CaptureState) -> None:
         """Queue post-ingestion indexing and make sure a bounded worker is draining."""
+        if not self.semantic_backend_available:
+            self._flush_metrics_snapshot()
+            return
         if not capture.semantic_chunks:
             self._flush_metrics_snapshot()
             return
@@ -2015,7 +2083,7 @@ class EphemeralEngine:
                 self._deferred_storage_readers += capture.active_readers
                 capture.deferred_storage_accounted_bytes = capture.retained_byte_size
                 if capture.embeddings is not None:
-                    capture.deferred_storage_accounted_bytes += int(capture.embeddings.nbytes)
+                    capture.deferred_storage_accounted_bytes += _embedding_nbytes(capture.embeddings)
                 self._deferred_storage_bytes += capture.deferred_storage_accounted_bytes
             capture.storage_close_pending = True
             return
@@ -2272,7 +2340,7 @@ class EphemeralEngine:
         capture = self._get_capture_state(capture_id)
         if capture is None:
             return None
-        embedding_bytes = int(capture.embeddings.nbytes) if capture.embeddings is not None else 0
+        embedding_bytes = _embedding_nbytes(capture.embeddings)
         return CaptureDiagnostics(
             capture_id=capture.capture_id,
             semantic_index_state=capture.semantic_index_state,
@@ -2347,6 +2415,7 @@ class EphemeralEngine:
         if not capture.semantic_chunks:
             return []
 
+        _load_semantic_dependencies()
         self._await_semantic_index(capture)
         with self._lock:
             embeddings = capture.embeddings
@@ -2449,7 +2518,7 @@ class EphemeralEngine:
 
             model = self._get_embedding_model()
             batches = self._semantic_embedding_batches(model, chunk_texts)
-            embeddings: Optional[np.ndarray] = None
+            embeddings: Optional[Any] = None
             for batch in batches:
                 batch_embeddings = list(model.embed([text for _, text in batch]))
                 if len(batch_embeddings) != len(batch):
@@ -2575,6 +2644,13 @@ class EphemeralEngine:
     ) -> Dict[str, Any]:
         """Run search while the caller retains the capture storage lease."""
 
+        if mode in ("semantic", "hybrid") and not self.semantic_backend_available:
+            return {
+                "status": "error",
+                "error_code": "semantic_backend_unavailable",
+                "message": _SEMANTIC_INSTALL_GUIDANCE,
+            }
+
         if capture.line_count == 0:
             self.metrics.record_search(capture.capture_id, 0)
             # No lines means no semantic windows to index, so a semantic or
@@ -2632,6 +2708,13 @@ class EphemeralEngine:
                     capture_id=capture.capture_id,
                     error_type=semantic_fallback,
                 )
+            except SemanticBackendUnavailable:
+                self.semantic_backend_available = False
+                return {
+                    "status": "error",
+                    "error_code": "semantic_backend_unavailable",
+                    "message": _SEMANTIC_INSTALL_GUIDANCE,
+                }
             except Exception as exc:
                 if mode == "semantic":
                     raise
@@ -3405,7 +3488,7 @@ class EphemeralEngine:
         total_chunks = sum(len(cap.chunks) for cap in self._captures.values())
         total_semantic_chunks = sum(len(cap.semantic_chunks) for cap in self._captures.values())
         embedding_bytes = sum(
-            int(cap.embeddings.nbytes) for cap in self._captures.values()
+            _embedding_nbytes(cap.embeddings) for cap in self._captures.values()
             if cap.embeddings is not None
         )
         accounted_bytes = self._total_bytes + self._deferred_storage_bytes + embedding_bytes
@@ -3440,6 +3523,7 @@ class EphemeralEngine:
             "deferred_storage_bytes": self._deferred_storage_bytes,
             "embedding_bytes": embedding_bytes,
             "embedding_model": self.embedding_model_name,
+            "semantic_backend_available": self.semantic_backend_available,
             "embedding_model_loaded": self.embedding_model is not None,
             "embedding_model_load_failure": (
                 embedding_load_failure[0].__name__

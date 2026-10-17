@@ -9,7 +9,7 @@ This guide covers installation, client setup, command capture, and privacy contr
 - Python 3.10 or newer
 - MCP Python SDK (`mcp`) 2.3.0 or newer within the 2.x series
 - A supported MCP client if you want to use the server from an AI coding assistant
-- Network access on first use if FastEmbed needs to download its embedding model
+- Network access on first use if the full install needs to download its embedding model
 
 The package is installed from PyPI as `ephemeral-buffer-mcp`. It provides both
 the MCP server and the `ephbuf` command-line client.
@@ -31,6 +31,20 @@ Verify that the CLI is available:
 .venv/bin/ephbuf --help
 ```
 
+The default `ephemeral-buffer-mcp` distribution includes BM25, semantic, and
+hybrid search. For an explicitly reduced lexical-only install, use the
+separate distribution in a clean virtual environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install ephemeral-buffer-mcp-lexical
+```
+
+The lexical-only install supports capture, retrieval, and BM25 search. Hybrid
+and semantic searches return `semantic_backend_unavailable`. The same command
+works on Windows after replacing `.venv/bin/python` with
+`.venv\\Scripts\\python.exe`.
+
 #### Windows support
 
 Use the equivalent commands from the virtual environment's `Scripts`
@@ -50,6 +64,20 @@ command timeout and cancellation use Unix process-group APIs, so those paths
 are unverified on Windows. Durable execution leases explicitly require Linux.
 
 #### Upgrade or remove the package
+
+If upgrading from a release published before the shared-core package layout,
+uninstall the old package once before installing the new full distribution.
+This avoids leaving the old package files over the files now provided by the
+core dependency:
+
+```bash
+.venv/bin/python -m pip uninstall ephemeral-buffer-mcp
+.venv/bin/python -m pip install ephemeral-buffer-mcp
+```
+
+On Windows, use `.venv\Scripts\python.exe` for both commands.
+
+After that migration, use the regular `--upgrade` command for future releases.
 
 On macOS and Linux:
 
@@ -75,11 +103,13 @@ cd ephemeral-buffer-mcp
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install -e '.[semantic]'
 ```
 
-The editable install exposes the same `ephbuf` command and MCP server as the
-PyPI installation. The reproducible, locked contributor environment is
-documented in [contributor setup and checks](../CONTRIBUTING.md).
+The semantic extra makes the editable source install match the default full
+PyPI distribution. Use plain `pip install -e .` for a lexical-only source
+environment. The reproducible, locked contributor environment is documented
+in [contributor setup and checks](../CONTRIBUTING.md).
 
 ### Python embedding API
 
@@ -351,12 +381,14 @@ admission slot.
 
 ### Background model warm-up
 
-After socket startup succeeds, the server loads FastEmbed and runs a small
-deterministic embedding in a background thread. MCP startup and BM25 search do
-not wait for this work. A semantic request arriving during warm-up waits on the
-same model lock instead of starting a duplicate load. Subsequent operations use
-the local model cache. To disable warm-up for lexical-only or memory-constrained
-deployments, or to select a compatible model and cache location, set:
+When the semantic backend is installed, the server loads FastEmbed and runs a
+small deterministic embedding in a background thread after socket startup.
+MCP startup and BM25 search do not wait for this work. A semantic request
+arriving during warm-up waits on the same model lock instead of starting a
+duplicate load. Subsequent operations use the local model cache. The
+lexical-only distribution skips warm-up because the backend is unavailable.
+To disable warm-up for memory-constrained deployments, or to select a
+compatible model and cache location, set:
 
 ```bash
 export EPHEMERAL_EMBEDDING_WARMUP=0
@@ -384,11 +416,14 @@ setting.
 export EPHEMERAL_EMBEDDING_THREADS=4
 ```
 
-Warm-up failures do not stop the server. BM25 remains available, and hybrid
-search returns lexical results with a `semantic_fallback` error-class field
-when semantic initialization fails. `get_buffer_stats` and
+Warm-up failures do not stop the server. With the semantic dependencies
+installed, BM25 remains available and hybrid search returns lexical results
+with a `semantic_fallback` error-class field when semantic model initialization
+fails. In a lexical-only installation, hybrid and semantic requests instead
+return `semantic_backend_unavailable`. `get_buffer_stats` and
 `get_runtime_diagnostics` report warm-up as `not-started`, `loading`, `ready`,
-`failed`, or `disabled`; failures expose only the exception class.
+`failed`, `disabled`, or `unavailable`; failures expose only the exception
+class.
 
 Semantic indexing uses bounded inference by default: at most 16 chunks and
 4,096 padded token slots per model call. Chunks are grouped by tokenizer length,

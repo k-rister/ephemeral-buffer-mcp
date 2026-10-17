@@ -28,7 +28,7 @@ flowchart TD
 
     subgraph Indexing["5. Classification & Search Indexing"]
         E --> F["SQLite FTS5 (BM25 Lexical) or Python lexical fallback"]
-        E --> G["Required FastEmbed dependency; model loads lazily or in background"]
+        E --> G["Optional semantic backend; dependencies load on demand or during warm-up"]
         E --> K["Diff & Signal Parser (File Maps & Conflict Detection)"]
         E --> CO["consolidate_captures: bounded source-aware JSON"]
         CO --> E
@@ -72,8 +72,11 @@ aggregate state quota defaults to 4 GiB, with a configurable checkpoint
 reserve for atomic writes. Capture eviction does not remove durable execution
 records.
 
-FastEmbed is an import-time dependency of the engine. Loading the dense model
-is lazy when semantic search first needs it; deployments may also warm the
-model in the background after startup.
+The shared runtime imports without NumPy or FastEmbed. The default
+`ephemeral-buffer-mcp` distribution installs both through the semantic extra;
+the explicit `ephemeral-buffer-mcp-lexical` distribution omits them. In a
+lexical-only install, BM25 remains available and hybrid or semantic searches
+return `semantic_backend_unavailable`. With the semantic extra installed, the
+dense model loads on demand and may be warmed in the background after startup.
 
 ---

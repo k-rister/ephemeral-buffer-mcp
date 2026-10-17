@@ -23,6 +23,11 @@ python3 -m venv .venv
 .venv/bin/python -m pip install ephemeral-buffer-mcp
 ```
 
+The default distribution includes BM25, semantic, and hybrid search. To
+explicitly choose the smaller lexical-only install, use
+`ephemeral-buffer-mcp-lexical`; it supports BM25 while semantic and hybrid
+search require the full distribution.
+
 Configure your MCP client using the [user guide](https://github.com/k-rister/ephemeral-buffer-mcp/blob/main/docs/user-guide.md). For an isolated
 server, the server and `ephbuf` must use the same unique session ID. On
 macOS/Linux, export the ID before starting Codex with the launcher installed in
