@@ -1,6 +1,7 @@
 """Search domain handlers."""
 
 from ..server import *  # noqa: F403
+from ..engine import MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_TOP_K
 from .capture import _bounded_summary_text
 from .registry import register_tool
 
@@ -209,10 +210,10 @@ def _search_capture_response(
 @register_tool("search_capture", "search", structured_result_factory=_search_capture_response)
 def search_capture(
     query: str,
-    mode: str = "hybrid",
+    mode: Literal["hybrid", "bm25", "semantic"] = "hybrid",
     capture_id: str = "latest",
-    top_k: int = 5,
-    context_lines: int = 3,
+    top_k: Annotated[int, Field(ge=1, le=MAX_SEARCH_TOP_K)] = 5,
+    context_lines: Annotated[int, Field(ge=0, le=MAX_SEARCH_CONTEXT_LINES)] = 3,
 ) -> str:
     """Search a capture by query text and return bounded readable and structured matches.
 
@@ -228,10 +229,10 @@ def search_capture(
 
 def search_capture_result(
     query: str,
-    mode: str = "hybrid",
+    mode: Literal["hybrid", "bm25", "semantic"] = "hybrid",
     capture_id: str = "latest",
-    top_k: int = 5,
-    context_lines: int = 3,
+    top_k: Annotated[int, Field(ge=1, le=MAX_SEARCH_TOP_K)] = 5,
+    context_lines: Annotated[int, Field(ge=0, le=MAX_SEARCH_CONTEXT_LINES)] = 3,
 ) -> ToolResponseEnvelope:
     """Return a typed search result while preserving ``search_capture`` text callers."""
     return _search_capture_response(query, mode, capture_id, top_k, context_lines)

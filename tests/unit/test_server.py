@@ -1090,6 +1090,18 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Error reading file", result)
         self.assertIn("permission denied", result)
 
+    def test_capture_file_rejects_unsupported_content_type_before_reading(self):
+        with tempfile.NamedTemporaryFile() as file_handle, patch.object(
+            capture_tools, "read_file_bounded"
+        ) as read_file:
+            result = server.capture_file(file_handle.name, content_type="html")
+
+        self.assertEqual(
+            result,
+            "Error: content_type must be one of: auto, diff, log, or text.",
+        )
+        read_file.assert_not_called()
+
     def test_execute_rejects_limit_above_buffer_budget(self):
         server.engine.max_buffer_bytes = 1024
 
@@ -1109,6 +1121,24 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Error executing command", result)
         self.assertIn("unable to start command", result)
+
+    def test_execute_rejects_unsupported_content_type_before_running_command(self):
+        with patch.object(capture_tools, "run_command_bounded") as run_command:
+            result = server.execute_and_capture("must-not-run", content_type="html")
+
+        self.assertEqual(
+            result,
+            "Error: content_type must be one of: auto, diff, log, or text.",
+        )
+        run_command.assert_not_called()
+
+    def test_capture_text_rejects_unsupported_content_type(self):
+        result = server.capture_text("content", content_type="html")
+
+        self.assertEqual(
+            result,
+            "Error: content_type must be one of: auto, diff, log, or text.",
+        )
 
     def test_execute_reports_timeout(self):
         with patch.object(
@@ -2774,6 +2804,7 @@ class TestServerTools(unittest.TestCase):
         capture_id = capture["capture_id"]
         missing = server.get_capture_slice_result(1, 1, capture_id="missing")
         invalid_range = server.get_capture_slice_result(3, 3, capture_id=capture_id)
+        invalid_positive_line = server.get_capture_slice_result(0, 1, capture_id=capture_id)
         invalid_budget = server.get_capture_slice_result(1, 1, capture_id=capture_id, max_bytes=3)
         invalid_cursor = server.get_capture_slice_result(
             1, 1, capture_id=capture_id, cursor="invalid"
@@ -2791,6 +2822,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(missing.error.code, "capture_not_found")
         self.assertIn("Error:", missing.text)
         self.assertEqual(invalid_range.error.code, "invalid_range")
+        self.assertEqual(invalid_positive_line.error.code, "invalid_range")
         self.assertEqual(invalid_budget.error.code, "invalid_byte_budget")
         self.assertEqual(invalid_cursor.error.code, "invalid_cursor")
         self.assertEqual(missing_search.error.code, "capture_not_found")

@@ -7,13 +7,24 @@ from .registry import register_tool
 
 @_instrument_tool("get_capture_slice")
 def _capture_slice_response(
-    start_line: int,
-    end_line: int,
+    start_line: Annotated[int, Field(ge=1)],
+    end_line: Annotated[int, Field(ge=1)],
     capture_id: str = "latest",
     max_bytes: int = MAX_CAPTURE_SLICE_CONTENT_BYTES,
     cursor: Optional[str] = None,
     __invocation_mode: str = "direct",
 ) -> ToolResponseEnvelope:
+    if any(
+        isinstance(line, bool) or not isinstance(line, int) or line < 1
+        for line in (start_line, end_line)
+    ):
+        message = "start_line and end_line must be positive integers."
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(code="invalid_range", message=message),
+            text=f"Error: {message}",
+        )
+
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 4096 <= max_bytes <= MCP_TOOL_RESPONSE_MAX_BYTES:
         message = f"max_bytes must be between 4,096 and {MCP_TOOL_RESPONSE_MAX_BYTES:,}."
         return ToolResponseEnvelope(
@@ -150,8 +161,8 @@ def _capture_slice_response(
 
 @register_tool("get_capture_slice", "retrieval", structured_result_factory=_capture_slice_response)
 def get_capture_slice(
-    start_line: int,
-    end_line: int,
+    start_line: Annotated[int, Field(ge=1)],
+    end_line: Annotated[int, Field(ge=1)],
     capture_id: str = "latest",
     max_bytes: Annotated[int, Field(ge=4096, le=MCP_TOOL_RESPONSE_MAX_BYTES)] = MCP_TOOL_RESPONSE_MAX_BYTES,
     cursor: Optional[str] = None,
