@@ -50,7 +50,7 @@ jobs:
             python -m pip install --require-hashes -r requirements-dev-lock-py312.txt
           else
             # Python 3.10 uses scripts/release_checks.py's tomli fallback for TOML parsing.
-            python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1
+            python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1 twine
           fi
 
       - name: Install project in editable mode
