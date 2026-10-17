@@ -1111,21 +1111,52 @@ class ExecutionStore:
             is_temporary = path.name.startswith("tmp")
             if not (is_record or is_summary or is_temporary):
                 continue
-            self._reject_symlink(path, "state file")
+            if not is_temporary:
+                self._reject_symlink(path, "state file")
             try:
                 info = path.stat(follow_symlinks=False)
             except FileNotFoundError:
+                continue
+            if is_temporary:
+                # Temporary entries that cannot safely be removed (for example
+                # symlinks and directories) still consume their lstat size in
+                # quota accounting. Never follow them.
+                temporary_bytes += info.st_size
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError(f"execution state file is not a regular file: {path}")
             if is_summary:
                 summary_bytes += info.st_size
-            elif is_temporary:
-                temporary_bytes += info.st_size
             else:
                 record_bytes += info.st_size
                 record_count += 1
         return record_bytes, summary_bytes, record_count, temporary_bytes
+
+    def _cleanup_temporary_files_locked(self) -> None:
+        """Remove regular atomic-write leftovers while holding the shared lock."""
+        if not self._validate_state_dir(require_exists=False):
+            return
+        removed_any = False
+        for path in self.state_dir.iterdir():
+            if not path.name.startswith("tmp"):
+                continue
+            try:
+                info = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # Preserve entries that cannot be removed. The quota scan below
+                # will continue to account for their lstat size.
+                continue
+            removed_any = True
+        if removed_any:
+            self._fsync_directory(self.state_dir)
 
     def _reservation_entries(self) -> List[Dict[str, Any]]:
         entries = []
@@ -1228,6 +1259,7 @@ class ExecutionStore:
                 self._ensure_state_dir()
                 if not self.is_locked(execution_id):
                     raise RuntimeError("checkpoint reservations require the execution lease")
+                self._cleanup_temporary_files_locked()
                 record_bytes, summary_bytes, _, temporary_bytes = self._managed_file_sizes()
                 other_reserved = self._reserved_checkpoint_bytes_locked(
                     exclude_execution_id=execution_id,
@@ -1412,6 +1444,7 @@ class ExecutionStore:
                     raise ValueError(
                         f"execution state exceeds the {MAX_EXECUTION_STATE_BYTES:,}-byte limit"
                     )
+                self._cleanup_temporary_files_locked()
                 record_bytes, summary_bytes, record_count, temporary_bytes = (
                     self._managed_file_sizes()
                 )
@@ -1542,8 +1575,12 @@ class ExecutionStore:
                         continue
                     if stat.S_ISLNK(info.st_mode):
                         symlink_count += 1
+                        if path.name.startswith("tmp"):
+                            temporary_file_bytes += info.st_size
                         continue
                     if not stat.S_ISREG(info.st_mode):
+                        if path.name.startswith("tmp"):
+                            temporary_file_bytes += info.st_size
                         continue
                     if path.name.startswith("."):
                         if path.name in {".records.lock"} or path.name.endswith(".lock"):

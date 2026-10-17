@@ -2890,6 +2890,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             missing = ExecutionStore(Path(directory) / "missing")
             self.assertEqual(missing._managed_file_sizes(), (0, 0, 0, 0))
+            missing._cleanup_temporary_files_locked()
 
             missing.state_dir.mkdir(mode=0o700)
             state_dir = missing.state_dir
@@ -2916,6 +2917,174 @@ class TestPhaseExecutionManager(unittest.TestCase):
             (state_dir / "not-a-record.json").mkdir()
             with self.assertRaisesRegex(ValueError, "not a regular file"):
                 missing._managed_file_sizes()
+
+    def test_save_and_checkpoint_reservation_clean_temporary_files_before_quota_checks(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            execution, "MAX_EXECUTION_STATE_BYTES", 1024
+        ):
+            store = ExecutionStore(
+                directory,
+                quota_bytes=8192,
+                checkpoint_reserve_bytes=1024,
+            )
+            store._ensure_state_dir()
+            save_leftover = store.state_dir / "tmp-save-leftover"
+            save_leftover.write_bytes(b"x" * 10000)
+
+            store.save({"execution_id": "cleanup-before-save", "phases": []})
+            self.assertFalse(save_leftover.exists())
+            self.assertEqual(store.capacity()["temporary_file_bytes"], 0)
+
+            reserve_leftover = store.state_dir / "tmp-reservation-leftover"
+            reserve_leftover.write_bytes(b"y" * 10000)
+            with store.lease("cleanup-before-save"):
+                store.reserve_checkpoint("cleanup-before-save", 64)
+                self.assertFalse(reserve_leftover.exists())
+                self.assertEqual(store.capacity()["active_reserved_bytes"], 64)
+                store.release_checkpoint("cleanup-before-save")
+
+    def test_temporary_cleanup_preserves_and_accounts_symlinks_and_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExecutionStore(directory)
+            store._ensure_state_dir()
+            state_dir = store.state_dir
+            temporary = state_dir / "tmp-regular"
+            temporary.write_bytes(b"remove me")
+            temporary_directory = state_dir / "tmp-directory"
+            temporary_directory.mkdir()
+            directory_bytes = temporary_directory.stat(follow_symlinks=False).st_size
+            target = state_dir / "ordinary-target"
+            target.write_bytes(b"target")
+            temporary_symlink = state_dir / "tmp-symlink"
+            try:
+                temporary_symlink.symlink_to(target)
+            except OSError:
+                self.skipTest("symlinks are unavailable on this platform")
+            symlink_bytes = temporary_symlink.stat(follow_symlinks=False).st_size
+            ordinary_entry = state_dir / "notes.txt"
+            ordinary_entry.write_bytes(b"keep")
+
+            with store._record_lease():
+                store._cleanup_temporary_files_locked()
+
+            self.assertFalse(temporary.exists())
+            self.assertTrue(temporary_directory.is_dir())
+            self.assertTrue(temporary_symlink.is_symlink())
+            self.assertTrue(target.exists())
+            self.assertTrue(ordinary_entry.exists())
+            expected_temporary_bytes = directory_bytes + symlink_bytes
+            self.assertEqual(store._managed_file_sizes()[3], expected_temporary_bytes)
+            capacity = store.capacity()
+            self.assertEqual(capacity["temporary_file_bytes"], expected_temporary_bytes)
+            self.assertEqual(capacity["symlink_count"], 1)
+
+    def test_temporary_cleanup_failure_remains_in_quota_accounting(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            execution, "MAX_EXECUTION_STATE_BYTES", 1024
+        ):
+            store = ExecutionStore(
+                directory,
+                quota_bytes=4096,
+                checkpoint_reserve_bytes=1024,
+            )
+            store._ensure_state_dir()
+            leftover = store.state_dir / "tmp-unremovable"
+            leftover.write_bytes(b"x" * 3500)
+            original_unlink = Path.unlink
+
+            def fail_temporary_unlink(path, *args, **kwargs):
+                if path == leftover:
+                    raise PermissionError("temporary cleanup denied")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_temporary_unlink):
+                with self.assertRaisesRegex(
+                    execution.ExecutionQuotaError, "aggregate quota"
+                ):
+                    store.save({"execution_id": "cleanup-failed", "phases": []})
+
+            self.assertTrue(leftover.exists())
+            self.assertEqual(store._managed_file_sizes()[3], 3500)
+            self.assertEqual(store.capacity()["temporary_file_bytes"], 3500)
+
+    def test_temporary_cleanup_handles_entries_disappearing_during_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExecutionStore(directory)
+            store._ensure_state_dir()
+            stat_leftover = store.state_dir / "tmp-stat-race"
+            stat_leftover.write_bytes(b"remains after stat race")
+            original_stat = Path.stat
+
+            def disappear_during_stat(path, *args, **kwargs):
+                if path == stat_leftover:
+                    raise FileNotFoundError(path)
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", disappear_during_stat):
+                with store._record_lease():
+                    store._cleanup_temporary_files_locked()
+            self.assertTrue(stat_leftover.exists())
+
+            unlink_leftover = store.state_dir / "tmp-unlink-race"
+            unlink_leftover.write_bytes(b"removed by another writer")
+            original_unlink = Path.unlink
+
+            def disappear_during_unlink(path, *args, **kwargs):
+                if path == unlink_leftover:
+                    original_unlink(path, *args, **kwargs)
+                    raise FileNotFoundError(path)
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", disappear_during_unlink):
+                with store._record_lease():
+                    store._cleanup_temporary_files_locked()
+            self.assertFalse(unlink_leftover.exists())
+
+    def test_temporary_cleanup_waits_for_shared_record_lock(self):
+        if execution.fcntl is None:
+            self.skipTest("shared record locking is unavailable on this platform")
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExecutionStore(directory)
+            store._ensure_state_dir()
+            leftover = store.state_dir / "tmp-locked-writer"
+            leftover.write_bytes(b"preserve until writer lock is available")
+            cleanup_entered = threading.Event()
+            writer_started = threading.Event()
+            writer_errors = []
+            original_cleanup = store._cleanup_temporary_files_locked
+
+            def track_cleanup():
+                cleanup_entered.set()
+                original_cleanup()
+
+            def write_record():
+                writer_started.set()
+                try:
+                    store.save({"execution_id": "lock-cleanup", "phases": []})
+                except BaseException as exc:
+                    writer_errors.append(exc)
+
+            with patch.object(
+                store,
+                "_cleanup_temporary_files_locked",
+                side_effect=track_cleanup,
+            ):
+                with store._record_lease():
+                    writer = threading.Thread(target=write_record, daemon=True)
+                    writer.start()
+                    started = writer_started.wait(1)
+                    cleanup_ran_while_locked = cleanup_entered.wait(0.1)
+                    leftover_remained_while_locked = leftover.exists()
+
+                writer.join(2)
+
+            self.assertTrue(started)
+            self.assertFalse(cleanup_ran_while_locked)
+            self.assertTrue(leftover_remained_while_locked)
+            self.assertFalse(writer.is_alive())
+            self.assertTrue(cleanup_entered.is_set())
+            self.assertFalse(leftover.exists())
+            self.assertEqual(writer_errors, [])
 
     def test_reservation_scans_and_checkpoint_cleanup_handle_races(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3033,6 +3202,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
             capacity = manager.capacity()
 
         self.assertEqual(capacity["temporary_file_bytes"], len(b"orphan"))
+        self.assertTrue((state_dir / "tmp-orphan").exists())
         self.assertEqual(capacity["other_file_bytes"], len(b"hidden"))
         self.assertGreaterEqual(capacity["invalid_record_count"], 1)
         self.assertGreaterEqual(capacity["uncertain_lock_count"], 1)
@@ -3181,6 +3351,63 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 )
             self.assertEqual(fsync_result["status"], "partial")
             self.assertEqual(fsync_result["retired_count"], 1)
+
+    def test_manual_recovery_archive_and_capacity_after_removing_fenced_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            protected_dir = root / "protected"
+            protected_dir.mkdir(mode=0o700)
+            store = ExecutionStore(state_dir)
+            manager = PhaseExecutionManager(state_dir, command_runner=Runner())
+            execution_id = "manual-fenced-recovery"
+            manager.create([self.phase("fenced", "fenced")], execution_id=execution_id)
+            record = store._read_record(execution_id)
+            record["phases"][0]["status"] = "started"
+            record["phases"][0]["attempts"] = 1
+            record["phases"][0]["process_fence_pending"] = True
+            store.save(record)
+            unreadable_reservation = state_dir / ".checkpoint-unreadable.json"
+            unreadable_reservation.write_text("not json", encoding="utf-8")
+
+            before = store.capacity()
+            self.assertEqual(before["fence_pending_record_count"], 1)
+            self.assertEqual(before["invalid_reservation_count"], 1)
+            with tempfile.TemporaryDirectory() as archive_parent:
+                refused = manager.retire(
+                    [execution_id],
+                    archive_path=str(Path(archive_parent) / "refused.tar"),
+                    dry_run=False,
+                )
+            self.assertEqual(refused["status"], "refused")
+
+            archive_path = protected_dir / "execution-state.tar"
+            with tarfile.open(archive_path, "w") as archive:
+                archive.add(state_dir, arcname="state")
+            archive_path.chmod(0o600)
+            with tarfile.open(archive_path, "r") as archive:
+                archived_names = set(archive.getnames())
+            self.assertIn(f"state/{store._path(execution_id).name}", archived_names)
+            self.assertIn(
+                f"state/{store._summary_path(execution_id).name}", archived_names
+            )
+            self.assertIn(
+                f"state/{unreadable_reservation.name}", archived_names
+            )
+            self.assertNotEqual(archive_path.parent, state_dir)
+            self.assertEqual(archive_path.stat().st_mode & 0o777, 0o600)
+
+            store._summary_path(execution_id).unlink()
+            store._path(execution_id).unlink()
+            unreadable_reservation.unlink()
+
+            restarted = ExecutionStore(state_dir)
+            after = restarted.capacity()
+            self.assertEqual(after["invalid_reservation_count"], 0)
+            self.assertEqual(after["invalid_record_count"], 0)
+            self.assertEqual(after["unpaired_record_count"], 0)
+            self.assertEqual(after["unpaired_summary_count"], 0)
+            self.assertGreater(after["available_bytes"], before["available_bytes"])
 
     def test_retirement_archive_temp_cleanup_tolerates_missing_temp_files(self):
         manager = self.manager()

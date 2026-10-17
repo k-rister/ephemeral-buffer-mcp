@@ -407,8 +407,10 @@ An unreadable process environment makes the marker scan inconclusive and keeps
 recovery blocked, including when the process belongs to another user.
 Linux process start and boot identities are revalidated while the pidfd is
 pinned so a reused process ID is not signalled. The launch fence is written
-before spawning, and older in-progress records without process identities are
-held fence-pending until they are inspected or retired. A `failed` or
+before spawning, and older in-progress records without process identities
+remain fence-pending. Resume and tool-based retirement are refused for these
+records; use the manual recovery procedure below only after process absence is
+confirmed. A `failed` or
 `timed_out` phase is only retried with
 `retry_failed=True`; a timed-out phase whose process-group cleanup is not
 confirmed remains fence-pending and blocks retry. A safe phase recovered as `interrupted` resumes on the
@@ -472,7 +474,9 @@ directory must be current-user-owned and not group/world writable. The archive
 is created with owner-only file permissions and synchronized before the source record and
 summary pair are removed. Keep the archive in an access-controlled location;
 it contains stored commands and bounded output. Active, started, and
-fence-pending executions are refused. There is no automatic expiry. An
+fence-pending executions are refused. There is no automatic expiry. For a
+fence-pending record or unreadable checkpoint reservation, use the manual
+recovery procedure below. An
 explicit `EPHEMERAL_EXECUTION_STATE_DIR` always selects the state directory.
 Otherwise an explicit socket path identifies the derived state namespace,
 followed by the session ID when no socket path is explicit. When neither
@@ -480,6 +484,60 @@ identity value is set, each server process receives a fresh private directory
 that is removed during normal shutdown on POSIX platforms. Windows may retain
 that temporary directory because secure owner-identity cleanup is not
 available there.
+
+### Manual recovery for fence-pending records and unreadable reservations
+
+Use this procedure only when normal recovery cannot establish whether a
+checkpointed process is gone, or when `get_execution_capacity` reports an
+unreadable checkpoint reservation. `retire_executions` intentionally refuses
+started and fence-pending records. If the process or its process group cannot be
+confirmed absent, leave the record fenced and do not remove its files.
+
+1. Stop every EB server that uses the state directory, including service units,
+   background instances, and clients that launched their own server. Verify
+   each server process has exited and check the persisted process and process
+   group identities against the host process table. Do not continue if any
+   process may still be running.
+2. Set `STATE_DIR` to the exact directory reported by
+   `get_execution_capacity`. Choose a new, access-controlled `ARCHIVE_PATH`
+   outside that directory, then create and verify a private archive of the
+   whole state directory before changing any files:
+
+   ```bash
+   umask 077
+   tar -C "$(dirname -- "$STATE_DIR")" -cf "$ARCHIVE_PATH" "$(basename -- "$STATE_DIR")"
+   chmod 600 "$ARCHIVE_PATH"
+   tar -tf "$ARCHIVE_PATH" >/dev/null
+   ```
+
+   Confirm the archive command succeeded and that the archive is outside the
+   state directory. It contains stored commands and bounded output.
+3. For a specific execution, compute the SHA-256 digest of its UTF-8 execution
+   ID and remove its record pair and reservation only after the archive is
+   verified:
+
+   ```bash
+   EXECUTION_ID='the-execution-id'
+   digest="$(printf '%s' "$EXECUTION_ID" | sha256sum | cut -d ' ' -f1)"
+   rm -- "$STATE_DIR/$digest.json" \
+     "$STATE_DIR/$digest.summary.json"
+   rm -f -- "$STATE_DIR/.checkpoint-$digest.json"
+   ```
+
+   Verify that the digest matches the intended record pair before removing it.
+   For an unreadable reservation whose execution ID cannot be read, identify
+   its `.checkpoint-*.json` file by name and remove only that reservation after
+   the archive is verified. Preserve every other record and reservation. After
+   either removal, sync the state directory before restarting:
+
+   ```bash
+   sync -f "$STATE_DIR"
+   ```
+4. Restart the server with the same state directory and inspect
+   `get_execution_capacity`. Confirm `invalid_reservation_count` is zero,
+   `invalid_record_count` and unpaired counts are understood, and available
+   quota matches the files that remain. Keep the archive until normal recovery
+   and the next checkpoint have been verified.
 
 If both `EPHEMERAL_SOCKET_PATH` and `EPHEMERAL_SESSION_ID` are set, this
 precedence can select a different state directory than older versions. Startup
