@@ -35,11 +35,6 @@
     "description": "Index a file and return a compact versioned JSON summary.\n\n    Verify the path before reading. Symlinks are followed; pipes and devices are\n    rejected. Resolve symlinks when path identity matters, confirm the expected\n    workspace, and set max_bytes for large or untrusted files. Capture limits do\n    not validate filesystem intent. Optional structured_metrics are retained.\n    ",
     "inputSchema": {
       "properties": {
-        "content_type": {
-          "default": "auto",
-          "title": "Content Type",
-          "type": "string"
-        },
         "file_path": {
           "title": "File Path",
           "type": "string"
@@ -47,6 +42,17 @@
         "label": {
           "default": "",
           "title": "Label",
+          "type": "string"
+        },
+        "content_type": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "diff",
+            "log",
+            "text"
+          ],
+          "title": "Content Type",
           "type": "string"
         },
         "max_bytes": {
@@ -181,14 +187,20 @@
           "title": "Content",
           "type": "string"
         },
-        "content_type": {
-          "default": "auto",
-          "title": "Content Type",
-          "type": "string"
-        },
         "label": {
           "default": "",
           "title": "Label",
+          "type": "string"
+        },
+        "content_type": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "diff",
+            "log",
+            "text"
+          ],
+          "title": "Content Type",
           "type": "string"
         },
         "structured_metrics": {
@@ -553,11 +565,6 @@
           "title": "Command",
           "type": "string"
         },
-        "content_type": {
-          "default": "auto",
-          "title": "Content Type",
-          "type": "string"
-        },
         "cwd": {
           "anyOf": [
             {
@@ -575,6 +582,17 @@
           "title": "Label",
           "type": "string"
         },
+        "content_type": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "diff",
+            "log",
+            "text"
+          ],
+          "title": "Content Type",
+          "type": "string"
+        },
         "max_output_bytes": {
           "anyOf": [
             {
@@ -586,6 +604,18 @@
           ],
           "default": null,
           "title": "Max Output Bytes"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
         },
         "structured_metrics": {
           "anyOf": [
@@ -599,18 +629,6 @@
           ],
           "default": null,
           "title": "Structured Metrics"
-        },
-        "timeout_seconds": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Timeout Seconds"
         }
       },
       "required": [
@@ -737,10 +755,27 @@
     "description": "Fetch a byte-bounded page of 1-indexed capture lines.\n\n    Repeat the range and capture ID from the first call, then pass the returned\n    opaque ``next_cursor`` to continue. Pages never split a Unicode character;\n    the cursor's line offset is a zero-based UTF-8 byte offset.\n    ",
     "inputSchema": {
       "properties": {
+        "start_line": {
+          "minimum": 1,
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "end_line": {
+          "minimum": 1,
+          "title": "End Line",
+          "type": "integer"
+        },
         "capture_id": {
           "default": "latest",
           "title": "Capture Id",
           "type": "string"
+        },
+        "max_bytes": {
+          "default": 65536,
+          "maximum": 65536,
+          "minimum": 4096,
+          "title": "Max Bytes",
+          "type": "integer"
         },
         "cursor": {
           "anyOf": [
@@ -753,21 +788,6 @@
           ],
           "default": null,
           "title": "Cursor"
-        },
-        "end_line": {
-          "title": "End Line",
-          "type": "integer"
-        },
-        "max_bytes": {
-          "default": 65536,
-          "maximum": 65536,
-          "minimum": 4096,
-          "title": "Max Bytes",
-          "type": "integer"
-        },
-        "start_line": {
-          "title": "Start Line",
-          "type": "integer"
         }
       },
       "required": [
@@ -1431,28 +1451,37 @@
     "description": "Search a capture by query text and return bounded readable and structured matches.\n\n    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic\n    (embedding based). capture_id defaults to latest; top_k defaults to 5\n    (maximum 20), and context_lines defaults to 3 (maximum 100). Use\n    get_capture_slice for complete or omitted content. Hybrid results may be\n    marked semantic pending or unavailable. The lexical-only distribution\n    returns a semantic_backend_unavailable error for hybrid and semantic modes.\n    ",
     "inputSchema": {
       "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "mode": {
+          "default": "hybrid",
+          "enum": [
+            "hybrid",
+            "bm25",
+            "semantic"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
         "capture_id": {
           "default": "latest",
           "title": "Capture Id",
           "type": "string"
         },
-        "context_lines": {
-          "default": 3,
-          "title": "Context Lines",
-          "type": "integer"
-        },
-        "mode": {
-          "default": "hybrid",
-          "title": "Mode",
-          "type": "string"
-        },
-        "query": {
-          "title": "Query",
-          "type": "string"
-        },
         "top_k": {
           "default": 5,
+          "maximum": 20,
+          "minimum": 1,
           "title": "Top K",
+          "type": "integer"
+        },
+        "context_lines": {
+          "default": 3,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Context Lines",
           "type": "integer"
         }
       },

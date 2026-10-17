@@ -3,6 +3,16 @@
 from ..server import *  # noqa: F403
 from .registry import register_tool
 
+CaptureContentType = Literal["auto", "diff", "log", "text"]
+CAPTURE_CONTENT_TYPES = ("auto", "diff", "log", "text")
+
+
+def _content_type_error(content_type: object) -> Optional[str]:
+    """Return a stable error when a caller supplies an unsupported hint."""
+    if isinstance(content_type, str) and content_type in CAPTURE_CONTENT_TYPES:
+        return None
+    return "Error: content_type must be one of: auto, diff, log, or text."
+
 
 def _bounded_diff_file_map(
     file_map: str,
@@ -224,7 +234,7 @@ def _summary_json(
 def _capture_text(
     content: str,
     label: str = "",
-    content_type: str = "auto",
+    content_type: CaptureContentType = "auto",
     source: str = "capture_text",
     duration_ms: Optional[float] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
@@ -234,6 +244,9 @@ def _capture_text(
     Automatically detects diffs, logs, and text structures.
     Returns a compact JSON summary while preserving the complete capture for later retrieval.
     """
+    content_type_error = _content_type_error(content_type)
+    if content_type_error:
+        return content_type_error
     try:
         structured_metrics = normalize_structured_metrics(structured_metrics)
     except ValueError as exc:
@@ -259,7 +272,7 @@ def _capture_text(
 def capture_text(
     content: str,
     label: str = "",
-    content_type: str = "auto",
+    content_type: CaptureContentType = "auto",
     structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Ingest already-collected text and return capture metadata.
@@ -283,7 +296,7 @@ def capture_text(
 def capture_file(
     file_path: str,
     label: str = "",
-    content_type: str = "auto",
+    content_type: CaptureContentType = "auto",
     max_bytes: Optional[int] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -294,6 +307,9 @@ def capture_file(
     workspace, and set max_bytes for large or untrusted files. Capture limits do
     not validate filesystem intent. Optional structured_metrics are retained.
     """
+    content_type_error = _content_type_error(content_type)
+    if content_type_error:
+        return content_type_error
     try:
         structured_metrics = normalize_structured_metrics(structured_metrics)
     except ValueError as exc:
@@ -339,7 +355,7 @@ def execute_and_capture(
     command: str,
     cwd: Optional[str] = None,
     label: str = "",
-    content_type: str = "auto",
+    content_type: CaptureContentType = "auto",
     max_output_bytes: Optional[int] = None,
     timeout_seconds: Optional[float] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
@@ -365,6 +381,9 @@ def execute_and_capture(
     retains collected output and returns exit code 124. structured_metrics accepts
     JSON-compatible named metrics.
     """
+    content_type_error = _content_type_error(content_type)
+    if content_type_error:
+        return content_type_error
     if not label:
         label = command[:40] + ("..." if len(command) > 40 else "")
 
