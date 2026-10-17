@@ -260,6 +260,12 @@ this harness does not invoke a model. Fixtures contain no project content and
 are generated in code, so runs are reproducible. This is a server-side smoke
 evaluation, not a claim about any particular coding agent or model.
 
+The `--summary` mode dispatches capture, summary, and slice-retrieval calls
+through the registered MCP tool surface using an isolated service context.
+`retrieval_bytes` counts the serialized MCP result, including both its readable
+text and structured-content channels; it includes server-side tool dispatch but
+not stdio JSON-RPC framing or an external client connection.
+
 Evaluate search relevance across supported modes with deterministic synthetic
 fixtures:
 ```bash
