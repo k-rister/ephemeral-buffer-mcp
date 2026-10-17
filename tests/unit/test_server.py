@@ -1358,6 +1358,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Deferred storage:", result)
         self.assertIn("Embedding bytes:", result)
         self.assertIn("Embedding model:", result)
+        self.assertIn("Semantic backend: available", result)
         self.assertIn("Embedding model load backoff: inactive", result)
         self.assertIn("Embedding warm-up:", result)
         self.assertIn("Process RSS:", result)

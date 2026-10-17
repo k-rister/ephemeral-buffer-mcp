@@ -45,6 +45,55 @@ def package_version(path: Path) -> str:
         raise ReleaseCheckError(f"unable to read project version from {path}: {exc}") from exc
 
 
+def _project_metadata(path: Path) -> dict:
+    """Read the project table from a distribution pyproject file."""
+    try:
+        with path.open("rb") as stream:
+            return tomllib.load(stream)["project"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        raise ReleaseCheckError(f"unable to read project metadata from {path}: {exc}") from exc
+
+
+def validate_distribution_metadata(
+    core_path: Path,
+    full_path: Path,
+    lexical_path: Path,
+    version: str,
+) -> None:
+    """Validate names, versions, and dependency boundaries for all PyPI distributions."""
+    core = _project_metadata(core_path)
+    full = _project_metadata(full_path)
+    lexical = _project_metadata(lexical_path)
+    expected_names = {
+        "core": "ephemeral-buffer-mcp-core",
+        "full": "ephemeral-buffer-mcp",
+        "lexical": "ephemeral-buffer-mcp-lexical",
+    }
+    projects = {"core": core, "full": full, "lexical": lexical}
+    for kind, project in projects.items():
+        if project.get("name") != expected_names[kind]:
+            raise ReleaseCheckError(
+                f"{kind} distribution must be named {expected_names[kind]!r}"
+            )
+        if project.get("version") != version:
+            raise ReleaseCheckError(
+                f"{expected_names[kind]} version {project.get('version')!r} "
+                f"does not match release version {version!r}"
+            )
+
+    core_dependency = f"ephemeral-buffer-mcp-core=={version}"
+    semantic_core_dependency = f"ephemeral-buffer-mcp-core[semantic]=={version}"
+    if core.get("dependencies") != ["mcp>=2.3.0,<3", "urllib3>=2.8.0"]:
+        raise ReleaseCheckError("core distribution must contain only the base runtime dependencies")
+    semantic_extra = core.get("optional-dependencies", {}).get("semantic", [])
+    if set(semantic_extra) != {"fastembed>=0.7.0", "numpy>=1.24.0"}:
+        raise ReleaseCheckError("core semantic extra must declare FastEmbed and NumPy")
+    if full.get("dependencies") != [semantic_core_dependency]:
+        raise ReleaseCheckError("full distribution must depend on the matching semantic core")
+    if lexical.get("dependencies") != [core_dependency]:
+        raise ReleaseCheckError("lexical distribution must depend on the matching base core")
+
+
 def changelog_version(changelog: str, version: str) -> None:
     """Require a dated/non-unreleased changelog section for the version."""
     extract_changelog_notes(changelog, version)
@@ -141,6 +190,14 @@ def run(argv: list[str] | None = None) -> int:
         version = package_version(args.pyproject)
         changelog = args.changelog.read_text(encoding="utf-8")
         validate_metadata(args.tag, version, changelog)
+        repository_root = Path(__file__).resolve().parents[1]
+        if args.pyproject.resolve() == repository_root / "pyproject.toml":
+            validate_distribution_metadata(
+                args.pyproject,
+                repository_root / "packaging" / "full" / "pyproject.toml",
+                repository_root / "packaging" / "lexical" / "pyproject.toml",
+                version,
+            )
         tag_commit = git("rev-parse", "--verify", f"{args.tag}^{{commit}}")
         main_commit = git("rev-parse", "--verify", args.main_ref)
         status = git("status", "--porcelain=v1", "--untracked-files=all")

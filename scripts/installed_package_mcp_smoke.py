@@ -38,7 +38,7 @@ def _is_within(path: Path, parent: Path) -> bool:
 def _assert_installed_modules() -> None:
     """Fail if Python would resolve application modules from the checkout."""
     prefix = Path(sys.prefix).resolve()
-    distribution = importlib.metadata.distribution("ephemeral-buffer-mcp")
+    distribution = importlib.metadata.distribution("ephemeral-buffer-mcp-core")
 
     for module_name in MODULES_FROM_DISTRIBUTION:
         spec = importlib.util.find_spec(module_name)

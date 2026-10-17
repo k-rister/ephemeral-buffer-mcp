@@ -17,10 +17,16 @@ def _runtime_package_version() -> str:
     match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']\s*$', source_text, re.MULTILINE)
     if match:
         return match.group(1)
-    try:
-        return package_version("ephemeral-buffer-mcp")
-    except PackageNotFoundError:
-        return "source checkout"
+    for distribution in (
+        "ephemeral-buffer-mcp",
+        "ephemeral-buffer-mcp-lexical",
+        "ephemeral-buffer-mcp-core",
+    ):
+        try:
+            return package_version(distribution)
+        except PackageNotFoundError:
+            continue
+    return "source checkout"
 
 
 def _socket_lifecycle():
@@ -47,6 +53,11 @@ def get_buffer_stats() -> str:
     )
     model_state = "loaded" if stats["embedding_model_loaded"] else "not loaded"
     model_line = f"Embedding model: {stats['embedding_model']} ({model_state})"
+    semantic_backend_line = (
+        "Semantic backend: available"
+        if stats.get("semantic_backend_available", True)
+        else "Semantic backend: unavailable (install ephemeral-buffer-mcp for semantic search)"
+    )
     load_failure = stats.get("embedding_model_load_failure")
     retry_after = stats.get("embedding_model_retry_after_seconds", 0.0)
     if load_failure and retry_after > 0:
@@ -105,6 +116,7 @@ def get_buffer_stats() -> str:
         f"({remaining_indexed_chunks:,} remaining)\n"
         f"Index budget adjustment: {json.dumps(stats.get('last_index_budget_adjustment', {}), sort_keys=True)}\n"
         f"{model_line}\n"
+        f"{semantic_backend_line}\n"
         f"{load_backoff_line}\n"
         f"{warmup_line}\n"
         f"{cache_line}\n"
@@ -190,6 +202,8 @@ def get_runtime_diagnostics() -> str:
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
         f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",
+        "Semantic backend: "
+        + ("available" if stats.get("semantic_backend_available", True) else "unavailable"),
         f"Embedding warm-up: {stats.get('embedding_warmup_state', 'not-started')}"
         + (f" ({stats['embedding_warmup_failure']})" if stats.get("embedding_warmup_failure") else ""),
         f"Lexical search backend: {stats['lexical_backend']}",

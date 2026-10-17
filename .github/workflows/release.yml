@@ -39,17 +39,32 @@ jobs:
         run: python scripts/release_checks.py --tag "$RELEASE_TAG" --main-ref "$RELEASE_MAIN_REF"
 
       - name: Build distributions
-        run: python -m build
+        run: |
+          python -m build --outdir dist .
+          python -m build --outdir dist packaging/full
+          python -m build --outdir dist packaging/lexical
 
       - name: Validate distribution metadata
         run: python -m twine check dist/*
 
-      - name: Verify installed package smoke test
+      - name: Verify installed full-featured distribution
         run: |
-          python -m venv /tmp/release-package-venv
-          /tmp/release-package-venv/bin/python -m pip install dist/*.whl
-          /tmp/release-package-venv/bin/python -c 'import ephemeral_buffer_mcp.capture_utils, ephemeral_buffer_mcp.cli, ephemeral_buffer_mcp.config, ephemeral_buffer_mcp.engine, ephemeral_buffer_mcp.server'
-          /tmp/release-package-venv/bin/ephbuf --help
+          python -m venv /tmp/release-package-full-venv
+          /tmp/release-package-full-venv/bin/python -m pip install --find-links dist dist/ephemeral_buffer_mcp-*.whl
+          /tmp/release-package-full-venv/bin/python -c 'import ephemeral_buffer_mcp.capture_utils, ephemeral_buffer_mcp.cli, ephemeral_buffer_mcp.config, ephemeral_buffer_mcp.engine, ephemeral_buffer_mcp.server'
+          /tmp/release-package-full-venv/bin/ephbuf --help
+          smoke_workdir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_workdir"' EXIT
+          (
+            cd "$smoke_workdir"
+            /tmp/release-package-full-venv/bin/python "$GITHUB_WORKSPACE/scripts/installed_package_mcp_smoke.py"
+          )
+
+      - name: Verify installed lexical-only distribution
+        run: |
+          python -m venv /tmp/release-package-lexical-venv
+          /tmp/release-package-lexical-venv/bin/python -m pip install --find-links dist dist/ephemeral_buffer_mcp_lexical-*.whl
+          /tmp/release-package-lexical-venv/bin/python scripts/installed_lexical_package_smoke.py
 
       - name: Generate distribution checksums
         run: sha256sum dist/* > dist/SHA256SUMS

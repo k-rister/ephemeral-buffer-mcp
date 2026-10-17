@@ -4,6 +4,11 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 ## Unreleased
 
+- Breaking: On the first upgrade to the shared-core package layout, uninstall
+  the previous `ephemeral-buffer-mcp` release before installing the new one.
+- Keep hybrid and semantic search in the default install, load their optional
+  runtime lazily, and publish an explicit lexical-only distribution backed by
+  a shared core package.
 - Document response schema-version compatibility and mark breaking release
   entries.
 - Handle oversized MCP result envelopes that have no text field.
