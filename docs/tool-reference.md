@@ -304,8 +304,9 @@ command, so a crash before process identity is persisted also fails closed.
 An unreadable process environment makes the marker scan inconclusive and keeps
 recovery blocked, including when the process belongs to another user.
 Older in-progress records without these identity fields are recovered as
-fence-pending and must be inspected or retired rather than being retried
-automatically.
+fence-pending. Resume and `retire_executions` refuse them. If process absence
+can be confirmed, follow the [manual recovery procedure in OPERATIONS.md](../OPERATIONS.md#manual-recovery-for-fence-pending-records-and-unreadable-reservations);
+otherwise leave the record fenced.
 
 Execution responses include a human-readable `summary`, machine-readable
 `execution_status` and `partial` fields, per-phase event history, and the
@@ -350,7 +351,10 @@ automatic expiry. Use `get_execution_capacity()` to inspect usage, then call
 `retire_executions(execution_ids)` to preview which records can be retired and
 how many bytes their record/summary pairs occupy. Actual retirement requires
 `dry_run=False` and a new `archive_path` outside the state directory. Active,
-started, or fence-pending records are refused. State records and execution
+started, or fence-pending records are refused. For a fence-pending record or
+unreadable checkpoint reservation, follow the [manual recovery procedure in
+OPERATIONS.md](../OPERATIONS.md#manual-recovery-for-fence-pending-records-and-unreadable-reservations).
+State records and execution
 leases use the same namespace precedence documented above: explicit state
 directory, explicit socket path, then session ID. Without an identity, each
 server process receives a fresh private state directory that is removed during
