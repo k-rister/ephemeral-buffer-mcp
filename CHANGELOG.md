@@ -4,6 +4,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 ## Unreleased
 
+## 0.11.0 - 2026-10-18
+
 - Breaking: On the first upgrade to the shared-core package layout, uninstall
   the previous `ephemeral-buffer-mcp` release before installing the new one.
 - Keep hybrid and semantic search in the default install, load their optional
