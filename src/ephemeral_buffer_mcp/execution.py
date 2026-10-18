@@ -1746,7 +1746,7 @@ class ExecutionStore:
         except (FileNotFoundError, KeyError):
             item["reason"] = "record or matching summary is missing"
             return item, None, None, None
-        except (KeyError, OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             error_type = "ValueError" if isinstance(exc, ValueError) else type(exc).__name__
             item["reason"] = f"record pair is unreadable: {error_type}"
             return item, None, None, None
