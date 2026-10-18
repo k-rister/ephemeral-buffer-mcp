@@ -7,12 +7,14 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  attestations: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -88,9 +90,9 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
 
-  publish:
-    name: Publish to PyPI
-    needs: [build, github-release]
+  publish-full:
+    name: Publish full distribution to PyPI
+    needs: [publish-core]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -104,8 +106,70 @@ jobs:
           name: ephemeral-buffer-mcp-${{ github.ref_name }}-pypi
           path: dist/
 
-      - name: Publish distributions to PyPI
+      - name: Stage full distribution
+        run: |
+          mkdir -p dist/publish-full
+          cp dist/ephemeral_buffer_mcp-*.whl dist/publish-full/
+          cp dist/ephemeral_buffer_mcp-*.tar.gz dist/publish-full/
+
+      - name: Publish full distribution to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1.14.2
+        with:
+          packages-dir: dist/publish-full/
+
+  publish-core:
+    name: Publish core distribution to PyPI
+    needs: [build, github-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-core
+      url: https://pypi.org/p/ephemeral-buffer-mcp-core
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ephemeral-buffer-mcp-${{ github.ref_name }}-pypi
+          path: dist/
+
+      - name: Stage core distribution
+        run: |
+          mkdir -p dist/publish-core
+          cp dist/ephemeral_buffer_mcp_core-*.whl dist/publish-core/
+          cp dist/ephemeral_buffer_mcp_core-*.tar.gz dist/publish-core/
+
+      - name: Publish core distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1.14.2
+        with:
+          packages-dir: dist/publish-core/
+
+  publish-lexical:
+    name: Publish lexical distribution to PyPI
+    needs: [publish-core]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-lexical
+      url: https://pypi.org/p/ephemeral-buffer-mcp-lexical
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ephemeral-buffer-mcp-${{ github.ref_name }}-pypi
+          path: dist/
+
+      - name: Stage lexical distribution
+        run: |
+          mkdir -p dist/publish-lexical
+          cp dist/ephemeral_buffer_mcp_lexical-*.whl dist/publish-lexical/
+          cp dist/ephemeral_buffer_mcp_lexical-*.tar.gz dist/publish-lexical/
+
+      - name: Publish lexical distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1.14.2
+        with:
+          packages-dir: dist/publish-lexical/
 
   github-release:
     name: Create GitHub Release
