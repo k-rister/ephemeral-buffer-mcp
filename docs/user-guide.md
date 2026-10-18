@@ -67,8 +67,10 @@ are unverified on Windows. Durable execution leases explicitly require Linux.
 
 If upgrading from a release published before the shared-core package layout,
 uninstall the old package once before installing the new full distribution.
-This avoids leaving the old package files over the files now provided by the
-core dependency:
+Do not use `pip install --upgrade` for this first transition. The old package
+and the new core dependency install some of the same files; an in-place upgrade
+can remove launchers and CLI entry points while pip replaces the old package.
+Uninstall it first, then install the new distribution:
 
 ```bash
 .venv/bin/python -m pip uninstall ephemeral-buffer-mcp
@@ -77,20 +79,37 @@ core dependency:
 
 On Windows, use `.venv\Scripts\python.exe` for both commands.
 
-After that migration, use the regular `--upgrade` command for future releases.
+If you already upgraded in place and the launchers or CLI commands are missing,
+reinstall the core package after the full distribution so its files are restored:
 
 On macOS and Linux:
 
 ```bash
+.venv/bin/python -m pip install --force-reinstall --no-deps "ephemeral-buffer-mcp-core==0.11.0"
+.venv/bin/ephbuf --help
+test -x .venv/bin/codex-ephemeral
+```
+
+On Windows, use `.venv\Scripts\python.exe` to reinstall the core package and
+verify `.venv\Scripts\ephbuf.exe --help`.
+
+After that migration, use the regular `--upgrade` command for future releases:
+
+```bash
 .venv/bin/python -m pip install --upgrade ephemeral-buffer-mcp
-.venv/bin/python -m pip uninstall ephemeral-buffer-mcp
+```
+
+On Windows, use `.venv\Scripts\python.exe` for the equivalent package
+commands. To remove the full install, uninstall both distributions:
+
+```bash
+.venv/bin/python -m pip uninstall ephemeral-buffer-mcp ephemeral-buffer-mcp-core
 ```
 
 On Windows (PowerShell):
 
 ```powershell
-.venv\Scripts\python.exe -m pip install --upgrade ephemeral-buffer-mcp
-.venv\Scripts\python.exe -m pip uninstall ephemeral-buffer-mcp
+.venv\Scripts\python.exe -m pip uninstall ephemeral-buffer-mcp ephemeral-buffer-mcp-core
 ```
 
 ### Install from a source checkout
