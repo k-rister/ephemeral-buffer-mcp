@@ -1158,7 +1158,7 @@ diagnostics report.
 ## Release verification
 
 Releases are distributed as GitHub Actions artifacts and, once the trusted
-publisher is registered, PyPI distributions.
+publishers are configured, PyPI distributions.
 
 Before cutting a release, collect the benchmark and agent A/B bundle against
 the previous release from a clean candidate checkout:
@@ -1205,7 +1205,9 @@ content from details that were returned but absent from the final answer.
    calendar date. Then create and push an annotated `vX.Y.Z` tag from `main`. The tag
    must match the project version exactly and point to a commit contained in
    the default branch.
-4. Wait for the tagged release workflow to finish.
+4. Wait for the tagged release workflow and all three PyPI publishing jobs to
+   finish. The core package publishes first; the full and lexical packages
+   depend on that matching core version.
 5. Review the automatically created GitHub Release. It contains the wheel,
    source distribution, `SHA256SUMS`, release notes from `CHANGELOG.md`, and a
    link to the workflow run containing the provenance attestation.
@@ -1236,26 +1238,46 @@ content from details that were returned but absent from the final answer.
 The release workflow also checks tag format, package/changelog consistency
 (including the exact dated heading format `## X.Y.Z - YYYY-MM-DD`),
 clean source state, and tag ancestry before building. GitHub Release creation
-must succeed before the PyPI publish job is allowed to run. Treat a failed
+must succeed before any PyPI publishing job is allowed to run. Treat a failed
 check, checksum mismatch, missing release asset, or missing attestation as a
 release blocker.
 
 ### PyPI trusted publishing setup
 
-The PyPI project owner must register the same publisher for each of
-`ephemeral-buffer-mcp`, `ephemeral-buffer-mcp-core`, and
-`ephemeral-buffer-mcp-lexical` before publishing the split distributions. The
-two new project names must be available and configured as pending publishers
-before the first upload:
+Configure one GitHub Actions trusted publisher for each distribution. The
+existing `ephemeral-buffer-mcp` project uses its project-level **Manage →
+Publishing** settings. Configure the two new package names as pending
+publishers from the PyPI account-level **Publishing** page before the first
+upload; that form includes the new PyPI project name.
 
-- Owner: `k-rister`
-- Repository: `ephemeral-buffer-mcp`
-- Workflow: `release.yml`
-- Environment: `pypi`
+Use these values, with a distinct GitHub environment for each project:
 
-The workflow uses the `pypi` GitHub environment and OIDC trusted publishing;
-no long-lived PyPI token is stored in GitHub. PyPI rejects reuse of an
-already-published version, so each release must use a new version number.
+| PyPI project | Environment |
+| --- | --- |
+| `ephemeral-buffer-mcp` | `pypi` |
+| `ephemeral-buffer-mcp-core` | `pypi-core` |
+| `ephemeral-buffer-mcp-lexical` | `pypi-lexical` |
+
+For all three publishers, set Owner to `k-rister`, Repository to
+`ephemeral-buffer-mcp`, and Workflow to `release.yml`. The Environment value
+must match the `environment.name` in the corresponding release job. This is
+the same name on both sides: PyPI uses it to match the workflow's OIDC identity,
+while GitHub Environments provide optional deployment controls such as
+approvals and branch restrictions. GitHub creates an environment automatically
+the first time a workflow references a name that does not exist yet. Create it
+under repository Settings → Environments only if you want to configure those
+controls before a release. The release workflow has a separate publishing job
+for each environment and stages only that project's wheel and source
+distribution for upload. The full package uses the existing `pypi`
+environment; the distinct `pypi-core` and `pypi-lexical` names give the two
+pending publishers separate OIDC identities. The core publishing job runs
+before the full and lexical jobs because both distributions depend on that core
+version.
+
+PyPI converts each pending publisher into a regular project publisher on its
+first successful upload. No long-lived PyPI token is stored in GitHub. PyPI
+rejects reuse of an already-published version, so each release must use a new
+version number.
 
 ## CI and branch protection
 
