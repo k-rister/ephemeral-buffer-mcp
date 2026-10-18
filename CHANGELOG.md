@@ -19,6 +19,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Back off for 60 seconds after embedding model load failures, report the retry
   delay in buffer stats, and preserve lexical hybrid-search results meanwhile.
 
+— AI-signed: Codex | model: GPT-6.1-Sol | effort: not specified | contribution: promoted existing release notes and prepared v0.11.0 package metadata
+
 ## 0.10.0 - 2026-10-12
 
 - Raise the default retained-capture limit from 25 to 256.
