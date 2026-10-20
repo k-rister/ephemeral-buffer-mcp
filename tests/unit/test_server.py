@@ -299,18 +299,14 @@ class TestServerTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first_metrics = Path(directory) / "first-metrics.json"
             second_metrics = Path(directory) / "second-metrics.json"
-            first_state = Path(directory) / "first-state"
-            second_state = Path(directory) / "second-state"
             settings = settings_with_environment(EPHEMERAL_METRICS="1")
             first = server.create_service_context(
                 settings,
-                state_dir=str(first_state),
                 metrics_file=str(first_metrics),
                 engine_options={"semantic_prefetch": False, "embedding_warmup": False},
             )
             second = server.create_service_context(
                 settings,
-                state_dir=str(second_state),
                 metrics_file=str(second_metrics),
                 engine_options={"semantic_prefetch": False, "embedding_warmup": False},
             )
@@ -346,8 +342,6 @@ class TestServerTools(unittest.TestCase):
 
             self.assertTrue(first_metrics.is_file())
             self.assertTrue(second_metrics.is_file())
-            self.assertFalse(first_state.exists())
-            self.assertFalse(second_state.exists())
 
     def test_service_context_replaces_and_cleans_private_state_directory(self):
         settings = settings_with_environment(
@@ -707,8 +701,10 @@ class TestServerTools(unittest.TestCase):
             engine_options={"embedding_warmup": False, "semantic_prefetch": False},
         )
         close_started = threading.Event()
+        second_waiting = threading.Event()
         finish_close = threading.Event()
         report = {"closed": True}
+        original_wait = context._close_complete.wait
 
         def slow_close():
             close_started.set()
@@ -716,7 +712,13 @@ class TestServerTools(unittest.TestCase):
             context.last_shutdown_report = report
             return report
 
-        with patch.object(context, "_close_resources", side_effect=slow_close):
+        def observe_second_wait(*args, **kwargs):
+            second_waiting.set()
+            return original_wait(*args, **kwargs)
+
+        close_resources = Mock(side_effect=slow_close)
+        with patch.object(context, "_close_resources", close_resources), \
+                patch.object(context._close_complete, "wait", side_effect=observe_second_wait):
             first_results = []
             second_results = []
             first = threading.Thread(target=lambda: first_results.append(context.close()))
@@ -724,14 +726,18 @@ class TestServerTools(unittest.TestCase):
             first.start()
             self.assertTrue(close_started.wait(timeout=1))
             second.start()
-            time.sleep(0.02)
-            self.assertTrue(second.is_alive())
-            finish_close.set()
-            first.join(timeout=1)
-            second.join(timeout=1)
+            try:
+                self.assertTrue(second_waiting.wait(timeout=1))
+                self.assertEqual(close_resources.call_count, 1)
+                self.assertEqual(second_results, [])
+            finally:
+                finish_close.set()
+                first.join(timeout=1)
+                second.join(timeout=1)
 
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
+        close_resources.assert_called_once_with()
         self.assertEqual(first_results, [report])
         self.assertEqual(second_results, [report])
 
