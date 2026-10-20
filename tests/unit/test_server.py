@@ -3713,7 +3713,15 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_error_response_disconnect_does_not_escape_handler(self):
         class BrokenWriter(FakeWriter):
+            def __init__(self):
+                super().__init__()
+                self.wait_closed_called = False
+
             async def drain(self):
+                raise ConnectionResetError("closed peer")
+
+            async def wait_closed(self):
+                self.wait_closed_called = True
                 raise ConnectionResetError("closed peer")
 
         gate = BoundedAdmissionGate(max_active=1, max_queued=0)
@@ -3723,6 +3731,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(gate._active, 0)
         self.assertTrue(writer.closed)
+        self.assertTrue(writer.wait_closed_called)
 
     async def test_socket_response_includes_compact_summary(self):
         payload = encode_frame(json.dumps({"label": "socket-summary", "text": "hello"}).encode())

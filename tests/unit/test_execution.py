@@ -1029,11 +1029,15 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 patch.object(execution.os, "killpg", side_effect=OSError(errno.ESRCH, "gone")):
             self.assertTrue(execution._terminate_stale_process(stale))
 
-        self.assertTrue(
-            execution._terminate_stale_process(
-                {"process_id": 123, "process_group_id": 456, "process_fence_pending": False}
+        with patch.object(
+            execution, "_process_group_is_absent", return_value=True
+        ) as group_is_absent:
+            self.assertTrue(
+                execution._terminate_stale_process(
+                    {"process_id": 123, "process_group_id": 456, "process_fence_pending": False}
+                )
             )
-        )
+        group_is_absent.assert_called_once_with(456)
         with patch.object(execution, "_proc_identity", return_value=("old-start", "new-boot")):
             self.assertTrue(execution._terminate_stale_process(stale))
 
