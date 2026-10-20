@@ -24,6 +24,13 @@ from ephemeral_buffer_mcp.capture_utils import (
 
 
 class TestBoundedCommandCapture(unittest.TestCase):
+    def assert_process_is_gone(self, process_id, message):
+        for _ in range(300):
+            if capture_utils._supervisor_process_absent(process_id):
+                return
+            time.sleep(0.01)
+        self.fail(message)
+
     def test_cleanup_status_attachment_ignores_immutable_exception(self):
         capture_utils._attach_cleanup_status(object(), False)
 
@@ -524,7 +531,10 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertGreater(identities[0][1], 0)
 
     def test_process_started_callback_failure_terminates_process(self):
-        def fail(*_identity):
+        process_ids = []
+
+        def fail(process_id, _process_group_id):
+            process_ids.append(process_id)
             raise RuntimeError("cannot persist process identity")
 
         started = time.monotonic()
@@ -536,6 +546,11 @@ class TestBoundedCommandCapture(unittest.TestCase):
                 process_started=fail,
             )
         self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(len(process_ids), 1)
+        self.assert_process_is_gone(
+            process_ids[0],
+            "process survived a process_started callback failure",
+        )
 
     def test_early_eof_waits_for_process_within_deadline(self):
         script = "import os, time; os.close(1); time.sleep(0.2)"
@@ -673,18 +688,39 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertTrue(all(command not in event for event in events.output))
 
     def test_timeout_kills_descendant_after_group_leader_exits(self):
-        child_script = "import time; time.sleep(10)"
-        parent_script = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child_script!r}])"
-        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)}"
-        started = time.monotonic()
-        output, exit_code, _truncated, _original_size, timed_out = run_command_bounded(
-            command, None, 1024, timeout_seconds=0.1
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "descendant-pid"
+            child_script = (
+                "import os, sys, time\n"
+                "temporary_path = sys.argv[1] + '.tmp'\n"
+                "with open(temporary_path, 'w', encoding='ascii') as pid_file:\n"
+                "    pid_file.write(str(os.getpid()))\n"
+                "os.replace(temporary_path, sys.argv[1])\n"
+                "time.sleep(10)\n"
+            )
+            parent_script = (
+                "import os, subprocess, sys, time\n"
+                f"pid_path = {str(pid_path)!r}\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_script!r}, pid_path])\n"
+                "while not os.path.exists(pid_path):\n"
+                "    time.sleep(0.005)\n"
+            )
+            command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)}"
+            started = time.monotonic()
+            output, exit_code, _truncated, _original_size, timed_out = run_command_bounded(
+                command, None, 1024, timeout_seconds=1
+            )
 
-        self.assertLess(time.monotonic() - started, 3)
-        self.assertEqual(output, "")
-        self.assertEqual(exit_code, 124)
-        self.assertTrue(timed_out)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertEqual(output, "")
+            self.assertEqual(exit_code, 124)
+            self.assertTrue(timed_out)
+            self.assertTrue(pid_path.is_file(), "descendant did not record its pid")
+            descendant_pid = int(pid_path.read_text(encoding="ascii"))
+            self.assert_process_is_gone(
+                descendant_pid,
+                "descendant survived timeout process-group cleanup",
+            )
 
     def test_timeout_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "timeout_seconds"):

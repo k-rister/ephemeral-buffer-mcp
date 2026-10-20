@@ -3,16 +3,15 @@ Test the end-to-end socket IPC and CLI piping against the running server.
 """
 
 import os
+import select
 import socket
 import sys
 import tempfile
 import time
 import subprocess
 import unittest
-import json
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 from ephemeral_buffer_mcp.server import SOCKET_JSON_MAX_EXPANSION, SOCKET_PAYLOAD_OVERHEAD
 from ephemeral_buffer_mcp.socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 from tests.paths import REPOSITORY_ROOT
@@ -32,10 +31,14 @@ def recv_exact(sock, size):
 
 class TestEndToEndPipe(unittest.TestCase):
     @contextmanager
-    def _isolated_server(self):
+    def _isolated_server(self, socket_path=None, *, expected_socket_error=None):
         with tempfile.TemporaryDirectory(prefix="ephemeral-buffer-e2e-") as temp_dir:
             temp_root = Path(temp_dir)
-            isolated_socket_path = temp_root / "ephemeral-buffer.sock"
+            isolated_socket_path = (
+                Path(socket_path)
+                if socket_path is not None
+                else temp_root / "ephemeral-buffer.sock"
+            )
             execution_state_dir = temp_root / "executions"
             test_env = os.environ.copy()
             test_env.update({
@@ -44,6 +47,7 @@ class TestEndToEndPipe(unittest.TestCase):
                 ),
                 "EPHEMERAL_SOCKET_PATH": str(isolated_socket_path),
                 "EPHEMERAL_EXECUTION_STATE_DIR": str(execution_state_dir),
+                "EPHEMERAL_DISABLE_SOCKET_SERVER": "0",
                 "EPHEMERAL_MAX_BUFFER_BYTES": "1024",
             })
 
@@ -52,19 +56,22 @@ class TestEndToEndPipe(unittest.TestCase):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                bufsize=0,
                 env=test_env,
             )
             try:
-                for _ in range(50):
-                    if isolated_socket_path.exists():
-                        break
-                    time.sleep(0.1)
+                if expected_socket_error is not None:
+                    self._wait_for_socket_error(proc, expected_socket_error)
+                else:
+                    for _ in range(50):
+                        if isolated_socket_path.exists():
+                            break
+                        time.sleep(0.1)
 
-                self.assertTrue(
-                    isolated_socket_path.exists(),
-                    "Socket should be created by server",
-                )
+                    self.assertTrue(
+                        isolated_socket_path.exists(),
+                        "Socket should be created by server",
+                    )
                 yield str(isolated_socket_path), test_env
             finally:
                 proc.terminate()
@@ -73,6 +80,23 @@ class TestEndToEndPipe(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate()
+
+    def _wait_for_socket_error(self, proc, expected_error):
+        deadline = time.monotonic() + 5
+        expected_error_bytes = expected_error.encode("utf-8")
+        captured = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            self.assertGreater(remaining, 0, f"server did not report {expected_error!r}")
+            readable, _writable, _exceptional = select.select(
+                [proc.stderr.fileno()], [], [], remaining
+            )
+            self.assertTrue(readable, f"server did not report {expected_error!r}")
+            chunk = os.read(proc.stderr.fileno(), 4096)
+            self.assertTrue(chunk, f"server exited before reporting {expected_error!r}")
+            captured.extend(chunk)
+            if expected_error_bytes in captured:
+                return
 
     def _exercise_pipe_to_socket(self):
         with self._isolated_server() as (isolated_socket_path, test_env):
@@ -145,11 +169,11 @@ class TestEndToEndPipe(unittest.TestCase):
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as inherited_listener:
                 inherited_listener.bind(str(inherited_socket_path))
                 inherited_listener.listen()
-                with patch.dict(
-                    os.environ,
-                    {"EPHEMERAL_SOCKET_PATH": str(inherited_socket_path)},
+                with self._isolated_server(
+                    socket_path=inherited_socket_path,
+                    expected_socket_error=f"Socket already in use at {inherited_socket_path}",
                 ):
-                    self._exercise_pipe_to_socket()
+                    pass
 
                 probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 try:
@@ -162,13 +186,19 @@ class TestEndToEndPipe(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ephemeral-buffer-inherited-") as temp_dir:
             inherited_file_path = Path(temp_dir) / "inherited.sock"
             inherited_file_path.write_bytes(original_contents)
-            with patch.dict(
-                os.environ,
-                {"EPHEMERAL_SOCKET_PATH": str(inherited_file_path)},
+            with self._isolated_server(
+                socket_path=inherited_file_path,
+                expected_socket_error=(
+                    "Socket path exists but is not a Unix socket: "
+                    f"{inherited_file_path}"
+                ),
             ):
-                self._exercise_pipe_to_socket()
+                pass
 
             self.assertEqual(inherited_file_path.read_bytes(), original_contents)
+
+    def test_pipe_to_socket_captures_and_bounds_input(self):
+        self._exercise_pipe_to_socket()
 
 
 if __name__ == "__main__":
