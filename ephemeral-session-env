@@ -52,7 +52,9 @@ if [[ -n "${EPHEMERAL_SOCKET_PATH:-}" || -n "${EPHEMERAL_EXECUTION_STATE_DIR:-}"
     unset ephemeral_paths_json
 fi
 if [[ -z "${EPHEMERAL_LOG_FILE:-}" ]]; then
-    ephemeral_socket_path="$(_ephemeral_session_config --socket-path)"
+    if ! ephemeral_socket_path="$(_ephemeral_session_config --socket-path)"; then
+        return 1
+    fi
     EPHEMERAL_LOG_FILE="${ephemeral_socket_path%.sock}.jsonl"
     unset ephemeral_socket_path
 fi

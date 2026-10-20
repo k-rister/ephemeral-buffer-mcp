@@ -3056,7 +3056,17 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return BrokenCursor()
 
         capture.fts_conn = BrokenConnection()
-        self.assertEqual(engine.search_bm25(capture, "searchable"), [])
+        with patch.object(engine_module, "log_event") as log_event:
+            results = engine.search_bm25(capture, "searchable")
+
+        self.assertEqual(results[0][0], 0)
+        warning_calls = [
+            call for call in log_event.call_args_list
+            if call.args[2] == "bm25_search_sqlite_failed"
+        ]
+        self.assertEqual(len(warning_calls), 1)
+        self.assertEqual(warning_calls[0].kwargs["capture_id"], capture.capture_id)
+        self.assertEqual(warning_calls[0].kwargs["error_type"], "OperationalError")
 
     def test_python_lexical_fallback_preserves_token_matches(self):
         with patch("ephemeral_buffer_mcp.engine.sqlite_fts5_available", return_value=False):

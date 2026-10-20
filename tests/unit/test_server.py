@@ -1115,6 +1115,11 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("does not exist", result)
 
+    def test_capture_file_formats_invalid_direct_api_path(self):
+        result = server.capture_file(123)
+
+        self.assertIn("Error reading file '123':", result)
+
     def test_capture_file_rejects_limit_above_buffer_budget(self):
         server.engine.max_buffer_bytes = 16
         with tempfile.NamedTemporaryFile() as file_handle:
@@ -2113,6 +2118,30 @@ class TestServerTools(unittest.TestCase):
         finally:
             server.METRICS = original_metrics
         self.assertTrue(any("metrics_snapshot_write_failed" in entry for entry in logs.output))
+
+    def test_metrics_snapshot_serialization_failure_does_not_replace_tool_result(self):
+        original_metrics = server.METRICS
+        server.METRICS = LocalMetrics(enabled=True)
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                server,
+                "SETTINGS",
+                settings_with_environment(
+                    EPHEMERAL_METRICS_FILE=os.path.join(directory, "metrics.json")
+                ),
+            ), patch.object(server, "_metrics_snapshot", return_value=object()), \
+                    self.assertLogs("ephemeral_buffer.server", level="WARNING") as logs:
+                @server._instrument_tool("metrics_serialization_probe")
+                def successful_tool():
+                    return "successful result"
+
+                self.assertEqual(successful_tool(), "successful result")
+        finally:
+            server.METRICS = original_metrics
+
+        self.assertTrue(
+            any("metrics_snapshot_write_failed" in entry for entry in logs.output)
+        )
 
     def test_metrics_snapshot_cleanup_failure_is_ignored(self):
         original_metrics = server.METRICS
@@ -3663,6 +3692,35 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         response = response_json(writer)
         self.assertEqual(response["status"], "error")
         self.assertEqual(response["code"], "socket_read_timeout")
+        self.assertEqual(gate._active, 0)
+        self.assertTrue(writer.closed)
+
+    async def test_read_timeout_response_disconnect_does_not_escape_handler(self):
+        class BrokenWriter(FakeWriter):
+            async def drain(self):
+                raise ConnectionResetError("closed peer")
+
+        gate = BoundedAdmissionGate(max_active=1, max_queued=0)
+        writer = BrokenWriter()
+        reader = StalledReader(FRAME_MAGIC + b"\x01")
+        with patch.object(socket_transport, "admission_gate", return_value=gate), patch.object(
+            socket_transport, "SOCKET_CLIENT_READ_TIMEOUT_SECONDS", 0.01
+        ):
+            await socket_transport.handle_socket_client(reader, writer)
+
+        self.assertEqual(gate._active, 0)
+        self.assertTrue(writer.closed)
+
+    async def test_error_response_disconnect_does_not_escape_handler(self):
+        class BrokenWriter(FakeWriter):
+            async def drain(self):
+                raise ConnectionResetError("closed peer")
+
+        gate = BoundedAdmissionGate(max_active=1, max_queued=0)
+        writer = BrokenWriter()
+        with patch.object(socket_transport, "admission_gate", return_value=gate):
+            await socket_transport.handle_socket_client(FakeReader(b"bad"), writer)
+
         self.assertEqual(gate._active, 0)
         self.assertTrue(writer.closed)
 

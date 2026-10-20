@@ -1310,19 +1310,32 @@ class TestBoundedCommandCapture(unittest.TestCase):
         self.assertEqual(original_size, 600)
         self.assertLessEqual(len(output.encode("utf-8")), 512)
         self.assertIn("output truncated", output)
+        head, remainder = output.split("\n\n[output truncated:", 1)
+        marker, tail = remainder.split("]\n\n", 1)
+        self.assertIn(
+            f"retained first {len(head.encode('utf-8')):,} and last "
+            f"{len(tail.encode('utf-8')):,} rendered UTF-8 bytes from 600 input bytes",
+            marker,
+        )
 
     def test_complete_invalid_utf8_that_expands_is_bounded(self):
         capture = _BoundedCapture(512)
         capture.add(b"\xff" * 200)
 
         output, truncated, original_size = capture.finish()
-        marker = "\n\n[output truncated: retained first 200 and last 0 bytes of 200]\n\n"
-        content_budget = 512 - len(marker.encode("utf-8"))
+        head, remainder = output.split("\n\n[output truncated:", 1)
+        marker, tail = remainder.split("]\n\n", 1)
 
         self.assertTrue(truncated)
         self.assertEqual(original_size, 200)
         self.assertLessEqual(len(output.encode("utf-8")), 512)
-        self.assertEqual(output.count("\ufffd"), content_budget // 3)
+        self.assertEqual(tail, "")
+        self.assertIn(
+            f"retained first {len(head.encode('utf-8')):,} and last 0 rendered UTF-8 bytes "
+            "from 200 input bytes",
+            marker,
+        )
+        self.assertEqual(len(head.encode("utf-8")), output.count("\ufffd") * 3)
 
     def test_file_read_rejects_oversized_content(self):
         with tempfile.NamedTemporaryFile() as file_handle:

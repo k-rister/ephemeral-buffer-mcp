@@ -2320,6 +2320,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
         pending["phases"][0]["output"] = None
         manager.store.save(pending)
         self.assertEqual(manager.public("lookup")["phases"][0]["output_bytes"], 0)
+        self.assertEqual(manager.output("lookup")["phases"][0]["output"], "")
         with self.assertRaisesRegex(ValueError, "non-negative"):
             manager.output("lookup", offset=-1)
         with self.assertRaisesRegex(ValueError, "integer"):

@@ -227,6 +227,12 @@ def load_baseline_dict(baseline: dict[str, Any]) -> dict[str, Any]:
     for mode in MODES:
         if not isinstance(baseline["metrics"].get(mode), dict):
             raise ValueError(f"baseline metrics are missing {mode}")
+        for metric in METRICS:
+            value = baseline["metrics"][mode].get(metric)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+            ):
+                raise ValueError(f"baseline metric {mode}.{metric} is not numeric or null")
     _assert_private(baseline)
     return baseline
 

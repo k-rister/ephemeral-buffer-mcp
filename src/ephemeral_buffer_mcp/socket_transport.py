@@ -428,11 +428,14 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                     )
                 except asyncio.TimeoutError:
                     log_event(LOGGER, logging.WARNING, "socket_client_read_timeout")
-                    await _write_socket_error(
-                        writer,
-                        "socket_read_timeout",
-                        "Socket request frame was not completed before the read timeout.",
-                    )
+                    try:
+                        await _write_socket_error(
+                            writer,
+                            "socket_read_timeout",
+                            "Socket request frame was not completed before the read timeout.",
+                        )
+                    except OSError:
+                        pass
                     return None
                 if not data:
                     return None
@@ -474,11 +477,17 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 err_resp = {"status": "error", "code": code, "message": str(exc)}
                 response_frame = encode_frame(encode_socket_response(err_resp))
                 METRICS.record_bytes("socket_response_bytes", len(response_frame))
-                writer.write(response_frame)
-                await writer.drain()
+                try:
+                    writer.write(response_frame)
+                    await writer.drain()
+                except OSError:
+                    pass
             finally:
                 writer.close()
-                await writer.wait_closed()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
 
         return await _run_admitted_tool_call(
             DEFAULT_SERVICES,

@@ -3560,7 +3560,7 @@ class PhaseExecutionManager:
             output_phases = []
             remaining = max_bytes
             for phase in phases:
-                full_output = phase.get("output", "")
+                full_output = phase.get("output") or ""
                 full_output_bytes = full_output.encode("utf-8")
                 phase_offset = min(
                     offset if phase_name is not None else 0,
