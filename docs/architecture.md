@@ -46,9 +46,12 @@ flowchart TD
 `server` owns service configuration, contexts, and shared runtime resources.
 The MCP and Unix socket adapters are loaded only when their transports start;
 the core server import does not import the MCP SDK. The tool registry imports
-domain modules in a stable order and exposes the same handlers to both
-transports. The supported Python embedding API remains `create_mcp_server`
-and `create_service_context`.
+domain modules in a stable order and exposes registered handlers and execution
+policy to both transports. MCP and socket calls share service tracking,
+admission, cancellation context, and cleanup; the socket adapter maps its
+framed capture request to the registered capture handler and keeps framing and
+wire-response encoding at the transport boundary. The supported Python
+embedding API remains `create_mcp_server` and `create_service_context`.
 
 ## Admission and storage bounds
 

@@ -38,7 +38,9 @@ def _mcpserver_compatibility_diagnostics():
     return adapter.compatibility_diagnostics()
 
 
-@register_tool("get_buffer_stats", "diagnostics")
+@register_tool(
+    "get_buffer_stats", "diagnostics", mcp_admission_lane="diagnostics"
+)
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
     """Return aggregate capture, admission, accounting, and process RSS metrics."""

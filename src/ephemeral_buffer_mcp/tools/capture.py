@@ -1,7 +1,13 @@
 """Capture domain handlers."""
 
+import inspect
+
 from ..server import *  # noqa: F403
 from .registry import register_tool
+from .formatting import (
+    bounded_summary_text,
+    summary_payload,
+)
 
 CaptureContentType = Literal["auto", "diff", "log", "text"]
 CAPTURE_CONTENT_TYPES = ("auto", "diff", "log", "text")
@@ -14,196 +20,13 @@ def _content_type_error(content_type: object) -> Optional[str]:
     return "Error: content_type must be one of: auto, diff, log, or text."
 
 
-def _bounded_diff_file_map(
-    file_map: str,
-    diff_meta: Optional[Dict[str, Any]] = None,
-) -> tuple[str, int]:
-    """Bound diff file-map text and return it with the omitted-entry count."""
-    retained: List[str] = []
-    files = diff_meta.get("files") if isinstance(diff_meta, dict) else None
-    if isinstance(files, list):
-        total_entries = len(files)
-        # Format only the bounded prefix from structured metadata. The full
-        # raw diff remains available through get_capture_slice.
-        source_lines = []
-        for file_info in files:
-            status_tag = f" [{file_info['status'].upper()}]" if file_info["status"] != "modified" else ""
-            source_lines.append(
-                f"  - {file_info['path']}{status_tag} (+{file_info['additions']}, -{file_info['deletions']}) "
-                f"| Buffer Lines: L{file_info['start_line']}-L{file_info['end_line']}"
-            )
-            if len(source_lines) >= SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES:
-                break
-    else:
-        total_entries = file_map.count("\n") + (1 if file_map else 0)
-        source_lines = []
-        start = 0
-        for _ in range(SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES):
-            end = file_map.find("\n", start)
-            if end < 0:
-                if start < len(file_map):
-                    source_lines.append(file_map[start:])
-                break
-            source_lines.append(file_map[start:end])
-            start = end + 1
-
-    for line in source_lines:
-        candidate = "\n".join([*retained, line])
-        if len(candidate.encode("utf-8")) > SUMMARY_DIFF_FILE_MAP_MAX_BYTES:
-            break
-        retained.append(line)
-
-    omitted = total_entries - len(retained)
-    if omitted:
-        marker = (
-            f"... [{omitted:,} diff file-map entries omitted; "
-            "use get_capture_slice for complete diff details] ..."
-        )
-        while retained and len(("\n".join([*retained, marker])).encode("utf-8")) > SUMMARY_DIFF_FILE_MAP_MAX_BYTES:
-            retained.pop()
-            omitted += 1
-        bounded = "\n".join([*retained, marker])
-        if len(bounded.encode("utf-8")) > SUMMARY_DIFF_FILE_MAP_MAX_BYTES:
-            bounded = marker[:SUMMARY_DIFF_FILE_MAP_MAX_BYTES]
-        return bounded, omitted
-    return "\n".join(retained), 0
-
-
-def _bounded_summary_text(value: str, max_bytes: int, marker: str) -> tuple[str, bool]:
-    """Bound text metadata included alongside an execution summary."""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return value, False
-    marker_bytes = marker.encode("utf-8")
-    if max_bytes <= 0:
-        return "", True
-    if len(marker_bytes) >= max_bytes:
-        return marker_bytes[:max_bytes].decode("utf-8", errors="ignore"), True
-    prefix_budget = max(0, max_bytes - len(marker_bytes))
-    prefix = encoded[:prefix_budget].decode("utf-8", errors="ignore")
-    return prefix + marker, True
-
-
-def _bounded_json_text(value: str, max_bytes: int, marker: str) -> tuple[str, bool]:
-    """Bound the escaped JSON representation of metadata strings."""
-    escaped_bytes = lambda text: len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
-    if escaped_bytes(value) <= max_bytes:
-        return value, False
-
-    marker_bytes = escaped_bytes(marker)
-    if marker_bytes > max_bytes:
-        return "", True
-    prefix_budget = max_bytes - marker_bytes
-    prefix = []
-    prefix_bytes = 0
-    for char in value:
-        char_bytes = escaped_bytes(char)
-        if prefix_bytes + char_bytes > prefix_budget:
-            break
-        prefix.append(char)
-        prefix_bytes += char_bytes
-    return "".join(prefix) + marker, True
-
-
-def _truncate_utf8_with_marker(value: str, max_bytes: int, marker: str) -> Optional[str]:
-    """Truncate UTF-8 text to a byte limit while retaining a visible marker."""
-    marker_bytes = marker.encode("utf-8")
-    if max_bytes < len(marker_bytes):
-        return None
-    prefix_budget = max_bytes - len(marker_bytes)
-    prefix = []
-    prefix_bytes = 0
-    for char in value:
-        char_bytes = len(char.encode("utf-8"))
-        if prefix_bytes + char_bytes > prefix_budget:
-            break
-        prefix.append(char)
-        prefix_bytes += char_bytes
-    return "".join(prefix) + marker
-
-
 def _bounded_command(command: str) -> tuple[str, bool]:
     """Bound command metadata included alongside an execution summary."""
-    return _bounded_summary_text(
+    return bounded_summary_text(
         command,
         SUMMARY_COMMAND_MAX_BYTES,
         SUMMARY_COMMAND_TRUNCATION_MARKER,
     )
-
-
-def _summary_payload(summary: Dict[str, Any], include_previews: bool = False) -> Dict[str, Any]:
-    """Project an engine summary into the compact, versioned MCP schema."""
-    if summary.get("status") == "error":
-        return dict(summary)
-
-    execution_status = summary.get("execution_status")
-    if execution_status is None:
-        execution_status = "captured" if summary.get("command_exit_code") is None else (
-            "success" if summary.get("command_exit_code") == 0 else "failed"
-        )
-    bounded_label, label_truncated = _bounded_summary_text(
-        summary["label"],
-        SUMMARY_LABEL_MAX_BYTES,
-        SUMMARY_LABEL_TRUNCATION_MARKER,
-    )
-    evicted_captures = summary.get("evicted_captures", [])
-    evicted_captures_omitted = max(
-        0, summary.get("evicted_captures_omitted", 0)
-    )
-    if len(evicted_captures) > MAX_CAPTURE_EVICTION_DETAILS:
-        evicted_captures_omitted += (
-            len(evicted_captures) - MAX_CAPTURE_EVICTION_DETAILS
-        )
-        evicted_captures = evicted_captures[:MAX_CAPTURE_EVICTION_DETAILS]
-    payload: Dict[str, Any] = {
-        "schema_version": summary.get(
-            "schema_version", CAPTURE_SUMMARY_SCHEMA_VERSION
-        ),
-        "capture_id": summary["capture_id"],
-        "label": bounded_label,
-        "label_truncated": label_truncated,
-        "source": summary.get("source", "capture"),
-        "status": execution_status,
-        "partial": summary.get("partial", summary.get("timed_out", False)),
-        "content_type": summary.get("content_type", "text"),
-        "timestamp": summary.get("timestamp"),
-        "duration_ms": summary.get("duration_ms"),
-        "exit_code": summary.get("command_exit_code"),
-        "timed_out": summary.get("timed_out", False),
-        "total_lines": summary.get("total_lines", 0),
-        "byte_size": summary.get("byte_size", 0),
-        "original_byte_size": summary.get("original_byte_size"),
-        "estimated_tokens": summary.get("estimated_tokens"),
-        "original_estimated_tokens": summary.get("original_estimated_tokens"),
-        "truncated": summary.get("truncated", False),
-        "signals": summary.get("keyword_signals", {}),
-        "errors": summary.get("errors", []),
-        "warnings": summary.get("warnings", []),
-        "structured_metrics": summary.get("structured_metrics", {}),
-        "evicted_captures": list(evicted_captures),
-        "evicted_captures_omitted": evicted_captures_omitted,
-        "retrieval": {
-            "search": f"search_capture(query='...', capture_id='{summary['capture_id']}')",
-            "slice": f"get_capture_slice(start_line=..., end_line=..., capture_id='{summary['capture_id']}')",
-        },
-    }
-    if summary.get("content_type") == "diff":
-        bounded_file_map, omitted_files = _bounded_diff_file_map(
-            summary.get("file_map", ""),
-            summary.get("diff_meta"),
-        )
-        payload["diff"] = {
-            "stats": summary.get("diff_stats", ""),
-            "file_map": bounded_file_map,
-            "file_map_truncated": omitted_files > 0,
-            "omitted_file_count": omitted_files,
-        }
-    if include_previews:
-        payload["previews"] = {
-            "head": summary.get("head_preview", ""),
-            "tail": summary.get("tail_preview", ""),
-        }
-    return payload
 
 
 def _summary_json(
@@ -217,14 +40,14 @@ def _summary_json(
     else:
         summary = _active_engine().get_summary_for_capture(capture, include_previews=include_previews)
     if summary.get("status") == "error":
-        message, _ = _bounded_summary_text(
+        message, _ = bounded_summary_text(
             str(summary.get("message", "capture summary unavailable")),
             SUMMARY_LABEL_MAX_BYTES,
             "... [error truncated]",
         )
         return f"Error: {message}"
     return json.dumps(
-        _summary_payload(summary, include_previews=include_previews),
+        summary_payload(summary, include_previews=include_previews),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -238,6 +61,10 @@ def _capture_text(
     source: str = "capture_text",
     duration_ms: Optional[float] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
+    truncated: bool = False,
+    original_byte_size: Optional[int] = None,
+    command_exit_code: Optional[int] = None,
+    timed_out: bool = False,
 ) -> str:
     """
     Ingests raw text output directly into the ephemeral search index.
@@ -255,25 +82,78 @@ def _capture_text(
         content,
         label=label,
         content_type=content_type,
+        truncated=truncated,
+        original_byte_size=original_byte_size,
+        command_exit_code=command_exit_code,
+        timed_out=timed_out,
         source=source,
         duration_ms=duration_ms,
         structured_metrics=structured_metrics,
     )
     return json.dumps(
-        _summary_payload(summary),
+        summary_payload(summary),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
 
 
-@register_tool("capture_text", "capture")
+def _socket_capture_arguments(request):
+    """Map the framed socket request onto the registered capture handler."""
+    metrics = normalize_structured_metrics(request["structured_metrics"])
+    return (request["text"],), {
+        "label": request["label"],
+        "content_type": request["content_type"],
+        "structured_metrics": metrics,
+        "__ingest_metadata": {
+            "source": "socket",
+            "duration_ms": request["duration_ms"],
+            "truncated": request["truncated"],
+            "original_byte_size": request["original_byte_size"],
+            "command_exit_code": request["command_exit_code"],
+            "timed_out": request["timed_out"],
+        },
+    }
+
+
+def _socket_capture_response(result):
+    """Project the registered capture result into the existing socket shape."""
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("capture handler returned invalid summary JSON") from exc
+    if not isinstance(payload, dict) or "capture_id" not in payload:
+        message = (
+            payload.get("message", "capture summary is unavailable")
+            if isinstance(payload, dict)
+            else "capture summary is unavailable"
+        )
+        raise RuntimeError(str(message))
+    return {
+        "status": "ok",
+        "capture_id": payload["capture_id"],
+        "label": payload["label"],
+        "line_count": payload["total_lines"],
+        "byte_size": payload["byte_size"],
+        "summary": payload,
+    }
+
+
+@register_tool(
+    "capture_text",
+    "capture",
+    socket_request_adapter=_socket_capture_arguments,
+    socket_response_adapter=_socket_capture_response,
+    legacy_error_code="capture_failed",
+    legacy_error_mode="capture",
+)
 @_instrument_tool("capture_text")
 def capture_text(
     content: str,
     label: str = "",
     content_type: CaptureContentType = "auto",
     structured_metrics: Optional[Dict[str, Any]] = None,
+    __ingest_metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Ingest already-collected text and return capture metadata.
 
@@ -283,15 +163,37 @@ def capture_text(
     versioned JSON summary; optional named metrics are retained in
     ``structured_metrics``.
     """
+    metadata = __ingest_metadata or {}
     return _capture_text(
         content,
         label=label,
         content_type=content_type,
         structured_metrics=structured_metrics,
+        source=metadata.get("source", "capture_text"),
+        duration_ms=metadata.get("duration_ms"),
+        truncated=metadata.get("truncated", False),
+        original_byte_size=metadata.get("original_byte_size"),
+        command_exit_code=metadata.get("command_exit_code"),
+        timed_out=metadata.get("timed_out", False),
     )
 
 
-@register_tool("capture_file", "capture")
+_capture_text_signature = inspect.signature(capture_text)
+capture_text.__signature__ = _capture_text_signature.replace(
+    parameters=tuple(
+        parameter
+        for parameter in _capture_text_signature.parameters.values()
+        if parameter.name != "__ingest_metadata"
+    )
+)
+
+
+@register_tool(
+    "capture_file",
+    "capture",
+    legacy_error_code="capture_failed",
+    legacy_error_mode="capture",
+)
 @_instrument_tool("capture_file")
 def capture_file(
     file_path: str,
@@ -349,7 +251,12 @@ def capture_file(
         return f"Error reading file '{file_path}': {str(e)}"
 
 
-@register_tool("execute_and_capture", "capture")
+@register_tool(
+    "execute_and_capture",
+    "capture",
+    legacy_error_code="capture_failed",
+    legacy_error_mode="capture",
+)
 @_instrument_tool("execute_and_capture")
 def execute_and_capture(
     command: str,
@@ -430,7 +337,7 @@ def execute_and_capture(
             duration_ms=duration_ms,
             structured_metrics=structured_metrics,
         )
-        payload = _summary_payload(summary)
+        payload = summary_payload(summary)
         bounded_command, command_truncated = _bounded_command(command)
         payload["command"] = bounded_command
         payload["command_truncated"] = command_truncated
@@ -493,7 +400,7 @@ def consolidate_captures(
             source="consolidated",
             protected_capture_ids=result["source_capture_ids"],
         )
-        payload = _summary_payload(summary)
+        payload = summary_payload(summary)
         payload.update({
             "source_capture_ids": result["source_capture_ids"],
             "requested_capture_count": result["requested_capture_count"],
@@ -511,7 +418,7 @@ def consolidate_captures(
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception as exc:
         log_event(LOGGER, logging.ERROR, "capture_consolidation_failed", error_type=type(exc).__name__)
-        message, _ = _bounded_summary_text(
+        message, _ = bounded_summary_text(
             str(exc),
             SUMMARY_LABEL_MAX_BYTES,
             "... [error truncated]",

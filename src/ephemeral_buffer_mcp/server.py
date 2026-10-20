@@ -65,6 +65,16 @@ from .engine import (
     EphemeralEngine,
     normalize_structured_metrics,
 )
+from .tools.formatting import (
+    SEARCH_QUERY_MAX_BYTES,
+    SEARCH_QUERY_TRUNCATION_MARKER,
+    SUMMARY_COMMAND_MAX_BYTES,
+    SUMMARY_COMMAND_TRUNCATION_MARKER,
+    SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
+    SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES,
+    SUMMARY_LABEL_MAX_BYTES,
+    SUMMARY_LABEL_TRUNCATION_MARKER,
+)
 from .capture_utils import read_file_bounded, run_command_bounded
 from .execution import (
     DEFAULT_EXECUTION_LIST_LIMIT,
@@ -139,8 +149,6 @@ SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER = (
     "... [snippet truncated; Additional matches omitted. "
     "Use the Context range above with get_capture_slice for full content]"
 )
-SUMMARY_DIFF_FILE_MAP_MAX_BYTES = 8 * 1024
-SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES = 100
 
 # The MCP and socket gates together bound submissions to this process-owned
 # executor, so EB work does not accumulate in asyncio's default executor queue.
@@ -185,15 +193,67 @@ async def _run_admitted_thread(
         raise
 
 
+async def _run_admitted_tool_call(
+    service_context,
+    tool_name: str,
+    lane: str,
+    operation,
+    *,
+    admission_gate_factory,
+    work_type: str,
+    on_rejection,
+    on_admission_error,
+    shutdown_message: str,
+    busy_message: str,
+):
+    """Share service tracking, admission, cancellation scope, and cleanup."""
+    registered_call = service_context.register_tool_call(tool_name)
+    if registered_call is None:
+        return await on_rejection("server_shutting_down", shutdown_message)
+
+    call_id, cancellation_event = registered_call
+    try:
+        ticket = await admission_gate_factory(lane).acquire(work_type)
+    except AdmissionBusy:
+        service_context.finish_tool_call(call_id)
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "tool_call_rejected_busy",
+            tool=tool_name,
+            lane=lane,
+        )
+        return await on_rejection("server_busy", busy_message)
+    except BaseException as exc:
+        service_context.finish_tool_call(call_id)
+        return await on_admission_error(exc)
+
+    if service_context.closing:
+        try:
+            ticket.release()
+        finally:
+            service_context.finish_tool_call(call_id)
+        return await on_rejection("server_shutting_down", shutdown_message)
+
+    cancel_token = (
+        _REQUEST_CANCEL_EVENT.set(cancellation_event)
+        if cancellation_event is not None
+        else None
+    )
+    try:
+        return await operation(ticket, call_id)
+    finally:
+        if cancel_token is not None:
+            _REQUEST_CANCEL_EVENT.reset(cancel_token)
+        try:
+            ticket.release()
+        finally:
+            service_context.finish_tool_call(call_id)
+
+
 _REQUEST_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
     "ephemeral_request_cancel_event", default=None
 )
-SUMMARY_COMMAND_MAX_BYTES = 1024
-SUMMARY_COMMAND_TRUNCATION_MARKER = "... [command truncated]"
-SUMMARY_LABEL_MAX_BYTES = 1024
-SUMMARY_LABEL_TRUNCATION_MARKER = "... [label truncated]"
-SEARCH_QUERY_MAX_BYTES = 1024
-SEARCH_QUERY_TRUNCATION_MARKER = "... [query truncated]"
 CONSOLIDATION_MAX_CAPTURES = 25
 CONSOLIDATION_CAPTURE_ID_MAX_BYTES = 256
 SOCKET_STARTUP_TIMEOUT_SECONDS = SETTINGS.socket_startup_timeout_seconds.value

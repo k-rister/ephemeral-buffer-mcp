@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
-
 from .server import *  # noqa: F403
 from .tools import load_tool_handlers
+from .tools.registry import get_socket_tool_registration
 from .socket_protocol import (
     FRAME_HEADER_SIZE,
     SocketRequestError,
@@ -16,7 +15,6 @@ from .socket_protocol import (
 )
 
 load_tool_handlers()
-_capture_handlers = importlib.import_module(".tools.capture", __package__)
 
 _SOCKET_STATE_LOCK = threading.Lock()
 _SOCKET_STATE = "disabled" if SETTINGS.disable_socket_server.value else "not-started"
@@ -378,38 +376,22 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 await writer.wait_closed()
             return
 
-        registered_call = DEFAULT_SERVICES.register_tool_call("socket")
-        if registered_call is None:
+        registration = get_socket_tool_registration()
+        request_adapter = registration.socket_request_adapter
+        response_adapter = registration.socket_response_adapter
+        assert request_adapter is not None and response_adapter is not None
+
+        async def on_rejection(code, message):
             try:
-                await _write_socket_error(
-                    writer,
-                    "server_shutting_down",
-                    "The service is shutting down; retry after it restarts.",
-                )
-            finally:
-                writer.close()
-                await writer.wait_closed()
-            return
-        call_id, _cancellation_event = registered_call
-        try:
-            ticket = await admission_gate("socket").acquire("socket")
-        except AdmissionBusy:
-            DEFAULT_SERVICES.finish_tool_call(call_id)
-            log_event(LOGGER, logging.WARNING, "socket_client_rejected_busy")
-            try:
-                await _write_socket_error(
-                    writer,
-                    "server_busy",
-                    "Socket work capacity is full; retry this request shortly.",
-                )
+                await _write_socket_error(writer, code, message)
             except Exception:
                 pass
             finally:
                 writer.close()
                 await writer.wait_closed()
-            return
-        except BaseException as admission_error:
-            DEFAULT_SERVICES.finish_tool_call(call_id)
+            return None
+
+        async def on_admission_error(admission_error):
             try:
                 if isinstance(admission_error, Exception):
                     try:
@@ -429,106 +411,87 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                     await writer.wait_closed()
                 except Exception:
                     pass
-            raise
+            raise admission_error
 
-        if DEFAULT_SERVICES.closing:
-            ticket.release()
-            DEFAULT_SERVICES.finish_tool_call(call_id)
+        async def invoke(ticket, call_id):
             try:
-                await _write_socket_error(
-                    writer,
-                    "server_shutting_down",
-                    "The service is shutting down; retry after it restarts.",
+                # Keep admission ahead of frame reads so saturated clients are
+                # rejected without consuming their request payload.
+                read_limit = (
+                    engine.max_buffer_bytes * SOCKET_JSON_MAX_EXPANSION
+                    + SOCKET_PAYLOAD_OVERHEAD
                 )
+                try:
+                    data = await asyncio.wait_for(
+                        _read_socket_payload(reader, read_limit),
+                        timeout=SOCKET_CLIENT_READ_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    log_event(LOGGER, logging.WARNING, "socket_client_read_timeout")
+                    await _write_socket_error(
+                        writer,
+                        "socket_read_timeout",
+                        "Socket request frame was not completed before the read timeout.",
+                    )
+                    return None
+                if not data:
+                    return None
+                request = decode_socket_request(
+                    data, allow_legacy_missing_text=True
+                )
+                try:
+                    args, kwargs = request_adapter(request)
+                except (TypeError, ValueError) as exc:
+                    if isinstance(exc, SocketRequestError):
+                        raise
+                    raise SocketRequestError(str(exc)) from exc
+
+                result = await _run_admitted_thread(
+                    ticket,
+                    registration.function,
+                    *args,
+                    _service_context=DEFAULT_SERVICES,
+                    _call_id=call_id,
+                    **kwargs,
+                )
+                response = response_adapter(result)
+                response_frame = encode_frame(encode_socket_response(response))
+                METRICS.record_bytes("socket_response_bytes", len(response_frame))
+                writer.write(response_frame)
+                await writer.drain()
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "socket_client_failed",
+                    error_type=type(exc).__name__,
+                )
+                code = (
+                    "invalid_socket_payload"
+                    if isinstance(exc, SocketRequestError)
+                    else "socket_request_failed"
+                )
+                err_resp = {"status": "error", "code": code, "message": str(exc)}
+                response_frame = encode_frame(encode_socket_response(err_resp))
+                METRICS.record_bytes("socket_response_bytes", len(response_frame))
+                writer.write(response_frame)
+                await writer.drain()
             finally:
                 writer.close()
                 await writer.wait_closed()
-            return
 
-        try:
-            # Read and validate one complete framed payload before decoding it.
-            read_limit = (
-                engine.max_buffer_bytes * SOCKET_JSON_MAX_EXPANSION
-                + SOCKET_PAYLOAD_OVERHEAD
-            )
-            try:
-                data = await asyncio.wait_for(
-                    _read_socket_payload(reader, read_limit),
-                    timeout=SOCKET_CLIENT_READ_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                log_event(LOGGER, logging.WARNING, "socket_client_read_timeout")
-                await _write_socket_error(
-                    writer,
-                    "socket_read_timeout",
-                    "Socket request frame was not completed before the read timeout.",
-                )
-                return
-            if not data:
-                return
-            # Frame v1 peers predating the JSON contract omitted ``text``;
-            # the original server treated that as an empty capture.
-            request = decode_socket_request(data, allow_legacy_missing_text=True)
-            label = request["label"]
-            text = request["text"]
-            content_type = request["content_type"]
-            truncated = request["truncated"]
-            original_byte_size = request["original_byte_size"]
-            command_exit_code = request["command_exit_code"]
-            timed_out = request["timed_out"]
-            duration_ms = request["duration_ms"]
-            try:
-                structured_metrics = normalize_structured_metrics(request["structured_metrics"])
-            except (TypeError, ValueError) as exc:
-                raise SocketRequestError(str(exc)) from exc
-
-            cap, summary = await _run_admitted_thread(
-                ticket,
-                engine.ingest_with_summary,
-                text,
-                label=label,
-                content_type=content_type,
-                truncated=truncated,
-                original_byte_size=original_byte_size,
-                command_exit_code=command_exit_code,
-                timed_out=timed_out,
-                source="socket",
-                duration_ms=duration_ms,
-                structured_metrics=structured_metrics,
-                include_previews=False,
-                _service_context=DEFAULT_SERVICES,
-                _call_id=call_id,
-            )
-            resp = {
-                "status": "ok",
-                "capture_id": cap.capture_id,
-                "label": _capture_handlers._bounded_summary_text(
-                    cap.label,
-                    SUMMARY_LABEL_MAX_BYTES,
-                    SUMMARY_LABEL_TRUNCATION_MARKER,
-                )[0],
-                "line_count": cap.line_count,
-                "byte_size": cap.byte_size
-            }
-            if summary.get("status") == "ok":
-                resp["summary"] = _capture_handlers._summary_payload(summary)
-            response_frame = encode_frame(encode_socket_response(resp))
-            METRICS.record_bytes("socket_response_bytes", len(response_frame))
-            writer.write(response_frame)
-            await writer.drain()
-        except Exception as e:
-            log_event(LOGGER, logging.ERROR, "socket_client_failed", error_type=type(e).__name__)
-            code = "invalid_socket_payload" if isinstance(e, SocketRequestError) else "socket_request_failed"
-            err_resp = {"status": "error", "code": code, "message": str(e)}
-            response_frame = encode_frame(encode_socket_response(err_resp))
-            METRICS.record_bytes("socket_response_bytes", len(response_frame))
-            writer.write(response_frame)
-            await writer.drain()
-        finally:
-            ticket.release()
-            DEFAULT_SERVICES.finish_tool_call(call_id)
-            writer.close()
-            await writer.wait_closed()
+        return await _run_admitted_tool_call(
+            DEFAULT_SERVICES,
+            registration.name,
+            registration.socket_admission_lane,
+            invoke,
+            admission_gate_factory=admission_gate,
+            work_type=registration.socket_admission_lane,
+            on_rejection=on_rejection,
+            on_admission_error=on_admission_error,
+            shutdown_message="The service is shutting down; retry after it restarts.",
+            busy_message="Socket work capacity is full; retry this request shortly.",
+        )
 
     # StreamReaderProtocol ignores the connection callback's return value.
     # Retain the task explicitly until it completes so the loop cannot collect

@@ -196,7 +196,7 @@ def preflight_command(command: str, cwd: Optional[str] = None) -> str:
         return json.dumps({"status": "error", "reason": type(exc).__name__})
 
 
-@register_tool("start_execution", "execution")
+@register_tool("start_execution", "execution", background_execution=True)
 @_instrument_tool("start_execution")
 def start_execution(
     phases: Annotated[List[ExecutionPhaseInput], Field(min_length=1, max_length=MAX_EXECUTION_PHASES)],
@@ -276,7 +276,7 @@ def _hide_internal_background_parameter(function):
 start_execution = _hide_internal_background_parameter(start_execution)
 
 
-@register_tool("resume_execution", "execution")
+@register_tool("resume_execution", "execution", background_execution=True)
 @_instrument_tool("resume_execution")
 def resume_execution(
     execution_id: Annotated[str, Field(

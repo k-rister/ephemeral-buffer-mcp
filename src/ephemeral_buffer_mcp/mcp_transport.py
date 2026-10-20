@@ -25,10 +25,14 @@ from .mcpserver_adapter import (
     register_tool as _register_mcpserver_tool,
 )
 from .tools import load_tool_handlers
-from .tools.registry import TOOL_CATEGORIES, get_tool_categories
+from .tools.formatting import bounded_summary_text, truncate_utf8_with_marker
+from .tools.registry import (
+    TOOL_CATEGORIES,
+    get_tool_categories,
+    get_tool_registration,
+)
 
 load_tool_handlers()
-_capture_handlers = importlib.import_module(".tools.capture", __package__)
 
 _MCP_SESSION_SCOPE_LOCK = threading.Lock()
 _MCP_SESSION_SCOPES: weakref.WeakKeyDictionary[Any, tuple[str, dict[str, str]]] = (
@@ -128,13 +132,13 @@ def _compact_tool_text(envelope: ToolResponseEnvelope) -> str:
         if value is None or isinstance(value, (dict, list)):
             continue
         if isinstance(value, str):
-            value, _ = _capture_handlers._bounded_summary_text(value, 160, "... [truncated]")
+            value, _ = bounded_summary_text(value, 160, "... [truncated]")
             value = json.dumps(value, ensure_ascii=False)
         else:
             value = json.dumps(value, ensure_ascii=False)
         parts.append(f"{key}={value}")
     if envelope.error is None and isinstance(data.get("message"), str):
-        message, _ = _capture_handlers._bounded_summary_text(
+        message, _ = bounded_summary_text(
             data["message"], 160, "... [truncated]"
         )
         parts.append(f"message={json.dumps(message, ensure_ascii=False)}")
@@ -201,9 +205,22 @@ def _legacy_tool_envelope(
     result: Any,
     *,
     compact_text: bool = False,
+    legacy_error_code: str | None = None,
+    legacy_error_mode: str | None = None,
 ) -> ToolResponseEnvelope:
     """Wrap an existing Python text result in the versioned MCP result shape."""
     text = result if isinstance(result, str) else str(result)
+    if legacy_error_code is None or legacy_error_mode is None:
+        try:
+            registration = get_tool_registration(tool)
+        except KeyError:
+            registration = None
+        if registration is not None:
+            if legacy_error_code is None:
+                legacy_error_code = registration.legacy_error_code
+            if legacy_error_mode is None:
+                legacy_error_mode = registration.legacy_error_mode
+    legacy_error_mode = legacy_error_mode or "default"
     data: Dict[str, Any] = {}
     error = None
     status: Literal["ok", "error"] = "ok"
@@ -217,10 +234,8 @@ def _legacy_tool_envelope(
             status = "error"
             if payload.get("error_code"):
                 error_code = str(payload["error_code"])
-            elif tool in {"get_capture_summary", "clear_captures"}:
-                error_code = "capture_not_found"
-            elif tool in {"capture_text", "capture_file", "execute_and_capture"}:
-                error_code = "capture_failed"
+            elif legacy_error_code is not None:
+                error_code = legacy_error_code
             else:
                 error_code = f"{tool}_failed"
             error = ToolErrorEnvelope(
@@ -230,19 +245,19 @@ def _legacy_tool_envelope(
         else:
             data = payload
     elif text.startswith(("Error", "Search Error")) or (
-        tool == "clear_captures" and "not found" in text.lower()
+        legacy_error_mode == "clear" and "not found" in text.lower()
     ):
         status = "error"
-        if tool == "get_capture_summary":
+        if legacy_error_mode == "retrieval":
             code = "capture_not_found" if "not found" in text.lower() else "retrieval_failed"
-        elif tool == "search_capture":
+        elif legacy_error_mode == "search":
             code = "invalid_search_request" if any(
                 marker in text.lower()
                 for marker in ("query must", "query exceeds", "unsupported", "top_k", "context_lines")
             ) else "search_failed"
-        elif tool.startswith("capture_") or tool == "execute_and_capture":
+        elif legacy_error_mode == "capture":
             code = "capture_failed"
-        elif tool == "clear_captures" and "not found" in text.lower():
+        elif legacy_error_mode == "clear" and "not found" in text.lower():
             code = "capture_not_found"
         else:
             code = "operation_failed"
@@ -273,7 +288,7 @@ def _fit_tool_envelope(
     best = shortened.model_copy(update={"text": marker[:max(0, max_bytes // 4)]})
     while low <= high:
         middle = (low + high) // 2
-        candidate_text = _capture_handlers._truncate_utf8_with_marker(
+        candidate_text = truncate_utf8_with_marker(
             envelope.text or "", middle, marker
         )
         if candidate_text is None:
@@ -327,6 +342,10 @@ def create_mcp_server(context: "ServiceContext | None" = None):
             registration.category,
             registration.structured_result_factory,
             service_context,
+            mcp_admission_lane=registration.mcp_admission_lane,
+            background_execution=registration.background_execution,
+            legacy_error_code=registration.legacy_error_code,
+            legacy_error_mode=registration.legacy_error_mode,
         )
     return app
 
@@ -338,8 +357,29 @@ def _register_mcp_tool_for_app(
     category,
     structured_result_factory,
     service_context,
+    *,
+    mcp_admission_lane=None,
+    background_execution=None,
+    legacy_error_code=None,
+    legacy_error_mode=None,
 ):
     """Register one shared tool implementation with context-bound adapters."""
+    try:
+        registration = get_tool_registration(name)
+    except KeyError:
+        registration = None
+    if registration is not None:
+        if mcp_admission_lane is None:
+            mcp_admission_lane = registration.mcp_admission_lane
+        if background_execution is None:
+            background_execution = registration.background_execution
+        if legacy_error_code is None:
+            legacy_error_code = registration.legacy_error_code
+        if legacy_error_mode is None:
+            legacy_error_mode = registration.legacy_error_mode
+    mcp_admission_lane = mcp_admission_lane or "mcp"
+    background_execution = bool(background_execution)
+    legacy_error_mode = legacy_error_mode or "default"
     # Reuse the registration behavior installed by the decorator factory.
     @wraps(function)
     async def adapter(*args, **kwargs):
@@ -355,60 +395,23 @@ def _register_mcp_tool_for_app(
                     False,
                 )
             )
-            registered_call = service_context.register_tool_call(name)
-            if registered_call is None:
-                message = "The service is shutting down; retry after it restarts."
-                return _service_rejection_result(
-                    "server_shutting_down",
-                    message,
-                    structured=(
-                        structured_result_factory is not None
-                        or category in {"capture", "retrieval", "search", "lifecycle"}
-                    ),
-                    compact_text=compact_text,
-                )
-            call_id, cancellation_event = registered_call
-            try:
-                lane = "diagnostics" if name == "get_buffer_stats" else "mcp"
-                ticket = await admission_gate(lane).acquire(name)
-            except AdmissionBusy:
-                service_context.finish_tool_call(call_id)
-                message = "Foreground work capacity is full; retry this tool call shortly."
-                log_event(LOGGER, logging.WARNING, "mcp_tool_rejected_busy", tool=name)
-                return _service_rejection_result(
-                    "server_busy",
-                    message,
-                    structured=(
-                        structured_result_factory is not None
-                        or category in {"capture", "retrieval", "search", "lifecycle"}
-                    ),
-                    compact_text=compact_text,
-                )
-            except BaseException:
-                service_context.finish_tool_call(call_id)
-                raise
+            structured = (
+                structured_result_factory is not None
+                or category in {"capture", "retrieval", "search", "lifecycle"}
+            )
 
-            if service_context.closing:
-                ticket.release()
-                service_context.finish_tool_call(call_id)
-                message = "The service is shutting down; retry after it restarts."
+            async def on_rejection(code, message):
                 return _service_rejection_result(
-                    "server_shutting_down",
+                    code,
                     message,
-                    structured=(
-                        structured_result_factory is not None
-                        or category in {"capture", "retrieval", "search", "lifecycle"}
-                    ),
+                    structured=structured,
                     compact_text=compact_text,
                 )
 
-            cancel_token = None
-            try:
-                cancel_token = (
-                    _REQUEST_CANCEL_EVENT.set(cancellation_event)
-                    if cancellation_event is not None
-                    else None
-                )
+            async def on_admission_error(exc):
+                raise exc
+
+            async def invoke(ticket, call_id):
                 if structured_result_factory is not None:
                     factory_kwargs = kwargs
                     if getattr(
@@ -432,7 +435,7 @@ def _register_mcp_tool_for_app(
                     dispatch_kwargs = kwargs
                     if getattr(dispatch_function, "_supports_invocation_mode", False):
                         dispatch_kwargs = {**kwargs, "__invocation_mode": "mcp"}
-                    if name in {"start_execution", "resume_execution"}:
+                    if background_execution:
                         dispatch_kwargs = {**dispatch_kwargs, "__background": True}
                     result = await _run_admitted_thread(
                         ticket,
@@ -445,16 +448,28 @@ def _register_mcp_tool_for_app(
                     if category not in {"capture", "retrieval", "search", "lifecycle"}:
                         return result
                     response = _legacy_tool_envelope(
-                        name, result, compact_text=compact_text
+                        name,
+                        result,
+                        compact_text=compact_text,
+                        legacy_error_code=legacy_error_code,
+                        legacy_error_mode=legacy_error_mode,
                     )
                 return _call_tool_result(
                     _fit_tool_envelope(response, compact_text=compact_text)
                 )
-            finally:
-                if cancel_token is not None:
-                    _REQUEST_CANCEL_EVENT.reset(cancel_token)
-                ticket.release()
-                service_context.finish_tool_call(call_id)
+
+            return await _run_admitted_tool_call(
+                service_context,
+                name,
+                mcp_admission_lane,
+                invoke,
+                admission_gate_factory=admission_gate,
+                work_type=name,
+                on_rejection=on_rejection,
+                on_admission_error=on_admission_error,
+                shutdown_message="The service is shutting down; retry after it restarts.",
+                busy_message="Foreground work capacity is full; retry this tool call shortly.",
+            )
 
     if structured_result_factory is not None or category in {
         "capture", "retrieval", "search", "lifecycle"

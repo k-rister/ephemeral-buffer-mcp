@@ -11,6 +11,7 @@ from .registry import (
     get_tool_names,
     get_tool_registration,
     get_tool_registrations,
+    get_socket_tool_registration,
     register_tool,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "get_tool_names",
     "get_tool_registration",
     "get_tool_registrations",
+    "get_socket_tool_registration",
     "load_tool_handlers",
     "register_tool",
 ]

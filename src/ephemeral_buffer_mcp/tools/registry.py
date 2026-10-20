@@ -25,6 +25,13 @@ class ToolRegistration:
     name: str
     category: str
     structured_result_factory: Callable[..., Any] | None = None
+    mcp_admission_lane: str = "mcp"
+    socket_admission_lane: str = "socket"
+    background_execution: bool = False
+    socket_request_adapter: Callable[..., Any] | None = None
+    socket_response_adapter: Callable[..., Any] | None = None
+    legacy_error_code: str | None = None
+    legacy_error_mode: str = "default"
 
 
 _REGISTRATIONS: list[ToolRegistration] = []
@@ -36,6 +43,13 @@ def register_tool(
     category: str,
     *,
     structured_result_factory: Callable[..., Any] | None = None,
+    mcp_admission_lane: str = "mcp",
+    socket_admission_lane: str = "socket",
+    background_execution: bool = False,
+    socket_request_adapter: Callable[..., Any] | None = None,
+    socket_response_adapter: Callable[..., Any] | None = None,
+    legacy_error_code: str | None = None,
+    legacy_error_mode: str = "default",
 ):
     """Register a transport-neutral handler and retain its public metadata."""
     if category not in TOOL_CATEGORIES:
@@ -48,7 +62,18 @@ def register_tool(
             name=name,
             category=category,
             structured_result_factory=structured_result_factory,
+            mcp_admission_lane=mcp_admission_lane,
+            socket_admission_lane=socket_admission_lane,
+            background_execution=background_execution,
+            socket_request_adapter=socket_request_adapter,
+            socket_response_adapter=socket_response_adapter,
+            legacy_error_code=legacy_error_code,
+            legacy_error_mode=legacy_error_mode,
         )
+        if (socket_request_adapter is None) != (socket_response_adapter is None):
+            raise ValueError(
+                "socket request and response adapters must be registered together"
+            )
         if current is not None:
             if current != registration:
                 raise ValueError(f"duplicate tool registration: {name}")
@@ -66,6 +91,18 @@ def get_tool_registration(name: str) -> ToolRegistration:
 
 def get_tool_registrations() -> tuple[ToolRegistration, ...]:
     return tuple(_REGISTRATIONS)
+
+
+def get_socket_tool_registration() -> ToolRegistration:
+    """Return the unique tool registration exposed by the socket transport."""
+    registrations = tuple(
+        item for item in _REGISTRATIONS if item.socket_request_adapter is not None
+    )
+    if len(registrations) != 1:
+        raise RuntimeError(
+            "the socket transport requires exactly one registered socket entrypoint"
+        )
+    return registrations[0]
 
 
 def get_tool_names() -> list[str]:
