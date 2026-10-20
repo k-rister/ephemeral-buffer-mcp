@@ -257,6 +257,15 @@ both paths. With neither identity value, EB keeps the legacy shared socket and
 uses a private process state directory that is removed on normal shutdown
 where secure cleanup is available. The session helper does not create an
 unrelated session ID when an explicit socket path is supplied.
+
+When using an explicit `EPHEMERAL_SOCKET_PATH` without a session ID,
+`EPHEMERAL_LEGACY_STATE_DIR` can identify the previous state directory for
+transition diagnostics. It does not select or move the active state directory.
+If diagnostics report that prior location and you need to continue using its
+records, set `EPHEMERAL_EXECUTION_STATE_DIR` to that path. An explicit state
+directory takes precedence; when both an explicit socket path and a session ID
+are present, EB derives the prior session-state location itself.
+
 An explicit `EPHEMERAL_EXECUTION_STATE_DIR` must resolve to an absolute
 filesystem path. Tilde-prefixed paths are expanded; relative paths and the
 `:memory:` token are rejected during startup so state cannot be written under

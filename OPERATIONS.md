@@ -391,8 +391,11 @@ process cleanup and fencing rules determine whether it can be resumed safely.
 Unexpected background task failures are exposed by `get_execution` in its
 `background_error` field, even when normal phase handling could not checkpoint
 a terminal phase result.
-The background manager admits at most eight active or queued executions;
-`get_execution_capacity` reports those counts.
+Each server process's background manager admits at most eight active or queued
+executions; this limit is process-local, not shared by every process using the
+same state directory. `get_execution_capacity` reports the current process's
+counts. The bounded output allowance is divided across the execution's phases,
+so adding phases reduces the amount of output retained for each phase.
 The state directory is checked for current-user ownership before use, and
 directory metadata is synchronized after atomic record replacement so a
 completed phase checkpoint survives normal host-crash recovery.
@@ -414,8 +417,11 @@ records; use the manual recovery procedure below only after process absence is
 confirmed. A `failed` or
 `timed_out` phase is only retried with
 `retry_failed=True`; a timed-out phase whose process-group cleanup is not
-confirmed remains fence-pending and blocks retry. A safe phase recovered as `interrupted` resumes on the
-normal resume call. Mark operations that can write, deploy, publish, or make
+confirmed remains fence-pending and blocks retry. A safe phase recovered as
+`interrupted` resumes on the normal resume call. Recovery is lazy: it runs when
+a persisted record is loaded, not from a scan of the state directory. After an abrupt server kill,
+leftover child processes can remain until a later record inspection triggers
+recovery. Mark operations that can write, deploy, publish, or make
 external requests with `side_effects: "unsafe"`; retrying an interrupted
 unsafe phase also requires `confirm_unsafe=True`, or the explicit
 `resume_policy: "allow-unsafe"` chosen when the execution was created. The
@@ -539,6 +545,40 @@ confirmed absent, leave the record fenced and do not remove its files.
    `invalid_record_count` and unpaired counts are understood, and available
    quota matches the files that remain. Keep the archive until normal recovery
    and the next checkpoint have been verified.
+
+### Durable record layout and format changes
+
+Each execution ID's UTF-8 bytes are hashed with SHA-256 to name its durable
+files. The versioned record is `<digest>.json`; its companion summary is
+`<digest>.summary.json`; an active checkpoint reservation is
+`.checkpoint-<digest>.json`. The record contains
+phase state and bounded output, while the summary supports listing and capacity
+reporting. Atomic checkpoint writes may also leave temporary files after a
+crash; those files count toward the state quota.
+
+Each phase's `events` array keeps ordered transition entries with `status`,
+`timestamp`, and `attempt`; event-specific details carry relevant result,
+error, or fence metadata.
+
+The record schema version is separate from MCP response schema versions. The
+current record reader normalizes known v1 records into the v2 in-memory shape
+without rewriting their files. Treat incompatible changes to stored fields or
+their meaning as a record-schema change: increment the record version and
+retain an explicit reader for older records that must remain resumable. If an
+older version will no longer be supported, document that it will remain
+read-only and cannot be resumed. Unknown record versions are not migrated
+automatically.
+
+Before deploying an incompatible record-format change, stop submitting work to
+servers that share the state directory and let active phases finish. Inspect
+the remaining records, then retire eligible completed or terminal records
+through `retire_executions` with an archive outside that directory. For records
+that must be retained, create and verify an access-controlled state-directory
+archive using step 2 of the [manual recovery procedure](#manual-recovery-for-fence-pending-records-and-unreadable-reservations).
+Resolve or preserve active and fence-pending records using the recovery
+guidance above; retirement refuses them. If retained records must remain
+resumable, the new release needs a compatible reader. Do not rely on an
+automatic state migration.
 
 If both `EPHEMERAL_SOCKET_PATH` and `EPHEMERAL_SESSION_ID` are set, this
 precedence can select a different state directory than older versions. Startup

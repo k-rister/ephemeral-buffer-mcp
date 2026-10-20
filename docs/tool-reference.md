@@ -209,7 +209,9 @@ and user intent checks remain necessary.
 For all capture tools, `content_type` accepts `auto` (default), `diff`, `log`, or `text`; other values are rejected.
 An omitted `label` is derived from the command.
 `max_output_bytes` defaults to the configured buffer limit; values above it are rejected.
-`timeout_seconds` bounds runtime; timeout retains collected output and returns exit code 124.
+`timeout_seconds` bounds runtime; timeout retains output collected through the
+deadline and returns exit code 124. Process termination and cleanup happen after
+that cutoff, so output produced during cleanup is not captured.
 `structured_metrics` accepts JSON-compatible named metrics.
 
 ## Resumable phase execution
@@ -262,10 +264,11 @@ completed checkpoints, and fences the subprocess if cleanup cannot be
 confirmed. `resume_execution` also returns promptly after scheduling work.
 Durable execution requires Linux leases, `/proc` process identities, pidfd
 signaling, and selector support; startup reports a platform error when these
-recovery backends are unavailable. The manager accepts up to eight active or
-queued background executions; `get_execution_capacity` reports the current
-counts. The default state directory is process-local; configure
-`EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
+recovery backends are unavailable. Each server process's manager accepts up to
+eight active or queued background executions; this limit is not shared across
+processes that use the same state directory. `get_execution_capacity` reports
+the current process's counts. The default state directory is process-local;
+configure `EPHEMERAL_SESSION_ID`, `EPHEMERAL_SOCKET_PATH`, or
 `EPHEMERAL_EXECUTION_STATE_DIR` when state must survive a server restart. If a
 background task fails outside normal phase handling, `get_execution` reports a
 `background_error` with the recorded execution state.
@@ -360,6 +363,20 @@ directory, explicit socket path, then session ID. Without an identity, each
 server process receives a fresh private state directory that is removed during
 normal shutdown on POSIX platforms. Windows may retain that temporary
 directory because secure owner-identity cleanup is not available there.
+
+### Durable output and recovery limits
+
+Capture content is held in a bounded in-memory buffer. When a capture is
+evicted by an LRU limit or explicitly cleared, EB tools cannot retrieve it
+again. Output omitted by a `max_output_bytes` limit is also not retained; the
+response's truncation flag and byte-size metadata report when that happened.
+
+For durable executions, retrying a failed or timed-out phase starts a new
+attempt and clears that phase's previous output. Save any partial output needed
+for diagnosis before retrying. Retiring an execution removes its managed record
+and summary only after writing the requested archive; the archive is then the
+remaining copy, and EB does not restore retired records automatically. Keep it
+if those records may be needed later.
 
 ## Repository-sensitive paths and file capture
 
