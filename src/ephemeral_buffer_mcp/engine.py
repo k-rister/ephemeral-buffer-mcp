@@ -2387,8 +2387,15 @@ class EphemeralEngine:
             """, (fts_query, top_k))
             results = cur.fetchall()
             return [(int(row[0]), -float(row[1])) for row in results]
-        except sqlite3.OperationalError:
-            return []
+        except sqlite3.OperationalError as exc:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "bm25_search_sqlite_failed",
+                capture_id=capture.capture_id,
+                error_type=type(exc).__name__,
+            )
+            return self._search_lexical_fallback(capture, tokens, top_k)
 
     @staticmethod
     def _search_lexical_fallback(

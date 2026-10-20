@@ -584,9 +584,11 @@ otherwise `auto` classifies diffs, build/test logs, and plain text from the
 content and label.
 
 `ephbuf` also bounds wrapped-command and piped-stdin capture with
-`--max-output-bytes`; it defaults to `EPHEMERAL_MAX_BUFFER_BYTES` or 50 MiB and
-retains the beginning and end of oversized output. Wrapped command output stays
-on stdout, while the `ephbuf` execution banner and status messages go to stderr.
+`--max-output-bytes`; its implicit default is the larger of 512 bytes and the
+configured `EPHEMERAL_MAX_BUFFER_BYTES` value (50 MiB by default). An explicit
+value below 512 is rejected. It retains the beginning and end of oversized
+output. Wrapped command output stays on stdout, while the `ephbuf` execution
+banner and status messages go to stderr.
 Use `--timeout-seconds` to stop a wrapped command after a bounded runtime; timed
 out commands retain the output collected so far and exit with status 124.
 Requested `max_output_bytes` and `capture_file` `max_bytes` values may not
@@ -660,9 +662,10 @@ session only and is disabled unless `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1` is
 set at startup. Decreases use the same deterministic LRU order and may evict
 multiple captures; deployment defaults are not changed or persisted.
 `execute_and_capture` retains the beginning and end of oversized command
-output and marks the capture with its original byte count. Each returned head
-or tail preview is independently capped at 4 KiB of UTF-8 data; a truncation
-marker directs the agent to `get_capture_slice` for the complete content.
+output. Its truncation marker reports the retained head and tail sizes as
+rendered UTF-8 bytes and the original input size as raw bytes. Each returned
+head or tail preview is independently capped at 4 KiB of UTF-8 data; use
+`get_capture_slice` to inspect retained lines beyond these previews.
 
 Call `get_runtime_diagnostics()` when reporting a field observation. It is
 explicitly opt-in and returns operational metadata only; captured content,

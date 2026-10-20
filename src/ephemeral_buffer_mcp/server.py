@@ -1204,7 +1204,7 @@ def _write_metrics_snapshot(service_context: ServiceContext | None = None) -> No
                 os.fsync(temporary.fileno())
             os.replace(temporary_path, destination)
             temporary_path = None
-        except OSError as exc:
+        except Exception as exc:
             log_event(LOGGER, logging.WARNING, "metrics_snapshot_write_failed", error_type=type(exc).__name__)
         finally:
             if temporary_path is not None:

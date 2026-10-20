@@ -126,6 +126,40 @@ class TestCliConfiguration(unittest.TestCase):
             self.assertIn("':memory:' is not supported", result.stderr)
             self.assertFalse((Path(directory) / ":memory:").exists())
 
+    def test_session_helper_stops_when_socket_path_resolution_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "ephemeral-session-env"
+            helper.write_text(SESSION_ENV_HELPER.read_text(encoding="utf-8"), encoding="utf-8")
+            config = Path(directory) / "ephemeral-config"
+            config.write_text("#!/usr/bin/env bash\nexit 9\n", encoding="utf-8")
+            config.chmod(0o755)
+            environment = os.environ.copy()
+            for name in (
+                "EPHEMERAL_SESSION_ID",
+                "EPHEMERAL_SOCKET_PATH",
+                "EPHEMERAL_EXECUTION_STATE_DIR",
+                "EPHEMERAL_LOG_FILE",
+            ):
+                environment.pop(name, None)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; source_status=$?; '
+                    'printf "%s\\n%s\\n" "$source_status" "${EPHEMERAL_LOG_FILE:-<unset>}"',
+                    "bash",
+                    str(helper),
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["1", "<unset>"])
+
     def test_recv_exact_rejects_truncated_response(self):
         class EmptySocket:
             def recv(self, _size):
@@ -626,6 +660,21 @@ class TestCliConfiguration(unittest.TestCase):
         self.assertTrue(kwargs["truncated"])
         self.assertEqual(kwargs["original_byte_size"], 2000)
         self.assertLessEqual(len(payload.encode("utf-8")), 1024)
+
+    def test_implicit_output_limit_is_clamped_to_cli_minimum(self):
+        response = {"status": "ok", "line_count": 1, "capture_id": "cap_test", "label": "echo ok"}
+        settings = SimpleNamespace(max_buffer_bytes=SimpleNamespace(value=128))
+        with patch.object(cli, "SETTINGS", settings), \
+                patch.object(cli, "run_command_bounded", return_value=("ok\n", 0, False, 3, False)) as run, \
+                patch.object(cli, "send_to_mcp", return_value=response), \
+                patch.object(sys, "argv", ["cli.py", "--", "echo", "ok"]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertEqual(run.call_args.args[2], 512)
 
     def test_binary_stdin_capture_uses_buffer(self):
         response = {"status": "ok", "line_count": 1, "capture_id": "cap_binary", "label": "Piped STDIN"}

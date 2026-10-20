@@ -105,6 +105,18 @@ class TestAgentAbBaseline(unittest.TestCase):
                     "completion_rate.gate must be a boolean",
                 )
 
+    def test_non_numeric_baseline_metrics_are_rejected_by_file_and_memory_paths(self):
+        summary = summary_fixture()
+        for value in ("fast", True):
+            baseline = build_baseline(summary)
+            baseline["metrics"]["control"]["duration_seconds"] = value
+            with self.subTest(value=value):
+                self.assert_threshold_rejected_by_both_loaders(
+                    summary,
+                    baseline,
+                    "baseline metric control.duration_seconds is not numeric or null",
+                )
+
     def test_compare_passes_same_summary(self):
         summary = summary_fixture()
         result = compare_summary(summary, build_baseline(summary))

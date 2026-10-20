@@ -216,9 +216,10 @@ def capture_file(
         structured_metrics = normalize_structured_metrics(structured_metrics)
     except ValueError as exc:
         return f"Error: invalid structured_metrics: {exc}"
-    if not os.path.exists(file_path):
-        return f"Error: File '{file_path}' does not exist."
     try:
+        file_path = os.fsdecode(os.fspath(file_path))
+        if not os.path.exists(file_path):
+            return f"Error: File '{file_path}' does not exist."
         active_engine = _active_engine()
         if max_bytes is not None and max_bytes > active_engine.max_buffer_bytes:
             log_event(

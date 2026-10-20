@@ -213,7 +213,7 @@ def main():
     parser.add_argument(
         "--max-output-bytes",
         type=int,
-        default=SETTINGS.max_buffer_bytes.value,
+        default=max(512, SETTINGS.max_buffer_bytes.value),
         help="Maximum output retained (default: EPHEMERAL_MAX_BUFFER_BYTES or 50 MiB)",
     )
     parser.add_argument(
