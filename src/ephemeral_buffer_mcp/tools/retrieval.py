@@ -1,7 +1,8 @@
 """Retrieval domain handlers."""
 
 from ..server import *  # noqa: F403
-from .capture import _bounded_json_text, _bounded_summary_text, _summary_json
+from .capture import _summary_json
+from .formatting import bounded_json_text, bounded_summary_text
 from .registry import register_tool
 
 
@@ -42,7 +43,7 @@ def _capture_slice_response(
     )
     label_bytes = 0
     if capture is not None:
-        safe_label, _ = _bounded_json_text(
+        safe_label, _ = bounded_json_text(
             str(capture.label),
             label_wire_budget,
             SUMMARY_LABEL_TRUNCATION_MARKER,
@@ -107,7 +108,7 @@ def _capture_slice_response(
                 + str(candidate_cursor)
                 + "']"
             )
-        label, _ = _bounded_json_text(
+        label, _ = bounded_json_text(
             str(page["label"]),
             label_wire_budget,
             SUMMARY_LABEL_TRUNCATION_MARKER,
@@ -187,7 +188,12 @@ def get_capture_slice_result(
     return _capture_slice_response(start_line, end_line, capture_id, max_bytes, cursor)
 
 
-@register_tool("get_capture_summary", "retrieval")
+@register_tool(
+    "get_capture_summary",
+    "retrieval",
+    legacy_error_code="capture_not_found",
+    legacy_error_mode="retrieval",
+)
 @_instrument_tool("get_capture_summary")
 def get_capture_summary(capture_id: str = "latest", include_previews: bool = False) -> str:
     """
@@ -203,7 +209,7 @@ def _list_captures_response() -> ToolResponseEnvelope:
     captures = []
     text_lines = ["Active Captures in Ephemeral Buffer:"]
     for capture in _active_engine().list_captures():
-        label, label_truncated = _bounded_summary_text(
+        label, label_truncated = bounded_summary_text(
             capture["label"],
             SUMMARY_LABEL_MAX_BYTES,
             SUMMARY_LABEL_TRUNCATION_MARKER,
@@ -247,7 +253,12 @@ def list_captures_result() -> ToolResponseEnvelope:
     return _list_captures_response()
 
 
-@register_tool("clear_captures", "lifecycle")
+@register_tool(
+    "clear_captures",
+    "lifecycle",
+    legacy_error_code="capture_not_found",
+    legacy_error_mode="clear",
+)
 @_instrument_tool("clear_captures")
 def clear_captures(capture_id: str = "all") -> str:
     """

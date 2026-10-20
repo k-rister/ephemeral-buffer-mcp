@@ -52,11 +52,19 @@ import ephemeral_buffer_mcp.server as server
 import ephemeral_buffer_mcp.socket_transport as socket_transport
 import ephemeral_buffer_mcp.mcp_transport as mcp_transport
 import ephemeral_buffer_mcp.tools.capture as capture_tools
+import ephemeral_buffer_mcp.tools.formatting as formatting_tools
 import ephemeral_buffer_mcp.tools.diagnostics as diagnostics_tools
 import ephemeral_buffer_mcp.tools.execution as execution_tools
 import ephemeral_buffer_mcp.tools.retrieval as retrieval_tools
 import ephemeral_buffer_mcp.tools.search as search_tools
-from ephemeral_buffer_mcp.tools.registry import get_tool_categories, get_tool_names, register_tool
+import ephemeral_buffer_mcp.tools.registry as tool_registry
+from ephemeral_buffer_mcp.tools.registry import (
+    get_socket_tool_registration,
+    get_tool_categories,
+    get_tool_names,
+    get_tool_registration,
+    register_tool,
+)
 from ephemeral_buffer_mcp.admission import (
     AdmissionBusy,
     AdmissionMetrics,
@@ -851,6 +859,48 @@ class TestServerTools(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown tool category"):
             register_tool("invalid_category_probe", "unknown")
 
+    def test_tool_registry_carries_transport_policy_and_socket_entrypoint(self):
+        capture_registration = get_tool_registration("capture_text")
+        self.assertIs(get_socket_tool_registration(), capture_registration)
+        self.assertEqual(capture_registration.socket_admission_lane, "socket")
+        self.assertIsNotNone(capture_registration.socket_request_adapter)
+        self.assertIsNotNone(capture_registration.socket_response_adapter)
+        self.assertNotIn(
+            "__ingest_metadata",
+            capture_tools.capture_text.__signature__.parameters,
+        )
+        self.assertEqual(
+            get_tool_registration("get_buffer_stats").mcp_admission_lane,
+            "diagnostics",
+        )
+        self.assertTrue(
+            get_tool_registration("start_execution").background_execution
+        )
+        self.assertTrue(
+            get_tool_registration("resume_execution").background_execution
+        )
+
+    def test_tool_registry_requires_one_socket_entrypoint(self):
+        registration = get_tool_registration("capture_text")
+        with patch.object(tool_registry, "_REGISTRATIONS", []):
+            with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                get_socket_tool_registration()
+        with patch.object(
+            tool_registry,
+            "_REGISTRATIONS",
+            [registration, registration],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                get_socket_tool_registration()
+
+    def test_tool_registry_requires_socket_adapters_as_a_pair(self):
+        with self.assertRaisesRegex(ValueError, "must be registered together"):
+            register_tool(
+                "incomplete_socket_probe",
+                "capture",
+                socket_request_adapter=lambda request: request,
+            )(lambda: None)
+
     def test_tool_descriptions_include_agent_routing_and_path_guidance(self):
         capture_text_doc = server.capture_text.__doc__
         capture_file_doc = server.capture_file.__doc__
@@ -917,12 +967,12 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("framed CLI request", server.handle_socket_client.__doc__)
 
     def test_bounded_summary_text_handles_marker_larger_than_budget(self):
-        text, truncated = capture_tools._bounded_summary_text("a long value", 4, "[cut]")
+        text, truncated = formatting_tools.bounded_summary_text("a long value", 4, "[cut]")
 
         self.assertTrue(truncated)
         self.assertEqual(text, "[cut"[:4])
         self.assertLessEqual(len(text.encode("utf-8")), 4)
-        self.assertEqual(capture_tools._bounded_summary_text("value", 0, "[cut]"), ("", True))
+        self.assertEqual(formatting_tools.bounded_summary_text("value", 0, "[cut]"), ("", True))
 
     def test_preflight_reports_repo_executable_and_does_not_run_command(self):
         result = json.loads(server.preflight_command("printf 'secret output'", cwd=os.getcwd()))
@@ -1975,11 +2025,15 @@ class TestServerTools(unittest.TestCase):
         self.assertNotIn("private snapshot label", json.dumps(snapshot))
 
     def test_metrics_snapshot_file_refreshes_after_async_index_completion(self):
+        import numpy as numpy_module
+        import ephemeral_buffer_mcp.engine as engine_module
         from ephemeral_buffer_mcp.engine import EphemeralEngine
 
         original_metrics = server.METRICS
+        original_numpy = engine_module.np
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
+        engine_module.np = numpy_module
         started = threading.Event()
         release = threading.Event()
         snapshot_written = threading.Event()
@@ -2021,6 +2075,7 @@ class TestServerTools(unittest.TestCase):
         finally:
             release.set()
             engine.shutdown()
+            engine_module.np = original_numpy
             server.METRICS = original_metrics
 
     def test_metrics_snapshot_file_skips_disabled_metrics(self):
@@ -2315,12 +2370,12 @@ class TestServerTools(unittest.TestCase):
 
     def test_summary_payload_preserves_engine_errors(self):
         self.assertEqual(
-            capture_tools._summary_payload({"status": "error", "message": "missing"}),
+            formatting_tools.summary_payload({"status": "error", "message": "missing"}),
             {"status": "error", "message": "missing"},
         )
 
     def test_summary_payload_defaults_to_current_schema_version(self):
-        payload = capture_tools._summary_payload({
+        payload = formatting_tools.summary_payload({
             "status": "ok",
             "capture_id": "cap-summary-version",
             "label": "summary version",
@@ -2335,7 +2390,7 @@ class TestServerTools(unittest.TestCase):
             {"capture_id": f"cap-{index}", "reasons": ["bytes"]}
             for index in range(server.MAX_CAPTURE_EVICTION_DETAILS + 5)
         ]
-        payload = capture_tools._summary_payload({
+        payload = formatting_tools.summary_payload({
             "status": "ok",
             "capture_id": "cap-summary-evictions",
             "label": "summary evictions",
@@ -2361,7 +2416,7 @@ class TestServerTools(unittest.TestCase):
             f"  - file-{index:05d}.txt (+1, -0) | Buffer Lines: L1-L2"
             for index in range(10_000)
         )
-        payload = capture_tools._summary_payload({
+        payload = formatting_tools.summary_payload({
             "status": "ok",
             "schema_version": 1,
             "capture_id": "cap-diff",
@@ -2394,7 +2449,7 @@ class TestServerTools(unittest.TestCase):
         self.assertTrue(payload["diff"]["file_map_truncated"])
         self.assertGreater(payload["diff"]["omitted_file_count"], 0)
 
-        structured_bounded, structured_omitted = capture_tools._bounded_diff_file_map(
+        structured_bounded, structured_omitted = formatting_tools._bounded_diff_file_map(
             "unused legacy map",
             {
                 "files": [
@@ -2413,7 +2468,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("added.py [ADDED]", structured_bounded)
         self.assertEqual(structured_omitted, 1)
 
-        bounded, omitted = capture_tools._bounded_diff_file_map(
+        bounded, omitted = formatting_tools._bounded_diff_file_map(
             "x" * (capture_tools.SUMMARY_DIFF_FILE_MAP_MAX_BYTES - 1) + "\nsmall"
         )
         self.assertLessEqual(
@@ -2421,11 +2476,23 @@ class TestServerTools(unittest.TestCase):
         )
         self.assertEqual(omitted, 2)
 
-        with patch.object(capture_tools, "SUMMARY_DIFF_FILE_MAP_MAX_BYTES", 10):
-            bounded, omitted = capture_tools._bounded_diff_file_map("long line\nsmall")
+        with patch.object(formatting_tools, "SUMMARY_DIFF_FILE_MAP_MAX_BYTES", 10):
+            bounded, omitted = formatting_tools._bounded_diff_file_map("long line\nsmall")
         self.assertLessEqual(len(bounded.encode("utf-8")), 10)
         self.assertGreater(len(bounded.encode("utf-8")), 0)
         self.assertEqual(omitted, 2)
+
+    def test_socket_capture_response_rejects_invalid_handler_output(self):
+        for result in ("not-json", None):
+            with self.subTest(result=result), self.assertRaisesRegex(
+                ValueError, "invalid summary JSON"
+            ):
+                capture_tools._socket_capture_response(result)
+
+        with self.assertRaisesRegex(RuntimeError, "capture summary (?:is )?unavailable"):
+            capture_tools._socket_capture_response('{"message":"capture summary unavailable"}')
+        with self.assertRaisesRegex(RuntimeError, "capture summary (?:is )?unavailable"):
+            capture_tools._socket_capture_response("[]")
 
     def test_search_capture_discloses_semantic_fallback(self):
         response = {
@@ -2837,6 +2904,10 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(plain_text.text, "not JSON")
         self.assertEqual(plain_text.data["message"], "not JSON")
         self.assertEqual(parsed_json.data["capture_id"], "cap-test")
+        unregistered_tool = mcp_transport._legacy_tool_envelope(
+            "unregistered_tool", "Error: operation failed"
+        )
+        self.assertEqual(unregistered_tool.error.code, "operation_failed")
 
         json_errors = [
             ("get_capture_summary", '{"status":"error","message":"missing"}', "capture_not_found"),
@@ -2893,8 +2964,8 @@ class TestServerTools(unittest.TestCase):
         self.assertFalse(fitted_within_budget.truncated)
         self.assertIsNone(fitted_within_budget.text)
 
-        self.assertEqual(capture_tools._bounded_json_text("value", 1, "long marker"), ("", True))
-        self.assertIsNone(capture_tools._truncate_utf8_with_marker("value", 1, "long marker"))
+        self.assertEqual(formatting_tools.bounded_json_text("value", 1, "long marker"), ("", True))
+        self.assertIsNone(formatting_tools.truncate_utf8_with_marker("value", 1, "long marker"))
 
     def test_mcp_adapter_rejects_non_envelope_factory_results(self):
         with patch.object(mcp_transport.mcp, "add_tool") as add_tool:
@@ -3205,6 +3276,43 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         return writer
 
+    @staticmethod
+    def capture_tool_result(
+        capture_id,
+        label,
+        line_count,
+        byte_size,
+        *,
+        truncated=False,
+        original_byte_size=None,
+        command_exit_code=None,
+        timed_out=False,
+        duration_ms=1.0,
+        structured_metrics=None,
+    ):
+        summary = formatting_tools.summary_payload({
+            "status": "ok",
+            "schema_version": 1,
+            "capture_id": capture_id,
+            "label": label,
+            "source": "socket",
+            "execution_status": "captured",
+            "partial": False,
+            "content_type": "text",
+            "total_lines": line_count,
+            "byte_size": byte_size,
+            "truncated": truncated,
+            "original_byte_size": original_byte_size,
+            "command_exit_code": command_exit_code,
+            "timed_out": timed_out,
+            "duration_ms": duration_ms,
+            "keyword_signals": {},
+            "errors": [],
+            "warnings": [],
+            "structured_metrics": structured_metrics or {},
+        })
+        return json.dumps(summary, ensure_ascii=False, sort_keys=True)
+
     async def test_startup_probe_is_acknowledged_without_registering_tool_call(self):
         token = b"startup-probe-token"
         address = "/tmp/ephemeral-startup-probe.sock"
@@ -3493,16 +3601,12 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_payload_returns_success_response(self):
         payload = encode_frame(json.dumps({"label": "socket-test", "text": "hello"}).encode())
-        capture = SimpleNamespace(
-            capture_id="cap_socket",
-            label="socket-test",
-            line_count=1,
-            byte_size=5,
-        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result("cap_socket", "socket-test", 1, 5)
+            ),
         ):
             writer = await self.run_handler(payload)
 
@@ -3558,40 +3662,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_socket_response_includes_compact_summary(self):
         payload = encode_frame(json.dumps({"label": "socket-summary", "text": "hello"}).encode())
-        capture = SimpleNamespace(
-            capture_id="cap_socket_summary",
-            label="socket-summary",
-            line_count=1,
-            byte_size=5,
-        )
-        summary = {
-            "status": "ok",
-            "schema_version": 1,
-            "capture_id": "cap_socket_summary",
-            "label": "socket-summary",
-            "source": "socket",
-            "execution_status": "captured",
-            "partial": False,
-            "content_type": "text",
-            "timestamp": "now",
-            "duration_ms": 1.0,
-            "command_exit_code": None,
-            "timed_out": False,
-            "total_lines": 1,
-            "byte_size": 5,
-            "original_byte_size": None,
-            "estimated_tokens": 2,
-            "original_estimated_tokens": None,
-            "truncated": False,
-            "keyword_signals": {},
-            "errors": [],
-            "warnings": [],
-            "structured_metrics": {},
-        }
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, summary)),
+            new=AsyncMock(
+                return_value=self.capture_tool_result(
+                    "cap_socket_summary", "socket-summary", 1, 5
+                )
+            ),
         ):
             writer = await self.run_handler(payload)
 
@@ -3600,29 +3678,104 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["summary"]["status"], "captured")
         self.assertNotIn("previews", response["summary"])
 
-    async def test_socket_response_bounds_long_command_label(self):
-        long_label = "x" * 10_000
-        payload = encode_frame(json.dumps({"label": long_label, "text": "hello"}).encode())
-        capture = SimpleNamespace(
-            capture_id="cap_long_label",
-            label=long_label,
-            line_count=1,
-            byte_size=5,
-        )
-        summary = {
-            "status": "ok",
-            "schema_version": 1,
-            "capture_id": "cap_long_label",
-            "label": long_label,
-            "source": "socket",
+    async def test_socket_dispatch_uses_capture_registration_and_preserves_ingest_metadata(self):
+        payload = encode_socket_request({
+            "label": "registered-socket-capture",
+            "text": "first line\nsecond line",
             "content_type": "text",
-            "total_lines": 1,
-            "byte_size": 5,
-        }
+            "truncated": True,
+            "original_byte_size": 40,
+            "command_exit_code": 7,
+            "timed_out": True,
+            "duration_ms": 12.5,
+            "structured_metrics": {"rows": 2},
+        })
+        expected_result = self.capture_tool_result(
+            "cap_registered_socket",
+            "registered-socket-capture",
+            2,
+            len("first line\nsecond line"),
+            truncated=True,
+            original_byte_size=40,
+            command_exit_code=7,
+            timed_out=True,
+            duration_ms=12.5,
+            structured_metrics={"rows": 2},
+        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, summary)),
+            new=AsyncMock(return_value=expected_result),
+        ) as offload:
+            writer = await self.run_handler(encode_frame(payload))
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["line_count"], 2)
+        self.assertEqual(response["byte_size"], len("first line\nsecond line"))
+        summary = response["summary"]
+        self.assertEqual(summary["source"], "socket")
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(summary["original_byte_size"], 40)
+        self.assertEqual(summary["exit_code"], 7)
+        self.assertTrue(summary["timed_out"])
+        self.assertEqual(summary["duration_ms"], 12.5)
+        self.assertEqual(summary["structured_metrics"], {"rows": 2})
+        self.assertIs(offload.await_args.args[0], get_tool_registration("capture_text").function)
+        self.assertEqual(offload.await_args.args[1], "first line\nsecond line")
+        self.assertEqual(offload.await_args.kwargs, {
+            "label": "registered-socket-capture",
+            "content_type": "text",
+            "structured_metrics": {"rows": 2},
+            "__ingest_metadata": {
+                "source": "socket",
+                "duration_ms": 12.5,
+                "truncated": True,
+                "original_byte_size": 40,
+                "command_exit_code": 7,
+                "timed_out": True,
+            },
+        })
+
+    async def test_socket_request_adapter_preserves_protocol_error(self):
+        payload = encode_socket_request({"label": "invalid-adapter", "text": "hello"})
+        registration = SimpleNamespace(
+            name="capture_text",
+            socket_admission_lane="socket",
+            socket_request_adapter=Mock(
+                side_effect=socket_transport.SocketRequestError("invalid mapped request")
+            ),
+            socket_response_adapter=Mock(),
+            function=Mock(),
+        )
+        writer = FakeWriter()
+        with patch.object(
+            socket_transport,
+            "get_socket_tool_registration",
+            return_value=registration,
+        ):
+            await socket_transport.handle_socket_client(
+                FakeReader(encode_frame(payload)), writer
+            )
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "invalid_socket_payload")
+        self.assertEqual(response["message"], "invalid mapped request")
+        registration.socket_request_adapter.assert_called_once()
+        registration.function.assert_not_called()
+
+    async def test_socket_response_bounds_long_command_label(self):
+        long_label = "x" * 10_000
+        payload = encode_frame(json.dumps({"label": long_label, "text": "hello"}).encode())
+        with patch.object(
+            server,
+            "to_thread",
+            new=AsyncMock(
+                return_value=self.capture_tool_result(
+                    "cap_long_label", long_label, 1, 5
+                )
+            ),
         ):
             writer = await self.run_handler(payload)
 
@@ -3643,16 +3796,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         socket_transport.METRICS = metrics
         try:
             payload = encode_frame(json.dumps({"label": "socket-metrics", "text": "hello"}).encode())
-            capture = SimpleNamespace(
-                capture_id="cap_socket_metrics",
-                label="socket-metrics",
-                line_count=1,
-                byte_size=5,
-            )
             with patch.object(
-                socket_transport,
+                server,
                 "to_thread",
-                new=AsyncMock(return_value=(capture, {"status": "error"})),
+                new=AsyncMock(
+                    return_value=self.capture_tool_result(
+                        "cap_socket_metrics", "socket-metrics", 1, 5
+                    )
+                ),
             ):
                 writer = await self.run_handler(payload)
         finally:
@@ -3664,17 +3815,13 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_payload_is_reassembled_across_socket_reads(self):
         payload = encode_frame(json.dumps({"label": "chunked", "text": "complete payload"}).encode())
-        capture = SimpleNamespace(
-            capture_id="cap_chunked",
-            label="chunked",
-            line_count=1,
-            byte_size=16,
-        )
         writer = FakeWriter()
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result("cap_chunked", "chunked", 1, 16)
+            ),
         ):
             await socket_transport.handle_socket_client(
                 ChunkedReader(payload[:7], payload[7:]),
@@ -3693,16 +3840,15 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
             len(payload),
             socket_transport.engine.max_buffer_bytes + socket_transport.SOCKET_PAYLOAD_OVERHEAD,
         )
-        capture = SimpleNamespace(
-            capture_id="cap_escaped",
-            label="escaped",
-            line_count=1,
-            byte_size=socket_transport.engine.max_buffer_bytes,
-        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result(
+                    "cap_escaped", "escaped", 1,
+                    socket_transport.engine.max_buffer_bytes,
+                )
+            ),
         ):
             writer = await self.run_handler(payload)
 
@@ -3757,35 +3903,33 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     async def test_ingest_is_offloaded_from_event_loop(self):
         payload = encode_frame(encode_socket_request({"label": "offload-test", "text": "hello"}))
-        capture = SimpleNamespace(
-            capture_id="cap_offload",
-            label="offload-test",
-            line_count=1,
-            byte_size=5,
-        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result(
+                    "cap_offload", "offload-test", 1, 5
+                )
+            ),
         ) as offload:
             await self.run_handler(payload)
 
         self.assertEqual(offload.await_count, 1)
-        ingest_callable = offload.await_args.args[0]
-        self.assertIs(ingest_callable.__self__, socket_transport.engine)
-        self.assertIs(ingest_callable.__func__, socket_transport.engine.ingest_with_summary.__func__)
+        registered_handler = offload.await_args.args[0]
+        self.assertIs(registered_handler, get_tool_registration("capture_text").function)
         self.assertEqual(offload.await_args.args[1], "hello")
         self.assertEqual(offload.await_args.kwargs, {
             "label": "offload-test",
             "content_type": "auto",
-            "truncated": False,
-            "original_byte_size": None,
-            "command_exit_code": None,
-            "timed_out": False,
-            "source": "socket",
-            "duration_ms": None,
             "structured_metrics": {},
-            "include_previews": False,
+            "__ingest_metadata": {
+                "source": "socket",
+                "duration_ms": None,
+                "truncated": False,
+                "original_byte_size": None,
+                "command_exit_code": None,
+                "timed_out": False,
+            },
         })
 
     async def test_oversized_payload_returns_error_response(self):
@@ -3810,16 +3954,12 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer.closed)
 
     async def test_malformed_payload_falls_back_to_plain_text(self):
-        capture = SimpleNamespace(
-            capture_id="cap_plain",
-            label="CLI pipe",
-            line_count=1,
-            byte_size=8,
-        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result("cap_plain", "CLI pipe", 1, 8)
+            ),
         ):
             writer = await self.run_handler(encode_frame(b"not-json"))
 
@@ -3828,16 +3968,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["label"], "CLI pipe")
 
     async def test_unknown_request_fields_are_ignored(self):
-        capture = SimpleNamespace(
-            capture_id="cap_unknown_field",
-            label="known-label",
-            line_count=1,
-            byte_size=7,
-        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result(
+                    "cap_unknown_field", "known-label", 1, 7
+                )
+            ),
         ) as offload:
             writer = await self.run_handler(encode_frame(json.dumps({
                 "text": "payload",
@@ -3850,16 +3988,14 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(offload.await_args.kwargs["label"], "known-label")
 
     async def test_legacy_v1_request_without_text_defaults_to_empty_string(self):
-        capture = SimpleNamespace(
-            capture_id="cap_legacy_empty",
-            label="missing-text",
-            line_count=0,
-            byte_size=0,
-        )
         with patch.object(
             server,
             "to_thread",
-            new=AsyncMock(return_value=(capture, {"status": "error"})),
+            new=AsyncMock(
+                return_value=self.capture_tool_result(
+                    "cap_legacy_empty", "missing-text", 0, 0
+                )
+            ),
         ) as offload:
             writer = await self.run_handler(encode_frame(b'{"label":"missing-text"}'))
 

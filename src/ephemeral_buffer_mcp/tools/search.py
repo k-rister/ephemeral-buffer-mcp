@@ -2,7 +2,7 @@
 
 from ..server import *  # noqa: F403
 from ..engine import MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_TOP_K
-from .capture import _bounded_summary_text
+from .formatting import bounded_summary_text
 from .registry import register_tool
 
 
@@ -14,12 +14,12 @@ def _render_search_text(
     query: Optional[str] = None,
 ) -> str:
     query = str(result.get("query", "") if query is None else query)
-    display_query, _ = _bounded_summary_text(
+    display_query, _ = bounded_summary_text(
         query,
         SEARCH_QUERY_MAX_BYTES,
         SEARCH_QUERY_TRUNCATION_MARKER,
     )
-    label, _ = _bounded_summary_text(
+    label, _ = bounded_summary_text(
         str(result.get("label", "")),
         SUMMARY_LABEL_MAX_BYTES,
         SUMMARY_LABEL_TRUNCATION_MARKER,
@@ -105,7 +105,7 @@ def _search_capture_response(
         response_budget_bytes=response_budget,
     )
     if res.get("status") == "error":
-        message, _ = _bounded_summary_text(
+        message, _ = bounded_summary_text(
             str(res.get("message", "search failed")),
             SUMMARY_LABEL_MAX_BYTES,
             "... [error truncated]",
@@ -136,12 +136,12 @@ def _search_capture_response(
     text_result.setdefault("query", query)
     structured_matches = []
     for match in engine_matches:
-        snippet, snippet_truncated = _bounded_summary_text(
+        snippet, snippet_truncated = bounded_summary_text(
             str(match.get("snippet", "")),
             SEARCH_STRUCTURED_MATCH_MAX_BYTES,
             SEARCH_SNIPPET_TRUNCATION_MARKER,
         )
-        context, context_truncated = _bounded_summary_text(
+        context, context_truncated = bounded_summary_text(
             str(match.get("context", "")),
             SEARCH_STRUCTURED_CONTEXT_MAX_BYTES,
             "... [raw context truncated; use get_capture_slice for full content] ...",
@@ -207,7 +207,12 @@ def _search_capture_response(
     return best
 
 
-@register_tool("search_capture", "search", structured_result_factory=_search_capture_response)
+@register_tool(
+    "search_capture",
+    "search",
+    structured_result_factory=_search_capture_response,
+    legacy_error_mode="search",
+)
 def search_capture(
     query: str,
     mode: Literal["hybrid", "bm25", "semantic"] = "hybrid",
