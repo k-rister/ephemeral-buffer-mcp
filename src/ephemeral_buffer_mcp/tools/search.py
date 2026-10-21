@@ -211,7 +211,6 @@ def _search_capture_response(
     "search_capture",
     "search",
     structured_result_factory=_search_capture_response,
-    legacy_error_mode="search",
 )
 def search_capture(
     query: str,

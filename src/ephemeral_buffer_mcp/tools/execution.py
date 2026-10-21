@@ -1,5 +1,7 @@
 """Execution domain handlers."""
 
+import inspect
+
 from ..server import *  # noqa: F403
 from .registry import register_tool
 
@@ -133,7 +135,11 @@ def _resolve_preflight_executable(tokens: list[str], resolved_cwd: str) -> dict[
 
 @register_tool("preflight_command", "diagnostics")
 @_instrument_tool("preflight_command")
-def preflight_command(command: str, cwd: Optional[str] = None) -> str:
+def preflight_command(
+    command: str,
+    cwd: Optional[str] = None,
+    __invocation_mode: str = "direct",
+) -> str:
     """Return content-free path and executable diagnostics without running ``command``.
 
     This resolves the working directory, symlink target, detectable Git
@@ -193,7 +199,19 @@ def preflight_command(command: str, cwd: Optional[str] = None) -> str:
             sort_keys=True,
         )
     except Exception as exc:
+        if __invocation_mode == "mcp":
+            return _execution_error_json("preflight_failed", str(exc))
         return json.dumps({"status": "error", "reason": type(exc).__name__})
+
+
+_preflight_command_signature = inspect.signature(preflight_command)
+preflight_command.__signature__ = _preflight_command_signature.replace(
+    parameters=tuple(
+        parameter
+        for parameter in _preflight_command_signature.parameters.values()
+        if parameter.name != "__invocation_mode"
+    )
+)
 
 
 @register_tool("start_execution", "execution", background_execution=True)

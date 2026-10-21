@@ -6,6 +6,9 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 - Require setuptools 77 or newer to build the full and lexical distributions
   with SPDX license metadata.
+- Preserve direct helper text and successful response shapes while returning
+  stable MCP error codes for capture, retrieval, clear, configuration, and
+  preflight failures; add exact response-shape regression assertions.
 
 ## 0.11.0 - 2026-10-18
 

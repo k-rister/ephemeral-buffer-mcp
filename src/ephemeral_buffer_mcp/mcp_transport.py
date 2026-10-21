@@ -206,24 +206,19 @@ def _legacy_tool_envelope(
     *,
     compact_text: bool = False,
     legacy_error_code: str | None = None,
-    legacy_error_mode: str | None = None,
 ) -> ToolResponseEnvelope:
     """Wrap an existing Python text result in the versioned MCP result shape."""
     text = result if isinstance(result, str) else str(result)
-    if legacy_error_code is None or legacy_error_mode is None:
+    if legacy_error_code is None:
         try:
             registration = get_tool_registration(tool)
         except KeyError:
             registration = None
         if registration is not None:
-            if legacy_error_code is None:
-                legacy_error_code = registration.legacy_error_code
-            if legacy_error_mode is None:
-                legacy_error_mode = registration.legacy_error_mode
-    legacy_error_mode = legacy_error_mode or "default"
+            legacy_error_code = registration.legacy_error_code
     data: Dict[str, Any] = {}
     error = None
-    status: Literal["ok", "error"] = "ok"
+    status = "ok"
     try:
         payload = json.loads(text)
     except (TypeError, ValueError):
@@ -234,33 +229,17 @@ def _legacy_tool_envelope(
             status = "error"
             if payload.get("error_code"):
                 error_code = str(payload["error_code"])
-            elif legacy_error_code is not None:
-                error_code = legacy_error_code
             else:
-                error_code = f"{tool}_failed"
+                error_code = legacy_error_code or "operation_failed"
             error = ToolErrorEnvelope(
                 code=error_code,
                 message=str(payload.get("message") or "The operation failed."),
             )
         else:
             data = payload
-    elif text.startswith(("Error", "Search Error")) or (
-        legacy_error_mode == "clear" and "not found" in text.lower()
-    ):
+    elif text.startswith(("Error", "Search Error")):
         status = "error"
-        if legacy_error_mode == "retrieval":
-            code = "capture_not_found" if "not found" in text.lower() else "retrieval_failed"
-        elif legacy_error_mode == "search":
-            code = "invalid_search_request" if any(
-                marker in text.lower()
-                for marker in ("query must", "query exceeds", "unsupported", "top_k", "context_lines")
-            ) else "search_failed"
-        elif legacy_error_mode == "capture":
-            code = "capture_failed"
-        elif legacy_error_mode == "clear" and "not found" in text.lower():
-            code = "capture_not_found"
-        else:
-            code = "operation_failed"
+        code = legacy_error_code or "operation_failed"
         error = ToolErrorEnvelope(code=code, message=text)
     else:
         data = {"message": text}
@@ -345,7 +324,6 @@ def create_mcp_server(context: "ServiceContext | None" = None):
             mcp_admission_lane=registration.mcp_admission_lane,
             background_execution=registration.background_execution,
             legacy_error_code=registration.legacy_error_code,
-            legacy_error_mode=registration.legacy_error_mode,
         )
     return app
 
@@ -361,7 +339,6 @@ def _register_mcp_tool_for_app(
     mcp_admission_lane=None,
     background_execution=None,
     legacy_error_code=None,
-    legacy_error_mode=None,
 ):
     """Register one shared tool implementation with context-bound adapters."""
     try:
@@ -375,11 +352,8 @@ def _register_mcp_tool_for_app(
             background_execution = registration.background_execution
         if legacy_error_code is None:
             legacy_error_code = registration.legacy_error_code
-        if legacy_error_mode is None:
-            legacy_error_mode = registration.legacy_error_mode
     mcp_admission_lane = mcp_admission_lane or "mcp"
     background_execution = bool(background_execution)
-    legacy_error_mode = legacy_error_mode or "default"
     # Reuse the registration behavior installed by the decorator factory.
     @wraps(function)
     async def adapter(*args, **kwargs):
@@ -452,7 +426,6 @@ def _register_mcp_tool_for_app(
                         result,
                         compact_text=compact_text,
                         legacy_error_code=legacy_error_code,
-                        legacy_error_mode=legacy_error_mode,
                     )
                 return _call_tool_result(
                     _fit_tool_envelope(response, compact_text=compact_text)
