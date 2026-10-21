@@ -1,6 +1,7 @@
 """Regression checks for lazy transports and the stable MCP tool contract."""
 
 import asyncio
+import ast
 import json
 import os
 from pathlib import Path
@@ -8,9 +9,11 @@ import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ephemeral_buffer_mcp import create_mcp_server, create_service_context
+from ephemeral_buffer_mcp.config import load_settings
+from ephemeral_buffer_mcp.mcp_transport import _record_tool_response_bytes
 import ephemeral_buffer_mcp.server as server
 from ephemeral_buffer_mcp.tools.registry import (
     TOOL_CATEGORIES,
@@ -23,6 +26,42 @@ from ephemeral_buffer_mcp.tools.registry import (
 
 
 class TestTransportDecomposition(unittest.TestCase):
+    def test_mcp_response_byte_metrics_ignore_non_text_content(self):
+        record_bytes = Mock()
+        metrics = SimpleNamespace(record_bytes=record_bytes)
+        _record_tool_response_bytes(SimpleNamespace(metrics=metrics), "capture_text", None)
+
+        record_bytes.assert_not_called()
+
+    def test_tool_modules_use_only_the_named_server_context_bridge(self):
+        tools_root = Path(__file__).parents[2] / "src" / "ephemeral_buffer_mcp" / "tools"
+        expected_context_accessors = {
+            "_active_engine",
+            "_active_execution_manager",
+            "_active_metrics",
+            "_active_settings",
+            "_metrics_snapshot",
+            "_request_cancel_event",
+            "_server_started_at",
+            "_write_metrics_snapshot",
+        }
+        context_imports = set()
+        for path in tools_root.glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if any(alias.name == "*" for alias in node.names):
+                    self.fail(f"wildcard import remains in {path.name}")
+                if node.module == "server":
+                    self.assertEqual(path.name, "_context.py")
+                    context_imports.update(alias.name for alias in node.names)
+                if node.module == "capture" and any(
+                    alias.name.startswith("_") for alias in node.names
+                ):
+                    self.fail(f"private capture helper imported by {path.name}")
+        self.assertEqual(context_imports, expected_context_accessors)
+
     def test_legacy_server_mcp_lookups_resolve_from_transport_registry(self):
         self.assertEqual(server._REGISTERED_MCP_TOOL_NAMES, get_tool_names())
         self.assertEqual(server._REGISTERED_MCP_TOOL_CATEGORIES, get_tool_categories())
@@ -118,6 +157,49 @@ class TestTransportDecomposition(unittest.TestCase):
         )
         self.assertEqual(failure["status"], "error")
         self.assertEqual(failure["error"]["code"], "capture_not_found")
+
+    def test_mcp_response_byte_metrics_measure_the_final_adapter_text_once(self):
+        settings = load_settings({**os.environ, "EPHEMERAL_METRICS": "1"})
+        context = create_service_context(
+            settings,
+            metrics_file=None,
+            engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+        )
+        try:
+            app = create_mcp_server(context)
+            capture = asyncio.run(
+                app.call_tool("capture_text", {"content": "needle in response metrics"})
+            )
+            capture_id = capture.structured_content["data"]["capture_id"]
+            search = asyncio.run(
+                app.call_tool(
+                    "search_capture",
+                    {"query": "needle", "mode": "bm25", "capture_id": capture_id},
+                )
+            )
+            retrieval = asyncio.run(
+                app.call_tool(
+                    "get_capture_slice",
+                    {"start_line": 1, "end_line": 1, "capture_id": capture_id},
+                )
+            )
+
+            capture_text = capture.content[0].text
+            search_text = search.content[0].text
+            retrieval_text = retrieval.content[0].text
+            byte_counts = context.metrics.snapshot()["bytes"]
+        finally:
+            context.close()
+
+        self.assertEqual(
+            byte_counts["tool_response_bytes"],
+            sum(len(text.encode("utf-8")) for text in (capture_text, search_text, retrieval_text)),
+        )
+        self.assertEqual(byte_counts["search_response_bytes"], len(search_text.encode("utf-8")))
+        self.assertEqual(
+            byte_counts["retrieval_response_bytes"],
+            len(retrieval_text.encode("utf-8")),
+        )
 
 
 if __name__ == "__main__":

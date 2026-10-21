@@ -2,11 +2,31 @@
 
 import inspect
 import json
+from typing import Annotated, Any, Dict, List, Optional
 
-from ..server import *  # noqa: F403
-from .capture import _summary_json, _summary_response
+from pydantic import Field
+
+from ..engine import CAPTURE_SLICE_SEGMENT_MAX_BYTES, MAX_CAPTURE_SLICE_CONTENT_BYTES
+from ..mcp_response import (
+    ToolErrorEnvelope,
+    ToolResponseEnvelope,
+    call_tool_result_bytes as _call_tool_result_bytes,
+)
+from ..response_limits import (
+    MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+    MCP_TOOL_RESPONSE_MAX_BYTES,
+    SUMMARY_LABEL_MAX_BYTES,
+    SUMMARY_LABEL_TRUNCATION_MARKER,
+)
+from ._context import (
+    active_engine as _active_engine,
+    compact_results_enabled as _compact_tool_results_enabled_for_mcp,
+)
+from .capture import _summary_response
 from .formatting import bounded_json_text, bounded_summary_text
+from .instrumentation import _instrument_tool
 from .registry import register_tool
+from .summary import summary_json as _summary_json
 
 
 @_instrument_tool("get_capture_slice")

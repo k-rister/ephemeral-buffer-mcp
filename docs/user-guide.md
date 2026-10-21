@@ -192,6 +192,11 @@ a context-specific `metrics_file` to persist a snapshot. The standard
 `python -m ephemeral_buffer_mcp.server` entrypoint continues to use the
 default context.
 
+Calls made through the returned MCP app are bound to the supplied context.
+Registered handler functions are internal implementation details; calling one
+directly outside an active context uses the process default. Use the MCP app as
+the supported embedding interface.
+
 ### Start an isolated Codex session
 
 When using the global Codex MCP configuration, start Codex through the
