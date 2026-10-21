@@ -1,13 +1,37 @@
 """Capture domain handlers."""
 
 import inspect
+import json
+import logging
+import os
+import stat
+import time
+from typing import Any, Dict, List, Literal, Optional
 
-from ..server import *  # noqa: F403
+from ..capture_utils import read_file_bounded, run_command_bounded
+from ..engine import normalize_structured_metrics
+from ..logging_utils import get_logger, log_event
+from ..mcp_response import ToolErrorEnvelope, ToolResponseEnvelope
+from ..response_limits import (
+    CONSOLIDATION_CAPTURE_ID_MAX_BYTES,
+    CONSOLIDATION_MAX_CAPTURES,
+    SUMMARY_COMMAND_MAX_BYTES,
+    SUMMARY_COMMAND_TRUNCATION_MARKER,
+    SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
+    SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES,
+    SUMMARY_LABEL_MAX_BYTES,
+)
+from ._context import active_engine as _active_engine
+from ._context import current_request_cancel_event
+from .instrumentation import _instrument_tool
 from .registry import register_tool
 from .formatting import (
     bounded_summary_text,
     summary_payload,
 )
+from .summary import summary_json as _summary_json
+
+LOGGER = get_logger("server")
 
 CaptureContentType = Literal["auto", "diff", "log", "text"]
 CAPTURE_CONTENT_TYPES = ("auto", "diff", "log", "text")
@@ -27,19 +51,6 @@ def _bounded_command(command: str) -> tuple[str, bool]:
         SUMMARY_COMMAND_MAX_BYTES,
         SUMMARY_COMMAND_TRUNCATION_MARKER,
     )
-
-
-def _summary_json(
-    capture_id: str,
-    include_previews: bool = False,
-    capture: Optional[Any] = None,
-) -> str:
-    """Return a compact JSON summary suitable for an agent response."""
-    return _summary_response(
-        capture_id,
-        include_previews=include_previews,
-        capture=capture,
-    ).text or ""
 
 
 def _summary_response(
@@ -341,7 +352,7 @@ def execute_and_capture(
             cwd,
             output_limit,
             timeout_seconds,
-            cancellation_event=_REQUEST_CANCEL_EVENT.get(),
+            cancellation_event=current_request_cancel_event(),
         )
         output, exit_code, truncated, original_byte_size, timed_out = command_result
         duration_ms = round((time.perf_counter() - command_started) * 1000, 3)

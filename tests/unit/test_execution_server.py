@@ -19,6 +19,7 @@ os.environ.setdefault("EPHEMERAL_TEST_EMBEDDINGS", "1")
 
 import ephemeral_buffer_mcp.server as server
 import ephemeral_buffer_mcp.socket_transport as socket_transport
+import ephemeral_buffer_mcp.tools.execution_responses as execution_responses
 from ephemeral_buffer_mcp.execution import (
     ExecutionBusyError,
     ExecutionDiskSpaceError,
@@ -251,7 +252,7 @@ class TestExecutionTools(unittest.TestCase):
         capture = server.engine.ingest("current session output")
         payload = {"phases": [{"result": {"capture_id": capture.capture_id}}]}
 
-        self.assertIs(server._execution_public_payload(payload), payload)
+        self.assertIs(execution_responses._execution_public_payload(payload), payload)
         self.assertFalse(payload["phases"][0]["result"]["capture_available"])
 
     def test_unsafe_side_effect_alias_normalizes_before_manager_validation(self):
@@ -293,9 +294,9 @@ class TestExecutionTools(unittest.TestCase):
 
     def test_execution_payload_preserves_phases_without_capture_references(self):
         payload = {"phases": [{"result": None}, {"result": {"exit_code": 0}}]}
-        self.assertIs(server._execution_public_payload(payload), payload)
+        self.assertIs(execution_responses._execution_public_payload(payload), payload)
         self.assertNotIn("capture_available", payload["phases"][1]["result"])
-        self.assertEqual(server._json_dumps_with_limit({"ok": True}, None), '{"ok":true}')
+        self.assertEqual(execution_responses._json_dumps_with_limit({"ok": True}, None), '{"ok":true}')
 
     def test_socket_probe_paths_are_covered_without_host_socket_permissions(self):
         class FailingLoop:
@@ -468,7 +469,7 @@ class TestExecutionTools(unittest.TestCase):
             "execution_not_found",
         )
         self.assertEqual(
-            json.loads(server._execution_json(lambda: "x" * 20, max_response_bytes=10))[
+            json.loads(execution_responses._execution_json(lambda: "x" * 20, max_response_bytes=10))[
                 "error"]["code"],
             "response_too_large",
         )
@@ -504,7 +505,7 @@ class TestExecutionTools(unittest.TestCase):
         )
         for error, expected_code in cases:
             with self.subTest(error=type(error).__name__, code=expected_code):
-                response = json.loads(server._execution_json(operation_for(error)))
+                response = json.loads(execution_responses._execution_json(operation_for(error)))
                 self.assertEqual(response["status"], "error")
                 self.assertEqual(response["error"]["code"], expected_code)
                 self.assertEqual(response["error"]["message"], str(error))
@@ -514,7 +515,7 @@ class TestExecutionTools(unittest.TestCase):
             reason_code="UNSUPPORTED_SCHEMA_VERSION",
             schema_version=999,
         )
-        response = json.loads(server._execution_json(operation_for(unsupported)))
+        response = json.loads(execution_responses._execution_json(operation_for(unsupported)))
         self.assertEqual(response["error"]["code"], "unsupported_schema_version")
         self.assertEqual(
             response["error"]["details"],
@@ -524,14 +525,14 @@ class TestExecutionTools(unittest.TestCase):
         malformed = ExecutionRecordError(
             "malformed", reason_code="MALFORMED_RECORD", schema_version="v" * 80
         )
-        response = json.loads(server._execution_json(operation_for(malformed)))
+        response = json.loads(execution_responses._execution_json(operation_for(malformed)))
         self.assertEqual(response["error"]["code"], "malformed_record")
         self.assertEqual(response["error"]["details"]["schema_version"], "v" * 64)
 
         non_finite = ExecutionRecordError(
             "malformed", reason_code="MALFORMED_RECORD", schema_version=float("nan")
         )
-        response = json.loads(server._execution_json(operation_for(non_finite)))
+        response = json.loads(execution_responses._execution_json(operation_for(non_finite)))
         self.assertNotIn("schema_version", response["error"]["details"])
 
     def test_record_diagnostics_include_stable_error_codes(self):
@@ -542,7 +543,7 @@ class TestExecutionTools(unittest.TestCase):
             "schema_version": 999,
             "message": "unsupported schema",
         }
-        response = json.loads(server._execution_json(lambda: unsupported))
+        response = json.loads(execution_responses._execution_json(lambda: unsupported))
         self.assertEqual(response["status"], "unsupported_record")
         self.assertEqual(response["error"]["code"], "unsupported_schema_version")
         self.assertEqual(
@@ -562,7 +563,7 @@ class TestExecutionTools(unittest.TestCase):
                 }
             ],
         }
-        response = json.loads(server._execution_json(lambda: listed))
+        response = json.loads(execution_responses._execution_json(lambda: listed))
         self.assertEqual(
             response["executions"][0]["error"]["code"], "malformed_record"
         )

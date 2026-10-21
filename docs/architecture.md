@@ -51,7 +51,10 @@ policy to both transports. MCP and socket calls share service tracking,
 admission, cancellation context, and cleanup; the socket adapter maps its
 framed capture request to the registered capture handler and keeps framing and
 wire-response encoding at the transport boundary. The supported Python
-embedding API remains `create_mcp_server` and `create_service_context`.
+embedding API remains `create_mcp_server` and `create_service_context`. The MCP
+adapter binds each registered handler call to the context used to build its
+application; direct calls to registry handlers are internal and use the active
+context, falling back to the process default when none is active.
 
 ## Admission and storage bounds
 

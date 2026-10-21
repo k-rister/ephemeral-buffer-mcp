@@ -19,13 +19,19 @@ from mcp.types import CallToolResult, TextContent
 
 from . import server as _runtime
 from .server import *  # noqa: F403
+from .mcp_response import (
+    ToolErrorEnvelope,
+    ToolResponseEnvelope,
+    call_tool_result_bytes as _call_tool_result_bytes,
+    compact_tool_text as _compact_tool_text,
+)
 from .mcpserver_adapter import (
     compatibility_diagnostics as _mcpserver_compatibility_diagnostics,
     refresh_instructions as _refresh_mcpserver_instructions,
     register_tool as _register_mcpserver_tool,
 )
 from .tools import load_tool_handlers
-from .tools.formatting import bounded_summary_text, truncate_utf8_with_marker
+from .response_formatting import bounded_summary_text, truncate_utf8_with_marker
 from .tools.registry import (
     TOOL_CATEGORIES,
     get_tool_categories,
@@ -118,67 +124,6 @@ class _MCPRequestMetricsMiddleware:
                 return await call_next(request_context)
 
 
-def _compact_tool_text(envelope: ToolResponseEnvelope) -> str:
-    """Render concise MCP text without repeating structured payload fields."""
-    parts = [f"status={envelope.status}"]
-    if envelope.error is not None:
-        parts.append(f"error_code={envelope.error.code}")
-
-    data = envelope.data if isinstance(envelope.data, dict) else {}
-    if data.get("status") not in (None, envelope.status):
-        parts.append(f"result_status={data['status']}")
-    for key in _COMPACT_RESULT_SUMMARY_FIELDS:
-        value = data.get(key)
-        if value is None or isinstance(value, (dict, list)):
-            continue
-        if isinstance(value, str):
-            value, _ = bounded_summary_text(value, 160, "... [truncated]")
-            value = json.dumps(value, ensure_ascii=False)
-        else:
-            value = json.dumps(value, ensure_ascii=False)
-        parts.append(f"{key}={value}")
-    if envelope.error is None and isinstance(data.get("message"), str):
-        message, _ = bounded_summary_text(
-            data["message"], 160, "... [truncated]"
-        )
-        parts.append(f"message={json.dumps(message, ensure_ascii=False)}")
-
-    if envelope.truncated or data.get("truncated"):
-        parts.append("truncated=true")
-    next_cursor = envelope.next_cursor or data.get("next_cursor")
-    if next_cursor:
-        # The cursor is a bounded opaque continuation handle; preserve it exactly.
-        parts.append(f"next_cursor={json.dumps(next_cursor, ensure_ascii=False)}")
-
-    matches = data.get("matches")
-    if isinstance(matches, list) and matches:
-        ranges = [
-            str(match["matched_range"])
-            for match in matches[:5]
-            if isinstance(match, dict) and match.get("matched_range") is not None
-        ]
-        if ranges:
-            parts.append(f"matched_ranges={json.dumps(ranges, ensure_ascii=False)}")
-        parts.append("match_details=structuredContent.data.matches")
-        parts.append("Use get_capture_slice for full content.")
-    elif "content" in data:
-        parts.append("content=structuredContent.data.content")
-    elif isinstance(data.get("captures"), list):
-        capture_ids = [
-            capture["capture_id"]
-            for capture in data["captures"][:5]
-            if isinstance(capture, dict) and capture.get("capture_id") is not None
-        ]
-        if capture_ids:
-            parts.append(f"capture_ids={json.dumps(capture_ids, ensure_ascii=False)}")
-        parts.append("capture_details=structuredContent.data.captures")
-    elif envelope.error is not None:
-        parts.append("details=structuredContent.error.message")
-    else:
-        parts.append("details=structuredContent")
-
-    parts.append("Set EPHEMERAL_COMPACT_TOOL_RESULTS=false for legacy text output.")
-    return "Compact result: " + "; ".join(parts)
 
 
 def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
@@ -189,15 +134,6 @@ def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
     )
 
 
-def _call_tool_result_bytes(
-    envelope: ToolResponseEnvelope,
-    *,
-    compact_text: bool = False,
-) -> int:
-    """Measure the JSON-encoded MCP result body, including both result channels."""
-    if compact_text:
-        envelope = envelope.model_copy(update={"text": _compact_tool_text(envelope)})
-    return len(_call_tool_result(envelope).model_dump_json(by_alias=True).encode("utf-8"))
 
 
 def _legacy_tool_envelope(
@@ -328,6 +264,18 @@ def create_mcp_server(context: "ServiceContext | None" = None):
     return app
 
 
+def _record_tool_response_bytes(service_context, name: str, text: Any) -> None:
+    """Record the final MCP response text after transport fitting."""
+    if isinstance(text, str):
+        response_bytes = len(text.encode("utf-8"))
+        metrics = service_context.metrics
+        metrics.record_bytes("tool_response_bytes", response_bytes)
+        if name == "search_capture":
+            metrics.record_bytes("search_response_bytes", response_bytes)
+        elif name in {"get_capture_slice", "get_capture_summary"}:
+            metrics.record_bytes("retrieval_response_bytes", response_bytes)
+
+
 def _register_mcp_tool_for_app(
     app,
     function,
@@ -420,6 +368,14 @@ def _register_mcp_tool_for_app(
                         **dispatch_kwargs,
                     )
                     if category not in {"capture", "retrieval", "search", "lifecycle"}:
+                        _record_tool_response_bytes(service_context, name, result)
+                        await _run_admitted_thread(
+                            ticket,
+                            _write_metrics_snapshot,
+                            service_context,
+                            _service_context=service_context,
+                            _call_id=call_id,
+                        )
                         return result
                     response = _legacy_tool_envelope(
                         name,
@@ -427,9 +383,16 @@ def _register_mcp_tool_for_app(
                         compact_text=compact_text,
                         legacy_error_code=legacy_error_code,
                     )
-                return _call_tool_result(
-                    _fit_tool_envelope(response, compact_text=compact_text)
+                fitted = _fit_tool_envelope(response, compact_text=compact_text)
+                _record_tool_response_bytes(service_context, name, fitted.text)
+                await _run_admitted_thread(
+                    ticket,
+                    _write_metrics_snapshot,
+                    service_context,
+                    _service_context=service_context,
+                    _call_id=call_id,
                 )
+                return _call_tool_result(fitted)
 
             return await _run_admitted_tool_call(
                 service_context,

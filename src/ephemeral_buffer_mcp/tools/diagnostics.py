@@ -1,10 +1,28 @@
 """Diagnostics domain handlers."""
 
 import importlib
+import json
+import logging
+import os
+import platform
+import re
+import time
 from importlib.metadata import PackageNotFoundError, version as package_version
+from pathlib import Path
+from typing import Optional
 
-from ..server import *  # noqa: F403
+from ..logging_utils import get_logger
+from ._context import (
+    active_engine as _active_engine,
+    active_metrics as _active_metrics,
+    active_settings as _active_settings,
+    metrics_snapshot as _metrics_snapshot,
+    server_started_at as _server_started_at,
+)
+from .instrumentation import _instrument_tool
 from .registry import register_tool
+
+LOGGER = get_logger("server")
 
 
 def _runtime_package_version() -> str:
@@ -157,7 +175,7 @@ def get_runtime_diagnostics() -> str:
         "default:shared legacy socket": "shared default path",
     }[identity.socket_source]
 
-    uptime_seconds = max(0, int(time.time() - SERVER_STARTED_AT))
+    uptime_seconds = max(0, int(time.time() - _server_started_at()))
     socket_state, socket_failure = _socket_lifecycle()
     file_handler = next(
         (handler for handler in LOGGER.handlers if isinstance(handler, logging.FileHandler)),

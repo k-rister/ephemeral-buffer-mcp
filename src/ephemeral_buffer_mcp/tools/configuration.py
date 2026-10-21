@@ -1,8 +1,11 @@
 """Configuration domain handlers."""
 
 import inspect
+import json
 
-from ..server import *  # noqa: F403
+from ..config import runtime_index_budget_adjustment_enabled
+from ._context import active_engine as _active_engine
+from .instrumentation import _instrument_tool
 from .registry import register_tool
 
 

@@ -8,7 +8,6 @@ import atexit
 import dataclasses
 import asyncio
 import json
-import inspect
 import math
 import os
 import sys
@@ -17,12 +16,10 @@ import socket
 import stat
 import threading
 import logging
-import itertools
 import platform
 import re
 import shlex
 import shutil
-import subprocess
 import time
 import tempfile
 import uuid
@@ -30,18 +27,11 @@ import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial, wraps
+from functools import partial
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
+from typing import Any, Dict, Optional
 from .config import (
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
     cleanup_execution_state_dir,
@@ -65,15 +55,31 @@ from .engine import (
     EphemeralEngine,
     normalize_structured_metrics,
 )
-from .tools.formatting import (
+from .response_limits import (
+    CONSOLIDATION_CAPTURE_ID_MAX_BYTES,
+    CONSOLIDATION_MAX_CAPTURES,
+    EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+    MCP_TOOL_RESPONSE_MAX_BYTES,
+    SEARCH_MATCHES_OMITTED_MARKER,
     SEARCH_QUERY_MAX_BYTES,
     SEARCH_QUERY_TRUNCATION_MARKER,
+    SEARCH_RESPONSE_MAX_BYTES,
+    SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER,
+    SEARCH_SNIPPET_TRUNCATION_MARKER,
+    SEARCH_STRUCTURED_CONTEXT_MAX_BYTES,
+    SEARCH_STRUCTURED_MATCH_MAX_BYTES,
     SUMMARY_COMMAND_MAX_BYTES,
     SUMMARY_COMMAND_TRUNCATION_MARKER,
     SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
     SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES,
     SUMMARY_LABEL_MAX_BYTES,
     SUMMARY_LABEL_TRUNCATION_MARKER,
+)
+from .mcp_response import (
+    ToolErrorEnvelope,
+    ToolResponseEnvelope,
+    call_tool_result_bytes as _call_tool_result_bytes,
 )
 from .capture_utils import read_file_bounded, run_command_bounded
 from .execution import (
@@ -94,10 +100,6 @@ from .execution import (
 )
 from .logging_utils import get_logger, log_event
 from .metrics import LocalMetrics
-from .schema_versions import (
-    CAPTURE_SUMMARY_SCHEMA_VERSION,
-    TOOL_RESPONSE_SCHEMA_VERSION,
-)
 from .admission import (
     ADMISSION_METRICS,
     AdmissionBusy,
@@ -131,24 +133,6 @@ def socket_isolation_configured() -> bool:
 # JSON string escaping can expand a UTF-8 capture by at most six bytes per
 # source byte (for example, a control character encoded as ``\u0000``).
 SOCKET_JSON_MAX_EXPANSION = 6
-EXECUTION_OUTPUT_RESPONSE_MAX_BYTES = 64 * 1024
-MCP_TOOL_RESPONSE_MAX_BYTES = 64 * 1024
-MCP_JSONRPC_ENVELOPE_RESERVE_BYTES = 1024
-SEARCH_RESPONSE_MAX_BYTES = (
-    MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
-)
-SEARCH_STRUCTURED_MATCH_MAX_BYTES = 2 * 1024
-SEARCH_STRUCTURED_CONTEXT_MAX_BYTES = 1024
-SEARCH_SNIPPET_TRUNCATION_MARKER = (
-    "... [snippet truncated; use the Context range above with get_capture_slice for full content]"
-)
-SEARCH_MATCHES_OMITTED_MARKER = (
-    "... [Additional matches omitted; the search response reached its byte budget]"
-)
-SEARCH_SNIPPET_AND_MATCHES_TRUNCATION_MARKER = (
-    "... [snippet truncated; Additional matches omitted. "
-    "Use the Context range above with get_capture_slice for full content]"
-)
 
 # The MCP and socket gates together bound submissions to this process-owned
 # executor, so EB work does not accumulate in asyncio's default executor queue.
@@ -254,294 +238,10 @@ async def _run_admitted_tool_call(
 _REQUEST_CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
     "ephemeral_request_cancel_event", default=None
 )
-CONSOLIDATION_MAX_CAPTURES = 25
-CONSOLIDATION_CAPTURE_ID_MAX_BYTES = 256
 SOCKET_STARTUP_TIMEOUT_SECONDS = SETTINGS.socket_startup_timeout_seconds.value
 SERVER_STARTED_AT = time.time()
 LOGGER = get_logger("server")
 METRICS = LocalMetrics(enabled=SETTINGS.metrics_enabled.value)
-_TOOL_CALL_IDS = itertools.count(1)
-_TIMEOUT_RESULT_TOOLS = {
-    "execute_and_capture",
-    "start_execution",
-    "resume_execution",
-}
-
-
-class ToolErrorEnvelope(BaseModel):
-    """Stable machine-readable error information for public tool results."""
-
-    code: str
-    message: str
-
-
-class ToolResponseEnvelope(BaseModel):
-    """Versioned structured result paired with readable MCP text content."""
-
-    schema_version: Literal[TOOL_RESPONSE_SCHEMA_VERSION] = (
-        TOOL_RESPONSE_SCHEMA_VERSION
-    )
-    status: Literal["ok", "error"]
-    data: Dict[str, Any] = Field(default_factory=dict)
-    error: Optional[ToolErrorEnvelope] = None
-    text: Optional[str] = None
-    truncated: bool = False
-    next_cursor: Optional[str] = None
-
-
-def _call_tool_result_bytes(
-    envelope: ToolResponseEnvelope,
-    *,
-    compact_text: bool = False,
-) -> int:
-    """Measure the MCP result wire shape without importing the MCP SDK."""
-    text = envelope.text or ""
-    if compact_text:
-        module = import_module(".mcp_transport", __package__)
-        text = module._compact_tool_text(envelope)
-    result = {
-        "_meta": None,
-        "content": [
-            {"type": "text", "text": text, "annotations": None, "_meta": None}
-        ],
-        "structuredContent": envelope.model_dump(
-            mode="json", by_alias=True, exclude={"text"}
-        ),
-        "isError": False,
-        "resultType": "complete",
-    }
-    return len(
-        json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    )
-def _classify_failure_text(text: str) -> str:
-    """Map an internal error description to a content-free failure category."""
-    normalized = text.lower()
-    if any(marker in normalized for marker in ("timeout", "timed out", "deadline")):
-        return "timeout"
-    if any(marker in normalized for marker in (
-        "socket",
-        "connection refused",
-        "connection reset",
-        "connection aborted",
-        "broken pipe",
-        "econn",
-    )):
-        return "socket"
-    if any(marker in normalized for marker in (
-        "embedding",
-        "semantic index",
-        "fastembed",
-        "onnx",
-    )):
-        return "embedding"
-    if any(marker in normalized for marker in ("evict", "eviction")):
-        return "eviction"
-    if any(marker in normalized for marker in (
-        "invalid",
-        "must ",
-        "unsupported",
-        "not found",
-        "does not exist",
-        "exceeds",
-        "at least",
-        "disabled",
-        "cannot ",
-        "no capture",
-    )):
-        return "validation"
-    return "other"
-
-
-def _classify_tool_exception(tool: str, exc: Exception, kwargs: dict[str, Any]) -> str:
-    """Classify exceptions without exposing their messages in metrics."""
-    if type(exc).__name__.lower().find("evict") >= 0:
-        return "eviction"
-    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
-        return "timeout"
-    if isinstance(exc, (
-        ConnectionError,
-        BrokenPipeError,
-        ConnectionAbortedError,
-        ConnectionRefusedError,
-        ConnectionResetError,
-    )):
-        return "socket"
-    if (
-        tool == "search_capture"
-        and kwargs.get("mode", "hybrid") in {"hybrid", "semantic"}
-    ):
-        return "embedding"
-    if isinstance(exc, (ValueError, TypeError)):
-        return "validation"
-    return "other"
-
-
-def _classify_tool_result(tool: str, result: Any) -> str | None:
-    """Classify structured or textual tool errors without retaining payloads."""
-    if isinstance(result, ToolResponseEnvelope):
-        if result.status == "error" and result.error is not None:
-            return _classify_failure_text(f"{result.error.code} {result.error.message}")
-        return None
-    if isinstance(result, str):
-        try:
-            payload = json.loads(result)
-        except (TypeError, ValueError):
-            payload = None
-        if isinstance(payload, dict):
-            phases = payload.get("phases", ())
-            if not isinstance(phases, list):
-                phases = ()
-            if (
-                tool in _TIMEOUT_RESULT_TOOLS
-                and (
-                    payload.get("timed_out") is True
-                    or payload.get("execution_status") in {"timed_out", "timeout"}
-                    or any(
-                        isinstance(phase, dict)
-                        and (
-                            phase.get("timed_out") is True
-                            or phase.get("status") in {"timed_out", "timeout"}
-                            or (
-                                isinstance(phase.get("result"), dict)
-                                and (
-                                    phase["result"].get("timed_out") is True
-                                    or phase["result"].get("status") in {"timed_out", "timeout"}
-                                )
-                            )
-                        )
-                        for phase in phases
-                    )
-                )
-            ):
-                return "timeout"
-            if payload.get("status") == "error":
-                return _classify_failure_text(str(payload.get("message", "")))
-        if result.startswith(("Error", "Search Error")):
-            return _classify_failure_text(result)
-    return None
-
-
-def _compact_tool_results_enabled_for_mcp(invocation_mode="direct") -> bool:
-    """Read the compact-result preference only for explicit MCP dispatch."""
-    if invocation_mode != "mcp":
-        return False
-    context = _active_service_context()
-    setting = getattr(
-        getattr(context, "settings", SETTINGS),
-        "compact_tool_results_enabled",
-        None,
-    )
-    return bool(getattr(setting, "value", False))
-
-
-def _instrument_tool(name):
-    """Decorate a tool with opt-in content-free call metrics and timing logs."""
-    def decorator(function):
-        @wraps(function)
-        def wrapper(*args, **kwargs):
-            invocation_mode = kwargs.pop("__invocation_mode", "direct")
-            if "__invocation_mode" in inspect.signature(function).parameters:
-                kwargs["__invocation_mode"] = invocation_mode
-            call_id = next(_TOOL_CALL_IDS)
-            started = time.perf_counter()
-            log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
-            try:
-                metrics = _active_metrics()
-                with metrics.measure(name) as state:
-                    try:
-                        result = function(*args, **kwargs)
-                    except Exception as exc:
-                        state["failure_category"] = _classify_tool_exception(
-                            name, exc, kwargs
-                        )
-                        raise
-                    response_text = (
-                        result.text if isinstance(result, ToolResponseEnvelope) else result
-                    )
-                    if invocation_mode == "mcp" and _compact_tool_results_enabled_for_mcp(
-                        invocation_mode
-                    ):
-                        mcp_transport = import_module(".mcp_transport", __package__)
-                        categories = mcp_transport.get_tool_categories()
-                    else:
-                        mcp_transport = None
-                        categories = {}
-                    if (
-                        mcp_transport is not None
-                        and categories.get(name)
-                        in {"capture", "retrieval", "search", "lifecycle"}
-                    ):
-                        # Keep byte metrics inside this measured call while using
-                        # the same compact, budget-fitted text the adapter returns.
-                        measured_envelope = result
-                        if not isinstance(measured_envelope, ToolResponseEnvelope):
-                            measured_envelope = mcp_transport._legacy_tool_envelope(
-                                name, result, compact_text=True
-                            )
-                        measured_envelope = mcp_transport._fit_tool_envelope(
-                            measured_envelope, compact_text=True
-                        )
-                        response_text = measured_envelope.text
-                    if isinstance(response_text, str):
-                        response_bytes = len(response_text.encode("utf-8"))
-                        metrics.record_bytes("tool_response_bytes", response_bytes)
-                        if name == "search_capture":
-                            metrics.record_bytes("search_response_bytes", response_bytes)
-                        elif name in {"get_capture_slice", "get_capture_summary"}:
-                            metrics.record_bytes("retrieval_response_bytes", response_bytes)
-                    failure_category = _classify_tool_result(name, result)
-                    if failure_category is not None:
-                        state["success"] = False
-                        state["failure_category"] = failure_category
-                duration_ms = round((time.perf_counter() - started) * 1000, 3)
-                log_event(
-                    LOGGER, logging.INFO, "mcp_tool_completed",
-                    call_id=call_id, duration_ms=duration_ms,
-                    success=state["success"], tool=name,
-                )
-                return result
-            except Exception as exc:
-                duration_ms = round((time.perf_counter() - started) * 1000, 3)
-                log_event(
-                    LOGGER, logging.ERROR, "mcp_tool_failed",
-                    call_id=call_id, duration_ms=duration_ms,
-                    error_type=type(exc).__name__, tool=name,
-                )
-                raise
-            finally:
-                # MCP clients may terminate the server process without running
-                # Python's atexit handlers. Persist the current counters after
-                # each tool call so benchmark runners can still collect them.
-                _write_metrics_snapshot()
-        wrapper._supports_invocation_mode = True
-        return wrapper
-    return decorator
-
-
-_COMPACT_RESULT_SUMMARY_FIELDS = (
-    "capture_id",
-    "execution_id",
-    "label",
-    "query",
-    "mode",
-    "source",
-    "total_lines",
-    "byte_size",
-    "original_byte_size",
-    "content_bytes",
-    "capture_count",
-    "match_count",
-    "available_match_count",
-    "returned_count",
-    "omitted_count",
-    "requested_start_line",
-    "requested_end_line",
-    "start_line",
-    "end_line",
-    "partial",
-    "exit_code",
-)
-
 
 _UNSET = object()
 
@@ -857,6 +557,16 @@ def _active_service_context() -> ServiceContext:
     return _SERVICE_CONTEXT_OVERRIDE.get() or DEFAULT_SERVICES
 
 
+def _request_cancel_event() -> threading.Event | None:
+    """Return the cancellation event bound to the current request, if any."""
+    return _REQUEST_CANCEL_EVENT.get()
+
+
+def _server_started_at() -> float:
+    """Return the startup timestamp shared by runtime diagnostics."""
+    return SERVER_STARTED_AT
+
+
 def _active_settings():
     context = _SERVICE_CONTEXT_OVERRIDE.get()
     return SETTINGS if context is None or context is DEFAULT_SERVICES else context.settings
@@ -881,268 +591,24 @@ def _active_execution_manager():
     return execution_manager if context is None or context is DEFAULT_SERVICES else context.execution_manager
 
 
-def _capture_execution_phase(
-    phase: Dict[str, Any],
-    output: str,
-    result: Dict[str, Any],
-) -> Optional[str]:
-    """Retain a phase result in the searchable ring as a convenience snapshot."""
-    active_engine = _active_engine()
-    capture = active_engine.ingest(
-        output,
-        label=f"execution phase: {phase['name']}",
-        content_type="auto",
-        truncated=bool(result.get("truncated", False)),
-        original_byte_size=(
-            result.get("original_byte_size") if result.get("truncated", False) else None
-        ),
-        command_exit_code=result.get("exit_code"),
-        timed_out=bool(result.get("timed_out", False)),
-        source="execution",
-        duration_ms=result.get("duration_ms"),
-        structured_metrics=phase.get("structured_metrics", {}),
-    )
-    result["capture_session_id"] = active_engine.session_id
-    return capture.capture_id
 
 
-def _background_execution_output_handler():
-    """Preserve the calling service context for phase captures on worker threads."""
-    context = copy_context()
-
-    def handle(phase, output, result):
-        return context.run(_capture_execution_phase, phase, output, result)
-
-    return handle
 
 
-def _execution_error_json(
-    code: str,
-    message: str,
-    *,
-    details: Optional[Dict[str, Any]] = None,
-) -> str:
-    error: Dict[str, Any] = {"code": code, "message": message or "Execution operation failed."}
-    if details:
-        error["details"] = details
-    return json.dumps(
-        {"status": "error", "error": error},
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
 
 
-def _execution_exception_json(exc: Exception) -> str:
-    """Map execution exceptions to stable codes without inspecting messages."""
-    details = None
-    if isinstance(exc, ExecutionBusyError):
-        code = "execution_busy"
-    elif isinstance(exc, ExecutionRecordError):
-        code = (
-            "unsupported_schema_version"
-            if exc.reason_code == "UNSUPPORTED_SCHEMA_VERSION"
-            else "malformed_record"
-        )
-        details = _execution_record_error_details(
-            exc.reason_code,
-            exc.schema_version,
-        )
-    elif isinstance(exc, ExecutionQuotaError):
-        code = "quota_exceeded"
-    elif isinstance(exc, ExecutionDiskSpaceError):
-        code = "disk_full"
-    elif isinstance(exc, ExecutionPhaseNotFoundError):
-        code = "phase_not_found"
-    elif isinstance(exc, KeyError):
-        code = "execution_not_found"
-    elif isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
-        code = "disk_full"
-    elif isinstance(exc, OSError):
-        code = "execution_storage_error"
-    else:
-        code = "execution_failed"
-    return _execution_error_json(code, str(exc), details=details)
 
 
-def _execution_record_error_details(
-    reason_code: Any,
-    schema_version: Any,
-) -> Dict[str, Any]:
-    """Return bounded, JSON-safe diagnostic fields for an invalid record."""
-    details: Dict[str, Any] = {}
-    if isinstance(reason_code, str):
-        details["reason_code"] = reason_code
-    if isinstance(schema_version, (str, int, float, bool)) and (
-        not isinstance(schema_version, float) or math.isfinite(schema_version)
-    ):
-        if isinstance(schema_version, str):
-            schema_version = schema_version.encode("utf-8", errors="replace")[:64].decode(
-                "utf-8", errors="ignore"
-            )
-        details["schema_version"] = schema_version
-    return details
 
 
-def _execution_payload_with_error_codes(payload: Any) -> Any:
-    """Add stable error codes to read-only malformed-record diagnostics."""
-    if not isinstance(payload, dict):
-        return payload
-
-    def annotate(diagnostic: Dict[str, Any]) -> Dict[str, Any]:
-        status = diagnostic.get("status")
-        if status not in {"invalid_record", "unsupported_record"}:
-            return diagnostic
-        code = (
-            "unsupported_schema_version"
-            if diagnostic.get("reason_code") == "UNSUPPORTED_SCHEMA_VERSION"
-            or status == "unsupported_record"
-            else "malformed_record"
-        )
-        annotated = dict(diagnostic)
-        error = {
-            "code": code,
-            "message": str(diagnostic.get("message") or "Execution record is invalid."),
-        }
-        details = _execution_record_error_details(
-            diagnostic.get("reason_code"),
-            diagnostic.get("schema_version"),
-        )
-        if details:
-            error["details"] = details
-        annotated["error"] = error
-        return annotated
-
-    annotated = annotate(payload)
-    executions = payload.get("executions")
-    if isinstance(executions, list):
-        annotated = dict(annotated)
-        annotated["executions"] = [
-            annotate(item) if isinstance(item, dict) else item for item in executions
-        ]
-    return annotated
 
 
-def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> str:
-    """Run an execution operation and return a compact machine-readable result."""
-    try:
-        payload = _execution_payload_with_error_codes(operation())
-        result = _json_dumps_with_limit(payload, max_response_bytes)
-        if result is None:
-            if isinstance(payload, dict) and isinstance(payload.get("executions"), list):
-                compact = {
-                    key: payload[key]
-                    for key in ("status", "limit", "offset")
-                    if key in payload
-                }
-                compact["response_truncated"] = True
-                compact["executions"] = []
-                for execution in payload["executions"]:
-                    if not isinstance(execution, dict):
-                        continue
-                    summary = {
-                        key: execution[key]
-                        for key in (
-                            "status", "execution_id", "label", "execution_status", "partial",
-                            "execution_in_progress", "cancellation_requested",
-                            "background_error", "updated_at",
-                            "completed_phase_count", "phase_count",
-                            "reason_code", "schema_version", "read_only", "error",
-                        )
-                        if key in execution
-                    }
-                    candidate = dict(compact)
-                    candidate["executions"] = [*compact["executions"], summary]
-                    candidate["returned_count"] = len(candidate["executions"])
-                    candidate["omitted_count"] = len(payload["executions"]) - candidate["returned_count"]
-                    encoded_candidate = _json_dumps_with_limit(candidate, max_response_bytes)
-                    if encoded_candidate is None:
-                        break
-                    compact["executions"].append(summary)
-                compact["returned_count"] = len(compact["executions"])
-                compact["omitted_count"] = len(payload["executions"]) - len(compact["executions"])
-                compact_result = _json_dumps_with_limit(compact, max_response_bytes)
-                if compact_result is not None:
-                    return compact_result
-            if isinstance(payload, dict) and payload.get("execution_id"):
-                compact = {
-                    key: payload[key]
-                    for key in (
-                        "status", "schema_version", "execution_id", "label",
-                        "execution_status", "execution_in_progress",
-                        "cancellation_requested", "partial", "summary", "created_at",
-                        "background_error", "updated_at", "resume",
-                        "completed_phase_count", "phase_count", "reason_code",
-                        "read_only", "error", "record_bytes", "record_preview",
-                        "record_preview_sanitized", "record_preview_redacted",
-                        "record_preview_truncated",
-                    )
-                    if key in payload
-                }
-                compact["response_truncated"] = True
-                compact["phases"] = [
-                    {
-                        key: phase.get(key)
-                        for key in ("name", "status", "attempts", "error")
-                    }
-                    for phase in payload.get("phases", [])
-                    if isinstance(phase, dict)
-                ]
-                compact_result = _json_dumps_with_limit(compact, max_response_bytes)
-                if compact_result is not None:
-                    return compact_result
-            return _execution_error_json(
-                "response_too_large",
-                "Execution response exceeds the configured byte limit; request a smaller output chunk.",
-            )
-        return result
-    except Exception as exc:
-        return _execution_exception_json(exc)
 
 
-def _json_dumps_with_limit(payload: Any, max_bytes: Optional[int]) -> Optional[str]:
-    """Encode incrementally so an oversized response never builds in full."""
-    if max_bytes is None:
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    chunks = []
-    total_bytes = 0
-    for chunk in encoder.iterencode(payload):
-        total_bytes += len(chunk.encode("utf-8"))
-        if total_bytes > max_bytes:
-            return None
-        chunks.append(chunk)
-    return "".join(chunks)
 
 
-def _execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Annotate session-local capture references before returning durable state."""
-    active_engine = _active_engine()
-    for phase in payload.get("phases", []):
-        result = phase.get("result")
-        if not isinstance(result, dict) or "capture_id" not in result:
-            continue
-        result["capture_available"] = (
-            result.get("capture_session_id") == active_engine.session_id
-            and active_engine.get_capture(result["capture_id"]) is not None
-        )
-    return payload
 
 
-def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str, Any]:
-    """Avoid copying large durable output before the response budget is known."""
-    metadata = _active_execution_manager().public(execution_id, include_output=False)
-    if not include_output:
-        return metadata
-    output_bytes = sum(
-        phase.get("output_bytes", 0)
-        for phase in metadata.get("phases", [])
-        if isinstance(phase, dict) and isinstance(phase.get("output_bytes", 0), int)
-    )
-    if output_bytes > EXECUTION_OUTPUT_RESPONSE_MAX_BYTES:
-        metadata["response_truncated"] = True
-        return metadata
-    return _active_execution_manager().public(execution_id, include_output=True)
 
 
 def _metrics_snapshot(
