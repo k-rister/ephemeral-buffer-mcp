@@ -35,6 +35,19 @@ def _summary_json(
     capture: Optional[Any] = None,
 ) -> str:
     """Return a compact JSON summary suitable for an agent response."""
+    return _summary_response(
+        capture_id,
+        include_previews=include_previews,
+        capture=capture,
+    ).text or ""
+
+
+def _summary_response(
+    capture_id: str,
+    include_previews: bool = False,
+    capture: Optional[Any] = None,
+) -> ToolResponseEnvelope:
+    """Build a typed summary response without discarding the engine error code."""
     if capture is None:
         summary = _active_engine().get_summary(capture_id, include_previews=include_previews)
     else:
@@ -45,13 +58,23 @@ def _summary_json(
             SUMMARY_LABEL_MAX_BYTES,
             "... [error truncated]",
         )
-        return f"Error: {message}"
-    return json.dumps(
-        summary_payload(summary, include_previews=include_previews),
+        text = f"Error: {message}"
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(
+                code=str(summary.get("error_code") or "retrieval_failed"),
+                message=text,
+            ),
+            text=text,
+        )
+    payload = summary_payload(summary, include_previews=include_previews)
+    text = json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
+    return ToolResponseEnvelope(status="ok", data=payload, text=text)
 
 
 def _capture_text(
@@ -145,7 +168,6 @@ def _socket_capture_response(result):
     socket_request_adapter=_socket_capture_arguments,
     socket_response_adapter=_socket_capture_response,
     legacy_error_code="capture_failed",
-    legacy_error_mode="capture",
 )
 @_instrument_tool("capture_text")
 def capture_text(
@@ -192,7 +214,6 @@ capture_text.__signature__ = _capture_text_signature.replace(
     "capture_file",
     "capture",
     legacy_error_code="capture_failed",
-    legacy_error_mode="capture",
 )
 @_instrument_tool("capture_file")
 def capture_file(
@@ -256,7 +277,6 @@ def capture_file(
     "execute_and_capture",
     "capture",
     legacy_error_code="capture_failed",
-    legacy_error_mode="capture",
 )
 @_instrument_tool("execute_and_capture")
 def execute_and_capture(
@@ -358,7 +378,11 @@ def _consolidated_jsonl(
     return _active_engine().consolidate(capture_ids, max_captures, max_bytes)
 
 
-@register_tool("consolidate_captures", "capture")
+@register_tool(
+    "consolidate_captures",
+    "capture",
+    legacy_error_code="consolidate_captures_failed",
+)
 @_instrument_tool("consolidate_captures")
 def consolidate_captures(
     capture_ids: Optional[List[str]] = None,

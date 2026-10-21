@@ -31,7 +31,6 @@ class ToolRegistration:
     socket_request_adapter: Callable[..., Any] | None = None
     socket_response_adapter: Callable[..., Any] | None = None
     legacy_error_code: str | None = None
-    legacy_error_mode: str = "default"
 
 
 _REGISTRATIONS: list[ToolRegistration] = []
@@ -49,7 +48,6 @@ def register_tool(
     socket_request_adapter: Callable[..., Any] | None = None,
     socket_response_adapter: Callable[..., Any] | None = None,
     legacy_error_code: str | None = None,
-    legacy_error_mode: str = "default",
 ):
     """Register a transport-neutral handler and retain its public metadata."""
     if category not in TOOL_CATEGORIES:
@@ -68,7 +66,6 @@ def register_tool(
             socket_request_adapter=socket_request_adapter,
             socket_response_adapter=socket_response_adapter,
             legacy_error_code=legacy_error_code,
-            legacy_error_mode=legacy_error_mode,
         )
         if (socket_request_adapter is None) != (socket_response_adapter is None):
             raise ValueError(

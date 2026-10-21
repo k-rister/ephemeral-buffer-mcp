@@ -1,7 +1,10 @@
 """Retrieval domain handlers."""
 
+import inspect
+import json
+
 from ..server import *  # noqa: F403
-from .capture import _summary_json
+from .capture import _summary_json, _summary_response
 from .formatting import bounded_json_text, bounded_summary_text
 from .registry import register_tool
 
@@ -188,11 +191,29 @@ def get_capture_slice_result(
     return _capture_slice_response(start_line, end_line, capture_id, max_bytes, cursor)
 
 
+@_instrument_tool("get_capture_summary")
+def _capture_summary_response(
+    capture_id: str = "latest",
+    include_previews: bool = False,
+    __invocation_mode: str = "direct",
+) -> ToolResponseEnvelope:
+    return _summary_response(capture_id, include_previews=include_previews)
+
+
+_capture_summary_response_signature = inspect.signature(_capture_summary_response)
+_capture_summary_response.__signature__ = _capture_summary_response_signature.replace(
+    parameters=tuple(
+        parameter
+        for parameter in _capture_summary_response_signature.parameters.values()
+        if parameter.name != "__invocation_mode"
+    )
+)
+
+
 @register_tool(
     "get_capture_summary",
     "retrieval",
-    legacy_error_code="capture_not_found",
-    legacy_error_mode="retrieval",
+    structured_result_factory=_capture_summary_response,
 )
 @_instrument_tool("get_capture_summary")
 def get_capture_summary(capture_id: str = "latest", include_previews: bool = False) -> str:
@@ -253,11 +274,43 @@ def list_captures_result() -> ToolResponseEnvelope:
     return _list_captures_response()
 
 
+@_instrument_tool("clear_captures")
+def _clear_captures_response(
+    capture_id: str = "all",
+    __invocation_mode: str = "direct",
+) -> ToolResponseEnvelope:
+    result = _active_engine().clear_result(capture_id)
+    message = result["message"]
+    if result["status"] == "error":
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(
+                code=str(result.get("error_code") or "operation_failed"),
+                message=message,
+            ),
+            text=message,
+        )
+    return ToolResponseEnvelope(
+        status="ok",
+        data={"message": message},
+        text=message,
+    )
+
+
+_clear_captures_response_signature = inspect.signature(_clear_captures_response)
+_clear_captures_response.__signature__ = _clear_captures_response_signature.replace(
+    parameters=tuple(
+        parameter
+        for parameter in _clear_captures_response_signature.parameters.values()
+        if parameter.name != "__invocation_mode"
+    )
+)
+
+
 @register_tool(
     "clear_captures",
     "lifecycle",
-    legacy_error_code="capture_not_found",
-    legacy_error_mode="clear",
+    structured_result_factory=_clear_captures_response,
 )
 @_instrument_tool("clear_captures")
 def clear_captures(capture_id: str = "all") -> str:
