@@ -3123,6 +3123,14 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.clear(capture.capture_id),
             f"Cleared capture '{capture.capture_id}'.",
         )
+        self.assertEqual(
+            engine.clear_result(capture.capture_id),
+            {
+                "status": "error",
+                "error_code": "capture_not_found",
+                "message": f"Capture '{capture.capture_id}' not found.",
+            },
+        )
         self.assertEqual(engine.clear(capture.capture_id), f"Capture '{capture.capture_id}' not found.")
         self.assertEqual(
             engine.get_buffer_stats()["capture_removals_by_reason"]["clear"],
@@ -3130,10 +3138,15 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         )
         engine._ingest_state("first clear-all payload")
         engine._ingest_state("second clear-all payload")
+        self.assertEqual(
+            engine.clear_result("all"),
+            {"status": "ok", "message": "Cleared all captures from ephemeral buffer."},
+        )
+        engine._ingest_state("clear-all compatibility payload")
         self.assertEqual(engine.clear("all"), "Cleared all captures from ephemeral buffer.")
         self.assertEqual(
             engine.get_buffer_stats()["capture_removals_by_reason"]["clear"],
-            3,
+            4,
         )
 
     def test_search_missing_capture_message_distinguishes_empty_buffer(self):

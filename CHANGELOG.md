@@ -4,6 +4,10 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 ## Unreleased
 
+- Preserve direct helper text and successful response shapes while returning
+  stable MCP error codes for capture, retrieval, clear, configuration, and
+  preflight failures; add exact response-shape regression assertions.
+
 ## 0.11.0 - 2026-10-18
 
 - Breaking: On the first upgrade to the shared-core package layout, uninstall

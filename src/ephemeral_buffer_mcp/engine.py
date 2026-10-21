@@ -3579,11 +3579,8 @@ class EphemeralEngine:
             ),
         }
 
-    @synchronized
-    def clear(self, capture_id: str = "all") -> str:
-        """
-        Clears one or all captures from the buffer.
-        """
+    def _clear_result_locked(self, capture_id: str) -> Dict[str, Any]:
+        """Clear captures while the engine lock is held and retain error identity."""
         if capture_id == "all":
             capture_ids = list(self._captures)
             for cap in self._captures.values():
@@ -3605,7 +3602,10 @@ class EphemeralEngine:
             self.metrics.record_event("cleanups")
             for current_id in capture_ids:
                 self.metrics.forget_capture(current_id)
-            return "Cleared all captures from ephemeral buffer."
+            return {
+                "status": "ok",
+                "message": "Cleared all captures from ephemeral buffer.",
+            }
         elif capture_id in self._captures:
             cap = self._captures.pop(capture_id)
             self._record_capture_removal_locked(
@@ -3624,6 +3624,20 @@ class EphemeralEngine:
             self.capture_order.pop(capture_id, None)
             self.metrics.record_event("cleanups")
             self.metrics.forget_capture(capture_id)
-            return f"Cleared capture '{capture_id}'."
+            return {"status": "ok", "message": f"Cleared capture '{capture_id}'."}
         else:
-            return f"Capture '{capture_id}' not found."
+            return {
+                "status": "error",
+                "error_code": "capture_not_found",
+                "message": f"Capture '{capture_id}' not found.",
+            }
+
+    @synchronized
+    def clear_result(self, capture_id: str = "all") -> Dict[str, Any]:
+        """Clear captures and return a typed status for transport adapters."""
+        return self._clear_result_locked(capture_id)
+
+    @synchronized
+    def clear(self, capture_id: str = "all") -> str:
+        """Clear one or all captures while preserving the historical text result."""
+        return self._clear_result_locked(capture_id)["message"]

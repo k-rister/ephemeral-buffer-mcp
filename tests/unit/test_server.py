@@ -47,11 +47,41 @@ def settings_with_environment(**overrides):
     environment.update(overrides)
     return load_settings(environment, warn_on_legacy_state_transition=False)
 
+
+CAPTURE_SUMMARY_BASE_KEYS = {
+    "schema_version",
+    "capture_id",
+    "label",
+    "label_truncated",
+    "source",
+    "status",
+    "partial",
+    "content_type",
+    "timestamp",
+    "duration_ms",
+    "exit_code",
+    "timed_out",
+    "total_lines",
+    "byte_size",
+    "original_byte_size",
+    "estimated_tokens",
+    "original_estimated_tokens",
+    "truncated",
+    "signals",
+    "errors",
+    "warnings",
+    "structured_metrics",
+    "evicted_captures",
+    "evicted_captures_omitted",
+    "retrieval",
+}
+
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import ephemeral_buffer_mcp.server as server
 import ephemeral_buffer_mcp.socket_transport as socket_transport
 import ephemeral_buffer_mcp.mcp_transport as mcp_transport
 import ephemeral_buffer_mcp.tools.capture as capture_tools
+import ephemeral_buffer_mcp.tools.configuration as configuration_tools
 import ephemeral_buffer_mcp.tools.formatting as formatting_tools
 import ephemeral_buffer_mcp.tools.diagnostics as diagnostics_tools
 import ephemeral_buffer_mcp.tools.execution as execution_tools
@@ -1108,7 +1138,23 @@ class TestServerTools(unittest.TestCase):
 
         with patch.object(execution_tools, "_resolve_preflight_cwd", side_effect=RuntimeError("unexpected")):
             error = json.loads(server.preflight_command("echo hello"))
+            mcp_response = asyncio.run(
+                self.call_mcp_tool_inline(
+                    "preflight_command",
+                    {"command": "echo hello"},
+                )
+            )
         self.assertEqual(error, {"reason": "RuntimeError", "status": "error"})
+        self.assertEqual(
+            json.loads(mcp_response.content[0].text),
+            {
+                "status": "error",
+                "error": {
+                    "code": "preflight_failed",
+                    "message": "unexpected",
+                },
+            },
+        )
 
     def test_capture_file_reports_missing_path(self):
         result = server.capture_file("/does/not/exist")
@@ -1321,6 +1367,34 @@ class TestServerTools(unittest.TestCase):
             json.loads(result["content"])["schema_version"],
             CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
         )
+        payload = json.loads(result["content"])
+        self.assertEqual(
+            set(payload),
+            {
+                "schema_version",
+                "sources",
+                "records",
+                "requested_capture_count",
+                "selected_capture_count",
+                "missing_capture_ids",
+                "omitted_record_count",
+            },
+        )
+        self.assertEqual(
+            set(payload["sources"][0]),
+            {
+                "capture_id",
+                "label",
+                "content_type",
+                "total_lines",
+                "byte_size",
+                "truncated",
+                "original_byte_size",
+                "command_exit_code",
+                "timed_out",
+            },
+        )
+        self.assertEqual(set(payload["records"][0]), {"capture_id", "source_line", "text"})
 
     def test_consolidate_captures_reports_omitted_records_and_missing_ids(self):
         server.capture_text("important failure " * 20, label="large")
@@ -1414,6 +1488,10 @@ class TestServerTools(unittest.TestCase):
         self.assertTrue(payload["metadata_omitted"])
         self.assertEqual(payload["records"], [])
         self.assertEqual(
+            set(payload),
+            {"schema_version", "records", "omitted_record_count", "metadata_omitted"},
+        )
+        self.assertEqual(
             payload["schema_version"],
             CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
         )
@@ -1426,6 +1504,10 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(
             envelope.model_dump()["schema_version"],
             TOOL_RESPONSE_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            set(envelope.model_dump()),
+            {"schema_version", "status", "data", "error", "text", "truncated", "next_cursor"},
         )
         with self.assertRaises(ValidationError):
             server.ToolResponseEnvelope(schema_version=2, status="ok", data={})
@@ -1571,13 +1653,82 @@ class TestServerTools(unittest.TestCase):
 
     def test_runtime_index_budget_adjustment_requires_opt_in_and_reports_result(self):
         with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "0"}, clear=False):
-            self.assertIn("disabled", server.set_semantic_index_budget(4))
+            self.assertEqual(
+                server.set_semantic_index_budget(4),
+                "Error: runtime semantic-index budget adjustment is disabled; set "
+                "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
+            )
         with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "1"}, clear=False):
             result = json.loads(server.set_semantic_index_budget(4))
         self.assertEqual(result["effective"], 4)
         self.assertEqual(server.engine.get_buffer_stats()["max_indexed_chunks"], 4)
         with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "1"}, clear=False):
             self.assertIn("Error adjusting semantic-index budget", server.set_semantic_index_budget("4"))
+
+    def test_runtime_index_budget_mcp_errors_use_specific_codes(self):
+        with patch.object(
+            configuration_tools,
+            "runtime_index_budget_adjustment_enabled",
+            return_value=False,
+        ):
+            direct = server.set_semantic_index_budget(4)
+            mcp_response = asyncio.run(
+                self.call_mcp_tool_inline(
+                    "set_semantic_index_budget",
+                    {"max_indexed_chunks": 4},
+                )
+            )
+
+        self.assertEqual(
+            direct,
+            "Error: runtime semantic-index budget adjustment is disabled; set "
+            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
+        )
+        self.assertEqual(
+            json.loads(mcp_response.content[0].text),
+            {
+                "status": "error",
+                "error": {
+                    "code": "index_budget_disabled",
+                    "message": (
+                        "runtime semantic-index budget adjustment is disabled; set "
+                        "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it."
+                    ),
+                },
+            },
+        )
+
+        with patch.object(
+            configuration_tools,
+            "runtime_index_budget_adjustment_enabled",
+            return_value=True,
+        ), patch.object(
+            configuration_tools._active_engine(),
+            "set_max_indexed_chunks",
+            side_effect=ValueError("budget must be non-negative"),
+        ):
+            direct = server.set_semantic_index_budget(-1)
+            mcp_response = asyncio.run(
+                self.call_mcp_tool_inline(
+                    "set_semantic_index_budget",
+                    {"max_indexed_chunks": -1},
+                )
+            )
+
+        self.assertEqual(
+            direct,
+            "Error adjusting semantic-index budget: budget must be non-negative",
+        )
+        self.assertEqual(
+            json.loads(mcp_response.content[0].text),
+            {
+                "status": "error",
+                "error": {
+                    "code": "invalid_index_budget",
+                    "message": "budget must be non-negative",
+                },
+            },
+        )
 
     def test_runtime_diagnostics_reports_explicit_and_default_socket_modes(self):
         with patch.object(
@@ -2331,6 +2482,11 @@ class TestServerTools(unittest.TestCase):
         ):
             summary = json.loads(server.get_capture_summary("cap"))
         self.assertEqual(summary["schema_version"], 1)
+        self.assertEqual(set(summary), CAPTURE_SUMMARY_BASE_KEYS | {"diff"})
+        self.assertEqual(
+            set(summary["diff"]),
+            {"stats", "file_map", "file_map_truncated", "omitted_file_count"},
+        )
         self.assertTrue(summary["truncated"])
         self.assertEqual(summary["original_byte_size"], 20)
         self.assertIn("new.txt", summary["diff"]["file_map"])
@@ -2347,6 +2503,7 @@ class TestServerTools(unittest.TestCase):
         ):
             regular = json.loads(server.get_capture_summary("cap", include_previews=True))
         self.assertEqual(regular["previews"], {"head": "head", "tail": "tail"})
+        self.assertEqual(set(regular), CAPTURE_SUMMARY_BASE_KEYS | {"previews"})
 
     def test_capture_summary_includes_warnings_metrics_and_token_estimate(self):
         result = server.capture_text(
@@ -2417,6 +2574,7 @@ class TestServerTools(unittest.TestCase):
         })
 
         self.assertEqual(payload["schema_version"], CAPTURE_SUMMARY_SCHEMA_VERSION)
+        self.assertEqual(set(payload), CAPTURE_SUMMARY_BASE_KEYS)
         self.assertEqual(payload["evicted_captures"], [])
         self.assertEqual(payload["evicted_captures_omitted"], 0)
 
@@ -2651,9 +2809,38 @@ class TestServerTools(unittest.TestCase):
             TOOL_RESPONSE_SCHEMA_VERSION,
         )
         self.assertEqual(capture_response.structured_content["status"], "ok")
-        self.assertIn("capture_id", capture_response.structured_content["data"])
+        self.assertEqual(
+            set(capture_response.structured_content),
+            {"schema_version", "status", "data", "error", "truncated", "next_cursor"},
+        )
+        self.assertEqual(
+            set(capture_response.structured_content["data"]),
+            CAPTURE_SUMMARY_BASE_KEYS,
+        )
         self.assertIn("capture_id=", capture_response.content[0].text)
         self.assertIn("EPHEMERAL_COMPACT_TOOL_RESULTS=false", capture_response.content[0].text)
+
+        with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
+            summary_response = asyncio.run(self.call_mcp_tool_inline(
+                "get_capture_summary",
+                {"capture_id": capture_id},
+            ))
+            missing_summary_response = asyncio.run(self.call_mcp_tool_inline(
+                "get_capture_summary",
+                {"capture_id": "missing-summary"},
+            ))
+        self.assertEqual(
+            set(summary_response.structured_content["data"]),
+            CAPTURE_SUMMARY_BASE_KEYS,
+        )
+        self.assertEqual(
+            missing_summary_response.structured_content["error"]["code"],
+            "capture_not_found",
+        )
+        self.assertEqual(
+            set(missing_summary_response.structured_content),
+            {"schema_version", "status", "data", "error", "truncated", "next_cursor"},
+        )
 
         with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
             search_response = asyncio.run(self.call_mcp_tool_inline(
@@ -2665,6 +2852,36 @@ class TestServerTools(unittest.TestCase):
             TOOL_RESPONSE_SCHEMA_VERSION,
         )
         self.assertEqual(search_response.structured_content["status"], "ok")
+        self.assertEqual(
+            set(search_response.structured_content["data"]),
+            {
+                "capture_id",
+                "label",
+                "total_lines",
+                "mode",
+                "query",
+                "semantic_coverage",
+                "matches",
+                "match_count",
+                "available_match_count",
+            },
+        )
+        self.assertEqual(
+            set(search_response.structured_content["data"]["matches"][0]),
+            {
+                "chunk_id",
+                "chunk_index",
+                "score",
+                "matched_range",
+                "context_range",
+                "context_start_line",
+                "context_end_line",
+                "snippet",
+                "snippet_truncated",
+                "context",
+                "context_truncated",
+            },
+        )
         expected_match = server.engine.search(
             "needle", mode="bm25", capture_id=capture_id
         )["matches"][0]
@@ -2694,12 +2911,51 @@ class TestServerTools(unittest.TestCase):
             slice_response.structured_content["schema_version"],
             TOOL_RESPONSE_SCHEMA_VERSION,
         )
+        self.assertEqual(
+            set(slice_response.structured_content["data"]),
+            {
+                "capture_id",
+                "label",
+                "requested_start_line",
+                "requested_end_line",
+                "start_line",
+                "end_line",
+                "total_lines",
+                "content",
+                "content_bytes",
+                "segments",
+            },
+        )
+        self.assertEqual(
+            set(slice_response.structured_content["data"]["segments"][0]),
+            {"line", "byte_offset", "byte_length", "line_complete", "separator_after"},
+        )
         self.assertEqual(slice_response.structured_content["data"]["content"], "needle αβ\nsecond line")
         self.assertIn("content=structuredContent.data.content", slice_response.content[0].text)
         self.assertNotIn("needle αβ", slice_response.content[0].text)
         self.assertLessEqual(
             len(slice_response.model_dump_json(by_alias=True).encode("utf-8")),
             8192,
+        )
+
+    def test_clear_mcp_uses_typed_status_while_python_helper_keeps_text(self):
+        direct = server.clear_captures("missing-clear")
+        self.assertEqual(direct, "Capture 'missing-clear' not found.")
+
+        missing = asyncio.run(
+            self.call_mcp_tool_inline("clear_captures", {"capture_id": "missing-clear"})
+        )
+        self.assertEqual(missing.structured_content["status"], "error")
+        self.assertEqual(missing.structured_content["error"]["code"], "capture_not_found")
+        self.assertEqual(missing.structured_content["error"]["message"], direct)
+
+        cleared = asyncio.run(
+            self.call_mcp_tool_inline("clear_captures", {"capture_id": "all"})
+        )
+        self.assertEqual(cleared.structured_content["status"], "ok")
+        self.assertEqual(
+            cleared.structured_content["data"],
+            {"message": "Cleared all captures from ephemeral buffer."},
         )
 
     def test_compact_tool_text_keeps_metadata_and_follow_up_handles(self):
@@ -2945,9 +3201,17 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(unregistered_tool.error.code, "operation_failed")
 
         json_errors = [
-            ("get_capture_summary", '{"status":"error","message":"missing"}', "capture_not_found"),
             ("capture_text", '{"status":"error","message":"failed"}', "capture_failed"),
-            ("list_captures", '{"status":"error","message":"failed"}', "list_captures_failed"),
+            (
+                "consolidate_captures",
+                '{"status":"error","message":"failed"}',
+                "consolidate_captures_failed",
+            ),
+            (
+                "unregistered_tool",
+                '{"status":"error","message":"failed"}',
+                "operation_failed",
+            ),
             ("capture_text", '{"status":"error","error_code":"specific","message":"failed"}', "specific"),
         ]
         for tool, result, code in json_errors:
@@ -2957,12 +3221,11 @@ class TestServerTools(unittest.TestCase):
                 self.assertEqual(envelope.error.code, code)
 
         text_errors = [
-            ("get_capture_summary", "Error: capture not found", "capture_not_found"),
-            ("get_capture_summary", "Error: storage failed", "retrieval_failed"),
-            ("search_capture", "Search Error: query must be a string", "invalid_search_request"),
-            ("search_capture", "Search Error: index failed", "search_failed"),
+            ("get_capture_summary", "Error: capture not found", "operation_failed"),
+            ("get_capture_summary", "Error: storage failed", "operation_failed"),
+            ("search_capture", "Search Error: query must be a string", "operation_failed"),
+            ("search_capture", "Search Error: index failed", "operation_failed"),
             ("capture_file", "Error: file unavailable", "capture_failed"),
-            ("clear_captures", "Capture not found", "capture_not_found"),
             ("get_capture_slice", "Error: retrieval failed", "operation_failed"),
         ]
         for tool, result, code in text_errors:
@@ -2970,6 +3233,12 @@ class TestServerTools(unittest.TestCase):
                 envelope = mcp_transport._legacy_tool_envelope(tool, result)
                 self.assertEqual(envelope.status, "error")
                 self.assertEqual(envelope.error.code, code)
+
+        clear_text = mcp_transport._legacy_tool_envelope(
+            "clear_captures", "Capture not found"
+        )
+        self.assertEqual(clear_text.status, "ok")
+        self.assertEqual(clear_text.data["message"], "Capture not found")
 
         oversized = server.ToolResponseEnvelope(
             status="ok",

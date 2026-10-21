@@ -97,12 +97,25 @@ envelope with `schema_version`, `status`, `data`, optional `error` (`code` and
 `message`), and truncation or continuation metadata. MCP clients continue to
 receive readable text in `content[0].text`; the same result data is also
 available in `structuredContent`. The envelope's `status` is `ok` or `error`.
-Stable retrieval and search error codes include `capture_not_found`,
-`invalid_range`, `invalid_cursor`, `invalid_byte_budget`,
-`response_budget_too_small`, `invalid_query`, `query_too_large`, and
-`unsupported_search_mode`. Search argument errors also include `invalid_top_k`,
-`top_k_limit_exceeded`, `invalid_context_lines`, `context_limit_exceeded`, and
-`invalid_response_budget`.
+Stable capture error codes include `capture_failed` and
+`consolidate_captures_failed`. Stable retrieval and search error codes include
+`capture_not_found`, `retrieval_failed`, `invalid_range`, `invalid_cursor`,
+`invalid_byte_budget`, `response_budget_too_small`, `invalid_query`,
+`query_too_large`, and `unsupported_search_mode`. Search argument errors also
+include `invalid_top_k`, `top_k_limit_exceeded`, `invalid_context_lines`,
+`context_limit_exceeded`, and `invalid_response_budget`. Clear failures use
+`capture_not_found`. Legacy text handlers without a more specific registration
+code use `operation_failed`; a structured error's explicit code takes
+precedence. Messages are for display and may change, so use `error.code` for
+handling.
+
+`set_semantic_index_budget` and `preflight_command` keep their successful JSON
+responses. Their MCP failures use JSON text shaped as
+`{"status":"error","error":{"code":"...","message":"..."}}`.
+Configuration failures use `index_budget_disabled` when the setting is off and
+`invalid_index_budget` for rejected values. Unexpected preflight failures use
+`preflight_failed`. Direct Python calls keep their existing error strings or
+preflight error JSON, and MCP argument validation remains the SDK's response.
 
 Execution tools preserve their successful JSON text responses and Python
 `str` return values. A failure returns JSON text with `status: "error"` and
