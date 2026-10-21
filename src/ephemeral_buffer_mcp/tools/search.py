@@ -1,8 +1,32 @@
 """Search domain handlers."""
 
-from ..server import *  # noqa: F403
+from typing import Annotated, Any, Dict, List, Literal, Optional
+
+from pydantic import Field
+
 from ..engine import MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_TOP_K
+from ..mcp_response import (
+    ToolErrorEnvelope,
+    ToolResponseEnvelope,
+    call_tool_result_bytes as _call_tool_result_bytes,
+)
+from ..response_limits import (
+    SEARCH_QUERY_MAX_BYTES,
+    SEARCH_QUERY_TRUNCATION_MARKER,
+    SEARCH_RESPONSE_MAX_BYTES,
+    SEARCH_SNIPPET_TRUNCATION_MARKER,
+    SEARCH_STRUCTURED_CONTEXT_MAX_BYTES,
+    SEARCH_STRUCTURED_MATCH_MAX_BYTES,
+    SUMMARY_LABEL_MAX_BYTES,
+    SUMMARY_LABEL_TRUNCATION_MARKER,
+)
+from ._context import (
+    active_engine as _active_engine,
+    active_metrics as _active_metrics,
+    compact_results_enabled as _compact_tool_results_enabled_for_mcp,
+)
 from .formatting import bounded_summary_text
+from .instrumentation import _instrument_tool
 from .registry import register_tool
 
 

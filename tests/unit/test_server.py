@@ -19,7 +19,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from pydantic import ValidationError
 
@@ -55,6 +55,7 @@ import ephemeral_buffer_mcp.tools.capture as capture_tools
 import ephemeral_buffer_mcp.tools.formatting as formatting_tools
 import ephemeral_buffer_mcp.tools.diagnostics as diagnostics_tools
 import ephemeral_buffer_mcp.tools.execution as execution_tools
+import ephemeral_buffer_mcp.tools.instrumentation as instrumentation_tools
 import ephemeral_buffer_mcp.tools.retrieval as retrieval_tools
 import ephemeral_buffer_mcp.tools.search as search_tools
 import ephemeral_buffer_mcp.tools.registry as tool_registry
@@ -374,8 +375,8 @@ class TestServerTools(unittest.TestCase):
             self.assertEqual(server.execution_manager.probe, "forwarded")
 
     def test_tool_instrumentation_logs_content_free_lifecycle(self):
-        with patch.object(server, "log_event") as log:
-            @server._instrument_tool("probe_tool")
+        with patch.object(instrumentation_tools, "log_event") as log:
+            @instrumentation_tools._instrument_tool("probe_tool")
             def successful_tool(query):
                 return f"result for {query}"
 
@@ -392,7 +393,7 @@ class TestServerTools(unittest.TestCase):
 
             log.reset_mock()
 
-            @server._instrument_tool("failing_tool")
+            @instrumentation_tools._instrument_tool("failing_tool")
             def failing_tool():
                 raise RuntimeError("private failure")
 
@@ -406,27 +407,50 @@ class TestServerTools(unittest.TestCase):
             self.assertEqual(failed["error_type"], "RuntimeError")
             self.assertNotIn("private failure", str(log.call_args_list))
 
+    def test_mcp_tool_instrumentation_persists_snapshot_after_cancellation(self):
+        cancel_event = threading.Event()
+        metrics = LocalMetrics(enabled=True)
+
+        with patch.object(
+            instrumentation_tools, "active_metrics", return_value=metrics
+        ), patch.object(
+            instrumentation_tools,
+            "current_request_cancel_event",
+            return_value=cancel_event,
+        ), patch.object(instrumentation_tools, "write_metrics_snapshot") as write_snapshot:
+            @instrumentation_tools._instrument_tool("cancelled_probe")
+            def cancelled_probe():
+                cancel_event.set()
+                return "completed after cancellation"
+
+            self.assertEqual(
+                cancelled_probe(__invocation_mode="mcp"),
+                "completed after cancellation",
+            )
+
+        write_snapshot.assert_called_once_with()
+
     def test_failure_classifiers_cover_content_free_categories(self):
-        self.assertEqual(server._classify_failure_text("deadline exceeded"), "timeout")
-        self.assertEqual(server._classify_failure_text("socket reset"), "socket")
-        self.assertEqual(server._classify_failure_text("embedding unavailable"), "embedding")
-        self.assertEqual(server._classify_failure_text("capture evicted"), "eviction")
-        self.assertEqual(server._classify_failure_text("invalid request"), "validation")
-        self.assertEqual(server._classify_failure_text("unexpected detail"), "other")
+        self.assertEqual(instrumentation_tools._classify_failure_text("deadline exceeded"), "timeout")
+        self.assertEqual(instrumentation_tools._classify_failure_text("socket reset"), "socket")
+        self.assertEqual(instrumentation_tools._classify_failure_text("embedding unavailable"), "embedding")
+        self.assertEqual(instrumentation_tools._classify_failure_text("capture evicted"), "eviction")
+        self.assertEqual(instrumentation_tools._classify_failure_text("invalid request"), "validation")
+        self.assertEqual(instrumentation_tools._classify_failure_text("unexpected detail"), "other")
 
         class EvictedError(RuntimeError):
             pass
 
         self.assertEqual(
-            server._classify_tool_exception("probe", EvictedError(), {}),
+            instrumentation_tools._classify_tool_exception("probe", EvictedError(), {}),
             "eviction",
         )
         self.assertEqual(
-            server._classify_tool_exception("probe", ConnectionError(), {}),
+            instrumentation_tools._classify_tool_exception("probe", ConnectionError(), {}),
             "socket",
         )
         self.assertEqual(
-            server._classify_tool_exception("probe", ValueError(), {}),
+            instrumentation_tools._classify_tool_exception("probe", ValueError(), {}),
             "validation",
         )
 
@@ -435,27 +459,27 @@ class TestServerTools(unittest.TestCase):
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
         try:
-            @server._instrument_tool("validation_probe")
+            @instrumentation_tools._instrument_tool("validation_probe")
             def validation_probe():
                 return "Error: invalid private request"
 
-            @server._instrument_tool("execute_and_capture")
+            @instrumentation_tools._instrument_tool("execute_and_capture")
             def timeout_probe():
                 return json.dumps({"status": "failed", "timed_out": True})
 
-            @server._instrument_tool("exception_probe")
+            @instrumentation_tools._instrument_tool("exception_probe")
             def exception_probe():
                 raise TimeoutError("private timeout detail")
 
-            @server._instrument_tool("search_capture")
+            @instrumentation_tools._instrument_tool("search_capture")
             def semantic_probe(mode="semantic"):
                 raise ValueError("private embedding failure")
 
-            @server._instrument_tool("get_capture_summary")
+            @instrumentation_tools._instrument_tool("get_capture_summary")
             def retrieval_probe():
                 return json.dumps({"status": "ok", "timed_out": True})
 
-            @server._instrument_tool("start_execution")
+            @instrumentation_tools._instrument_tool("start_execution")
             def partial_execution_probe():
                 return json.dumps({
                     "status": "ok",
@@ -562,7 +586,13 @@ class TestServerTools(unittest.TestCase):
                     result = await mcp_transport.mcp.call_tool("blocking_probe", {})
 
                 self.assertEqual(result.content[0].text, "worker result")
-                offload.assert_awaited_once_with(blocking_probe)
+                self.assertEqual(
+                    offload.await_args_list,
+                    [
+                        call(blocking_probe),
+                        call(server._write_metrics_snapshot, server.DEFAULT_SERVICES),
+                    ],
+                )
             finally:
                 mcp_transport.mcp.remove_tool("blocking_probe")
 
@@ -2131,7 +2161,7 @@ class TestServerTools(unittest.TestCase):
                 ),
             ), patch.object(server, "_metrics_snapshot", return_value=object()), \
                     self.assertLogs("ephemeral_buffer.server", level="WARNING") as logs:
-                @server._instrument_tool("metrics_serialization_probe")
+                @instrumentation_tools._instrument_tool("metrics_serialization_probe")
                 def successful_tool():
                     return "successful result"
 
