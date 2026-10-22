@@ -511,9 +511,9 @@ docutils==0.23 \
     --hash=sha256:25d013af9bf23bc1c7b2b093dff4208166c53a94786c9e447808335ef1185fea \
     --hash=sha256:746f5060322511280a1e50eb76846ed6bf2342984b2ac04dc42caa1a8d78799e
     # via readme-renderer
-fastembed==0.8.0 \
-    --hash=sha256:40bee672657574a1009e35ec50030a55f2b426842cb011845379817641bbbbd0 \
-    --hash=sha256:75966edfa8b006ee78514c726bd7f6a50721dadc89305279052be9db72fd53e8
+fastembed==0.9.0 \
+    --hash=sha256:273d408edec8c0f161711d8f6e44e4a5b559d18e8edf6bf805415d55dc772846 \
+    --hash=sha256:bc3beadb46ecb3580ab832d12670be7ecb937f80adfcb7b77b03f7eef76c394a
     # via
     #   -c constraints.txt
     #   -r requirements.txt
