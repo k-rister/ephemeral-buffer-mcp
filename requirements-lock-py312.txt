@@ -360,9 +360,9 @@ cryptography==50.0.1 \
     --hash=sha256:fd3718b960d0b5dd213cdf03f3bcb7000e69dda0de8b956061947ff6bcff5558 \
     --hash=sha256:ff838d62ec1bfce4f9ba7fa16f4a7b554cd8d0c299e6be37502161a660c84eef
     # via pyjwt
-fastembed==0.8.0 \
-    --hash=sha256:40bee672657574a1009e35ec50030a55f2b426842cb011845379817641bbbbd0 \
-    --hash=sha256:75966edfa8b006ee78514c726bd7f6a50721dadc89305279052be9db72fd53e8
+fastembed==0.9.0 \
+    --hash=sha256:273d408edec8c0f161711d8f6e44e4a5b559d18e8edf6bf805415d55dc772846 \
+    --hash=sha256:bc3beadb46ecb3580ab832d12670be7ecb937f80adfcb7b77b03f7eef76c394a
     # via -r requirements.txt
 filelock==3.32.5 \
     --hash=sha256:142cd9fa77a872c5e78c62329a0d15278fadc686eb89e760017968961a4fd6b2 \
