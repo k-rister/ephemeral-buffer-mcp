@@ -18,6 +18,7 @@ from ..response_limits import (
     SUMMARY_COMMAND_TRUNCATION_MARKER,
     SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
     SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES,
+    SUMMARY_LABEL_MAX_BYTES,
 )
 from ._context import active_engine as _active_engine
 from ._context import current_request_cancel_event
