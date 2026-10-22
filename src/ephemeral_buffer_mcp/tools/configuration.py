@@ -5,6 +5,7 @@ import json
 
 from ..config import runtime_index_budget_adjustment_enabled
 from ._context import active_engine as _active_engine
+from .execution_responses import _execution_error_json
 from .instrumentation import _instrument_tool
 from .registry import register_tool
 
