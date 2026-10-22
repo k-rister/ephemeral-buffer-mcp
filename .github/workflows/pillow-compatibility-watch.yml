@@ -1,0 +1,74 @@
+name: Pillow compatibility watch
+
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pillow_clean: ${{ steps.probe.outputs.pillow_clean }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
+
+      - name: Prepare Python 3.10 audit environment
+        run: |
+          python -m venv /tmp/pillow-watch-py310
+          /tmp/pillow-watch-py310/bin/python -m pip install --upgrade pip-audit
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Prepare Python 3.12 audit environment
+        run: |
+          python -m venv /tmp/pillow-watch-py312
+          /tmp/pillow-watch-py312/bin/python -m pip install --upgrade pip-audit
+
+      - name: Resolve current requirements and inspect Pillow
+        id: probe
+        run: |
+          python scripts/pillow_compatibility_watch.py \
+            --python /tmp/pillow-watch-py310/bin/python \
+            --python /tmp/pillow-watch-py312/bin/python \
+            --requirements requirements.txt \
+            --github-output "$GITHUB_OUTPUT"
+
+  notify:
+    needs: check
+    if: needs.check.outputs.pillow_clean == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Comment on the blocker issue once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          already_notified="$(gh issue view 468 --json comments --jq 'any(.comments[].body; contains("<!-- pillow-compatibility-watch:resolved -->"))')"
+          if [ "$already_notified" != "true" ]; then
+            cat > /tmp/pillow-watch-comment.md <<'EOF'
+          <!-- pillow-compatibility-watch:resolved -->
+          The weekly resolver check found no Pillow advisories for the current unpinned requirements on Python 3.10 and 3.12.
+
+          Please update and audit the pinned lock files, remove the temporary Pillow exception, and close this blocker when the supported install sets are clean. This check only reports Pillow status.
+
+          — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: configured the automated Pillow compatibility notification.
+          EOF
+            gh issue comment 468 --body-file /tmp/pillow-watch-comment.md
+          fi
