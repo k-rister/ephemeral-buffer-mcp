@@ -4,6 +4,9 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 ## Unreleased
 
+- Require setuptools 77 or newer to build the full and lexical distributions
+  with SPDX license metadata.
+
 ## 0.11.0 - 2026-10-18
 
 - Breaking: On the first upgrade to the shared-core package layout, uninstall
