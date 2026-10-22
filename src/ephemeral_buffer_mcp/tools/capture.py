@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Literal, Optional
 from ..capture_utils import read_file_bounded, run_command_bounded
 from ..engine import normalize_structured_metrics
 from ..logging_utils import get_logger, log_event
-from ..mcp_response import ToolErrorEnvelope, ToolResponseEnvelope
 from ..response_limits import (
     CONSOLIDATION_CAPTURE_ID_MAX_BYTES,
     CONSOLIDATION_MAX_CAPTURES,
@@ -19,7 +18,6 @@ from ..response_limits import (
     SUMMARY_COMMAND_TRUNCATION_MARKER,
     SUMMARY_DIFF_FILE_MAP_MAX_BYTES,
     SUMMARY_DIFF_FILE_MAP_MAX_ENTRIES,
-    SUMMARY_LABEL_MAX_BYTES,
 )
 from ._context import active_engine as _active_engine
 from ._context import current_request_cancel_event
@@ -51,41 +49,6 @@ def _bounded_command(command: str) -> tuple[str, bool]:
         SUMMARY_COMMAND_MAX_BYTES,
         SUMMARY_COMMAND_TRUNCATION_MARKER,
     )
-
-
-def _summary_response(
-    capture_id: str,
-    include_previews: bool = False,
-    capture: Optional[Any] = None,
-) -> ToolResponseEnvelope:
-    """Build a typed summary response without discarding the engine error code."""
-    if capture is None:
-        summary = _active_engine().get_summary(capture_id, include_previews=include_previews)
-    else:
-        summary = _active_engine().get_summary_for_capture(capture, include_previews=include_previews)
-    if summary.get("status") == "error":
-        message, _ = bounded_summary_text(
-            str(summary.get("message", "capture summary unavailable")),
-            SUMMARY_LABEL_MAX_BYTES,
-            "... [error truncated]",
-        )
-        text = f"Error: {message}"
-        return ToolResponseEnvelope(
-            status="error",
-            error=ToolErrorEnvelope(
-                code=str(summary.get("error_code") or "retrieval_failed"),
-                message=text,
-            ),
-            text=text,
-        )
-    payload = summary_payload(summary, include_previews=include_previews)
-    text = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return ToolResponseEnvelope(status="ok", data=payload, text=text)
 
 
 def _capture_text(
