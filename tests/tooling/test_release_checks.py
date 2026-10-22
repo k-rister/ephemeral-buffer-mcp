@@ -34,6 +34,14 @@ class TestReleaseChecks(unittest.TestCase):
 
         self.assertEqual(license_metadata, {"file": "LICENSE"})
 
+    def test_standalone_distributions_require_setuptools_for_spdx_license(self):
+        for distribution in ("full", "lexical"):
+            project = REPOSITORY_ROOT / "packaging" / distribution / "pyproject.toml"
+            with project.open("rb") as stream:
+                build_system = release_checks.tomllib.load(stream)["build-system"]
+
+            self.assertIn("setuptools>=77", build_system["requires"])
+
     def test_wheel_discovers_the_runtime_package_from_src(self):
         project = REPOSITORY_ROOT / "pyproject.toml"
         with project.open("rb") as stream:
