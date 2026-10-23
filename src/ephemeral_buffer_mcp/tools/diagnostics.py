@@ -113,6 +113,10 @@ def get_buffer_stats() -> str:
         "capture_removals_by_reason",
         {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
     )
+    capture_rejection_counts = stats.get(
+        "capture_rejections_by_reason",
+        {"bytes": 0, "chunks": 0},
+    )
     result = (
         f"Captures: {stats['capture_count']}/{stats['max_captures']}\n"
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}\n"
@@ -127,6 +131,7 @@ def get_buffer_stats() -> str:
         f"Foreground work by type: active={admission_active_by_type}, "
         f"queued={admission_queued_by_type}, rejected={admission_rejected_by_type}\n"
         f"Capture removals by reason: {json.dumps(capture_removal_counts, sort_keys=True)}\n"
+        f"Capture rejections by reason: {json.dumps(capture_rejection_counts, sort_keys=True)}\n"
         f"Deferred storage: {stats.get('deferred_storage_capture_count', 0)} captures, "
         f"{stats.get('deferred_storage_readers', 0)} readers, "
         f"{stats.get('deferred_storage_bytes', 0):,} accounted bytes\n"

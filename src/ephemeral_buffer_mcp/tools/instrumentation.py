@@ -136,10 +136,11 @@ def _instrument_tool(name):
         @wraps(function)
         def wrapper(*args, **kwargs):
             invocation_mode = kwargs.pop("__invocation_mode", "direct")
+            supplied_call_id = kwargs.pop("__call_id", None)
             persist_snapshot = invocation_mode != "mcp"
             if "__invocation_mode" in inspect.signature(function).parameters:
                 kwargs["__invocation_mode"] = invocation_mode
-            call_id = next(_TOOL_CALL_IDS)
+            call_id = supplied_call_id if supplied_call_id is not None else next(_TOOL_CALL_IDS)
             started = time.perf_counter()
             log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
             try:
@@ -195,5 +196,6 @@ def _instrument_tool(name):
                     # Direct calls and worker failures persist here.
                     write_metrics_snapshot()
         wrapper._supports_invocation_mode = True
+        wrapper._supports_call_id = True
         return wrapper
     return decorator

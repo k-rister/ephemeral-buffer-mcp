@@ -1597,6 +1597,11 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(engine.get_buffer_stats()["total_bytes"], 10)
             with self.assertRaisesRegex(ValueError, "content and label use 11 bytes"):
                 engine._ingest_state("1234", label="éééx")
+            self.assertEqual(
+                engine.get_buffer_stats()["capture_rejections_by_reason"],
+                {"bytes": 1, "chunks": 0},
+            )
+            self.assertEqual(len(engine._captures), 1)
         finally:
             engine.clear("all")
 
@@ -1631,6 +1636,57 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with self.assertRaisesRegex(ValueError, "indexed chunks"):
             rejecting._ingest_state("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="too-large")
         self.assertEqual(rejecting._captures, {})
+        self.assertEqual(
+            rejecting.get_buffer_stats()["capture_rejections_by_reason"],
+            {"bytes": 0, "chunks": 1},
+        )
+
+    def test_capacity_rejections_update_usage_metric_task_window_once(self):
+        from ephemeral_buffer_mcp.metrics import LocalMetrics
+
+        metrics = LocalMetrics(enabled=True)
+        byte_limited = self._new_engine(
+            max_buffer_bytes=4,
+            metrics=metrics,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        baseline = metrics.snapshot(include_snapshot_token=True)
+        with self.assertRaisesRegex(ValueError, "buffer limit"):
+            byte_limited._ingest_state("oversized", label="x")
+        byte_delta = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+        self.assertEqual(
+            byte_limited.get_buffer_stats()["capture_rejections_by_reason"],
+            {"bytes": 1, "chunks": 0},
+        )
+        self.assertEqual(byte_limited._captures, {})
+        self.assertEqual(
+            byte_delta["capture_rejections_by_reason"],
+            {"bytes": 1, "chunks": 0},
+        )
+
+        chunk_limited = self._new_engine(
+            max_indexed_chunks=1,
+            metrics=metrics,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        baseline = metrics.snapshot(include_snapshot_token=True)
+        with self.assertRaisesRegex(ValueError, "indexed chunks"):
+            chunk_limited._ingest_state(
+                "one\ntwo\nthree\nfour\nfive",
+                label="too-many-chunks",
+            )
+        chunk_delta = metrics.snapshot(since_snapshot=baseline["snapshot_token"])
+        self.assertEqual(
+            chunk_limited.get_buffer_stats()["capture_rejections_by_reason"],
+            {"bytes": 0, "chunks": 1},
+        )
+        self.assertEqual(chunk_limited._captures, {})
+        self.assertEqual(
+            chunk_delta["capture_rejections_by_reason"],
+            {"bytes": 0, "chunks": 1},
+        )
 
     def test_runtime_index_budget_decrease_evicts_oldest_captures(self):
         engine = self._new_engine(max_captures=3, max_indexed_chunks=6)

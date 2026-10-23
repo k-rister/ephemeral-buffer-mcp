@@ -27,7 +27,13 @@ class TestMetrics(unittest.TestCase):
     def test_disabled_metrics_keep_empty_snapshot(self):
         metrics = LocalMetrics(enabled=False)
         metrics.record_event("secret-event")
-        self.assertEqual(metrics.snapshot(), {"enabled": False})
+        self.assertEqual(
+            metrics.snapshot(),
+            {
+                "enabled": False,
+                "capture_rejections_by_reason": {"bytes": 0, "chunks": 0},
+            },
+        )
 
     def test_record_event_rejects_unknown_names(self):
         metrics = LocalMetrics(enabled=True)
@@ -81,6 +87,54 @@ class TestMetrics(unittest.TestCase):
             client_b["capture_removals_by_reason"],
             {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
         )
+
+    def test_capture_rejection_reasons_are_scoped_and_delta_aware(self):
+        metrics = LocalMetrics(enabled=True)
+        with metrics.bind_scope(
+            "client-a",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-a"},
+        ):
+            baseline = metrics.snapshot(include_snapshot_token=True)
+            with metrics.measure("capture_text"):
+                metrics.record_capture_rejection(("bytes",))
+                in_flight = metrics.snapshot(
+                    since_snapshot=baseline["snapshot_token"]
+                )
+                self.assertEqual(
+                    in_flight["capture_rejections_by_reason"],
+                    {"bytes": 0, "chunks": 0},
+                )
+                metrics.record_capture_rejection(("chunks",))
+            delta = metrics.snapshot(since_snapshot=in_flight["snapshot_token"])
+
+        self.assertEqual(
+            delta["capture_rejections_by_reason"],
+            {"bytes": 1, "chunks": 1},
+        )
+        process = metrics.snapshot(scope_key="process")
+        self.assertEqual(
+            process["capture_rejections_by_reason"],
+            {"bytes": 1, "chunks": 1},
+        )
+        with metrics.bind_scope(
+            "client-b",
+            attribution={"kind": "mcp_session", "mode": "private", "id": "opaque-b"},
+        ):
+            client_b = metrics.snapshot()
+        self.assertEqual(
+            client_b["capture_rejections_by_reason"],
+            {"bytes": 0, "chunks": 0},
+        )
+
+    def test_capture_rejection_reasons_are_fixed_and_validated(self):
+        metrics = LocalMetrics(enabled=True)
+
+        with self.assertRaisesRegex(ValueError, "unknown capture rejection reason"):
+            metrics.record_capture_rejection(("unknown",))
+        with self.assertRaisesRegex(
+            ValueError, "at least one capture rejection reason is required"
+        ):
+            metrics.record_capture_rejection(())
 
     def test_scoped_compatibility_views_and_measurement_handle(self):
         disabled = LocalMetrics(enabled=False)

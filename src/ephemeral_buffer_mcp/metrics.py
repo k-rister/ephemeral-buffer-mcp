@@ -25,6 +25,7 @@ EVENT_NAMES = (
 )
 
 CAPTURE_REMOVAL_REASONS = ("count", "bytes", "chunks", "clear", "budget")
+CAPTURE_REJECTION_REASONS = ("bytes", "chunks")
 
 BYTE_COUNTER_NAMES = (
     "capture_input_bytes",
@@ -125,6 +126,7 @@ class LocalMetrics:
             "tools": defaultdict(cls._new_tool),
             "events": defaultdict(int),
             "capture_removals_by_reason": defaultdict(int),
+            "capture_rejections_by_reason": defaultdict(int),
             "bytes": defaultdict(int),
             "semantic_index": cls._new_semantic_state(),
             "captured": set(),
@@ -479,6 +481,10 @@ class LocalMetrics:
                 target["scope_key"]: defaultdict(int)
                 for target in target_states
             },
+            "capture_rejections_by_scope": {
+                target["scope_key"]: defaultdict(int)
+                for target in target_states
+            },
             "bytes": defaultdict(int),
             "semantic_index": self._new_semantic_state(),
             "result_count": 0,
@@ -577,6 +583,26 @@ class LocalMetrics:
                         target["capture_removals_by_reason"][reason] += 1
                         if measurement is not None:
                             measurement["capture_removals_by_scope"][
+                                target["scope_key"]
+                            ][reason] += 1
+
+    def record_capture_rejection(self, reasons: Iterable[str]) -> None:
+        """Record one rejected capture against fixed capacity reasons."""
+        reason_names = tuple(dict.fromkeys(reasons))
+        unknown = set(reason_names).difference(CAPTURE_REJECTION_REASONS)
+        if unknown:
+            raise ValueError(f"unknown capture rejection reason: {sorted(unknown)[0]}")
+        if not reason_names:
+            raise ValueError("at least one capture rejection reason is required")
+        if self.enabled:
+            with self._lock:
+                measurement = self._active_measurement.get()
+                targets = self._current_scope_states(measurement)
+                for target in targets:
+                    for reason in reason_names:
+                        target["capture_rejections_by_reason"][reason] += 1
+                        if measurement is not None:
+                            measurement["capture_rejections_by_scope"][
                                 target["scope_key"]
                             ][reason] += 1
 
@@ -738,6 +764,10 @@ class LocalMetrics:
             name: runtime_state["capture_removals_by_reason"][name]
             for name in CAPTURE_REMOVAL_REASONS
         }
+        capture_rejections_by_reason = {
+            name: runtime_state["capture_rejections_by_reason"][name]
+            for name in CAPTURE_REJECTION_REASONS
+        }
         bytes_snapshot = {
             name: runtime_state["bytes"][name]
             for name in BYTE_COUNTER_NAMES
@@ -764,6 +794,13 @@ class LocalMetrics:
                         capture_removals_by_reason[name] = max(
                             0, capture_removals_by_reason[name] - amount
                         )
+                for name, amount in measurement["capture_rejections_by_scope"].get(
+                    runtime_state["scope_key"], {}
+                ).items():
+                    if name in capture_rejections_by_reason:
+                        capture_rejections_by_reason[name] = max(
+                            0, capture_rejections_by_reason[name] - amount
+                        )
                 for name, amount in measurement["bytes"].items():
                     if name in bytes_snapshot:
                         bytes_snapshot[name] = max(0, bytes_snapshot[name] - amount)
@@ -776,6 +813,7 @@ class LocalMetrics:
             "tools": tools,
             "events": events,
             "capture_removals_by_reason": capture_removals_by_reason,
+            "capture_rejections_by_reason": capture_rejections_by_reason,
             "bytes": bytes_snapshot,
             "semantic_index": semantic_index,
         }
@@ -1094,7 +1132,12 @@ class LocalMetrics:
         explicitly selects the aggregate process view.
         """
         if not self.enabled:
-            return {"enabled": False}
+            return {
+                "enabled": False,
+                "capture_rejections_by_reason": dict.fromkeys(
+                    CAPTURE_REJECTION_REASONS, 0
+                ),
+            }
         with self._lock:
             snapshot_at = time.time()
             runtime_state = self._scope_state(scope_key)
@@ -1165,6 +1208,13 @@ class LocalMetrics:
                         )
                         for name in CAPTURE_REMOVAL_REASONS
                     },
+                    "capture_rejections_by_reason": {
+                        name: self._delta_value(
+                            current_state["capture_rejections_by_reason"].get(name, 0),
+                            baseline["capture_rejections_by_reason"].get(name, 0),
+                        )
+                        for name in CAPTURE_REJECTION_REASONS
+                    },
                     "bytes": {
                         name: self._delta_value(
                             current_state["bytes"].get(name, 0),
@@ -1233,6 +1283,7 @@ class LocalMetrics:
                 },
                 "events": state["events"],
                 "capture_removals_by_reason": state["capture_removals_by_reason"],
+                "capture_rejections_by_reason": state["capture_rejections_by_reason"],
                 "bytes": state["bytes"],
                 "semantic_index": self._public_semantic_index(state["semantic_index"]),
                 "workflow_effectiveness": self._workflow_effectiveness(

@@ -381,7 +381,7 @@ def handle_socket_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         response_adapter = registration.socket_response_adapter
         assert request_adapter is not None and response_adapter is not None
 
-        async def on_rejection(code, message):
+        async def on_rejection(code, message, _call_id):
             try:
                 await _write_socket_error(writer, code, message)
             except Exception:
