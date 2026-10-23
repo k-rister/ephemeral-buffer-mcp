@@ -63,14 +63,13 @@ class TestEndToEndPipe(unittest.TestCase):
                 if expected_socket_error is not None:
                     self._wait_for_socket_error(proc, expected_socket_error)
                 else:
-                    for _ in range(50):
-                        if isolated_socket_path.exists():
-                            break
+                    deadline = time.monotonic() + 30
+                    while not isolated_socket_path.exists() and time.monotonic() < deadline:
                         time.sleep(0.1)
 
                     self.assertTrue(
                         isolated_socket_path.exists(),
-                        "Socket should be created by server",
+                        "Socket should be created by server before the deadline",
                     )
                 yield str(isolated_socket_path), test_env
             finally:

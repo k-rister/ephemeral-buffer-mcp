@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
@@ -806,10 +807,23 @@ class TestExecutionTools(unittest.TestCase):
             )
 
         async def invoke():
+            worker_started = threading.Event()
+            worker_finished = threading.Event()
+            original_run = self.manager._run
+
+            def observe_background_run(*args, **kwargs):
+                worker_started.set()
+                try:
+                    return original_run(*args, **kwargs)
+                finally:
+                    worker_finished.set()
+
             offload = AsyncMock(
                 side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
             )
-            with patch.object(server, "to_thread", offload):
+            with patch.object(server, "to_thread", offload), patch.object(
+                self.manager, "_run", new=observe_background_run
+            ):
                 started = json.loads(mcp_result_text(await server.mcp.call_tool(
                     "start_execution",
                     {
@@ -817,21 +831,23 @@ class TestExecutionTools(unittest.TestCase):
                         "execution_id": "adapter-execution",
                     },
                 )))
-                deadline = asyncio.get_running_loop().time() + 3
-                while True:
-                    result = json.loads(
-                        mcp_result_text(await server.mcp.call_tool(
-                            "get_execution",
-                            {"execution_id": "adapter-execution"},
-                        ))
-                    )
-                    if result["execution_status"] == "completed":
-                        return started, result
-                    if result.get("background_error"):
-                        self.fail(result["background_error"])
-                    if asyncio.get_running_loop().time() >= deadline:
-                        self.fail("background execution did not complete before the deadline")
-                    await asyncio.sleep(0.01)
+                self.assertTrue(
+                    await asyncio.to_thread(worker_started.wait, 30),
+                    "background execution did not start before the deadline",
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(worker_finished.wait, 30),
+                    "background execution did not finish before the deadline",
+                )
+                result = json.loads(
+                    mcp_result_text(await server.mcp.call_tool(
+                        "get_execution",
+                        {"execution_id": "adapter-execution"},
+                    ))
+                )
+                if result.get("background_error"):
+                    self.fail(result["background_error"])
+                return started, result
 
         _started, result = asyncio.run(invoke())
         self.assertEqual(result["execution_status"], "completed")

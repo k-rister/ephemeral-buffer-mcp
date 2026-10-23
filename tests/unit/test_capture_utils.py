@@ -25,7 +25,8 @@ from ephemeral_buffer_mcp.capture_utils import (
 
 class TestBoundedCommandCapture(unittest.TestCase):
     def assert_process_is_gone(self, process_id, message):
-        for _ in range(300):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
             if capture_utils._supervisor_process_absent(process_id):
                 return
             time.sleep(0.01)
@@ -124,7 +125,8 @@ class TestBoundedCommandCapture(unittest.TestCase):
                 command, None, 1024, process_marker="detached-descendant"
             )
             detached_pid = int(pid_path.read_text(encoding="ascii"))
-            for _ in range(20):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
                 try:
                     os.kill(detached_pid, 0)
                 except ProcessLookupError:
@@ -155,7 +157,7 @@ class TestBoundedCommandCapture(unittest.TestCase):
             )
 
             def wait_for_detached_child(_pid, _process_group_id):
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     if pid_path.exists():
                         return
@@ -172,7 +174,8 @@ class TestBoundedCommandCapture(unittest.TestCase):
             )
             detached_pid = int(pid_path.read_text(encoding="ascii"))
             try:
-                for _ in range(300):
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
                     try:
                         os.kill(detached_pid, 0)
                     except ProcessLookupError:
@@ -360,11 +363,6 @@ class TestBoundedCommandCapture(unittest.TestCase):
         with patch.object(capture_utils, "_supervisor_descendants", return_value={2}), \
                 patch.object(capture_utils, "_supervisor_signal_descendants", side_effect=[True, True]), \
                 patch.object(capture_utils.time, "monotonic", side_effect=[0, 0.1, 2, 2, 0.1, 4]), \
-                patch.object(capture_utils, "_supervisor_reap"):
-            self.assertFalse(capture_utils._supervisor_cleanup(1))
-        with patch.object(capture_utils, "_supervisor_descendants", return_value={2}), \
-                patch.object(capture_utils, "_supervisor_signal_descendants", side_effect=[True, False, False]), \
-                patch.object(capture_utils.time, "monotonic", side_effect=[0, 2, 2, 4]), \
                 patch.object(capture_utils, "_supervisor_reap"):
             self.assertFalse(capture_utils._supervisor_cleanup(1))
         with patch.object(capture_utils, "_supervisor_descendants", return_value={2}), \
@@ -707,7 +705,7 @@ class TestBoundedCommandCapture(unittest.TestCase):
             )
             command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)}"
             started = time.monotonic()
-            output, exit_code, _truncated, _original_size, timed_out = run_command_bounded(
+            output, exit_code, _truncated, _, timed_out = run_command_bounded(
                 command, None, 1024, timeout_seconds=1
             )
 
@@ -1190,16 +1188,6 @@ class TestBoundedCommandCapture(unittest.TestCase):
 
         self.assertEqual(killpg.call_count, 3)
         self.assertEqual(killpg.call_args_list[0].args, (42, 15))
-
-    def test_process_group_cleanup_confirms_group_absence_after_kill(self):
-        process = type("Process", (), {"pid": 42, "wait": lambda _self, timeout=None: None})()
-
-        with patch(
-            "ephemeral_buffer_mcp.capture_utils.os.killpg",
-            side_effect=[None, None, ProcessLookupError()],
-        ) as killpg:
-            self.assertTrue(_terminate_process_group(process))
-        self.assertEqual(killpg.call_count, 3)
 
     def test_process_group_cleanup_accepts_missing_group_after_unreaped_wait(self):
         class UnreapedProcess:

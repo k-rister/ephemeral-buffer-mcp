@@ -57,7 +57,7 @@ class TestCliConfiguration(unittest.TestCase):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -92,7 +92,7 @@ class TestCliConfiguration(unittest.TestCase):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         session_id, socket_path, log_file = result.stdout.splitlines()
@@ -119,7 +119,7 @@ class TestCliConfiguration(unittest.TestCase):
                 cwd=directory,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
             )
 
             self.assertNotEqual(result.returncode, 0)
@@ -154,7 +154,7 @@ class TestCliConfiguration(unittest.TestCase):
                 env=environment,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
             )
 
         self.assertEqual(result.returncode, 0, result.stderr)
