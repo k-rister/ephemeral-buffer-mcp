@@ -193,7 +193,18 @@ async def _run_admitted_tool_call(
     """Share service tracking, admission, cancellation scope, and cleanup."""
     registered_call = service_context.register_tool_call(tool_name)
     if registered_call is None:
-        return await on_rejection("server_shutting_down", shutdown_message)
+        call_id = uuid.uuid4().hex
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "tool_call_rejected_shutdown",
+            call_id=call_id,
+            tool=tool_name,
+            lane=lane,
+        )
+        return await on_rejection(
+            "server_shutting_down", shutdown_message, call_id
+        )
 
     call_id, cancellation_event = registered_call
     try:
@@ -204,10 +215,11 @@ async def _run_admitted_tool_call(
             LOGGER,
             logging.WARNING,
             "tool_call_rejected_busy",
+            call_id=call_id,
             tool=tool_name,
             lane=lane,
         )
-        return await on_rejection("server_busy", busy_message)
+        return await on_rejection("server_busy", busy_message, call_id)
     except BaseException as exc:
         service_context.finish_tool_call(call_id)
         return await on_admission_error(exc)
@@ -217,7 +229,17 @@ async def _run_admitted_tool_call(
             ticket.release()
         finally:
             service_context.finish_tool_call(call_id)
-        return await on_rejection("server_shutting_down", shutdown_message)
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "tool_call_rejected_shutdown",
+            call_id=call_id,
+            tool=tool_name,
+            lane=lane,
+        )
+        return await on_rejection(
+            "server_shutting_down", shutdown_message, call_id
+        )
 
     cancel_token = (
         _REQUEST_CANCEL_EVENT.set(cancellation_event)

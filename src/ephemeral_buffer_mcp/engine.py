@@ -28,7 +28,11 @@ from typing import Callable, List, Dict, Any, Optional, Tuple, Mapping
 from dataclasses import dataclass, field
 from functools import wraps
 from .logging_utils import get_logger, log_event
-from .metrics import CAPTURE_REMOVAL_REASONS, LocalMetrics
+from .metrics import (
+    CAPTURE_REJECTION_REASONS,
+    CAPTURE_REMOVAL_REASONS,
+    LocalMetrics,
+)
 from .schema_versions import (
     CAPTURE_SUMMARY_SCHEMA_VERSION,
     CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
@@ -1114,6 +1118,9 @@ class EphemeralEngine:
         self._capture_removals_by_reason = dict.fromkeys(
             CAPTURE_REMOVAL_REASONS, 0
         )
+        self._capture_rejections_by_reason = dict.fromkeys(
+            CAPTURE_REJECTION_REASONS, 0
+        )
         self._metrics_snapshot_callback: Optional[Callable[[], None]] = None
         self._metrics_snapshot_pending = False
         self.semantic_prefetch_enabled = (
@@ -1494,6 +1501,7 @@ class EphemeralEngine:
         label_bytes = len(label.encode("utf-8"))
         retained_bytes = capture_bytes + label_bytes
         if retained_bytes > max_buffer_bytes:
+            self._record_capture_rejection(("bytes",))
             log_event(
                 LOGGER,
                 logging.WARNING,
@@ -1512,6 +1520,7 @@ class EphemeralEngine:
         classified_type, diff_meta = detect_content_type(lines, label=label, content_type_hint=content_type)
         required_chunks = self._chunk_count(len(lines))
         if required_chunks > self.max_indexed_chunks:
+            self._record_capture_rejection(("chunks",))
             raise ValueError(
                 f"Capture requires {required_chunks:,} indexed chunks, exceeding the "
                 f"{self.max_indexed_chunks:,}-chunk index budget"
@@ -1586,6 +1595,16 @@ class EphemeralEngine:
                 or projected_bytes > self.max_buffer_bytes
                 or projected_chunks > self.max_indexed_chunks
             ):
+                self._record_capture_rejection(
+                    tuple(
+                        reason
+                        for reason, exceeded in (
+                            ("bytes", projected_bytes > self.max_buffer_bytes),
+                            ("chunks", projected_chunks > self.max_indexed_chunks),
+                        )
+                        if exceeded
+                    )
+                )
                 raise ValueError(
                     "Cannot admit capture while retaining protected source captures "
                     f"(count={len(protected_ids)})"
@@ -1654,6 +1673,16 @@ class EphemeralEngine:
             )
         self._schedule_semantic_prefetch(capture)
         return capture
+
+    def _record_capture_rejection(self, reasons: Tuple[str, ...]) -> None:
+        """Record fixed capacity reasons for one rejected ingestion attempt."""
+        reason_names = tuple(dict.fromkeys(reasons))
+        if not reason_names:
+            return
+        with self._lock:
+            for reason in reason_names:
+                self._capture_rejections_by_reason[reason] += 1
+            self.metrics.record_capture_rejection(reason_names)
 
     def _record_capture_removal_locked(
         self,
@@ -3510,6 +3539,7 @@ class EphemeralEngine:
         return {
             "capture_count": len(self._captures),
             "capture_removals_by_reason": dict(self._capture_removals_by_reason),
+            "capture_rejections_by_reason": dict(self._capture_rejections_by_reason),
             "max_captures": self.max_captures,
             "total_lines": total_lines,
             "total_chunks": total_chunks,

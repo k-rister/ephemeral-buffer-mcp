@@ -16,6 +16,7 @@ class ToolErrorEnvelope(BaseModel):
 
     code: str
     message: str
+    details: Optional[Dict[str, Any]] = None
 
 
 class ToolResponseEnvelope(BaseModel):

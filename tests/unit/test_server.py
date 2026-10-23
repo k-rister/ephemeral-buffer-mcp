@@ -660,11 +660,19 @@ class TestServerTools(unittest.TestCase):
                 ("get_buffer_stats", "diagnostics"),
             ):
                 with patch.object(mcp_transport, "admission_gate", return_value=BusyGate()) as gate:
-                    result = await adapters[name]()
+                    with patch.object(server, "log_event") as log_event:
+                        result = await adapters[name]()
                 gate.assert_called_once_with(category)
                 payload = mcp_result_payload(result)
                 self.assertEqual(payload["status"], "error")
                 self.assertEqual(payload["error"]["code"], "server_busy")
+                call_id = payload["error"]["details"]["call_id"]
+                busy_event = next(
+                    call
+                    for call in log_event.call_args_list
+                    if call.args[2] == "tool_call_rejected_busy"
+                )
+                self.assertEqual(call_id, busy_event.kwargs["call_id"])
 
         asyncio.run(exercise())
 
@@ -853,6 +861,7 @@ class TestServerTools(unittest.TestCase):
                 {"phases": [{"name": "shutdown-probe", "command": "true"}]},
             )
             diagnostic = await app.call_tool("get_buffer_stats", {})
+            shutdown_results = (structured, execution, diagnostic)
             for result in (structured, execution, diagnostic):
                 payload = mcp_result_payload(result)
                 self.assertEqual(
@@ -864,7 +873,9 @@ class TestServerTools(unittest.TestCase):
                     payload["error"]["code"],
                     "server_shutting_down",
                 )
+                self.assertIsInstance(payload["error"]["details"]["call_id"], str)
 
+            race_results = []
             for name, arguments in (
                 ("capture_text", {"content": "closing race"}),
                 (
@@ -882,11 +893,13 @@ class TestServerTools(unittest.TestCase):
                 with context._lifecycle_lock:
                     context._closing = False
                 payload = mcp_result_payload(result)
+                race_results.append(result)
                 self.assertEqual(payload["status"], "error")
                 self.assertEqual(
                     payload["error"]["code"],
                     "server_shutting_down",
                 )
+                self.assertIsInstance(payload["error"]["details"]["call_id"], str)
 
             class FailingGate:
                 async def acquire(self, _work_type):
@@ -897,9 +910,21 @@ class TestServerTools(unittest.TestCase):
                     await app.call_tool("get_buffer_stats", {})
             self.assertEqual(str(raised.exception.__cause__), "admission failed")
             self.assertEqual(context._active_tool_calls, {})
+            return shutdown_results + tuple(race_results)
 
         try:
-            asyncio.run(exercise())
+            with patch.object(server, "log_event") as log_event:
+                rejection_results = asyncio.run(exercise())
+            shutdown_log_ids = [
+                call.kwargs["call_id"]
+                for call in log_event.call_args_list
+                if call.args[2] == "tool_call_rejected_shutdown"
+            ]
+            result_ids = [
+                mcp_result_payload(result)["error"]["details"]["call_id"]
+                for result in rejection_results
+            ]
+            self.assertCountEqual(result_ids, shutdown_log_ids)
         finally:
             with context._lifecycle_lock:
                 context._closing = False
@@ -1182,16 +1207,11 @@ class TestServerTools(unittest.TestCase):
                 )
             )
         self.assertEqual(error, {"reason": "RuntimeError", "status": "error"})
-        self.assertEqual(
-            json.loads(mcp_response.content[0].text),
-            {
-                "status": "error",
-                "error": {
-                    "code": "preflight_failed",
-                    "message": "unexpected",
-                },
-            },
-        )
+        mcp_error = json.loads(mcp_response.content[0].text)
+        self.assertEqual(mcp_error["status"], "error")
+        self.assertEqual(mcp_error["error"]["code"], "preflight_failed")
+        self.assertEqual(mcp_error["error"]["message"], "unexpected")
+        self.assertIsInstance(mcp_error["error"]["details"]["call_id"], str)
 
     def test_capture_file_reports_missing_path(self):
         result = server.capture_file("/does/not/exist")
@@ -1721,19 +1741,15 @@ class TestServerTools(unittest.TestCase):
             "Error: runtime semantic-index budget adjustment is disabled; set "
             "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
         )
+        mcp_error = json.loads(mcp_response.content[0].text)
+        self.assertEqual(mcp_error["status"], "error")
+        self.assertEqual(mcp_error["error"]["code"], "index_budget_disabled")
         self.assertEqual(
-            json.loads(mcp_response.content[0].text),
-            {
-                "status": "error",
-                "error": {
-                    "code": "index_budget_disabled",
-                    "message": (
-                        "runtime semantic-index budget adjustment is disabled; set "
-                        "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it."
-                    ),
-                },
-            },
+            mcp_error["error"]["message"],
+            "runtime semantic-index budget adjustment is disabled; set "
+            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
         )
+        self.assertIsInstance(mcp_error["error"]["details"]["call_id"], str)
 
         with patch.object(
             configuration_tools,
@@ -1756,16 +1772,11 @@ class TestServerTools(unittest.TestCase):
             direct,
             "Error adjusting semantic-index budget: budget must be non-negative",
         )
-        self.assertEqual(
-            json.loads(mcp_response.content[0].text),
-            {
-                "status": "error",
-                "error": {
-                    "code": "invalid_index_budget",
-                    "message": "budget must be non-negative",
-                },
-            },
-        )
+        mcp_error = json.loads(mcp_response.content[0].text)
+        self.assertEqual(mcp_error["status"], "error")
+        self.assertEqual(mcp_error["error"]["code"], "invalid_index_budget")
+        self.assertEqual(mcp_error["error"]["message"], "budget must be non-negative")
+        self.assertIsInstance(mcp_error["error"]["details"]["call_id"], str)
 
     def test_runtime_diagnostics_reports_explicit_and_default_socket_modes(self):
         with patch.object(
@@ -1884,6 +1895,10 @@ class TestServerTools(unittest.TestCase):
             payload["capture_removals_by_reason"],
             {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
         )
+        self.assertEqual(
+            payload["capture_rejections_by_reason"],
+            {"bytes": 0, "chunks": 0},
+        )
         self.assertIn("started_at", payload)
         self.assertIn("snapshot_at", payload)
         self.assertEqual(payload["interface_coverage"]["available"], 22)
@@ -1925,6 +1940,10 @@ class TestServerTools(unittest.TestCase):
             delta["capture_removals_by_reason"],
             {"count": 0, "bytes": 0, "chunks": 0, "clear": 0, "budget": 0},
         )
+        self.assertEqual(
+            delta["capture_rejections_by_reason"],
+            {"bytes": 0, "chunks": 0},
+        )
         self.assertEqual(delta["interface_coverage"]["used"], 2)
         self.assertIn("snapshot_token", delta)
 
@@ -1934,6 +1953,89 @@ class TestServerTools(unittest.TestCase):
             next_delta["bytes"]["tool_response_bytes"],
             len(delta_raw.encode("utf-8")),
         )
+
+    def test_mcp_errors_include_lifecycle_call_id_and_hide_exception_text(self):
+        context = server.create_service_context(
+            metrics_file=None,
+            engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+        )
+        app = server.create_mcp_server(context)
+        try:
+            with patch.object(instrumentation_tools, "log_event") as log:
+                returned_error = asyncio.run(
+                    app.call_tool(
+                        "get_capture_summary",
+                        {"capture_id": "missing-call-id-capture"},
+                    )
+                )
+            returned_lifecycle = [
+                call for call in log.call_args_list
+                if call.args[2] in {"mcp_tool_started", "mcp_tool_completed"}
+            ]
+            returned_call_id = returned_lifecycle[-1].kwargs["call_id"]
+            self.assertEqual(
+                returned_error.structured_content["error"]["details"]["call_id"],
+                returned_call_id,
+            )
+
+            with patch.object(
+                context.engine,
+                "get_summary",
+                side_effect=RuntimeError("private exception text"),
+            ), patch.object(instrumentation_tools, "log_event") as log:
+                unexpected_error = asyncio.run(
+                    app.call_tool(
+                        "get_capture_summary",
+                        {"capture_id": "exception-call-id-capture"},
+                    )
+                )
+            failure_event = next(
+                call for call in log.call_args_list
+                if call.args[2] == "mcp_tool_failed"
+            )
+            self.assertEqual(
+                unexpected_error.structured_content["status"],
+                "error",
+            )
+            self.assertEqual(
+                unexpected_error.structured_content["error"]["code"],
+                "operation_failed",
+            )
+            self.assertEqual(
+                unexpected_error.structured_content["error"]["message"],
+                "The operation failed unexpectedly.",
+            )
+            self.assertEqual(
+                unexpected_error.structured_content["error"]["details"]["call_id"],
+                failure_event.kwargs["call_id"],
+            )
+            self.assertNotIn("private exception text", repr(unexpected_error))
+        finally:
+            context.close()
+
+    def test_unstructured_mcp_tool_exceptions_return_generic_json_errors(self):
+        def fail_with_private_text():
+            raise RuntimeError("private exception text")
+
+        adapter = self.build_mcp_adapter(
+            fail_with_private_text,
+            "unexpected_plain_probe",
+            "diagnostics",
+        )
+        result = asyncio.run(adapter())
+        payload = json.loads(result)
+
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"]["code"], "operation_failed")
+        self.assertEqual(
+            payload["error"]["message"],
+            "The operation failed unexpectedly.",
+        )
+        self.assertIsInstance(payload["error"]["details"]["call_id"], str)
+        self.assertNotIn("private exception text", result)
+
+    def test_legacy_json_error_correlation_ignores_non_text_values(self):
+        self.assertIsNone(mcp_transport._correlate_json_error(None, "call-id"))
 
     def test_mcp_session_scope_binding_without_request_context_is_a_noop(self):
         original_metrics = server.METRICS
@@ -2098,7 +2200,7 @@ class TestServerTools(unittest.TestCase):
         description_characters = sum(
             len(tool.description or "") for tool in mcp_tools
         )
-        self.assertLess(len(compact_catalog), 28000)
+        self.assertLess(len(compact_catalog), 30000)
         self.assertLess(description_characters, 7000)
         self.assertLess(len(mcp_transport._mcp_instructions()), 200)
 
@@ -2195,7 +2297,14 @@ class TestServerTools(unittest.TestCase):
         finally:
             server.METRICS = original_metrics
 
-        self.assertEqual(payload, {"enabled": False, "schema_version": 2})
+        self.assertEqual(
+            payload,
+            {
+                "enabled": False,
+                "capture_rejections_by_reason": {"bytes": 0, "chunks": 0},
+                "schema_version": 2,
+            },
+        )
 
     def test_metrics_snapshot_file_is_opt_in_and_content_free(self):
         from ephemeral_buffer_mcp.engine import EphemeralEngine

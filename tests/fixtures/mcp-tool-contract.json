@@ -100,6 +100,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -236,6 +249,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -341,6 +367,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -478,6 +517,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -650,6 +702,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -810,6 +875,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -920,6 +998,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -1195,6 +1286,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [
@@ -1504,6 +1608,19 @@
             "message": {
               "title": "Message",
               "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
             }
           },
           "required": [

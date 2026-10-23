@@ -221,12 +221,17 @@ def _service_rejection_result(
     code: str,
     message: str,
     *,
+    call_id: str,
     structured: bool,
     compact_text: bool = False,
 ) -> CallToolResult | str:
     """Return a consistent JSON error body for busy and shutdown failures."""
+    details = {"call_id": call_id}
     error_text = json.dumps(
-        {"status": "error", "error": {"code": code, "message": message}},
+        {
+            "status": "error",
+            "error": {"code": code, "message": message, "details": details},
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -234,10 +239,47 @@ def _service_rejection_result(
         return error_text
     response = ToolResponseEnvelope(
         status="error",
-        error=ToolErrorEnvelope(code=code, message=message),
+        error=ToolErrorEnvelope(code=code, message=message, details=details),
         text=error_text,
     )
     return _call_tool_result(_fit_tool_envelope(response, compact_text=compact_text))
+
+
+def _correlate_tool_error(
+    response: ToolResponseEnvelope,
+    call_id: str,
+) -> ToolResponseEnvelope:
+    """Attach the lifecycle call ID to a returned structured tool error."""
+    if response.status != "error" or response.error is None:
+        return response
+    details = dict(response.error.details or {})
+    details["call_id"] = call_id
+    return response.model_copy(
+        update={
+            "error": response.error.model_copy(update={"details": details}),
+        }
+    )
+
+
+def _correlate_json_error(text: Any, call_id: str) -> Any:
+    """Add the lifecycle call ID to a legacy JSON error result when present."""
+    if not isinstance(text, str):
+        return text
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if (
+        not isinstance(payload, dict)
+        or payload.get("status") != "error"
+        or not isinstance(payload.get("error"), dict)
+    ):
+        return text
+    details = payload["error"].get("details")
+    details = dict(details) if isinstance(details, dict) else {}
+    details["call_id"] = call_id
+    payload["error"]["details"] = details
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def create_mcp_server(context: "ServiceContext | None" = None):
@@ -322,16 +364,66 @@ def _register_mcp_tool_for_app(
                 or category in {"capture", "retrieval", "search", "lifecycle"}
             )
 
-            async def on_rejection(code, message):
+            async def on_rejection(code, message, call_id):
                 return _service_rejection_result(
                     code,
                     message,
+                    call_id=call_id,
                     structured=structured,
                     compact_text=compact_text,
                 )
 
             async def on_admission_error(exc):
                 raise exc
+
+            async def unexpected_tool_failure(ticket, call_id):
+                message = "The operation failed unexpectedly."
+                details = {"call_id": call_id}
+                if structured:
+                    response = ToolResponseEnvelope(
+                        status="error",
+                        error=ToolErrorEnvelope(
+                            code="operation_failed",
+                            message=message,
+                            details=details,
+                        ),
+                        text=message,
+                    )
+                    fitted = _fit_tool_envelope(
+                        response,
+                        compact_text=compact_text,
+                    )
+                    _record_tool_response_bytes(service_context, name, fitted.text)
+                    await _run_admitted_thread(
+                        ticket,
+                        _write_metrics_snapshot,
+                        service_context,
+                        _service_context=service_context,
+                        _call_id=call_id,
+                    )
+                    return _call_tool_result(fitted)
+
+                error_text = json.dumps(
+                    {
+                        "status": "error",
+                        "error": {
+                            "code": "operation_failed",
+                            "message": message,
+                            "details": details,
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                _record_tool_response_bytes(service_context, name, error_text)
+                await _run_admitted_thread(
+                    ticket,
+                    _write_metrics_snapshot,
+                    service_context,
+                    _service_context=service_context,
+                    _call_id=call_id,
+                )
+                return error_text
 
             async def invoke(ticket, call_id):
                 if structured_result_factory is not None:
@@ -342,14 +434,19 @@ def _register_mcp_tool_for_app(
                         False,
                     ):
                         factory_kwargs = {**kwargs, "__invocation_mode": "mcp"}
-                    response = await _run_admitted_thread(
-                        ticket,
-                        structured_result_factory,
-                        *args,
-                        _service_context=service_context,
-                        _call_id=call_id,
-                        **factory_kwargs,
-                    )
+                    if getattr(structured_result_factory, "_supports_call_id", False):
+                        factory_kwargs = {**factory_kwargs, "__call_id": call_id}
+                    try:
+                        response = await _run_admitted_thread(
+                            ticket,
+                            structured_result_factory,
+                            *args,
+                            _service_context=service_context,
+                            _call_id=call_id,
+                            **factory_kwargs,
+                        )
+                    except Exception:
+                        return await unexpected_tool_failure(ticket, call_id)
                     if not isinstance(response, ToolResponseEnvelope):
                         raise TypeError("structured_result_factory must return ToolResponseEnvelope")
                 else:
@@ -357,17 +454,23 @@ def _register_mcp_tool_for_app(
                     dispatch_kwargs = kwargs
                     if getattr(dispatch_function, "_supports_invocation_mode", False):
                         dispatch_kwargs = {**kwargs, "__invocation_mode": "mcp"}
+                    if getattr(dispatch_function, "_supports_call_id", False):
+                        dispatch_kwargs = {**dispatch_kwargs, "__call_id": call_id}
                     if background_execution:
                         dispatch_kwargs = {**dispatch_kwargs, "__background": True}
-                    result = await _run_admitted_thread(
-                        ticket,
-                        dispatch_function,
-                        *args,
-                        _service_context=service_context,
-                        _call_id=call_id,
-                        **dispatch_kwargs,
-                    )
+                    try:
+                        result = await _run_admitted_thread(
+                            ticket,
+                            dispatch_function,
+                            *args,
+                            _service_context=service_context,
+                            _call_id=call_id,
+                            **dispatch_kwargs,
+                        )
+                    except Exception:
+                        return await unexpected_tool_failure(ticket, call_id)
                     if category not in {"capture", "retrieval", "search", "lifecycle"}:
+                        result = _correlate_json_error(result, call_id)
                         _record_tool_response_bytes(service_context, name, result)
                         await _run_admitted_thread(
                             ticket,
@@ -383,6 +486,7 @@ def _register_mcp_tool_for_app(
                         compact_text=compact_text,
                         legacy_error_code=legacy_error_code,
                     )
+                response = _correlate_tool_error(response, call_id)
                 fitted = _fit_tool_envelope(response, compact_text=compact_text)
                 _record_tool_response_bytes(service_context, name, fitted.text)
                 await _run_admitted_thread(

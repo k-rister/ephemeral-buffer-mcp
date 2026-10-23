@@ -638,12 +638,15 @@ socket path; `EPHEMERAL_SOCKET_PATH` remains an explicit override. The byte
 limit accounts for captured UTF-8 content plus its label; a capture is rejected
 when their combined size exceeds the limit. `get_buffer_stats` also reports
 embedding model readiness, embedding/cache settings, and process memory
-separately.
+separately. Its `capture_rejections_by_reason` map counts capacity rejections
+under `bytes` and `chunks`; `get_usage_metrics` exposes the same content-free
+counts in cumulative snapshots and task-window deltas.
 
 Foreground MCP work and CLI socket clients have bounded active and queued
 capacity. Defaults are 8 active and 16 queued MCP calls, plus 4 active and 8
 queued socket clients. When a lane is full, the server returns a `server_busy`
-error that can be retried. Configure these limits with
+error that can be retried. MCP admission errors include `details.call_id` for
+correlation with the rejection log. Configure these limits with
 `EPHEMERAL_MAX_ACTIVE_TOOL_WORK`, `EPHEMERAL_MAX_QUEUED_TOOL_WORK`,
 `EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS`, and
 `EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS`. `get_buffer_stats` reports active,
