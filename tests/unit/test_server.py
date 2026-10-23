@@ -4941,6 +4941,57 @@ class TestSocketServerStartup(unittest.TestCase):
             self.assertFalse(startup_thread.is_alive())
             self.assertIn("Socket isolation is required", diagnostic)
 
+    def test_socket_path_lock_contention_fails_promptly(self):
+        if socket_transport.fcntl is None:
+            self.skipTest("requires fcntl file locks")
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = os.path.join(directory, "active.sock")
+            lock_holder_code = (
+                "import fcntl, os, sys, time; "
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600); "
+                "fcntl.flock(fd, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(30)"
+            )
+            lock_holder = subprocess.Popen(
+                [sys.executable, "-c", lock_holder_code, socket_path + ".lock"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            def stop_lock_holder():
+                if lock_holder.poll() is None:
+                    lock_holder.terminate()
+                    try:
+                        lock_holder.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        lock_holder.kill()
+                        lock_holder.communicate(timeout=5)
+
+            try:
+                readable, _, _ = select.select([lock_holder.stdout], [], [], 5)
+                if not readable or lock_holder.stdout.readline().strip() != "locked":
+                    self.fail("could not acquire the socket path lock")
+
+                class FailingLoop:
+                    def close(self):
+                        pass
+
+                started_at = time.monotonic()
+                with patch.object(socket_transport, "SOCKET_PATH", socket_path), \
+                        patch.object(socket_transport.asyncio, "new_event_loop", return_value=FailingLoop()), \
+                        patch.object(socket_transport.asyncio, "set_event_loop"), \
+                        patch.object(socket_transport, "_set_socket_state"), \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    socket_transport.run_socket_server()
+                elapsed = time.monotonic() - started_at
+                diagnostic = stderr.getvalue()
+            finally:
+                stop_lock_holder()
+
+            self.assertLess(elapsed, 2.0)
+            self.assertIn("Socket already in use", diagnostic)
+
     def _run_with_existing_socket(self, probe_error, unlink=None):
         class FailingLoop:
             def close(self):

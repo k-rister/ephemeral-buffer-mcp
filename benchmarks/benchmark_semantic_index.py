@@ -406,7 +406,7 @@ def workload_result(result: dict[str, Any]) -> dict[str, Any]:
             "engine_options": result["engine_options"],
             "test_embeddings": result["test_embeddings"],
         }),
-        environment=wr.environment(
+        environment_desc=wr.environment(
             embedding_model=result["embedding_model"],
             embedding_threads=result["embedding_threads"],
         ),

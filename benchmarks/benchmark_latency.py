@@ -189,7 +189,7 @@ def workload_result(results: dict[str, Any]) -> dict[str, Any]:
             "line_counts": [measurement["line_count"] for measurement in warm],
             "samples": warm[0]["samples"] if warm else 0,
         },
-        environment=wr.environment(embedding_model=results["embedding_model"]),
+        environment_desc=wr.environment(embedding_model=results["embedding_model"]),
         runs=runs,
         details=results,
     )

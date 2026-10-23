@@ -477,8 +477,6 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
 def json_text(value):
     """Serialize test metadata for a simple privacy assertion."""
-    import json
-
     return json.dumps(value, sort_keys=True)
 
 

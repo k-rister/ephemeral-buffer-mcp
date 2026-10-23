@@ -41,6 +41,3 @@ set_semantic_index_budget.__signature__ = _set_semantic_index_budget_signature.r
         if parameter.name != "__invocation_mode"
     )
 )
-
-
-# --- Unix Domain Socket IPC for CLI piping (ephbuf) ---

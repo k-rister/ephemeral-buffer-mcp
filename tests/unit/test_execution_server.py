@@ -13,7 +13,7 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
-from ephemeral_buffer_mcp.engine import DEFAULT_MAX_BUFFER_BYTES
+from ephemeral_buffer_mcp.config import DEFAULT_MAX_BUFFER_BYTES
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 os.environ.setdefault("EPHEMERAL_TEST_EMBEDDINGS", "1")

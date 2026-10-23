@@ -36,7 +36,7 @@ def result(name="capture-latency", *, status=None, runs=None, errors=(), experim
         kind="benchmark",
         producer="benchmark_latency.py",
         parameters={"samples": 3},
-        environment={**ENVIRONMENT, "recorded_at": recorded_at},
+        environment_desc={**ENVIRONMENT, "recorded_at": recorded_at},
         runs=runs,
         status=status,
         errors=errors,

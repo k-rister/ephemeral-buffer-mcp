@@ -184,8 +184,22 @@ run_tool() {
 
 run_benchmark() {
     local revision="$1" source_dir="$2" name="$3" embeddings="$4" script="$5"
+    local required_baseline=""
     shift 5
-    run_tool "$revision-$name" "$source_dir" "$embeddings" "$script" "$@"
+    if [[ "${1:-}" == "--baseline-asset" ]]; then
+        required_baseline="$2"
+        shift 2
+    fi
+    resolve_tool "$source_dir" "$script"
+    if [[ -z "$tool_path" ]]; then
+        skip "$revision-$name" "$script is absent at this revision"
+        return
+    fi
+    if [[ -n "$required_baseline" && ! -f "$required_baseline" ]]; then
+        skip "$revision-$name" "baseline asset absent at this revision"
+        return
+    fi
+    run "$revision-$name" "$source_dir" "$embeddings" "${tool_command[@]}" "$@"
 }
 
 resolve_baseline_asset() {
@@ -225,6 +239,7 @@ run_revision_suite() {
     relevance_baseline="$(resolve_baseline_asset "$source_dir" benchmark_relevance_baseline.json)"
 
     run_benchmark "$revision" "$source_dir" concurrency 0 benchmark_concurrency.py \
+        --baseline-asset "$concurrency_baseline" \
         --captures 32 --workers 8 --baseline "$concurrency_baseline" \
         --output "$native/concurrency.json" --result "$results/concurrency.result.json"
     run_benchmark "$revision" "$source_dir" admission 0 benchmark_admission.py \
@@ -269,6 +284,7 @@ run_revision_suite() {
     run_benchmark "$revision" "$source_dir" effectiveness-summary 1 benchmark_effectiveness.py \
         --summary --output "$native/effectiveness-summary.json" --result "$results/effectiveness-summary.result.json"
     run_benchmark "$revision" "$source_dir" relevance 1 benchmark_relevance.py \
+        --baseline-asset "$relevance_baseline" \
         --top-k 3 --baseline "$relevance_baseline" --fail-on-regression \
         --output "$native/relevance.json" --result "$results/relevance.result.json"
 }

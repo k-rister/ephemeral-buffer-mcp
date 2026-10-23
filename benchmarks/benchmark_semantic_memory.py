@@ -181,7 +181,7 @@ def workload_result(result: dict[str, Any]) -> dict[str, Any]:
         producer="benchmark_semantic_memory.py",
         producer_schema_version=result["schema_version"],
         parameters={"configuration": result["configuration"], "input": input_data},
-        environment=wr.environment(
+        environment_desc=wr.environment(
             embedding_model=result["configuration"]["embedding_model"],
             embedding_threads=result["configuration"]["embedding_threads"],
         ),

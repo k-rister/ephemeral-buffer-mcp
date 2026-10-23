@@ -61,7 +61,7 @@ from ephemeral_buffer_mcp.config import (
 )
 
 
-class TestPositiveIntEnv(unittest.TestCase):
+class TestConfigSettings(unittest.TestCase):
     def test_max_captures_default_and_environment_override(self):
         self.assertEqual(DEFAULT_MAX_CAPTURES, 256)
         self.assertEqual(load_settings(environ={}).max_captures.value, 256)

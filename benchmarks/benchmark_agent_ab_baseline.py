@@ -174,7 +174,7 @@ def load_baseline(path: Path) -> dict[str, Any]:
 def compare_summary(summary: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
     """Compare aggregate metrics and return gated regressions plus observations."""
     _validate_summary(summary)
-    load_baseline_from_memory = load_baseline_dict(baseline)
+    load_baseline_dict(baseline)
     regressions = []
     comparisons = {}
     if summary["task_fixture_version"] != baseline.get("task_fixture_version"):
