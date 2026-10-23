@@ -40,7 +40,7 @@ body:
       label: Relevant configuration
       description: List relevant environment variables and limits, but never include session ID values, credentials, or secrets.
       placeholder: |
-        EPHEMERAL_MAX_CAPTURES=25
+        EPHEMERAL_MAX_CAPTURES=256
         EPHEMERAL_MAX_BUFFER_BYTES=52428800
         EPHEMERAL_SESSION_ID=(configured; value omitted)
 

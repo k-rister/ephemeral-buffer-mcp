@@ -14,7 +14,6 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple
-from .config import DEFAULT_MAX_OUTPUT_BYTES
 from .logging_utils import get_logger, log_event
 
 

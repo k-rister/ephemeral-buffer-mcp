@@ -180,6 +180,17 @@ class TestEndToEndPipe(unittest.TestCase):
                 finally:
                     probe.close()
 
+    def test_second_server_on_same_socket_fails_promptly_with_conflict(self):
+        with self._isolated_server() as (socket_path, _test_env):
+            started_at = time.monotonic()
+            with self._isolated_server(
+                socket_path=Path(socket_path),
+                expected_socket_error=f"Socket already in use at {socket_path}",
+            ):
+                pass
+
+            self.assertLess(time.monotonic() - started_at, 2.0)
+
     def test_pipe_to_socket_preserves_inherited_regular_file(self):
         original_contents = b"leave this inherited file alone\n"
         with tempfile.TemporaryDirectory(prefix="ephemeral-buffer-inherited-") as temp_dir:

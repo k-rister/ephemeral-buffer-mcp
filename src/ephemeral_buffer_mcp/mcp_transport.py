@@ -11,13 +11,12 @@ import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Optional
+from typing import Any
 
 from mcp.server import CacheHint, MCPServer
 from mcp.server.context import ServerRequestContext
 from mcp.types import CallToolResult, TextContent
 
-from . import server as _runtime
 from .server import *  # noqa: F403
 from .mcp_response import (
     ToolErrorEnvelope,
@@ -26,7 +25,6 @@ from .mcp_response import (
     compact_tool_text as _compact_tool_text,
 )
 from .mcpserver_adapter import (
-    compatibility_diagnostics as _mcpserver_compatibility_diagnostics,
     refresh_instructions as _refresh_mcpserver_instructions,
     register_tool as _register_mcpserver_tool,
 )

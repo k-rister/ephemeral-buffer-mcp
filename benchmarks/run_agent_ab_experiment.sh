@@ -39,7 +39,10 @@ if [[ "$test_embeddings" != "0" && "$test_embeddings" != "1" ]]; then
     exit 2
 fi
 
-CODEX_HOME="$CODEX_HOME" codex login status >/dev/null
+if ! CODEX_HOME="$CODEX_HOME" codex login status >/dev/null 2>&1; then
+    echo "codex CLI is not logged in (CODEX_HOME=$CODEX_HOME)" >&2
+    exit 2
+fi
 if [[ -z "$run_dir" ]]; then
     run_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-ab-run.XXXXXX")"
 fi

@@ -179,6 +179,18 @@ class TestBuildAndValidate(unittest.TestCase):
         with self.assertRaisesRegex(WorkloadResultError, "reserved"):
             environment(platform="x")
 
+    def test_build_result_environment_desc_keeps_serialized_environment_field(self):
+        environment_desc = environment(embedding_model="deterministic-test")
+
+        result = build_result(
+            workload="environment-description",
+            kind="benchmark",
+            producer="test",
+            environment_desc=environment_desc,
+        )
+
+        self.assertEqual(result["environment"], environment_desc)
+
     def test_project_version_falls_back_to_metadata_then_none(self):
         with patch.object(wr.Path, "read_text", side_effect=OSError("missing")):
             with patch.object(wr._metadata, "version", return_value="9.9.9"):

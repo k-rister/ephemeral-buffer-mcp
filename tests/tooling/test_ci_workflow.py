@@ -1,9 +1,13 @@
 """Tests for the GitHub Actions CI workflow policy."""
 
 import inspect
+import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
-from pathlib import Path
 
 import ephemeral_buffer_mcp.server as server
 
@@ -106,6 +110,140 @@ class TestCiWorkflow(unittest.TestCase):
 
         self.assertTrue(AGENT_AB_REPORTER.is_file())
         self.assertIn('"$repo_dir/benchmarks/render_agent_ab_report.py"', source)
+
+    def test_release_benchmark_runner_skips_missing_baselines_and_runs_present_assets(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = temporary_directory
+            repository = os.path.join(root, "repository")
+            scripts = os.path.join(repository, "scripts")
+            benchmarks = os.path.join(repository, "benchmarks")
+            data = os.path.join(benchmarks, "data")
+            os.makedirs(scripts)
+            os.makedirs(data)
+            shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, os.path.join(scripts, "collect-release-benchmarks.sh"))
+            for name in ("benchmark_concurrency.py", "benchmark_relevance.py"):
+                with open(os.path.join(benchmarks, name), "w", encoding="utf-8"):
+                    pass
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", *arguments], cwd=repository, check=True,
+                    capture_output=True, text=True,
+                ).stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "CI test")
+            git("config", "user.email", "ci-test@example.invalid")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "baseline without benchmark assets")
+            baseline_revision = git("rev-parse", "HEAD")
+            for name in ("benchmark_baseline.json", "benchmark_relevance_baseline.json"):
+                with open(os.path.join(data, name), "w", encoding="utf-8") as stream:
+                    stream.write("{}\n")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "add benchmark assets")
+
+            fake_python = os.path.join(root, "python")
+            fake_python_log = os.path.join(root, "python.log")
+            with open(fake_python, "w", encoding="utf-8") as stream:
+                stream.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "if len(sys.argv) > 1 and sys.argv[1] == '-c':\n"
+                    "    print(os.path.realpath(sys.argv[3]))\n"
+                    "    raise SystemExit(0)\n"
+                    "with open(os.environ['FAKE_PYTHON_LOG'], 'a', encoding='utf-8') as log:\n"
+                    "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                )
+            os.chmod(fake_python, 0o700)
+            codex_home = os.path.join(root, "codex-home")
+            binary_directory = os.path.join(root, "bin")
+            os.makedirs(codex_home)
+            os.makedirs(binary_directory)
+            fake_codex = os.path.join(binary_directory, "codex")
+            with open(fake_codex, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake_codex, 0o700)
+            output_directory = os.path.join(root, "bundle")
+            environment = os.environ.copy()
+            environment.update({
+                "PYTHON_BIN": fake_python,
+                "FAKE_PYTHON_LOG": fake_python_log,
+                "CODEX_HOME": codex_home,
+                "PATH": binary_directory + os.pathsep + environment.get("PATH", ""),
+            })
+            result = subprocess.run(
+                [
+                    "bash", os.path.join(scripts, "collect-release-benchmarks.sh"),
+                    "--baseline-ref", baseline_revision,
+                    "--model", "gpt-5.6-luna",
+                    "--output-dir", output_directory,
+                    "--samples", "1",
+                    "--semantic-samples", "1",
+                    "--repetitions", "1",
+                    "--agent-ab-repetitions", "1",
+                ],
+                cwd=repository,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(os.path.join(output_directory, "STATUS.tsv"), encoding="utf-8") as stream:
+                statuses = stream.read()
+            self.assertIn(
+                "skipped\tbaseline-concurrency\t-\tbaseline asset absent at this revision",
+                statuses,
+            )
+            self.assertIn(
+                "skipped\tbaseline-relevance\t-\tbaseline asset absent at this revision",
+                statuses,
+            )
+            self.assertIn(
+                "skipped\tbaseline-admission\t-\tbenchmark_admission.py is absent at this revision",
+                statuses,
+            )
+            self.assertIn("success\tcandidate-concurrency\t0\t", statuses)
+            self.assertIn("success\tcandidate-relevance\t0\t", statuses)
+            with open(fake_python_log, encoding="utf-8") as stream:
+                invocations = stream.read()
+            self.assertIn("benchmarks.benchmark_concurrency", invocations)
+            self.assertIn("benchmarks.benchmark_relevance", invocations)
+            self.assertIn("benchmark_baseline.json", invocations)
+            self.assertIn("benchmark_relevance_baseline.json", invocations)
+
+    def test_agent_ab_runner_reports_missing_codex_authentication(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            codex_home = os.path.join(temporary_directory, "codex-home")
+            binary_directory = os.path.join(temporary_directory, "bin")
+            os.makedirs(codex_home)
+            os.makedirs(binary_directory)
+            fake_codex = os.path.join(binary_directory, "codex")
+            with open(fake_codex, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\nexit 1\n")
+            os.chmod(fake_codex, 0o700)
+            environment = os.environ.copy()
+            environment.update({
+                "CODEX_HOME": codex_home,
+                "PATH": binary_directory + os.pathsep + environment.get("PATH", ""),
+                "PYTHON_BIN": sys.executable,
+            })
+            result = subprocess.run(
+                ["bash", str(REPOSITORY_ROOT / "benchmarks" / "run_agent_ab_experiment.sh")],
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(
+                f"codex CLI is not logged in (CODEX_HOME={codex_home})",
+                result.stderr,
+            )
 
     def test_release_notes_import_release_checks_from_scripts_package(self):
         source = RELEASE_WORKFLOW.read_text()

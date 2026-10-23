@@ -46,7 +46,7 @@ def latency_result(*, wall=0.010, p95=0.015, output=3840, tokens=None, phases=No
         kind="benchmark",
         producer="benchmark_latency.py",
         parameters={"line_counts": [256], "samples": samples},
-        environment=environment or ENVIRONMENT,
+        environment_desc=environment or ENVIRONMENT,
         measurements={"cold_start_seconds": wr.measurement("seconds", value=1.5)},
         runs=runs,
         status=status,
@@ -61,7 +61,7 @@ def agent_result(control_tokens=1000, mcp_tokens=600, control_status="success", 
         kind="evaluation",
         producer="benchmark_agent_ab.py",
         parameters={"seed": 1, "repetitions": 2},
-        environment=ENVIRONMENT,
+        environment_desc=ENVIRONMENT,
         runs=[
             wr.run(
                 "control",
@@ -600,7 +600,7 @@ class TestCompare(ResultFiles):
         forced = cw.compare([path, other], allow_workload_mismatch=True)
         self.assertEqual(forced["workload"], "capture-latency")
         self.assertEqual(forced["comparisons"][0]["summary"]["runs_compared"], 1)
-        empty_reference = self.write("empty.json", wr.build_result(workload="capture-latency", kind="benchmark", producer="p", environment=ENVIRONMENT))
+        empty_reference = self.write("empty.json", wr.build_result(workload="capture-latency", kind="benchmark", producer="p", environment_desc=ENVIRONMENT))
         with self.assertRaisesRegex(ComparisonError, "available: none"):
             cw.compare([path, f"{empty_reference}#lines-256"])
 

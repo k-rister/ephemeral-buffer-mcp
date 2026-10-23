@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+
 from .server import *  # noqa: F403
 from .tools import load_tool_handlers
 from .tools.registry import get_socket_tool_registration
@@ -199,17 +201,21 @@ def _socket_path_lock(path):
                     0o600,
                 )
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                except BaseException:
-                    os.close(lock_fd)
-                    lock_fd = None
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                        os.close(lock_fd)
+                        lock_fd = None
+                        raise RuntimeError(f"Socket already in use at {key}") from exc
                     raise
             yield
         finally:
             try:
                 if lock_fd is not None:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                    os.close(lock_fd)
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(lock_fd)
             finally:
                 held_keys.remove(key)
                 _SOCKET_PATH_LOCK_DEPTH.keys = held_keys

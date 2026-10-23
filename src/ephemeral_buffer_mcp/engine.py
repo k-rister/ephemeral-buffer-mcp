@@ -39,10 +39,7 @@ from .schema_versions import (
 )
 from .config import (
     BGE_SMALL_HF_REPO,
-    DEFAULT_EMBEDDING_MODEL,
     FP32_EMBEDDING_MODEL,
-    DEFAULT_MAX_BUFFER_BYTES,
-    DEFAULT_MAX_CAPTURES,
     SettingsSnapshot,
     load_settings,
 )

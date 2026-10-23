@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
+set -euo pipefail
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 export PYTHONPATH="$dir/src${PYTHONPATH:+:$PYTHONPATH}"
 if [ -x "$dir/.venv/bin/python" ]; then

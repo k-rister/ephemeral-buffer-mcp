@@ -1402,7 +1402,6 @@ class ExecutionStore:
             return False
         lock_path = self._lock_path(execution_id)
         if not lock_path.exists():
-            self._reject_symlink(lock_path, "lock file")
             return False
         self._reject_symlink(lock_path, "lock file")
         lock_stream = lock_path.open("a+", encoding="ascii")
