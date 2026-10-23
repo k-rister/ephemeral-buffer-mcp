@@ -7,22 +7,25 @@ flowchart TD
         B["MCP Client"] --> MT["MCP stdio Transport"]
     end
 
-    subgraph Tools["2. Shared Tool Layer"]
-        S --> R["Tool Registry"]
-        MT --> R
-        R --> T["Capture, execution, search, retrieval, diagnostics, configuration"]
+    subgraph Dispatch["2. Transport Dispatch"]
+        MT --> MR["Register every domain-tool entry with MCPServer"]
+        MR --> MCPTools["MCP registered tool set"]
+        S --> SR["Select the sole socket-enabled registry entry"]
+        SR --> SC["capture_text socket request/response adapters"]
     end
 
-    subgraph Ingestion["3. Service and Ingestion"]
-        T --> C["Service Context"]
+    subgraph Service["3. Shared Service and Ingestion"]
+        MCPTools --> T["Domain tool handler invocation"]
+        SC --> T
+        T --> C["Service Context, admission, cancellation, cleanup"]
         C --> E["Ephemeral Ring Buffer Engine"]
         T --> Y["Phase Execution Manager"]
         P["preflight_command(cmd, cwd)"] --> Q["Path, executable & repository diagnostics"]
     end
 
     subgraph Execution["4. Durable Phase Execution"]
-        Y --> Z["Persistent Execution State & Bounded Phase Output"]
-        Y --> E
+        Y --> Z["Persistent execution state & bounded phase output"]
+        Z -->|"phase output handler ingests a searchable snapshot"| E
         Z --> AA["get_execution / get_execution_output / list_executions / capacity / retirement"]
     end
 
@@ -43,18 +46,116 @@ flowchart TD
     end
 ```
 
-`server` owns service configuration, contexts, and shared runtime resources.
-The MCP and Unix socket adapters are loaded only when their transports start;
-the core server import does not import the MCP SDK. The tool registry imports
-domain modules in a stable order and exposes registered handlers and execution
-policy to both transports. MCP and socket calls share service tracking,
-admission, cancellation context, and cleanup; the socket adapter maps its
-framed capture request to the registered capture handler and keeps framing and
-wire-response encoding at the transport boundary. The supported Python
-embedding API remains `create_mcp_server` and `create_service_context`. The MCP
-adapter binds each registered handler call to the context used to build its
-application; direct calls to registry handlers are internal and use the active
-context, falling back to the process default when none is active.
+`server.py` owns service configuration, contexts, and shared runtime resources.
+The supported Python embedding API is `create_mcp_server` and
+`create_service_context`. Transport modules load lazily: importing the core
+server does not import the MCP SDK, and starting the socket transport does not
+load MCP modules.
+
+The transport boundaries expose different entrypoints. `mcp_transport.py`
+loads the domain registrations and registers each one with MCPServer. It also
+binds calls to their service context, applies MCP middleware and admission,
+converts results to MCP responses, and fits responses to their size limits.
+`socket_transport.py` selects the unique registry entry with socket adapters;
+that entry is `capture_text`. Its request adapter maps the framed socket payload
+to the capture handler, and its response adapter maps the handler result to the
+socket wire format. The socket transport does not expose the MCP tool set.
+
+`mcpserver_adapter.py` contains the MCP SDK compatibility boundary. Tool
+registration uses MCPServer's public `add_tool` API. Optional validation-failure
+metrics use a narrowly contained SDK-internal validation hook because the SDK
+does not expose a registration hook for them. Instruction refresh first tries
+the public property and falls back to the low-level server only when the SDK
+does not allow setting it. If either optional integration is incompatible or
+fails, the tool remains registered and dispatchable; validation metrics may be
+unavailable or partial, or instruction refresh may be unavailable. Runtime
+diagnostics report these limitations.
+
+On MCP dispatch, `mcp_transport.py` injects `__invocation_mode="mcp"` for
+handlers that support it. It also injects `__background=True` for registrations
+marked for background execution, currently `start_execution` and
+`resume_execution`. These are internal dispatch parameters, omitted from the
+public tool schema; they are not caller-supplied tool arguments. Invocation
+mode lets handlers and instrumentation apply MCP-specific behavior. The
+background flag makes those execution handlers schedule work and return
+promptly, while direct Python calls remain synchronous.
+
+Execution output has two forms of retention. Each phase's bounded output is
+stored with the durable execution record. The execution tool handlers pass an
+output handler that ingests each returned phase result as a searchable capture
+in the ordinary bounded ring. These phase captures count against the same
+capture, byte, and index-chunk budgets as other captures and can therefore
+cause normal LRU evictions. Evicting a capture does not delete its durable
+execution record.
+
+## Python module map
+
+The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
+
+### Service, storage, and execution
+
+- `__init__.py` — lazily exports the supported Python embedding interfaces.
+- `server.py` — builds service contexts, owns shared runtime resources, and
+  lazily starts transports.
+- `config.py` — resolves environment-backed settings, session identity, and
+  durable execution state paths.
+- `admission.py` — bounds active and queued MCP tool and socket work.
+- `engine.py` — ingests and retains captures, classifies content, and supports
+  lexical and optional semantic search and indexing.
+- `execution.py` — runs durable, resumable command phases and manages their
+  persistent state, bounded output, quotas, and lifecycle.
+- `capture_utils.py` — runs bounded commands and reads bounded files, including
+  process cleanup for command capture.
+
+### Transports and protocol
+
+- `cli.py` — sends command output to the local service over the Unix socket.
+- `socket_protocol.py` — defines socket frame encoding, decoding, and payload
+  contracts.
+- `socket_transport.py` — manages the Unix socket lifecycle and dispatches its
+  single registry-selected capture entrypoint.
+- `mcp_transport.py` — assembles MCPServer, registers the MCP tool set, binds
+  service context and middleware, and converts and bounds MCP results.
+- `mcpserver_adapter.py` — isolates MCP SDK compatibility integrations and
+  reports when optional capabilities degrade.
+- `mcp_response.py` — defines transport-neutral structured tool results and
+  response-size measurement.
+
+### Runtime and response support
+
+- `logging_utils.py` — provides privacy-safe structured logging.
+- `metrics.py` — collects opt-in, content-free local usage metrics.
+- `response_formatting.py` — formats and truncates UTF-8 and JSON text within
+  byte limits.
+- `response_limits.py` — centralizes response and metadata size limits.
+- `schema_versions.py` — defines versions for public response schemas.
+
+### Tool registry and shared context
+
+- `tools/__init__.py` — imports domain modules in stable order and loads their
+  registrations.
+- `tools/registry.py` — stores handler metadata and selects the unique
+  socket-enabled registration.
+- `tools/_context.py` — bridges domain handlers to the active service context.
+- `tools/instrumentation.py` — wraps handlers with content-free metrics and
+  lifecycle logging.
+
+### Tool domains and helpers
+
+- `tools/capture.py` — implements text, file, and command capture, plus capture
+  consolidation and the socket capture adapters.
+- `tools/configuration.py` — implements runtime configuration tools, including
+  semantic index budget adjustment.
+- `tools/diagnostics.py` — implements buffer, runtime, and usage diagnostics.
+- `tools/execution.py` — implements command preflight and durable execution
+  tools, including start, resume, cancellation, retrieval, and retirement.
+- `tools/execution_responses.py` — builds execution responses and ingests phase
+  output into the searchable capture ring.
+- `tools/formatting.py` — builds bounded summary and diff-file-map payloads.
+- `tools/retrieval.py` — implements capture listing, clearing, summaries, and
+  exact-line retrieval.
+- `tools/search.py` — implements capture search and result rendering.
+- `tools/summary.py` — builds shared capture summary JSON and responses.
 
 ## Admission and storage bounds
 
@@ -84,5 +185,3 @@ the explicit `ephemeral-buffer-mcp-lexical` distribution omits them. In a
 lexical-only install, BM25 remains available and hybrid or semantic searches
 return `semantic_backend_unavailable`. With the semantic extra installed, the
 dense model loads on demand and may be warmed in the background after startup.
-
----
