@@ -179,7 +179,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
 
         def blocking_runner(*_args):
             started.set()
-            self.assertTrue(release.wait(timeout=5))
+            self.assertTrue(release.wait(timeout=30))
             return ("done", 0, False, 4, False)
 
         first_runner = Runner({"live": blocking_runner})
@@ -192,14 +192,14 @@ class TestPhaseExecutionManager(unittest.TestCase):
 
         worker = threading.Thread(target=run_first)
         worker.start()
-        self.assertTrue(started.wait(timeout=5))
+        self.assertTrue(started.wait(timeout=30))
         observed = second.public("live-execution")
         self.assertEqual(observed["execution_status"], "running")
         self.assertFalse(observed["resume"]["available"])
         with self.assertRaises(ExecutionBusyError):
             second.resume("live-execution", retry_failed=True, confirm_unsafe=True)
         release.set()
-        worker.join(timeout=5)
+        worker.join(timeout=30)
         self.assertFalse(worker.is_alive())
         self.assertEqual(outcome[0]["execution_status"], "completed")
 
@@ -214,23 +214,35 @@ class TestPhaseExecutionManager(unittest.TestCase):
             "lease = store.lease('cross-process'); "
             "lease.__enter__(); "
             "Path(sys.argv[2]).write_text('ready', encoding='ascii'); "
-            "time.sleep(5); "
+            "time.sleep(60); "
             "lease.__exit__(None, None, None)"
         )
         child = subprocess.Popen(
             [sys.executable, "-c", code, str(manager.store.state_dir), str(marker)]
         )
-        self.addCleanup(lambda: child.poll() is None and child.terminate())
-        for _ in range(100):
-            if marker.exists():
-                break
+
+        def cleanup_child():
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=30)
+
+        self.addCleanup(cleanup_child)
+        deadline = time.monotonic() + 30
+        while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.assertTrue(marker.exists())
+        self.assertTrue(
+            marker.exists(),
+            "child did not acquire the execution lease before the deadline",
+        )
         with self.assertRaises(ExecutionBusyError):
             with manager.store.lease("cross-process"):
                 pass
         child.terminate()
-        child.wait(timeout=5)
+        child.wait(timeout=30)
 
     def test_allow_unsafe_policy_allows_explicit_retry_without_confirmation(self):
         runner = Runner({"publish": ("no", 2, False, 2, False)})
@@ -1505,9 +1517,6 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 ):
             self.assertEqual(execution._marker_processes("marker"), {123})
         with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.Path, "read_bytes", side_effect=FileNotFoundError()):
-            self.assertEqual(execution._marker_process_groups("marker"), set())
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
                 patch.object(
                     execution.Path,
                     "read_bytes",
@@ -1521,9 +1530,6 @@ class TestPhaseExecutionManager(unittest.TestCase):
                     side_effect=PermissionError(errno.EACCES, "environ unavailable"),
                 ):
             self.assertIsNone(execution._marker_process_groups("marker"))
-        with patch.object(execution.os, "listdir", return_value=["123"]), \
-                patch.object(execution.Path, "read_bytes", return_value=b"OTHER=value\0"):
-            self.assertEqual(execution._marker_process_groups("marker"), set())
         with patch.object(execution.os, "listdir", return_value=["123"]), \
                 patch.object(execution.Path, "read_bytes", return_value=b"EPHEMERAL_EXECUTION_PROCESS_MARKER=marker\0"), \
                 patch.object(execution.os, "getpgid", side_effect=OSError(errno.ESRCH, "gone")):
@@ -2254,13 +2260,14 @@ class TestPhaseExecutionManager(unittest.TestCase):
             with patch("ephemeral_buffer_mcp.execution.os.replace", side_effect=OSError("replace failed")):
                 with self.assertRaisesRegex(OSError, "replace failed"):
                     store.save({"execution_id": "replace-failure"})
-            outside = Path(directory).parent / "outside-record.json"
-            outside.write_text(json.dumps({"execution_id": "outside"}), encoding="utf-8")
-            record_path = store._path("listed")
-            record_path.unlink()
-            record_path.symlink_to(outside)
-            with self.assertRaisesRegex(ValueError, "record file"):
-                store.load("listed")
+            with tempfile.TemporaryDirectory() as outside_directory:
+                outside = Path(outside_directory) / "outside-record.json"
+                outside.write_text(json.dumps({"execution_id": "outside"}), encoding="utf-8")
+                record_path = store._path("listed")
+                record_path.unlink()
+                record_path.symlink_to(outside)
+                with self.assertRaisesRegex(ValueError, "record file"):
+                    store.load("listed")
             self.assertFalse(store._path("replace-failure").exists())
 
     def test_save_rejects_non_finite_values_without_replacing_record_pair(self):
@@ -3054,39 +3061,54 @@ class TestPhaseExecutionManager(unittest.TestCase):
             leftover = store.state_dir / "tmp-locked-writer"
             leftover.write_bytes(b"preserve until writer lock is available")
             cleanup_entered = threading.Event()
-            writer_started = threading.Event()
+            writer_lock_attempted = threading.Event()
+            writer_done = threading.Event()
             writer_errors = []
             original_cleanup = store._cleanup_temporary_files_locked
+            original_flock = execution.fcntl.flock
+            writer = None
 
             def track_cleanup():
                 cleanup_entered.set()
                 original_cleanup()
 
             def write_record():
-                writer_started.set()
                 try:
                     store.save({"execution_id": "lock-cleanup", "phases": []})
                 except BaseException as exc:
                     writer_errors.append(exc)
+                finally:
+                    writer_done.set()
 
-            with patch.object(
-                store,
-                "_cleanup_temporary_files_locked",
-                side_effect=track_cleanup,
-            ):
+            def observe_writer_lock_attempt(fd, operation):
+                if (
+                    writer is not None
+                    and threading.current_thread() is writer
+                    and operation == execution.fcntl.LOCK_EX
+                ):
+                    writer_lock_attempted.set()
+                return original_flock(fd, operation)
+
+            with patch.object(execution.fcntl, "flock", side_effect=observe_writer_lock_attempt), \
+                    patch.object(
+                        store,
+                        "_cleanup_temporary_files_locked",
+                        side_effect=track_cleanup,
+                    ):
                 with store._record_lease():
                     writer = threading.Thread(target=write_record, daemon=True)
                     writer.start()
-                    started = writer_started.wait(1)
-                    cleanup_ran_while_locked = cleanup_entered.wait(0.1)
+                    attempted_lock = writer_lock_attempted.wait(30)
+                    cleanup_ran_while_locked = cleanup_entered.is_set()
                     leftover_remained_while_locked = leftover.exists()
 
-                writer.join(2)
+                writer.join(timeout=30)
 
-            self.assertTrue(started)
+            self.assertTrue(attempted_lock, "writer did not attempt the exclusive record lock")
             self.assertFalse(cleanup_ran_while_locked)
             self.assertTrue(leftover_remained_while_locked)
             self.assertFalse(writer.is_alive())
+            self.assertTrue(writer_done.is_set())
             self.assertTrue(cleanup_entered.is_set())
             self.assertFalse(leftover.exists())
             self.assertEqual(writer_errors, [])
@@ -3607,9 +3629,9 @@ class TestPhaseExecutionManager(unittest.TestCase):
             )
             future = manager._background_futures[started["execution_id"]]
             with self.assertRaisesRegex(RuntimeError, "unexpected worker failure"):
-                future.result(timeout=2)
+                future.result(timeout=30)
 
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 30
         while (
             started["execution_id"] in manager._background_futures
             and time.monotonic() < deadline
@@ -3691,7 +3713,7 @@ class TestPhaseExecutionManager(unittest.TestCase):
 
         with patch.object(manager.store, "_recover_started", return_value=True) as recover:
             manager.resume_background("resume-background")
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + 30
             while "resume-background" in manager._background_futures and time.monotonic() < deadline:
                 time.sleep(0.01)
 

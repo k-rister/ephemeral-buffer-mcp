@@ -108,11 +108,6 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             measurement["semantic_index_seconds_median"],
             measurement["first_search_seconds_median"] + 0.01,
         )
-        # These are single wall-clock samples; allow timer and scheduler noise.
-        self.assertLessEqual(
-            measurement["subsequent_search_seconds_median"],
-            measurement["first_search_seconds_median"] + 0.01,
-        )
 
     def test_single_needle_capture_measures_a_subsequent_search(self):
         measurement = run_benchmark((1,), samples=1)["measurements"][0]

@@ -460,6 +460,7 @@ class TestEngineClassification(unittest.TestCase):
 
     def test_storage_cleanup_ignores_captures_without_storage(self):
         engine = EphemeralEngine(max_captures=1)
+        self.addCleanup(engine.shutdown)
         capture = engine._ingest_state("no storage payload", label="no-storage")
         capture.fts_conn = None
 
@@ -468,6 +469,7 @@ class TestEngineClassification(unittest.TestCase):
 
     def test_storage_cleanup_logs_and_swallows_close_failure(self):
         engine = EphemeralEngine(max_captures=1)
+        self.addCleanup(engine.shutdown)
         capture = engine._ingest_state("cleanup failure payload", label="cleanup-failure")
 
         class BrokenStorage:
@@ -482,6 +484,11 @@ class TestEngineClassification(unittest.TestCase):
 
 
 class TestEphemeralEngine(unittest.TestCase):
+    def _new_engine(self, *args, **kwargs):
+        engine = EphemeralEngine(*args, **kwargs)
+        self.addCleanup(engine.shutdown)
+        return engine
+
     def test_semantic_dependency_helpers_report_unavailable_backend(self):
         with patch(
             "ephemeral_buffer_mcp.engine.importlib.util.find_spec",
@@ -509,7 +516,7 @@ class TestEphemeralEngine(unittest.TestCase):
                 return_value=True,
             ),
         ):
-            engine = EphemeralEngine(embedding_warmup=False, semantic_prefetch=False)
+            engine = self._new_engine(embedding_warmup=False, semantic_prefetch=False)
         try:
             unavailable = engine_module.SemanticBackendUnavailable("missing dependency")
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}):
@@ -535,7 +542,7 @@ class TestEphemeralEngine(unittest.TestCase):
 
     def test_lexical_search_works_without_semantic_dependencies(self):
         with patch("ephemeral_buffer_mcp.engine._semantic_dependencies_available", return_value=False):
-            engine = EphemeralEngine(
+            engine = self._new_engine(
                 max_captures=1,
                 embedding_warmup=True,
                 semantic_prefetch=True,
@@ -563,6 +570,13 @@ class TestEphemeralEngine(unittest.TestCase):
     def setUpClass(cls):
         print("\n--- Initializing EphemeralEngine for testing ---")
         cls.engine = EphemeralEngine(max_captures=3)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.engine.shutdown()
+        finally:
+            super().tearDownClass()
 
     def test_01_ingest_and_bm25_search(self):
         sample_log = """
@@ -635,7 +649,7 @@ STEP 3: Summary
         print(best["snippet"])
 
     def test_search_query_semantics_and_mode_validation(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state(
             "alpha beta\nECONNREFUSED: port=5432\nfoo.bar literal\n",
             label="query-semantics",
@@ -650,7 +664,7 @@ STEP 3: Summary
         self.assertIn("Unsupported search mode", invalid["message"])
 
     def test_hybrid_prioritizes_lexical_matches(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("noise line\n" * 8, label="hybrid-ranking")
 
         with patch.object(engine, "search_bm25", return_value=[(1, 0.1)]), \
@@ -660,7 +674,7 @@ STEP 3: Summary
         self.assertEqual(result["matches"][0]["chunk_id"], 1)
 
     def test_search_context_is_exact_and_bounded(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("first\nMATCH alpha\nthird\nfourth\nfifth", label="context-boundaries")
 
         result = engine.search("MATCH", mode="bm25", capture_id=capture.capture_id, top_k=1, context_lines=0)
@@ -686,7 +700,7 @@ STEP 3: Summary
         )
 
     def test_search_context_and_snippet_are_bounded_for_wide_ranges(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         content = "\n".join(["needle", *("x" * 20_000 for _ in range(80))])
         capture = engine._ingest_state(content, label="wide-context")
 
@@ -709,7 +723,7 @@ STEP 3: Summary
         )
 
     def test_search_deduplicates_overlapping_contexts_before_top_k(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("\n".join(f"line {i}" for i in range(1, 11)), label="overlap-ranking")
 
         with patch.object(
@@ -728,7 +742,7 @@ STEP 3: Summary
         self.assertEqual([match["chunk_id"] for match in result["matches"]], [0, 3])
 
     def test_search_dedup_keeps_matches_that_reveal_new_lines(self):
-        engine = EphemeralEngine(max_captures=1, semantic_chunk_lines=8)
+        engine = self._new_engine(max_captures=1, semantic_chunk_lines=8)
         capture = engine._ingest_state("\n".join(f"line {i}" for i in range(1, 17)), label="dedup-visibility")
         # Semantic windows L1-8 and L9-16: contexts overlap, but the second reveals lines 12-16.
         with patch.object(engine, "search_semantic", return_value=[(0, 0.9), (1, 0.8)]):
@@ -744,7 +758,7 @@ STEP 3: Summary
         self.assertEqual([m["matched_range"] for m in narrow["matches"]], ["L9-L12", "L13-L16"])
 
     def test_search_snippet_bounds_long_utf8_lines(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         long_line = "MATCH " + "é" * (SEARCH_SNIPPET_MAX_BYTES * 2)
         capture = engine._ingest_state(long_line, label="long-search-line")
 
@@ -755,7 +769,7 @@ STEP 3: Summary
         self.assertIn("search line truncated", snippet)
 
     def test_search_reader_defers_storage_close_during_eviction(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         capture = engine._ingest_state("target value\nsecond line", label="reader-lifetime")
         capture.embeddings = np.zeros((1, 384), dtype=np.float32)
         view = engine.get_capture()
@@ -813,7 +827,7 @@ STEP 3: Summary
         self.assertEqual(released["deferred_storage_bytes"], 0)
 
     def test_deferred_storage_accounting_tracks_embeddings_published_by_reader(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         engine.embedding_model = type(
             "TestEmbedding",
             (),
@@ -872,7 +886,7 @@ STEP 3: Summary
             engine.shutdown()
 
     def test_search_response_budget_bounds_materialized_matches(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("needle\n" * 32, label="search-response-budget")
         with patch.object(engine, "search_bm25", return_value=[(0, 1.0), (5, 0.9), (10, 0.8)]):
             result = engine.search(
@@ -914,7 +928,7 @@ STEP 3: Summary
         self.assertTrue(too_small["response_matches_omitted"])
 
     def test_search_response_budget_debits_actual_short_match_bytes(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("needle\n" * 40, label="short-search-matches")
         with patch.object(
             engine,
@@ -945,7 +959,7 @@ STEP 3: Summary
                 self.release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         embedding = BlockingEmbedding()
         engine.embedding_model = embedding
         capture = engine._ingest_state("semantic payload", label="lazy-eviction")
@@ -969,7 +983,7 @@ STEP 3: Summary
         self.assertEqual(result_holder["result"]["match_count"], 1)
 
     def test_summary_for_capture_survives_lru_eviction(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("first capture", label="first")
 
         engine._ingest_state("replacement capture", label="replacement")
@@ -1058,7 +1072,7 @@ STEP 3: Summary
         print(slice_res["content"])
 
     def test_consolidate_reports_effective_limit_below_floor(self):
-        engine = EphemeralEngine(max_buffer_bytes=256)
+        engine = self._new_engine(max_buffer_bytes=256)
         try:
             with self.assertRaisesRegex(
                 ValueError,
@@ -1261,7 +1275,7 @@ STEP 3: Summary
         self.assertEqual(_bounded_preview("café", max_bytes=8), "café")
 
     def test_ingest_validates_and_preserves_structured_metrics(self):
-        engine = EphemeralEngine(max_captures=2)
+        engine = self._new_engine(max_captures=2)
         capture = engine._ingest_state(
             "metric output",
             source="command",
@@ -1287,7 +1301,7 @@ STEP 3: Summary
             engine._ingest_state("invalid", source="")
 
     def test_ingest_preserves_positional_protected_capture_compatibility(self):
-        engine = EphemeralEngine(max_captures=2)
+        engine = self._new_engine(max_captures=2)
         source = engine._ingest_state("source capture")
         combined = engine._ingest_state(
             "combined capture", "combined", "text", False, None, None, False,
@@ -1524,7 +1538,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         print("\n[Byte Budget Passed] Content byte budget evicted old captures and rejected oversized input.")
 
     def test_default_capture_capacity_and_lru_eviction(self):
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             settings=load_settings(environ={}),
             semantic_prefetch=False,
             embedding_warmup=False,
@@ -1558,7 +1572,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_byte_budget_uses_actual_utf8_input_bytes(self):
-        engine = EphemeralEngine(max_captures=3, max_buffer_bytes=7)
+        engine = self._new_engine(max_captures=3, max_buffer_bytes=7)
         try:
             no_trailing_newline = engine._ingest_state("abc", label="a")
             multibyte = engine._ingest_state("é", label="b")
@@ -1574,7 +1588,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_byte_budget_includes_utf8_label_bytes(self):
-        engine = EphemeralEngine(max_captures=2, max_buffer_bytes=10)
+        engine = self._new_engine(max_captures=2, max_buffer_bytes=10)
         try:
             capture = engine._ingest_state("1234", label="ééé")
             self.assertEqual(capture.byte_size, 4)
@@ -1602,7 +1616,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertGreaterEqual(stats["unaccounted_rss_bytes"], 0)
 
     def test_index_chunk_budget_evicts_lru_and_rejects_oversized_capture(self):
-        engine = EphemeralEngine(max_captures=3, max_indexed_chunks=3)
+        engine = self._new_engine(max_captures=3, max_indexed_chunks=3)
         first = engine._ingest_state("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="first")
         second = engine._ingest_state("eight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen", label="second")
 
@@ -1613,13 +1627,13 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(stats["remaining_indexed_chunks"], 0)
         self.assertGreaterEqual(stats["capture_removals_by_reason"]["chunks"], 1)
 
-        rejecting = EphemeralEngine(max_captures=1, max_indexed_chunks=2)
+        rejecting = self._new_engine(max_captures=1, max_indexed_chunks=2)
         with self.assertRaisesRegex(ValueError, "indexed chunks"):
             rejecting._ingest_state("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="too-large")
         self.assertEqual(rejecting._captures, {})
 
     def test_runtime_index_budget_decrease_evicts_oldest_captures(self):
-        engine = EphemeralEngine(max_captures=3, max_indexed_chunks=6)
+        engine = self._new_engine(max_captures=3, max_indexed_chunks=6)
         first = engine._ingest_state("one\ntwo\nthree\nfour\nfive\nsix\nseven", label="first")
         second = engine._ingest_state("eight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen", label="second")
         third = engine._ingest_state("fifteen\nsixteen\nseventeen\neighteen\nnineteen\ntwenty\ntwenty-one", label="third")
@@ -1648,13 +1662,13 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(stats["capture_removals_by_reason"]["budget"], 1)
 
     def test_runtime_index_budget_rejects_invalid_values(self):
-        engine = EphemeralEngine(max_indexed_chunks=3)
+        engine = self._new_engine(max_indexed_chunks=3)
         for value in (0, -1, True, "3"):
             with self.assertRaises(ValueError):
                 engine.set_max_indexed_chunks(value)
 
     def test_runtime_budget_adjustment_bounds_eviction_details(self):
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=100,
             max_indexed_chunks=100,
             semantic_prefetch=False,
@@ -1679,12 +1693,12 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         )
 
     def test_eviction_of_missing_capture_is_reported_without_mutation(self):
-        engine = EphemeralEngine(max_indexed_chunks=3, embedding_warmup=False)
+        engine = self._new_engine(max_indexed_chunks=3, embedding_warmup=False)
         with engine._lock:
             self.assertFalse(engine._evict_capture_locked("missing", ("count",)))
 
     def test_eviction_records_every_limit_exceeded_for_each_removed_capture(self):
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             max_buffer_bytes=50,
             embedding_warmup=False,
@@ -1725,7 +1739,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         )
 
     def test_runtime_index_budget_adjustment_serializes_with_ingest(self):
-        engine = EphemeralEngine(max_indexed_chunks=6, embedding_warmup=False)
+        engine = self._new_engine(max_indexed_chunks=6, embedding_warmup=False)
         barrier = threading.Barrier(2)
 
         def ingest():
@@ -1745,7 +1759,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertLessEqual(engine.get_buffer_stats()["indexed_chunks"], 3)
 
     def test_protected_ingest_evicts_only_unrelated_captures(self):
-        engine = EphemeralEngine(max_captures=2)
+        engine = self._new_engine(max_captures=2)
         source = engine._ingest_state("source payload", label="source")
         unrelated = engine._ingest_state("unrelated payload", label="unrelated")
 
@@ -1760,7 +1774,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIn(admitted.capture_id, engine._captures)
 
     def test_protected_ingest_rejects_without_evicting_sources(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         source = engine._ingest_state("source payload", label="source")
 
         with self.assertRaisesRegex(ValueError, "protected source captures"):
@@ -1774,7 +1788,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(engine.get_capture(source.capture_id).label, "source")
 
     def test_capture_view_freezes_nested_metadata_and_diagnostics_are_supported(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         try:
             capture = engine.ingest(
                 "one\ntwo",
@@ -1808,7 +1822,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_summary_for_capture_accepts_and_rejects_public_views(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         try:
             view = engine.ingest("summary payload", label="summary-view")
             summary = engine.get_summary_for_capture(view, include_previews=False)
@@ -1823,7 +1837,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_public_indexing_and_wait_apis_report_supported_statuses(self):
-        engine = EphemeralEngine(max_captures=2, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=2, semantic_prefetch=False)
         try:
             self.assertEqual(engine.index_capture("missing"), "not-found")
             self.assertEqual(engine.wait_for_capture_index("missing"), "not-found")
@@ -1854,7 +1868,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def embed(self, _texts):
                 raise RuntimeError("embedding unavailable")
 
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         engine.embedding_model = FailingEmbedding()
         try:
             capture = engine.ingest("indexing failure", label="failed-index")
@@ -1871,7 +1885,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_protected_ingest_rejects_missing_source_ids(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
 
         with self.assertRaisesRegex(ValueError, "unavailable source captures"):
             engine._ingest_state(
@@ -1883,7 +1897,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(engine._captures, {})
 
     def test_protected_ingest_rejects_when_bytes_or_chunks_cannot_fit(self):
-        byte_limited = EphemeralEngine(max_captures=2, max_buffer_bytes=25)
+        byte_limited = self._new_engine(max_captures=2, max_buffer_bytes=25)
         byte_source = byte_limited._ingest_state("source payload", label="source")
         with self.assertRaisesRegex(ValueError, "protected source captures"):
             byte_limited._ingest_state(
@@ -1893,7 +1907,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             )
         self.assertIn(byte_source.capture_id, byte_limited._captures)
 
-        chunk_limited = EphemeralEngine(max_captures=2, max_indexed_chunks=1)
+        chunk_limited = self._new_engine(max_captures=2, max_indexed_chunks=1)
         chunk_source = chunk_limited._ingest_state("source payload", label="source")
         with self.assertRaisesRegex(ValueError, "protected source captures"):
             chunk_limited._ingest_state(
@@ -1911,7 +1925,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
             def embed(self, texts):
                 self.started.set()
-                self.release.wait(timeout=2)
+                self.release.wait()
                 return [[0.0] * 384 for _ in texts]
 
         original_model = self.engine.embedding_model
@@ -1919,32 +1933,60 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.engine.embedding_model = blocker
         capture = self.engine._ingest_state("blocked embedding")
         worker = threading.Thread(target=self.engine.search_semantic, args=(capture, "blocked"))
+        read_workers = []
+
+        def read_in_worker(operation):
+            finished = threading.Event()
+            result = {}
+
+            def read():
+                try:
+                    result["value"] = operation()
+                except BaseException as exc:
+                    result["error"] = exc
+                finally:
+                    finished.set()
+
+            read_worker = threading.Thread(target=read, daemon=True)
+            read_workers.append(read_worker)
+            read_worker.start()
+            self.assertTrue(
+                finished.wait(timeout=30),
+                "read did not finish while embedding was blocked",
+            )
+            read_worker.join(timeout=30)
+            self.assertFalse(read_worker.is_alive(), "read worker remained alive after completion")
+            if "error" in result:
+                raise result["error"]
+            return result["value"]
+
         try:
             worker.start()
-            self.assertTrue(blocker.started.wait(timeout=1))
-            started_at = time.monotonic()
-            stats = self.engine.get_buffer_stats()
-            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertTrue(blocker.started.wait(timeout=30))
+            stats = read_in_worker(self.engine.get_buffer_stats)
             self.assertIn("capture_count", stats)
-            started_at = time.monotonic()
-            concurrent_capture = self.engine._ingest_state("concurrent capture")
-            self.assertLess(time.monotonic() - started_at, 0.5)
+            concurrent_capture = read_in_worker(
+                lambda: self.engine._ingest_state("concurrent capture")
+            )
             self.assertIn(concurrent_capture.capture_id, self.engine._captures)
         finally:
             blocker.release.set()
-            worker.join(timeout=2)
+            worker.join(timeout=30)
+            for read_worker in read_workers:
+                read_worker.join(timeout=30)
             self.engine.embedding_model = original_model
+        self.assertFalse(worker.is_alive(), "embedding worker did not stop after release")
 
     def test_13_rejects_invalid_buffer_limits(self):
         with self.assertRaisesRegex(ValueError, "max_captures"):
-            EphemeralEngine(max_captures=0)
+            self._new_engine(max_captures=0)
         with self.assertRaisesRegex(ValueError, "max_buffer_bytes"):
-            EphemeralEngine(max_buffer_bytes=0)
+            self._new_engine(max_buffer_bytes=0)
         with self.assertRaisesRegex(ValueError, "max_indexed_chunks"):
-            EphemeralEngine(max_indexed_chunks=0)
+            self._new_engine(max_indexed_chunks=0)
 
     def test_ingest_rejects_invalid_original_byte_sizes_before_admission(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         try:
             for invalid in (True, "12", -1):
                 with self.subTest(original_byte_size=invalid):
@@ -1965,7 +2007,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_14_empty_and_missing_capture_paths(self):
-        empty = EphemeralEngine(max_captures=1)
+        empty = self._new_engine(max_captures=1)
         capture = empty._ingest_state("", label="empty")
 
         self.assertEqual(empty.search("anything")["status"], "ok")
@@ -1981,7 +2023,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def embed(self, _texts):
                 raise RuntimeError("model unavailable")
 
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         engine.embedding_model = FailingEmbedding()
         capture = engine._ingest_state("payload", label="embedding-failure")
         with self.assertRaisesRegex(RuntimeError, "model unavailable"):
@@ -1989,7 +2031,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIn(capture.capture_id, engine._captures)
 
     def test_lazy_embedding_cache_and_empty_embedding_paths(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("searchable payload", label="lazy-embedding")
         capture.embeddings = np.empty((0, 384), dtype=np.float32)
         self.assertEqual(engine.search_semantic(capture, "payload"), [])
@@ -2014,7 +2056,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine._embedding_lock = original_lock
 
     def test_embedding_snapshot_aborts_when_capture_is_not_current(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         engine._ensure_embeddings(SimpleNamespace(capture_id="missing", embeddings=None, chunks=[]))
         capture = engine._ingest_state("evicted before embedding", label="evicted")
 
@@ -2044,7 +2086,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine = self._new_engine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
         engine.embedding_model = BlockingEmbedding()
         try:
             capture = engine._ingest_state("prefetch payload", label="prefetch")
@@ -2072,7 +2114,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def embed(self, _texts):
                 raise RuntimeError("prefetch unavailable")
 
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
         engine.embedding_model = FailingEmbedding()
         try:
             capture = engine._ingest_state("prefetch failure", label="prefetch-failure")
@@ -2097,7 +2139,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         from ephemeral_buffer_mcp.metrics import LocalMetrics
 
         metrics = LocalMetrics(enabled=True)
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             embedding_model_name="test",
@@ -2124,7 +2166,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
         submit_metrics = LocalMetrics(enabled=True)
-        submit_engine = EphemeralEngine(
+        submit_engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             metrics=submit_metrics,
@@ -2165,7 +2207,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=True,
             semantic_prefetch_workers=1,
@@ -2220,7 +2262,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 on_demand_release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        on_demand_engine = EphemeralEngine(
+        on_demand_engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             metrics=on_demand_metrics,
@@ -2266,7 +2308,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         from ephemeral_buffer_mcp.metrics import LocalMetrics
 
         metrics = LocalMetrics(enabled=True)
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             metrics=metrics,
@@ -2291,7 +2333,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_semantic_metrics_snapshot_flush_without_callback_is_safe(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         try:
             with engine._lock:
                 engine._metrics_snapshot_pending = True
@@ -2313,7 +2355,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         metrics = LocalMetrics(enabled=True)
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             semantic_wait_seconds=0.01,
@@ -2334,7 +2376,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
         fallback_metrics = LocalMetrics(enabled=True)
-        fallback_engine = EphemeralEngine(
+        fallback_engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             metrics=fallback_metrics,
@@ -2377,7 +2419,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         metrics = LocalMetrics(enabled=True)
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=True,
             semantic_prefetch_workers=1,
@@ -2418,7 +2460,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=8, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine = self._new_engine(max_captures=8, semantic_prefetch=True, semantic_prefetch_workers=1)
         engine.embedding_model = BlockingEmbedding()
         try:
             first = engine._ingest_state("first payload", label="first")
@@ -2462,7 +2504,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                     release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine = self._new_engine(max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1)
         engine.embedding_model = BlockingEmbedding()
         try:
             engine._ingest_state("first payload", label="first")
@@ -2497,7 +2539,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=5)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0.05
         )
         engine.embedding_model = BlockingEmbedding()
@@ -2550,7 +2592,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=5)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0)
+        engine = self._new_engine(max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0)
         engine.embedding_model = BlockingEmbedding()
         try:
             capture = engine._ingest_state("semantic payload", label="semantic-wait")
@@ -2580,16 +2622,16 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
     def test_wait_budget_validation_and_unbounded_wait(self):
         for invalid in (-1, float("nan")):
             with self.assertRaisesRegex(ValueError, "semantic_wait_seconds"):
-                EphemeralEngine(semantic_prefetch=False, semantic_wait_seconds=invalid)
+                self._new_engine(semantic_prefetch=False, semantic_wait_seconds=invalid)
         with patch.dict("os.environ", {"EPHEMERAL_SEMANTIC_WAIT_SECONDS": "2.5"}, clear=False):
-            configured = EphemeralEngine(semantic_prefetch=False)
+            configured = self._new_engine(semantic_prefetch=False)
         try:
             self.assertEqual(configured.semantic_wait_seconds, 2.5)
             self.assertEqual(configured.get_buffer_stats()["semantic_wait_seconds"], 2.5)
         finally:
             configured.shutdown()
 
-        unbounded = EphemeralEngine(
+        unbounded = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_wait_seconds=float("inf")
         )
         try:
@@ -2610,7 +2652,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             unbounded.shutdown()
 
     def test_await_semantic_index_recovers_from_unpublished_job_and_eviction(self):
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False, semantic_wait_seconds=0)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False, semantic_wait_seconds=0)
         try:
             capture = engine._ingest_state("recover payload", label="recover")
             # A finished prefetch job that could not publish leaves the capture
@@ -2666,7 +2708,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_prefetch_workers=1, semantic_wait_seconds=0
         )
         engine.embedding_model = BlockingEmbedding()
@@ -2720,7 +2762,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=5)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             semantic_prefetch_workers=1,
@@ -2785,7 +2827,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=5)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_prefetch_workers=1, semantic_wait_seconds=5
         )
         engine.embedding_model = BlockingEmbedding()
@@ -2857,7 +2899,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                         raise RuntimeError("embedding backend unavailable")
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1, semantic_wait_seconds=0
         )
         engine.embedding_model = FlakyEmbedding()
@@ -2900,9 +2942,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
     def test_async_prefetch_lifecycle_error_and_shutdown_paths(self):
         with self.assertRaisesRegex(ValueError, "semantic_prefetch_workers"):
-            EphemeralEngine(semantic_prefetch=True, semantic_prefetch_workers=0)
+            self._new_engine(semantic_prefetch=True, semantic_prefetch_workers=0)
 
-        submit_failure = EphemeralEngine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
+        submit_failure = self._new_engine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
         try:
             with patch.object(
                 submit_failure._prefetch_executor,
@@ -2926,7 +2968,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             submit_failure.shutdown()
             self.assertEqual(queued.semantic_index_state, "not-requested")
 
-        evicted_engine = EphemeralEngine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
+        evicted_engine = self._new_engine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
         try:
             capture = SimpleNamespace(
                 capture_id="cap-evicted",
@@ -2955,7 +2997,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 release.wait(timeout=2)
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
+        engine = self._new_engine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
         engine.embedding_model = BlockingEmbedding()
         try:
             first = engine._ingest_state("first shutdown payload", label="shutdown-first")
@@ -2987,38 +3029,48 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
     def test_shutdown_waits_for_embedding_warmup(self):
         started = threading.Event()
         release = threading.Event()
-        shutdown_entered = threading.Event()
+        warmup_join_entered = threading.Event()
         shutdown_done = threading.Event()
 
         class BlockingEmbedding:
             def embed(self, texts):
                 started.set()
-                release.wait(timeout=2)
+                release.wait()
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        engine = self._new_engine(max_captures=1, embedding_warmup=True)
         engine.embedding_model = BlockingEmbedding()
+        shutdown_thread = None
         try:
             self.assertTrue(engine.start_embedding_warmup())
-            self.assertTrue(started.wait(timeout=2))
+            self.assertTrue(started.wait(timeout=30))
+            warmup_thread = engine._embedding_warmup_thread
+            self.assertIsNotNone(warmup_thread)
+            original_join = warmup_thread.join
+
+            def observe_warmup_join(timeout=None):
+                warmup_join_entered.set()
+                return original_join(timeout)
 
             def shutdown():
-                shutdown_entered.set()
                 engine.shutdown()
                 shutdown_done.set()
 
-            shutdown_thread = threading.Thread(target=shutdown)
-            shutdown_thread.start()
-            self.assertTrue(shutdown_entered.wait(timeout=2))
-            self.assertFalse(shutdown_done.wait(timeout=0.05))
+            with patch.object(warmup_thread, "join", new=observe_warmup_join):
+                shutdown_thread = threading.Thread(target=shutdown)
+                shutdown_thread.start()
+                self.assertTrue(warmup_join_entered.wait(timeout=30))
+                self.assertFalse(shutdown_done.is_set())
 
-            release.set()
-            shutdown_thread.join(timeout=2)
+                release.set()
+                shutdown_thread.join(timeout=30)
             self.assertFalse(shutdown_thread.is_alive())
             self.assertTrue(shutdown_done.is_set())
             self.assertEqual(engine.embedding_warmup_state, "ready")
         finally:
             release.set()
+            if shutdown_thread is not None:
+                shutdown_thread.join(timeout=30)
             engine.shutdown()
 
     def test_shutdown_reports_warmup_that_outlives_grace_period(self):
@@ -3032,7 +3084,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def is_alive(self):
                 return True
 
-        engine = EphemeralEngine(embedding_warmup=False, semantic_prefetch=False)
+        engine = self._new_engine(embedding_warmup=False, semantic_prefetch=False)
         warmup = StillRunning()
         engine._embedding_warmup_thread = warmup
 
@@ -3042,7 +3094,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIn("embedding_warmup", report["unfinished_work"])
 
     def test_bm25_invalid_query_and_sqlite_failure_return_no_matches(self):
-        engine = EphemeralEngine(max_captures=1)
+        engine = self._new_engine(max_captures=1)
         capture = engine._ingest_state("searchable payload", label="search-errors")
 
         self.assertEqual(engine.search_bm25(capture, "!!!"), [])
@@ -3070,7 +3122,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
     def test_python_lexical_fallback_preserves_token_matches(self):
         with patch("ephemeral_buffer_mcp.engine.sqlite_fts5_available", return_value=False):
-            engine = EphemeralEngine(max_captures=1)
+            engine = self._new_engine(max_captures=1)
             capture = engine._ingest_state("noise line\nECONNREFUSED on port 5432\n", label="fallback")
 
         self.assertEqual(engine.lexical_backend, "python-fallback")
@@ -3083,7 +3135,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
     def test_python_lexical_fallback_ignores_diacritics(self):
         with patch("ephemeral_buffer_mcp.engine.sqlite_fts5_available", return_value=False):
-            engine = EphemeralEngine(max_captures=1)
+            engine = self._new_engine(max_captures=1)
             capture = engine._ingest_state("café connection failed", label="diacritics")
 
         self.assertEqual(engine.search_bm25(capture, "cafe")[0][0], 0)
@@ -3096,7 +3148,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         for fts5_available in backend_modes:
             with self.subTest(fts5_available=fts5_available):
                 with patch("ephemeral_buffer_mcp.engine.sqlite_fts5_available", return_value=fts5_available):
-                    engine = EphemeralEngine(max_captures=1)
+                    engine = self._new_engine(max_captures=1)
                     capture = engine._ingest_state(
                         "database_connection café naïve v2.4 error-code",
                         label="token-boundaries",
@@ -3110,13 +3162,13 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
     def test_fallback_query_syntax_remains_tokenized_as_text(self):
         with patch("ephemeral_buffer_mcp.engine.sqlite_fts5_available", return_value=False):
-            engine = EphemeralEngine(max_captures=1)
+            engine = self._new_engine(max_captures=1)
             capture = engine._ingest_state("database_connection", label="query-syntax")
 
         self.assertTrue(engine.search_bm25(capture, '"connection" OR missing'))
 
     def test_clear_single_and_missing_capture_paths(self):
-        engine = EphemeralEngine(max_captures=2)
+        engine = self._new_engine(max_captures=2)
         capture = engine._ingest_state("cleanup payload", label="cleanup")
 
         self.assertEqual(
@@ -3150,7 +3202,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         )
 
     def test_search_missing_capture_message_distinguishes_empty_buffer(self):
-        engine = EphemeralEngine(max_captures=2, embedding_warmup=False)
+        engine = self._new_engine(max_captures=2, embedding_warmup=False)
         empty = engine.search("query", capture_id="missing")
         self.assertIn("Buffer is currently empty.", empty["message"])
 
@@ -3160,7 +3212,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertNotIn("Buffer is currently empty.", nonempty["message"])
 
     def test_empty_capture_reader_returns_none(self):
-        engine = EphemeralEngine(max_captures=1, embedding_model_name="test")
+        engine = self._new_engine(max_captures=1, embedding_model_name="test")
         try:
             self.assertIsNone(engine._acquire_capture_reader("latest"))
             self.assertIsNone(engine.get_capture())
@@ -3174,7 +3226,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                 patch("ephemeral_buffer_mcp.engine.TextEmbedding", return_value=FakeEmbedding()) as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            engine = EphemeralEngine(
+            engine = self._new_engine(
                 max_captures=1,
                 embedding_cache_path="/cache",
                 embedding_cpu_mem_arena_enabled=False,
@@ -3192,7 +3244,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                 patch("ephemeral_buffer_mcp.engine.TextEmbedding", side_effect=RuntimeError("load failed")) as embedding:
-            failing = EphemeralEngine(max_captures=1)
+            failing = self._new_engine(max_captures=1)
             with self.assertRaisesRegex(RuntimeError, "load failed"):
                 failing._get_embedding_model()
             with self.assertRaisesRegex(RuntimeError, "retry backoff"):
@@ -3209,7 +3261,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         class FakeEmbedding:
             pass
 
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        engine = self._new_engine(max_captures=1, embedding_warmup=False)
         try:
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                     patch(
@@ -3244,7 +3296,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def __init__(self, code, reason):
                 super().__init__(code, reason)
 
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        engine = self._new_engine(max_captures=1, embedding_warmup=False)
         try:
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                     patch(
@@ -3259,7 +3311,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_concurrent_embedding_model_load_failure_is_attempted_once(self):
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        engine = self._new_engine(max_captures=1, embedding_warmup=False)
         load_started = threading.Event()
         allow_failure = threading.Event()
 
@@ -3289,7 +3341,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_failed_model_load_is_cached_and_hybrid_search_stays_available(self):
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             embedding_warmup=False,
             semantic_prefetch=False,
@@ -3326,7 +3378,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 self.calls.append(list(texts))
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        engine = self._new_engine(max_captures=1, embedding_warmup=True)
         embedding = WarmEmbedding()
         engine.embedding_model = embedding
         try:
@@ -3345,7 +3397,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def embed(self, _texts):
                 raise RuntimeError("model unavailable")
 
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        engine = self._new_engine(max_captures=1, embedding_warmup=True)
         engine.embedding_model = FailingEmbedding()
         try:
             self.assertTrue(engine.start_embedding_warmup())
@@ -3366,7 +3418,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             engine.shutdown()
 
     def test_embedding_warmup_can_be_disabled(self):
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=False)
+        engine = self._new_engine(max_captures=1, embedding_warmup=False)
         try:
             self.assertFalse(engine.start_embedding_warmup())
             self.assertEqual(engine.wait_for_embedding_warmup(timeout=0), "disabled")
@@ -3388,15 +3440,20 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
 
 class TestEmbeddingStartup(unittest.TestCase):
+    def _new_engine(self, *args, **kwargs):
+        engine = EphemeralEngine(*args, **kwargs)
+        self.addCleanup(engine.shutdown)
+        return engine
+
     def test_embedding_model_loads_lazily(self):
         with patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding:
-            engine = EphemeralEngine(max_captures=1)
+            engine = self._new_engine(max_captures=1)
 
         embedding.assert_not_called()
         self.assertIsNone(engine.embedding_model)
 
     def test_embedding_warmup_thread_start_failure_is_degraded(self):
-        engine = EphemeralEngine(max_captures=1, embedding_warmup=True)
+        engine = self._new_engine(max_captures=1, embedding_warmup=True)
         try:
             with patch.object(threading.Thread, "start", side_effect=RuntimeError("thread limit")):
                 self.assertFalse(engine.start_embedding_warmup())
@@ -3406,7 +3463,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             engine.shutdown()
 
     def test_semantic_chunks_pack_lines_by_line_and_byte_caps(self):
-        engine = EphemeralEngine(max_captures=1, semantic_chunk_lines=3, semantic_chunk_bytes=20)
+        engine = self._new_engine(max_captures=1, semantic_chunk_lines=3, semantic_chunk_bytes=20)
         self.assertEqual(engine._semantic_chunk_lines([]), [])
 
         lines = ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff", "gggg"]
@@ -3419,7 +3476,7 @@ class TestEmbeddingStartup(unittest.TestCase):
         chunks = engine._semantic_chunk_lines(wide)
         self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 1), (2, 2), (3, 3), (4, 4)])
 
-        overlapping = EphemeralEngine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=2)
+        overlapping = self._new_engine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=2)
         chunks = overlapping._semantic_chunk_lines(lines)
         self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 4), (3, 6), (5, 7)])
 
@@ -3442,22 +3499,22 @@ class TestEmbeddingStartup(unittest.TestCase):
             },
             clear=False,
         ):
-            engine = EphemeralEngine(max_captures=1)
+            engine = self._new_engine(max_captures=1)
         self.assertEqual(
             (engine.semantic_chunk_lines, engine.semantic_chunk_bytes, engine.semantic_chunk_overlap),
             (6, 512, 1),
         )
         with self.assertRaisesRegex(ValueError, "semantic_chunk_lines"):
-            EphemeralEngine(max_captures=1, semantic_chunk_lines=0)
+            self._new_engine(max_captures=1, semantic_chunk_lines=0)
         with self.assertRaisesRegex(ValueError, "semantic_chunk_bytes"):
-            EphemeralEngine(max_captures=1, semantic_chunk_bytes=0)
+            self._new_engine(max_captures=1, semantic_chunk_bytes=0)
         with self.assertRaisesRegex(ValueError, "semantic_chunk_overlap"):
-            EphemeralEngine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=4)
+            self._new_engine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=4)
         with self.assertRaisesRegex(ValueError, "semantic_chunk_overlap"):
-            EphemeralEngine(max_captures=1, semantic_chunk_overlap=-1)
+            self._new_engine(max_captures=1, semantic_chunk_overlap=-1)
 
     def test_hybrid_fuses_semantic_windows_with_lexical_ranges(self):
-        engine = EphemeralEngine(max_captures=1, semantic_chunk_lines=4)
+        engine = self._new_engine(max_captures=1, semantic_chunk_lines=4)
         capture = engine._ingest_state("\n".join(f"line {i}" for i in range(1, 13)), label="fusion")
         # Lexical windows: 0=L1-4, 1=L3-6, 2=L5-8, 3=L7-10, 4=L9-12.
         # Semantic windows: 0=L1-4, 1=L5-8, 2=L9-12.
@@ -3496,16 +3553,16 @@ class TestEmbeddingStartup(unittest.TestCase):
 
     def test_embedding_threads_configuration_and_validation(self):
         with patch.dict("os.environ", {"EPHEMERAL_EMBEDDING_THREADS": "3"}, clear=False):
-            configured = EphemeralEngine(max_captures=1)
+            configured = self._new_engine(max_captures=1)
         self.assertEqual(configured.embedding_threads, 3)
         self.assertEqual(configured.get_buffer_stats()["embedding_threads"], 3)
 
-        explicit = EphemeralEngine(
+        explicit = self._new_engine(
             max_captures=1, embedding_threads=2, embedding_model_name=CATALOGUE_EMBEDDING_MODEL
         )
         self.assertEqual(explicit.embedding_threads, 2)
         with self.assertRaisesRegex(ValueError, "embedding_threads"):
-            EphemeralEngine(max_captures=1, embedding_threads=0)
+            self._new_engine(max_captures=1, embedding_threads=0)
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                 patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
@@ -3535,7 +3592,7 @@ class TestEmbeddingStartup(unittest.TestCase):
                 self.calls.append(texts)
                 return [np.eye(384, dtype=np.float32)[ord(text) - ord("a")] for text in texts]
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             embedding_batch_size=4,
@@ -3581,9 +3638,9 @@ class TestEmbeddingStartup(unittest.TestCase):
         )
         for options, message in invalid_options:
             with self.subTest(option=message), self.assertRaisesRegex(ValueError, message):
-                EphemeralEngine(max_captures=1, **options)
+                self._new_engine(max_captures=1, **options)
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             semantic_max_index_input_bytes=1,
@@ -3625,7 +3682,7 @@ class TestEmbeddingStartup(unittest.TestCase):
         )
         for result, message in invalid_results:
             with self.subTest(result=message):
-                engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+                engine = self._new_engine(max_captures=1, semantic_prefetch=False)
                 engine.embedding_model = StaticEmbedding(result)
                 try:
                     capture = make_capture(engine)
@@ -3634,7 +3691,7 @@ class TestEmbeddingStartup(unittest.TestCase):
                 finally:
                     engine.shutdown()
 
-        engine = EphemeralEngine(max_captures=1, semantic_prefetch=False)
+        engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         engine.embedding_model = StaticEmbedding(
             lambda _texts: self.fail("empty semantic chunks must not call embed")
         )
@@ -3655,7 +3712,7 @@ class TestEmbeddingStartup(unittest.TestCase):
                 self.calls += 1
                 raise AssertionError("over-budget content must not reach embedding inference")
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=True,
             semantic_max_index_input_bytes=8,
@@ -3690,7 +3747,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             def embed(self, _texts):
                 raise AssertionError("over-budget tokens must not reach embedding inference")
 
-        engine = EphemeralEngine(
+        engine = self._new_engine(
             max_captures=1,
             semantic_prefetch=False,
             semantic_wait_seconds=1,
@@ -3717,9 +3774,9 @@ class TestEmbeddingStartup(unittest.TestCase):
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                     patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
                     patch("sys.stderr", new_callable=io.StringIO):
-                first = EphemeralEngine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
+                first = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
                 first._get_embedding_model()
-                second = EphemeralEngine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
+                second = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
                 second._get_embedding_model()
             embedding.add_custom_model.assert_called_once()
             registration = embedding.add_custom_model.call_args.kwargs

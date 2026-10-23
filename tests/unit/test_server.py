@@ -691,7 +691,7 @@ class TestServerTools(unittest.TestCase):
 
             def blocking_work():
                 started.set()
-                finish.wait(timeout=3)
+                finish.wait()
                 return "finished"
 
             task = asyncio.create_task(server._run_admitted_thread(
@@ -700,27 +700,34 @@ class TestServerTools(unittest.TestCase):
                 _service_context=context,
                 _call_id=call_id,
             ))
-            for _ in range(100):
-                if started.is_set():
-                    break
-                await asyncio.sleep(0.01)
-            self.assertTrue(started.is_set())
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            self.assertTrue(cancellation_event.is_set())
-            ticket.release()
-            self.assertEqual(admission_snapshot()["admission_active"], 1)
-            self.assertFalse(context.wait_for_tool_calls(0))
+            try:
+                self.assertTrue(
+                    await asyncio.to_thread(started.wait, 30),
+                    "worker did not start before the deadline",
+                )
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(cancellation_event.is_set())
+                ticket.release()
+                self.assertEqual(admission_snapshot()["admission_active"], 1)
+                self.assertFalse(context.wait_for_tool_calls(0))
 
-            finish.set()
-            for _ in range(100):
-                if admission_snapshot()["admission_active"] == 0:
-                    break
-                await asyncio.sleep(0.01)
-            self.assertEqual(admission_snapshot()["admission_active"], 0)
-            self.assertTrue(context.wait_for_tool_calls(0))
-            server._REQUEST_CANCEL_EVENT.reset(cancel_token)
+                finish.set()
+                self.assertTrue(
+                    await asyncio.to_thread(context.wait_for_tool_calls, 30),
+                    "service context did not finish the deferred worker call",
+                )
+                self.assertEqual(admission_snapshot()["admission_active"], 0)
+            finally:
+                finish.set()
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                server._REQUEST_CANCEL_EVENT.reset(cancel_token)
 
         with patch("ephemeral_buffer_mcp.admission.ADMISSION_METRICS", AdmissionMetrics()):
             asyncio.run(exercise())
@@ -4793,13 +4800,13 @@ class TestSocketServerStartup(unittest.TestCase):
                 if lock_holder.poll() is None:
                     lock_holder.terminate()
                     try:
-                        lock_holder.communicate(timeout=3)
+                        lock_holder.communicate(timeout=30)
                     except subprocess.TimeoutExpired:
                         lock_holder.kill()
-                        lock_holder.communicate(timeout=3)
+                        lock_holder.communicate(timeout=30)
 
             try:
-                readable, _, _ = select.select([lock_holder.stdout], [], [], 5)
+                readable, _, _ = select.select([lock_holder.stdout], [], [], 10)
                 if not readable or lock_holder.stdout.readline().strip() != "locked":
                     stop_lock_holder()
                     self.fail("could not acquire the active session socket lock")
@@ -4812,14 +4819,14 @@ class TestSocketServerStartup(unittest.TestCase):
                         patch.object(socket_transport, "_set_socket_state"), \
                         patch("sys.stderr", new_callable=io.StringIO) as stderr:
                     startup_thread.start()
-                    completed_while_lock_was_held = startup_finished.wait(timeout=1)
+                    completed_while_lock_was_held = startup_finished.wait(timeout=10)
                     stop_lock_holder()
-                    startup_thread.join(timeout=3)
+                    startup_thread.join(timeout=30)
                     diagnostic = stderr.getvalue()
             finally:
                 stop_lock_holder()
                 if startup_thread.ident is not None:
-                    startup_thread.join(timeout=3)
+                    startup_thread.join(timeout=30)
 
             self.assertTrue(completed_while_lock_was_held, "startup waited for the active session's socket lock")
             self.assertFalse(startup_thread.is_alive())
