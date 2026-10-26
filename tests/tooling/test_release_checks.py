@@ -73,7 +73,11 @@ class TestReleaseChecks(unittest.TestCase):
             core.write_text(
                 '[project]\nname="ephemeral-buffer-mcp-core"\nversion="1.2.3"\n'
                 'dependencies=["mcp>=2.3.0,<3", "urllib3>=2.8.0"]\n'
-                '[project.optional-dependencies]\nsemantic=["fastembed>=0.7.0", "numpy>=1.24.0"]\n',
+                '[project.optional-dependencies]\nsemantic=["filelock<3.20.4", '
+                '"huggingface-hub>=0.20,<2", "numpy>=1.24.0", '
+                '"onnxruntime>=1.17,<1.24; python_version < \'3.11\'", '
+                '"onnxruntime>=1.17,<2; python_version >= \'3.11\'", '
+                '"tokenizers>=0.15,<1"]\n',
                 encoding="utf-8",
             )
             full = temporary / "full.toml"
@@ -100,7 +104,14 @@ class TestReleaseChecks(unittest.TestCase):
                 "lexical_name": "ephemeral-buffer-mcp-lexical",
                 "version": "1.2.3",
                 "core_dependencies": ["mcp>=2.3.0,<3", "urllib3>=2.8.0"],
-                "semantic_extra": ["fastembed>=0.7.0", "numpy>=1.24.0"],
+                "semantic_extra": [
+                    "filelock<3.20.4",
+                    "huggingface-hub>=0.20,<2",
+                    "numpy>=1.24.0",
+                    "onnxruntime>=1.17,<1.24; python_version < '3.11'",
+                    "onnxruntime>=1.17,<2; python_version >= '3.11'",
+                    "tokenizers>=0.15,<1",
+                ],
                 "full_dependencies": ["ephemeral-buffer-mcp-core[semantic]==1.2.3"],
                 "lexical_dependencies": ["ephemeral-buffer-mcp-core==1.2.3"],
             }
@@ -135,7 +146,7 @@ class TestReleaseChecks(unittest.TestCase):
             ({"full_name": "wrong-full-name"}, "full distribution must be named"),
             ({"lexical_name": "wrong-lexical-name"}, "lexical distribution must be named"),
             ({"core_dependencies": []}, "only the base runtime dependencies"),
-            ({"semantic_extra": []}, "must declare FastEmbed and NumPy"),
+            ({"semantic_extra": []}, "must declare the supported ONNX runtime stack"),
             ({"full_dependencies": []}, "matching semantic core"),
             ({"lexical_dependencies": []}, "matching base core"),
         )

@@ -448,7 +448,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=SEARCH_MODES, default="hybrid", help="Search mode to time")
     parser.add_argument(
         "--embedding-model",
-        help="FastEmbed model name to measure (default: EPHEMERAL_EMBEDDING_MODEL or the engine default)",
+        help="Hugging Face ONNX model ID to measure (default: EPHEMERAL_EMBEDDING_MODEL or the engine default)",
     )
     parser.add_argument(
         "--embedding-threads",

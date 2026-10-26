@@ -22,8 +22,8 @@ def load_exceptions(path: Path) -> list[dict[str, Any]]:
         raise ValueError(f"Could not read exception policy {path}: {exc}") from exc
 
     exceptions = document.get("exceptions") if isinstance(document, dict) else None
-    if not isinstance(exceptions, list) or not exceptions:
-        raise ValueError("Exception policy must contain a non-empty 'exceptions' list")
+    if not isinstance(exceptions, list):
+        raise ValueError("Exception policy must contain an 'exceptions' list")
 
     seen_packages: set[str] = set()
     for exception in exceptions:

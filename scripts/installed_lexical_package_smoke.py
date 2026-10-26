@@ -9,7 +9,7 @@ import ephemeral_buffer_mcp.server  # noqa: F401
 
 def main() -> None:
     """Check imports, BM25, and semantic-mode errors in an isolated install."""
-    for dependency in ("fastembed", "numpy"):
+    for dependency in ("numpy", "onnxruntime", "huggingface_hub", "tokenizers"):
         if importlib.util.find_spec(dependency) is not None:
             raise AssertionError(f"lexical-only environment unexpectedly has {dependency}")
 

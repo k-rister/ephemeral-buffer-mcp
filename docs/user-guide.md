@@ -414,36 +414,39 @@ admission slot.
 
 ### Background model warm-up
 
-When the semantic backend is installed, the server loads FastEmbed and runs a
-small deterministic embedding in a background thread after socket startup.
+When the semantic extra is installed, the server loads the text-only ONNX
+backend and runs a small deterministic embedding in a background thread after socket startup.
 MCP startup and BM25 search do not wait for this work. A semantic request
 arriving during warm-up waits on the same model lock instead of starting a
 duplicate load. Subsequent operations use the local model cache. The
 lexical-only distribution skips warm-up because the backend is unavailable.
-To disable warm-up for memory-constrained deployments, or to select a
-compatible model and cache location, set:
+To disable warm-up for memory-constrained deployments, or to select the BGE
+model alias and cache location, set:
 
 ```bash
 export EPHEMERAL_EMBEDDING_WARMUP=0
 export EPHEMERAL_EMBEDDING_MODEL="BAAI/bge-small-en-v1.5-fp32"
-export EPHEMERAL_FASTEMBED_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
+export EPHEMERAL_EMBEDDING_CACHE_DIR="$HOME/.cache/ephemeral-buffer"
 ```
 
-The default model is `BAAI/bge-small-en-v1.5-fp32`, the upstream fp32 ONNX
-export of bge-small-en-v1.5 (about 130 MB), which the server registers with
-FastEmbed itself. FastEmbed's own catalogue entry, selectable as
-`BAAI/bge-small-en-v1.5`, is a smaller reduced-precision export that produces
-identical vectors but whose matrix kernels do not parallelize on common CPU
-hosts. In a release-preparation comparison on a 16-vCPU Linux x86_64 host,
-the fp32 export reached 69.1 semantic chunks per second with 1.85 seconds
-median indexing at 1,024 lines, versus 3.1 chunks per second and 41.15 seconds
-for the catalogue file. That roughly 22x difference is host-specific evidence,
-not a universal performance guarantee. Embedding inference uses ONNX Runtime's
-default thread count; bound it with
+The default model name `BAAI/bge-small-en-v1.5-fp32` maps to the pinned
+`BAAI/bge-small-en-v1.5` Hugging Face revision and its fp32 ONNX export (about
+130 MB). The older catalogue name `BAAI/bge-small-en-v1.5` remains accepted as
+an alias for the same model. The backend tokenizes with Hugging Face
+Tokenizers, runs ONNX Runtime on CPU, takes the CLS vector, and L2-normalizes
+it. These are the only supported model names; other FastEmbed catalogue entries
+and Hugging Face IDs are rejected because their pooling and preprocessing rules
+have not been validated by this backend.
+`EPHEMERAL_FASTEMBED_CACHE_DIR` remains supported as a legacy alias for the
+cache setting. Embedding inference uses ONNX Runtime's default thread count;
+bound it with
 `EPHEMERAL_EMBEDDING_THREADS` when the server shares a host with an
 interactive coding agent, and check both settings on the deployment host with
 `benchmark_semantic_index.py`. `get_buffer_stats` reports the active thread
 setting.
+
+Python 3.10 uses ONNX Runtime below 1.24 because newer releases do not publish
+Python 3.10 wheels. Python 3.11 and newer can use later ONNX Runtime releases.
 
 ```bash
 export EPHEMERAL_EMBEDDING_THREADS=4

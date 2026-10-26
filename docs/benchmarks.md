@@ -139,7 +139,7 @@ so the report shows how often it answered with pending semantic coverage
 (`needle_mrr`); pass `--semantic-wait-seconds inf` to time the full lazy
 indexing cost inside the first search instead. Default sizes are 16, 256,
 2,048, and 8,192 lines. Run it without `EPHEMERAL_TEST_EMBEDDINGS=1` to measure
-the configured FastEmbed model; with deterministic test embeddings it only
+the configured ONNX model; with deterministic test embeddings it only
 validates the harness. Prefetch and startup warm-up are disabled inside the
 harness so the lazy cost is visible. Results are host-specific diagnostic
 evidence, not a required CI gate.
@@ -193,20 +193,22 @@ runs with timing and RSS measurements, and preserves the native record under
 the existing native JSON stays on stdout. With `--result -`, stdout contains
 the workload JSON and a concise human-readable report moves to stderr.
 
-For a release comparison, record the same workload under each model and compare
-the selected run with the versioned result tool:
+For a release comparison, record the same workload and model configuration for
+each release, then compare the selected runs with the versioned result tool. The
+two supported BGE names map to the same model, so they are aliases rather than
+separate benchmark variants:
 
 ```bash
 .venv/bin/python -m benchmarks.benchmark_semantic_index \
   --embedding-model BAAI/bge-small-en-v1.5-fp32 --line-counts 1024 --samples 3 \
-  --result results/fp32.result.json --experiment embedding-model \
-  --metadata variant=fp32 --metadata host_class=linux-x86_64
+  --result results/baseline.result.json --experiment embedding-backend \
+  --metadata variant=baseline --metadata host_class=linux-x86_64
 .venv/bin/python -m benchmarks.benchmark_semantic_index \
-  --embedding-model BAAI/bge-small-en-v1.5 --line-counts 1024 --samples 3 \
-  --result results/catalogue.result.json --experiment embedding-model \
-  --metadata variant=catalogue --metadata host_class=linux-x86_64
+  --embedding-model BAAI/bge-small-en-v1.5-fp32 --line-counts 1024 --samples 3 \
+  --result results/candidate.result.json --experiment embedding-backend \
+  --metadata variant=candidate --metadata host_class=linux-x86_64
 .venv/bin/python -m benchmarks.compare_workload_results \
-  results/fp32.result.json#lines-1024 results/catalogue.result.json#lines-1024 \
+  results/baseline.result.json#lines-1024 results/candidate.result.json#lines-1024 \
   --statistic median --metric semantic_index --metric throughput_per_second
 ```
 
@@ -224,7 +226,7 @@ The warm-up harness reports engine initialization, time to embedding readiness,
 first semantic-search latency, and process RSS change for both policies. For the
 lazy policy, embedding readiness is measured through completion of the first
 semantic search rather than reported as instantaneous. Run it without
-deterministic test embeddings to measure the configured FastEmbed model and host
+deterministic test embeddings to measure the configured ONNX model and host
 cache; each policy is measured in a fresh worker process so model pages retained
 by the allocator do not contaminate the other policy. In the release-preparation
 Linux run, first-search median was 0.335 seconds without warm-up versus 0.0122
@@ -558,7 +560,7 @@ repeat a different experiment. The script also writes
 `records.result.json` and `summary.result.json` in the common workload result
 format; set `AGENT_AB_EXPERIMENT` and `AGENT_AB_VARIANT` to assign them to an
 experiment group (see "Organizing experiments"). The test embedding setting defaults to `1` for
-deterministic, offline runs; set it to `0` to exercise the configured FastEmbed
+deterministic, offline runs; set it to `0` to exercise the configured ONNX
 model and measure real model startup and first-query behavior. Keep the model,
 embedding cache, and other environment settings identical across paired runs.
 The script uses the synthetic fixture by default; set

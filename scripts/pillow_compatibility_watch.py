@@ -1,4 +1,4 @@
-"""Probe current unconstrained requirements for a Pillow audit fix."""
+"""Ensure current unconstrained requirements do not resolve a vulnerable Pillow."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 
 
 def pillow_status(report: Any) -> tuple[bool, str]:
-    """Return whether the report has one Pillow dependency with no advisories."""
+    """Return whether Pillow is absent or has no reported advisories."""
     if not isinstance(report, dict) or not isinstance(report.get("dependencies"), list):
         raise ValueError("pip-audit JSON is missing its dependencies list")
     pillow = [
@@ -21,6 +21,8 @@ def pillow_status(report: Any) -> tuple[bool, str]:
         and isinstance(dependency.get("name"), str)
         and dependency["name"].casefold() == "pillow"
     ]
+    if not pillow:
+        return True, "Pillow is not installed in this requirements resolution"
     if len(pillow) != 1:
         raise ValueError(f"Expected one Pillow record in pip-audit output, found {len(pillow)}")
     dependency = pillow[0]
@@ -77,7 +79,7 @@ def main() -> int:
     try:
         results = [inspect_interpreter(python, args.requirements) for python in args.python]
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"Pillow compatibility watch failed: {exc}", file=sys.stderr)
+        print(f"Pillow dependency watch failed: {exc}", file=sys.stderr)
         return 2
 
     for _clean, detail in results:
@@ -87,9 +89,9 @@ def main() -> int:
         with args.github_output.open("a", encoding="utf-8") as output:
             output.write(f"pillow_clean={'true' if pillow_clean else 'false'}\n")
     if pillow_clean:
-        print("Pillow is clean in every checked unpinned requirements resolution.")
+        print("Pillow is absent or clean in every checked unpinned requirements resolution.")
     else:
-        print("The Pillow compatibility blocker remains; the CI exception is still active.")
+        print("A Pillow advisory remains in at least one requirements resolution.")
     return 0
 
 

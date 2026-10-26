@@ -86,8 +86,16 @@ def validate_distribution_metadata(
     if core.get("dependencies") != ["mcp>=2.3.0,<3", "urllib3>=2.8.0"]:
         raise ReleaseCheckError("core distribution must contain only the base runtime dependencies")
     semantic_extra = core.get("optional-dependencies", {}).get("semantic", [])
-    if set(semantic_extra) != {"fastembed>=0.7.0", "numpy>=1.24.0"}:
-        raise ReleaseCheckError("core semantic extra must declare FastEmbed and NumPy")
+    expected_semantic_extra = {
+        "filelock<3.20.4",
+        "huggingface-hub>=0.20,<2",
+        "numpy>=1.24.0",
+        "onnxruntime>=1.17,<1.24; python_version < '3.11'",
+        "onnxruntime>=1.17,<2; python_version >= '3.11'",
+        "tokenizers>=0.15,<1",
+    }
+    if set(semantic_extra) != expected_semantic_extra:
+        raise ReleaseCheckError("core semantic extra must declare the supported ONNX runtime stack")
     if full.get("dependencies") != [semantic_core_dependency]:
         raise ReleaseCheckError("full distribution must depend on the matching semantic core")
     if lexical.get("dependencies") != [core_dependency]:

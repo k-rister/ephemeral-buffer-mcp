@@ -214,6 +214,41 @@ judged by its selected runs, and the report shows the whole file's
 `--metric` must each select at least one run or measurement; empty selections
 fail instead of passing without a comparison.
 
+## FastEmbed-to-ONNX BGE comparison
+
+The FastEmbed 0.9.0 BGE fp32 path and the text-only ONNX adapter were compared
+on the same pinned `BAAI/bge-small-en-v1.5` snapshot
+(`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`). Both used Python 3.12.12,
+ONNX Runtime 1.29.0, one embedding thread, hybrid search, an unbounded semantic
+wait, and the same 1,024-line benchmark fixture. The machine was Linux x86_64
+with 16 logical CPUs. Each path ran once with five fresh captures and once with
+three; run order was FastEmbed, ONNX, ONNX, FastEmbed. The reported times below
+are the per-run medians, not pooled samples.
+
+| Measure | FastEmbed runs | ONNX runs | Paired change |
+| --- | ---: | ---: | ---: |
+| Semantic indexing, 128 chunks | 15.30s, 15.71s | 14.38s, 15.35s | 6.0% and 2.3% faster |
+| First hybrid search, including indexing | 15.317s, 15.725s | 14.393s, 15.361s | 6.0% and 2.3% faster |
+| Subsequent search | 11.50ms, 11.12ms | 13.44ms, 11.68ms | 1.95ms and 0.57ms slower |
+| Needle hit at rank 1 / MRR | 1.00 / 1.00 in both runs | 1.00 / 1.00 in both runs | unchanged |
+
+A separate parity run embedded 135 benchmark chunks, queries, and edge-case
+strings with both implementations. The vectors were bit-for-bit equal
+(maximum absolute difference 0, minimum cosine similarity 1.0), and all
+top-10 rankings matched. Together, these runs show no material indexing or
+retrieval-quality regression on this host. The small subsequent-search timing
+differences are in the 0.6–2.0ms range and varied between repeats.
+
+A separate warm-cache startup check used the normal loader paths and a shared
+Hugging Face cache root whose `main` ref pointed to the same pinned snapshot.
+It measured model loading plus the benchmark's tiny warm-up capture in two new
+processes per backend: FastEmbed took 0.730s and 0.703s; ONNX took 0.843s and
+0.566s. Their medians were 0.717s and 0.705s, respectively. This small sample
+shows no consistent startup difference. The larger indexing comparison used a
+direct snapshot path for FastEmbed to guarantee identical model files, so its
+model-load timings are excluded from that table. These measurements are
+host-specific and do not cover every CPU architecture.
+
 ## Organizing experiments
 
 A performance or token-efficiency study is rarely one comparison: a chunk-size

@@ -21,10 +21,8 @@ DEFAULT_MAX_OUTPUT_BYTES = DEFAULT_MAX_BUFFER_BYTES
 DEFAULT_EMBEDDING_BATCH_SIZE = 16
 DEFAULT_EMBEDDING_MAX_BATCH_TOKENS = 4096
 DEFAULT_SEMANTIC_MAX_INDEX_INPUT_BYTES = 4 * 1024 * 1024
-# The FastEmbed catalogue entry for bge-small-en-v1.5 downloads a reduced-precision
-# ONNX file whose matrix kernels do not parallelize on common CPU hosts.  The
-# engine registers the upstream fp32 export under an alias and uses it by
-# default; the catalogue file stays selectable by its catalogue name.
+# Keep the upstream fp32 BGE export as the default model. The legacy catalogue
+# name remains accepted as an alias for the same upstream ONNX model.
 BGE_SMALL_HF_REPO = "BAAI/bge-small-en-v1.5"
 CATALOGUE_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 FP32_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5-fp32"
@@ -394,13 +392,23 @@ def execution_checkpoint_reserve_bytes() -> int:
 
 
 def embedding_model_name() -> str:
-    """Return the configured FastEmbed model name."""
+    """Return the configured supported BGE-small model name or alias."""
     return _read_string_setting("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL, os.environ).value
 
 
+def _embedding_cache_setting(values: Mapping[str, str]) -> ConfigSetting[str | None]:
+    """Prefer the backend-neutral cache setting while accepting the old name."""
+    setting_name = (
+        "EPHEMERAL_EMBEDDING_CACHE_DIR"
+        if "EPHEMERAL_EMBEDDING_CACHE_DIR" in values
+        else "EPHEMERAL_FASTEMBED_CACHE_DIR"
+    )
+    return _read_string_setting(setting_name, None, values, empty_is_default=True)
+
+
 def embedding_cache_dir() -> str | None:
-    """Return the optional FastEmbed model cache directory."""
-    return _read_string_setting("EPHEMERAL_FASTEMBED_CACHE_DIR", None, os.environ, empty_is_default=True).value
+    """Return the optional Hugging Face model cache directory."""
+    return _embedding_cache_setting(os.environ).value
 
 
 def embedding_threads() -> int | None:
@@ -700,9 +708,7 @@ def load_settings(
         embedding_model_name=_read_string_setting(
             "EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL, values,
         ),
-        embedding_cache_dir=_read_string_setting(
-            "EPHEMERAL_FASTEMBED_CACHE_DIR", None, values, empty_is_default=True,
-        ),
+        embedding_cache_dir=_embedding_cache_setting(values),
         embedding_threads=_read_optional_positive_int_setting("EPHEMERAL_EMBEDDING_THREADS", values),
         embedding_batch_size=integer("EPHEMERAL_EMBEDDING_BATCH_SIZE", DEFAULT_EMBEDDING_BATCH_SIZE),
         embedding_max_batch_tokens=integer(
@@ -791,6 +797,7 @@ CODEX_MCP_ENV_NAMES = (
     "EPHEMERAL_EXECUTION_STATE_QUOTA_BYTES",
     "EPHEMERAL_EXECUTION_CHECKPOINT_RESERVE_BYTES",
     "EPHEMERAL_EMBEDDING_MODEL",
+    "EPHEMERAL_EMBEDDING_CACHE_DIR",
     "EPHEMERAL_FASTEMBED_CACHE_DIR",
     "EPHEMERAL_EMBEDDING_THREADS",
     "EPHEMERAL_EMBEDDING_BATCH_SIZE",

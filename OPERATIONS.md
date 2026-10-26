@@ -172,26 +172,24 @@ eviction, with accounted capture-content, label, and materialized embedding
 bytes. These controls bound the number of concurrent working sets; they do not
 make the retained-byte budget a process RSS cap.
 
-FastEmbed is warmed in a background thread after socket startup succeeds, so
+The ONNX embedding backend is warmed in a background thread after socket startup succeeds, so
 the MCP handshake and BM25 search remain available while model loading and one
 small deterministic embedding complete. Set `EPHEMERAL_EMBEDDING_WARMUP=0` for
 lexical-only or memory-constrained deployments. Set `EPHEMERAL_EMBEDDING_MODEL`
-to select a compatible model and `EPHEMERAL_FASTEMBED_CACHE_DIR` to place its
-downloaded model files in a controlled cache directory. Set
+to select a compatible Hugging Face ONNX model and
+`EPHEMERAL_EMBEDDING_CACHE_DIR` to place its downloaded model files in a
+controlled cache directory. `EPHEMERAL_FASTEMBED_CACHE_DIR` remains a legacy
+alias. Set
 `EPHEMERAL_EMBEDDING_THREADS` to a small positive integer to bound the ONNX
 Runtime threads used for embedding inference; leave it unset for the runtime
-default. The default model, `BAAI/bge-small-en-v1.5-fp32`, is the upstream fp32
-ONNX export of bge-small-en-v1.5 registered by the engine; it downloads about
-130 MB on first use. FastEmbed's catalogue file for the same model, selectable
-as `EPHEMERAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`, is 67 MB and produces
-identical vectors, but its reduced-precision matrix kernels do not parallelize
-on common CPU hosts. A release-preparation comparison on a 16-vCPU Linux
-x86_64 host measured 3.1 chunks per second and 41.15 seconds median indexing
-for the catalogue file versus 69.1 chunks per second and 1.85 seconds for the
-fp32 export at 1,024 lines—about a 22x difference. Prefer bounding threads
-over switching files when host impact is the concern. These are host-specific
-diagnostic measurements; rerun `benchmark_semantic_index.py` on the deployment
-host before generalizing them. Warm-up failure does
+default. The model name `BAAI/bge-small-en-v1.5-fp32` maps to a pinned upstream
+revision of `BAAI/bge-small-en-v1.5` and downloads about 130 MB on first use.
+The older name `BAAI/bge-small-en-v1.5` remains accepted as an alias for that
+same fp32 ONNX export. The adapter uses CLS pooling and L2 normalization for
+the default BGE model. Other model IDs must provide a compatible ONNX text
+model; confirm their pooling behavior and quality against your workload. Rerun
+`benchmark_semantic_index.py` on the deployment host when changing the model or
+thread settings. Warm-up failure does
 not block startup: BM25 remains available and hybrid search degrades to lexical
 results. `get_buffer_stats` and `get_runtime_diagnostics` report warm-up state
 and a content-free exception class on failure.
@@ -1215,7 +1213,7 @@ The runner creates a temporary worktree at the baseline ref, runs every
 available benchmark on both revisions, compares their workload-result files,
 and runs the same synthetic agent A/B schedule against each revision (five
 repetitions by default). It uses deterministic test embeddings for synthetic
-retrieval and effectiveness checks, and the configured FastEmbed model for
+retrieval and effectiveness checks, and the configured ONNX model for
 performance, indexing, memory, and warm-up measurements. Agent A/B runs make
 live Codex CLI calls with the selected model. The default output directory is
 under `/tmp`; `manifest.json` records the revisions, run settings, Python and

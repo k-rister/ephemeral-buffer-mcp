@@ -593,7 +593,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             {
                 "EPHEMERAL_TEST_EMBEDDINGS": "0",
                 "EPHEMERAL_EMBEDDING_MODEL": "custom/model",
-                "EPHEMERAL_FASTEMBED_CACHE_DIR": "/tmp/embedding-cache",
+                "EPHEMERAL_EMBEDDING_CACHE_DIR": "/tmp/embedding-cache",
             },
             clear=False,
         ):
@@ -606,13 +606,13 @@ class TestCodexAgentRunner(unittest.TestCase):
                     for name in (
                         "EPHEMERAL_TEST_EMBEDDINGS",
                         "EPHEMERAL_EMBEDDING_MODEL",
-                        "EPHEMERAL_FASTEMBED_CACHE_DIR",
+                        "EPHEMERAL_EMBEDDING_CACHE_DIR",
                     )
                 },
             )
         env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
         self.assertIn('EPHEMERAL_EMBEDDING_MODEL="custom/model"', env_config)
-        self.assertIn('EPHEMERAL_FASTEMBED_CACHE_DIR="/tmp/embedding-cache"', env_config)
+        self.assertIn('EPHEMERAL_EMBEDDING_CACHE_DIR="/tmp/embedding-cache"', env_config)
 
     def test_mcp_server_source_paths_are_forwarded_to_the_child(self):
         from benchmarks.run_codex_agent_ab import _codex_command
@@ -717,7 +717,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(len(result["runs"]), 8)
         self.assertTrue(all(item["status"] == "success" for item in result["runs"]))
         self.assertIn("capture_input_bytes", result["runs"][0]["measurements"])
-        self.assertEqual(payload["protocol"]["embedding_mode"], "fastembed")
+        self.assertEqual(payload["protocol"]["embedding_mode"], "onnx")
         self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5-fp32")
         self.assertEqual(payload["protocol"]["embedding_cache"], "default")
 
