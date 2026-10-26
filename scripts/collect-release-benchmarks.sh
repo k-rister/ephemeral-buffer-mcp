@@ -184,7 +184,7 @@ run_tool() {
 
 run_benchmark() {
     local revision="$1" source_dir="$2" name="$3" embeddings="$4" script="$5"
-    local required_baseline=""
+    local required_baseline="" timeout_runner="$repo_dir/scripts/run_with_timeout.py"
     shift 5
     if [[ "${1:-}" == "--baseline-asset" ]]; then
         required_baseline="$2"
@@ -199,7 +199,8 @@ run_benchmark() {
         skip "$revision-$name" "baseline asset absent at this revision"
         return
     fi
-    run "$revision-$name" "$source_dir" "$embeddings" "${tool_command[@]}" "$@"
+    run "$revision-$name" "$source_dir" "$embeddings" \
+        "$python_bin" "$timeout_runner" --timeout "$benchmark_timeout" -- "${tool_command[@]}" "$@"
 }
 
 resolve_baseline_asset() {
@@ -400,6 +401,7 @@ if ! RELEASE_BENCHMARK_BASELINE_REF="$baseline_ref" \
     RELEASE_BENCHMARK_AGENT_AB_ONLY="$agent_ab_only" \
     RELEASE_BENCHMARK_SEED="$seed" \
     RELEASE_BENCHMARK_AGENT_TIMEOUT="$agent_timeout" \
+    RELEASE_BENCHMARK_TIMEOUT="$benchmark_timeout" \
     "$python_bin" - "$output_dir/manifest.json" "$output_dir/STATUS.tsv" <<'PY'
 import csv
 import json
@@ -437,6 +439,7 @@ manifest = {
         "agent_ab_only": os.environ["RELEASE_BENCHMARK_AGENT_AB_ONLY"] == "1",
         "seed": int(os.environ["RELEASE_BENCHMARK_SEED"]),
         "agent_timeout_seconds": int(os.environ["RELEASE_BENCHMARK_AGENT_TIMEOUT"]),
+        "benchmark_timeout_seconds": int(os.environ["RELEASE_BENCHMARK_TIMEOUT"]),
         "python_executable": sys.executable,
     },
     "environment": {
@@ -472,6 +475,7 @@ fi
     printf '%s\n' "- Candidate: \`${candidate_revision:0:12}\`"
     printf '%s\n' "- Model: \`$model\`"
     printf '%s\n' "- Repetitions: effectiveness=$repetitions; agent A/B=$agent_ab_repetitions; seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
+    printf '%s\n' "- Timeouts: local benchmark=${benchmark_timeout}s (5s cleanup grace); agent A/B=${agent_timeout}s per task"
     if ((agent_ab_only)); then
         printf '%s\n' '- Scope: agent A/B only; other local benchmarks and comparisons were skipped.'
     fi
