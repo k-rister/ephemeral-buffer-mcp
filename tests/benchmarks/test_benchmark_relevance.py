@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import benchmarks.benchmark_relevance as benchmark_relevance
 import benchmarks.workload_results as wr
+import ephemeral_buffer_mcp.semantic_index as semantic_index
 from ephemeral_buffer_mcp.engine import EphemeralEngine
 from benchmarks.benchmark_relevance import (
     _expected_range_rank,
@@ -110,7 +111,7 @@ class TestRelevanceBenchmark(unittest.TestCase):
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "1"}), patch.object(
-            EphemeralEngine,
+            semantic_index.SemanticIndexCoordinator,
             "_get_embedding_model",
             return_value=QueryInsensitiveEmbedding(),
         ):

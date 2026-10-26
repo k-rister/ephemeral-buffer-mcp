@@ -2334,14 +2334,14 @@ class TestServerTools(unittest.TestCase):
 
     def test_metrics_snapshot_file_refreshes_after_async_index_completion(self):
         import numpy as numpy_module
-        import ephemeral_buffer_mcp.engine as engine_module
+        import ephemeral_buffer_mcp.semantic_index as semantic_index
         from ephemeral_buffer_mcp.engine import EphemeralEngine
 
         original_metrics = server.METRICS
-        original_numpy = engine_module.np
+        original_numpy = semantic_index.np
         metrics = LocalMetrics(enabled=True)
         server.METRICS = metrics
-        engine_module.np = numpy_module
+        semantic_index.np = numpy_module
         started = threading.Event()
         release = threading.Event()
         snapshot_written = threading.Event()
@@ -2383,7 +2383,7 @@ class TestServerTools(unittest.TestCase):
         finally:
             release.set()
             engine.shutdown()
-            engine_module.np = original_numpy
+            semantic_index.np = original_numpy
             server.METRICS = original_metrics
 
     def test_metrics_snapshot_file_skips_disabled_metrics(self):

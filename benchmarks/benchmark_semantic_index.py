@@ -129,7 +129,8 @@ def _needle_rank(result: dict[str, Any], line_number: int) -> int | None:
 @contextmanager
 def _timed_semantic_index(engine: EphemeralEngine, sink: dict[str, float]) -> Iterator[None]:
     """Record how long lazy embedding materialization takes inside a search."""
-    original = engine._ensure_embeddings
+    coordinator = getattr(engine, "_semantic_index", engine)
+    original = coordinator._ensure_embeddings
 
     def timed(capture):
         started = time.perf_counter()
@@ -138,11 +139,11 @@ def _timed_semantic_index(engine: EphemeralEngine, sink: dict[str, float]) -> It
         finally:
             sink["semantic_index_seconds"] += time.perf_counter() - started
 
-    engine._ensure_embeddings = timed
+    coordinator._ensure_embeddings = timed
     try:
         yield
     finally:
-        engine._ensure_embeddings = original
+        coordinator._ensure_embeddings = original
 
 
 def measure_once(
