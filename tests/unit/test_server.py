@@ -2938,6 +2938,114 @@ class TestServerTools(unittest.TestCase):
         server.capture_text("one line", label="listed")
         self.assertIn("listed", server.list_captures())
 
+    def test_mcp_search_bounds_oversized_label_and_keeps_first_match(self):
+        captured = json.loads(
+            server.capture_text("needle appears here", label="L" * 70_000)
+        )
+        response = asyncio.run(self.call_mcp_tool_inline(
+            "search_capture",
+            {
+                "query": "needle",
+                "mode": "bm25",
+                "capture_id": captured["capture_id"],
+                "context_lines": 0,
+            },
+        ))
+
+        structured = response.structured_content
+        self.assertEqual(structured["status"], "ok")
+        data = structured["data"]
+        self.assertEqual(data["capture_id"], captured["capture_id"])
+        self.assertTrue(data["label_truncated"])
+        self.assertLessEqual(
+            len(data["label"].encode("utf-8")),
+            server.SUMMARY_LABEL_MAX_BYTES,
+        )
+        self.assertEqual(data["match_count"], 1)
+        self.assertIn("needle", data["matches"][0]["snippet"])
+        self.assertLessEqual(
+            len(response.model_dump_json(by_alias=True).encode("utf-8")),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES,
+        )
+
+    def test_mcp_capture_inventory_pages_with_bounded_labels_and_stable_cursor(self):
+        captures = []
+        for index in range(80):
+            label = "\x00" * 1000 if index == 0 else f"label-{index}-" + "x" * 1000
+            captures.append(json.loads(server.capture_text(f"item {index}", label=label)))
+
+        response = asyncio.run(self.call_mcp_tool_inline(
+            "list_captures", {"limit": 25}
+        ))
+        seen = []
+        page_responses = []
+        while True:
+            page_responses.append(response)
+            structured = response.structured_content
+            self.assertEqual(structured["status"], "ok")
+            data = structured["data"]
+            self.assertLessEqual(data["page_count"], 25)
+            self.assertEqual(data["page_count"], len(data["captures"]))
+            for entry in data["captures"]:
+                safe_label = entry["label"]
+                self.assertLessEqual(
+                    len(json.dumps(safe_label, ensure_ascii=False).encode("utf-8")) - 2,
+                    128,
+                )
+                seen.append(entry["capture_id"])
+            self.assertLessEqual(
+                len(response.model_dump_json(by_alias=True).encode("utf-8")),
+                server.MCP_TOOL_RESPONSE_MAX_BYTES,
+            )
+            cursor = structured["next_cursor"]
+            if cursor is None:
+                break
+            if len(page_responses) == 1:
+                server.capture_text("later", label="later")
+                server.engine.get_summary(captures[0]["capture_id"])
+            response = asyncio.run(self.call_mcp_tool_inline(
+                "list_captures", {"limit": 25, "cursor": cursor}
+            ))
+
+        expected = [capture["capture_id"] for capture in reversed(captures)]
+        self.assertEqual(seen, expected)
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertTrue(page_responses[0].structured_content["truncated"])
+        self.assertIsNone(page_responses[-1].structured_content["next_cursor"])
+        self.assertEqual(
+            retrieval_tools.list_captures_result(0).error.code,
+            "invalid_limit",
+        )
+        invalid_cursor = retrieval_tools.list_captures_result(25, "invalid")
+        self.assertEqual(invalid_cursor.error.code, "invalid_cursor")
+        mcp_invalid_cursor = asyncio.run(self.call_mcp_tool_inline(
+            "list_captures", {"limit": 25, "cursor": "invalid"}
+        ))
+        self.assertEqual(
+            mcp_invalid_cursor.structured_content["error"]["code"],
+            "invalid_cursor",
+        )
+
+    def test_capture_listing_cursor_handles_removed_snapshot_entries(self):
+        older = json.loads(server.capture_text("older", label="older"))
+        server.capture_text("newest", label="newest")
+        first_page = retrieval_tools.list_captures_result(limit=1)
+        self.assertIsNotNone(first_page.next_cursor)
+
+        server.engine.clear(older["capture_id"])
+        server.capture_text("later", label="later")
+        continuation = retrieval_tools.list_captures_result(
+            limit=1,
+            cursor=first_page.next_cursor,
+        )
+
+        self.assertEqual(continuation.status, "ok")
+        self.assertEqual(continuation.data["capture_count"], 2)
+        self.assertEqual(continuation.data["page_count"], 0)
+        self.assertEqual(continuation.data["captures"], [])
+        self.assertIsNone(continuation.next_cursor)
+        self.assertIn("Restart listing to refresh", continuation.text)
+
     def test_capture_search_and_retrieval_mcp_results_include_typed_data(self):
         captured = json.loads(server.capture_text("needle αβ\nsecond line", label="typed-result"))
         capture_id = captured["capture_id"]
@@ -3003,6 +3111,7 @@ class TestServerTools(unittest.TestCase):
             {
                 "capture_id",
                 "label",
+                "label_truncated",
                 "total_lines",
                 "mode",
                 "query",

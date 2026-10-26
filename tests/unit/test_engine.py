@@ -3230,6 +3230,85 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                         f"{query!r} should match with fts5_available={fts5_available}",
                     )
 
+    def test_unicode_bm25_normalization_matches_in_both_backends_and_preserves_text(self):
+        backend_modes = [False]
+        if sqlite_fts5_available():
+            backend_modes.append(True)
+
+        for fts5_available in backend_modes:
+            with self.subTest(fts5_available=fts5_available):
+                with patch(
+                    "ephemeral_buffer_mcp.engine.sqlite_fts5_available",
+                    return_value=fts5_available,
+                ):
+                    engine = self._new_engine(max_captures=1)
+                    original = "Straße ﬁle Άλφα café"
+                    capture = engine._ingest_state(original, label="unicode")
+
+                for query in ("STRASSE", "file", "αλφα", "cafe"):
+                    result = engine.search(
+                        query,
+                        mode="bm25",
+                        capture_id=capture.capture_id,
+                        context_lines=0,
+                    )
+                    self.assertEqual(result["match_count"], 1, query)
+                    self.assertIn(original, result["matches"][0]["snippet"])
+
+    def test_capture_list_pages_are_stable_and_validate_bounds(self):
+        engine = self._new_engine(max_captures=100)
+        captures = [
+            engine._ingest_state(f"capture {index}", label=f"label-{index}")
+            for index in range(80)
+        ]
+        first = engine.list_captures_page(limit=25)
+        self.assertEqual(first["page_count"], 25)
+        self.assertEqual(first["capture_count"], 80)
+        self.assertTrue(first["truncated"])
+        self.assertIsNotNone(first["next_cursor"])
+
+        # New captures and access-order changes do not shift the snapshot.
+        engine._ingest_state("later capture", label="later")
+        engine.get_summary(captures[0].capture_id)
+        seen = [item["capture_id"] for item in first["captures"]]
+        cursor = first["next_cursor"]
+        while cursor is not None:
+            page = engine.list_captures_page(limit=25, cursor=cursor)
+            self.assertEqual(page["status"], "ok")
+            self.assertLessEqual(page["page_count"], 25)
+            seen.extend(item["capture_id"] for item in page["captures"])
+            cursor = page["next_cursor"]
+
+        self.assertEqual(seen, [capture.capture_id for capture in reversed(captures)])
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(engine.list_captures_page(limit=0)["error_code"], "invalid_limit")
+        self.assertEqual(engine.list_captures_page(cursor="invalid")["error_code"], "invalid_cursor")
+
+    def test_capture_list_cursor_rejects_malformed_and_invalid_signed_payloads(self):
+        engine = self._new_engine(max_captures=2)
+
+        def signed(payload):
+            payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            signature = hmac.new(
+                engine._slice_cursor_secret,
+                payload_bytes,
+                hashlib.sha256,
+            ).digest()[:16]
+            return (
+                base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
+                + "."
+                + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+            )
+
+        self.assertIsNone(engine._decode_capture_list_cursor(123))
+        self.assertIsNone(engine._decode_capture_list_cursor("x" * 513))
+        self.assertIsNone(engine._decode_capture_list_cursor("invalid"))
+        payload_part, _signature_part = signed({"v": 1, "snapshot": 2, "before": 1}).split(".", 1)
+        self.assertIsNone(engine._decode_capture_list_cursor(payload_part + "." + "A" * 22))
+        self.assertIsNone(engine._decode_capture_list_cursor(signed([])))
+        self.assertIsNone(engine._decode_capture_list_cursor(signed({"v": 1, "snapshot": 2, "before": "bad"})))
+        self.assertIsNone(engine._decode_capture_list_cursor(signed({"v": 1, "snapshot": 2, "before": 3})))
+
     def test_fallback_query_syntax_remains_tokenized_as_text(self):
         with patch("ephemeral_buffer_mcp.engine.sqlite_fts5_available", return_value=False):
             engine = self._new_engine(max_captures=1)
