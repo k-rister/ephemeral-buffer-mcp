@@ -701,6 +701,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             os.environ,
             {
                 "EPHEMERAL_TEST_EMBEDDINGS": "",
+                "EPHEMERAL_EMBEDDING_CACHE_DIR": "",
                 "EPHEMERAL_FASTEMBED_CACHE_DIR": "",
                 "EPHEMERAL_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5-fp32",
             },
