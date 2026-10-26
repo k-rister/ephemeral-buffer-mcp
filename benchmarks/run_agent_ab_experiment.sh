@@ -54,7 +54,7 @@ experiment_args=(
     --metadata "model=$model"
     --metadata "task_type=$fixture_profile"
     --metadata "workload_size=$repetitions"
-    --metadata "environment=$([[ "$test_embeddings" == "1" ]] && echo test-embeddings || echo fastembed)"
+    --metadata "environment=$([[ "$test_embeddings" == "1" ]] && echo test-embeddings || echo onnx)"
     --metadata "started_at=$started_at"
 )
 if [[ -n "$experiment" ]]; then

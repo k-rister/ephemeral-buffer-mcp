@@ -689,6 +689,7 @@ def _run_one(
         for variable in (
             "EPHEMERAL_TEST_EMBEDDINGS",
             "EPHEMERAL_EMBEDDING_MODEL",
+            "EPHEMERAL_EMBEDDING_CACHE_DIR",
             "EPHEMERAL_FASTEMBED_CACHE_DIR",
         ):
             if os.environ.get(variable):
@@ -856,9 +857,13 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "agent_adapter": "codex-cli",
         "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "read-only-sandbox",
         "mcp_usage_policy": "required" if getattr(args, "require_mcp_calls", False) else "opportunistic",
-        "embedding_mode": "test" if test_embeddings else "fastembed",
+        "embedding_mode": "test" if test_embeddings else "onnx",
         "embedding_model": "deterministic-test" if test_embeddings else os.environ.get("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-        "embedding_cache": "not-applicable" if test_embeddings else os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR") or "default",
+        "embedding_cache": "not-applicable" if test_embeddings else (
+            os.environ.get("EPHEMERAL_EMBEDDING_CACHE_DIR")
+            or os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR")
+            or "default"
+        ),
     }
     payload = {
         "schema_version": schedule["schema_version"],

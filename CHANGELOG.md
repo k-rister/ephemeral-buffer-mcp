@@ -4,11 +4,21 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 ## Unreleased
 
+- Breaking: Replace FastEmbed with a text-only ONNX Runtime backend and limit
+  `EPHEMERAL_EMBEDDING_MODEL` to the BGE-small fp32 model and its catalogue
+  alias; other FastEmbed catalogue entries and Hugging Face IDs are unsupported.
+- Keep Python 3.10 support with its ONNX Runtime wheel-compatible version cap,
+  retain the BGE default and legacy FastEmbed cache environment variable, and
+  remove Pillow from semantic installs.
+- Pin the BGE model snapshot and constrain FileLock below the affected releases;
+  remove the Pillow audit exception and require a clean audit with no exceptions.
 - Require setuptools 77 or newer to build the full and lexical distributions
   with SPDX license metadata.
 - Preserve direct helper text and successful response shapes while returning
   stable MCP error codes for capture, retrieval, clear, configuration, and
   preflight failures; add exact response-shape regression assertions.
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: replaced the semantic embedding dependency stack and removed the CI audit exception
 
 ## 0.11.0 - 2026-10-18
 

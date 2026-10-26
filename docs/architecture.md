@@ -179,9 +179,11 @@ aggregate state quota defaults to 4 GiB, with a configurable checkpoint
 reserve for atomic writes. Capture eviction does not remove durable execution
 records.
 
-The shared runtime imports without NumPy or FastEmbed. The default
-`ephemeral-buffer-mcp` distribution installs both through the semantic extra;
-the explicit `ephemeral-buffer-mcp-lexical` distribution omits them. In a
+The shared runtime imports without NumPy, ONNX Runtime, Hugging Face Hub, or
+Tokenizers. The default `ephemeral-buffer-mcp` distribution installs these
+through the semantic extra; the explicit `ephemeral-buffer-mcp-lexical`
+distribution omits them. Pillow is not required because the backend handles
+the supported BGE-small ONNX model directly. In a
 lexical-only install, BM25 remains available and hybrid or semantic searches
 return `semantic_backend_unavailable`. With the semantic extra installed, the
 dense model loads on demand and may be warmed in the background after startup.

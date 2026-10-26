@@ -38,8 +38,6 @@ from .schema_versions import (
     CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
 )
 from .config import (
-    BGE_SMALL_HF_REPO,
-    FP32_EMBEDDING_MODEL,
     SettingsSnapshot,
     load_settings,
 )
@@ -49,8 +47,6 @@ from .admission import admission_snapshot
 LOGGER = get_logger("engine")
 np = None
 TextEmbedding = None
-ModelSource = None
-PoolingType = None
 SEARCH_MODES = ("hybrid", "bm25", "semantic")
 HYBRID_LEXICAL_WEIGHT = 2.0
 PREVIEW_MAX_BYTES = 4 * 1024
@@ -85,31 +81,24 @@ _SEMANTIC_INSTALL_GUIDANCE = (
 def _semantic_dependencies_available() -> bool:
     """Return whether the optional semantic runtime packages can be located."""
     try:
-        return all(importlib.util.find_spec(name) is not None for name in ("numpy", "fastembed"))
+        dependencies = ("numpy", "onnxruntime", "huggingface_hub", "tokenizers")
+        return all(importlib.util.find_spec(name) is not None for name in dependencies)
     except (ImportError, ValueError):
         return False
 
 
 def _load_semantic_dependencies() -> None:
     """Import the semantic stack only when a dense-search path needs it."""
-    global np, TextEmbedding, ModelSource, PoolingType
+    global np, TextEmbedding
     try:
         if np is None:
             import numpy as numpy
 
             np = numpy
         if TextEmbedding is None:
-            from fastembed import TextEmbedding as text_embedding
+            from .embedding_backend import TextEmbedding as text_embedding
 
             TextEmbedding = text_embedding
-        if ModelSource is None or PoolingType is None:
-            from fastembed.common.model_description import (
-                ModelSource as model_source,
-                PoolingType as pooling_type,
-            )
-
-            ModelSource = model_source
-            PoolingType = pooling_type
     except ImportError as exc:
         raise SemanticBackendUnavailable(_SEMANTIC_INSTALL_GUIDANCE) from exc
 
@@ -893,39 +882,6 @@ class CaptureDiagnostics:
 Capture = CaptureView
 
 
-_BUNDLED_MODELS_REGISTERED = False
-
-
-def register_bundled_embedding_models() -> None:
-    """Register the fp32 bge-small-en-v1.5 alias with FastEmbed once per process.
-
-    FastEmbed's catalogue entry for bge-small-en-v1.5 downloads a reduced-precision
-    ONNX export whose matrix kernels do not parallelize on common CPU hosts. The
-    upstream fp32 export produces identical vectors, so it is registered under an
-    alias that is the default and that ``EPHEMERAL_EMBEDDING_MODEL`` can select.
-    """
-    global _BUNDLED_MODELS_REGISTERED
-    if _BUNDLED_MODELS_REGISTERED:
-        return
-    _load_semantic_dependencies()
-    try:
-        TextEmbedding.add_custom_model(
-            model=FP32_EMBEDDING_MODEL,
-            pooling=PoolingType.CLS,
-            normalization=True,
-            sources=ModelSource(hf=BGE_SMALL_HF_REPO),
-            dim=384,
-            model_file="onnx/model.onnx",
-            description="fp32 ONNX export of BAAI/bge-small-en-v1.5",
-            license="mit",
-            size_in_gb=0.13,
-        )
-    except ValueError:
-        # Another engine in this process already registered the alias.
-        pass
-    _BUNDLED_MODELS_REGISTERED = True
-
-
 class _SemanticIndexJob:
     """Completion state for one on-demand embedding job.
 
@@ -1249,7 +1205,7 @@ class EphemeralEngine:
             return self.embedding_warmup_state
 
     def _get_embedding_model(self):
-        """Load FastEmbed once, on first operation that needs embeddings."""
+        """Load the ONNX embedding model once, when semantic search first needs it."""
         with self._embedding_lock:
             if self.embedding_model is not None:
                 return self.embedding_model
@@ -1293,8 +1249,6 @@ class EphemeralEngine:
                 kwargs["threads"] = self.embedding_threads
             kwargs["enable_cpu_mem_arena"] = self.embedding_cpu_mem_arena_enabled
             try:
-                if self.embedding_model_name == FP32_EMBEDDING_MODEL:
-                    register_bundled_embedding_models()
                 self.embedding_model = TextEmbedding(**kwargs)
             except Exception as exc:
                 self._embedding_model_load_failure = (
@@ -1320,7 +1274,7 @@ class EphemeralEngine:
         """Ensure the configured embedding model is loaded without exposing it.
 
         This supported operation is useful for measuring model-load cost. The
-        FastEmbed object remains owned by the engine.
+        ONNX embedding object remains owned by the engine.
         """
         self._get_embedding_model()
 
@@ -1465,7 +1419,7 @@ class EphemeralEngine:
     ) -> _CaptureState:
         """
         Ingests text, chunks it, and builds the SQLite FTS5 BM25 index.
-        FastEmbed dense vector embeddings are materialized lazily when semantic
+        Dense vector embeddings are materialized lazily when semantic
         or hybrid search first needs them. Automatically classifies content
         type (diff, log, text) and extracts structural metadata.
         """
@@ -2478,7 +2432,7 @@ class EphemeralEngine:
                 token_ids = getattr(encoded, "ids", None)
                 token_length = len(token_ids) if token_ids is not None else 0
             else:
-                # Test doubles and compatible non-FastEmbed adapters may not
+                # Test doubles and compatible embedding adapters may not
                 # expose a tokenizer. UTF-8 bytes are a conservative proxy.
                 token_length = len(text.encode("utf-8", errors="replace"))
             token_length = max(1, token_length)

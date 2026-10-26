@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--line-bytes", type=int, default=DEFAULT_LINE_BYTES)
     parser.add_argument("--semantic-chunk-lines", type=int, default=8)
     parser.add_argument("--semantic-chunk-bytes", type=int, default=1024)
-    parser.add_argument("--model", help="FastEmbed model name; defaults to the EB model setting")
+    parser.add_argument("--model", help="Hugging Face ONNX model ID; defaults to the EB model setting")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--max-batch-tokens", type=int, default=4096)

@@ -30,7 +30,6 @@ from ephemeral_buffer_mcp.engine import (
     CaptureView,
     HYBRID_LEXICAL_WEIGHT,
     SemanticIndexBudgetExceeded,
-    register_bundled_embedding_models,
     _CaptureState,
     EphemeralEngine,
     MAX_CAPTURE_EVICTION_DETAILS,
@@ -499,9 +498,7 @@ class TestEphemeralEngine(unittest.TestCase):
         with (
             patch.object(engine_module, "np", object()),
             patch.object(engine_module, "TextEmbedding", None),
-            patch.object(engine_module, "ModelSource", None),
-            patch.object(engine_module, "PoolingType", None),
-            patch("builtins.__import__", side_effect=ImportError("FastEmbed missing")),
+            patch("builtins.__import__", side_effect=ImportError("ONNX backend missing")),
         ):
             with self.assertRaisesRegex(
                 engine_module.SemanticBackendUnavailable, "full distribution"
@@ -3624,12 +3621,12 @@ class TestEmbeddingStartup(unittest.TestCase):
                 patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO):
             explicit._get_embedding_model()
-        # CI may set EPHEMERAL_FASTEMBED_CACHE_DIR, so only assert the settings under test.
+        # CI may set the embedding cache directory, so only assert settings under test.
         self.assertEqual(embedding.call_count, 1)
         self.assertEqual(embedding.call_args.kwargs["model_name"], explicit.embedding_model_name)
         self.assertEqual(embedding.call_args.kwargs["threads"], 2)
         self.assertFalse(embedding.call_args.kwargs["enable_cpu_mem_arena"])
-        embedding.add_custom_model.assert_not_called()
+        self.assertNotIn("fastembed", embedding.call_args.kwargs)
 
     def test_semantic_embeddings_use_length_bounded_batches_and_restore_order(self):
         token_lengths = {"a": 60, "b": 10, "c": 12, "d": 60}
@@ -3821,33 +3818,15 @@ class TestEmbeddingStartup(unittest.TestCase):
         finally:
             engine.shutdown()
 
-    def test_fp32_model_alias_is_registered_once_per_process(self):
-        import ephemeral_buffer_mcp.engine as engine_module
+    def test_model_alias_is_passed_to_the_onnx_backend(self):
+        with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
+                patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
+                patch("sys.stderr", new_callable=io.StringIO):
+            engine = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
+            engine._get_embedding_model()
 
-        original_flag = engine_module._BUNDLED_MODELS_REGISTERED
-        engine_module._BUNDLED_MODELS_REGISTERED = False
-        try:
-            with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                    patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
-                    patch("sys.stderr", new_callable=io.StringIO):
-                first = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
-                first._get_embedding_model()
-                second = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
-                second._get_embedding_model()
-            embedding.add_custom_model.assert_called_once()
-            registration = embedding.add_custom_model.call_args.kwargs
-            self.assertEqual(registration["model"], FP32_EMBEDDING_MODEL)
-            self.assertEqual(registration["sources"].hf, "BAAI/bge-small-en-v1.5")
-            self.assertEqual(registration["model_file"], "onnx/model.onnx")
-            self.assertEqual(embedding.call_count, 2)
-
-            engine_module._BUNDLED_MODELS_REGISTERED = False
-            with patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding:
-                embedding.add_custom_model.side_effect = ValueError("already registered")
-                register_bundled_embedding_models()
-            self.assertTrue(engine_module._BUNDLED_MODELS_REGISTERED)
-        finally:
-            engine_module._BUNDLED_MODELS_REGISTERED = original_flag
+        self.assertEqual(embedding.call_count, 1)
+        self.assertEqual(embedding.call_args.kwargs["model_name"], FP32_EMBEDDING_MODEL)
 
 
 if __name__ == "__main__":

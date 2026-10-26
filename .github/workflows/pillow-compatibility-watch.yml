@@ -1,4 +1,4 @@
-name: Pillow compatibility watch
+name: Pillow dependency watch
 
 on:
   schedule:
@@ -64,11 +64,11 @@ jobs:
           if [ "$already_notified" != "true" ]; then
             cat > /tmp/pillow-watch-comment.md <<'EOF'
           <!-- pillow-compatibility-watch:resolved -->
-          The weekly resolver check found no Pillow advisories for the current unpinned requirements on Python 3.10 and 3.12.
+          The weekly resolver check found Pillow absent or free of reported advisories in the current unpinned requirements on Python 3.10 and 3.12.
 
-          Please update and audit the pinned lock files, remove the temporary Pillow exception, and close this blocker when the supported install sets are clean. This check only reports Pillow status.
+          The semantic runtime now uses text-only ONNX dependencies and does not require Pillow. Please review the supported install sets and close this blocker when the pinned locks are confirmed clean. This check only reports the unpinned requirements.
 
-          — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: configured the automated Pillow compatibility notification.
+          — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: updated the automated dependency watch for the text-only embedding runtime.
           EOF
             gh issue comment 468 --body-file /tmp/pillow-watch-comment.md
           fi

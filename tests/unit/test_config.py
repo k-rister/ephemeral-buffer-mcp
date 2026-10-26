@@ -589,6 +589,18 @@ class TestConfigSettings(unittest.TestCase):
             self.assertEqual(embedding_model_name(), "custom/model")
             self.assertEqual(embedding_cache_dir(), "/tmp/fastembed")
 
+    def test_backend_neutral_embedding_cache_setting_takes_precedence(self):
+        with patch.dict(
+            os.environ,
+            {
+                "EPHEMERAL_EMBEDDING_CACHE_DIR": "/tmp/embeddings",
+                "EPHEMERAL_FASTEMBED_CACHE_DIR": "/tmp/legacy-cache",
+            },
+            clear=True,
+        ):
+            self.assertEqual(embedding_cache_dir(), "/tmp/embeddings")
+            self.assertEqual(load_settings().embedding_cache_dir.value, "/tmp/embeddings")
+
     def test_semantic_prefetch_defaults_enabled_and_one_worker(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(semantic_prefetch_enabled())

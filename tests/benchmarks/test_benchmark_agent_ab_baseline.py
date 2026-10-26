@@ -136,7 +136,7 @@ class TestAgentAbBaseline(unittest.TestCase):
         summary = summary_fixture()
         baseline = build_baseline(summary)
         changed = copy.deepcopy(summary)
-        changed["protocol"]["embedding_mode"] = "fastembed"
+        changed["protocol"]["embedding_mode"] = "onnx"
         result = compare_summary(changed, baseline)
         self.assertFalse(result["passed"])
         self.assertIn("protocol.embedding_mode changed", result["regressions"][0])
