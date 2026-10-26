@@ -17,6 +17,11 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Preserve direct helper text and successful response shapes while returning
   stable MCP error codes for capture, retrieval, clear, configuration, and
   preflight failures; add exact response-shape regression assertions.
+- Normalize Unicode identically in BM25 indexes, queries, and fallback search;
+  bound structured search labels and paginate capture listings with stable,
+  signed cursors and JSON-safe label limits.
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: documented the Unicode search and bounded capture listing fixes
 
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: replaced the semantic embedding dependency stack and removed the CI audit exception
 

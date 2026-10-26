@@ -1267,9 +1267,29 @@
     }
   },
   {
-    "description": "List active captures with readable text and structured capture data.\n\n    The structured result contains ``captures`` and ``capture_count`` alongside\n    the text summary. Use ``get_capture_summary`` or ``get_capture_slice`` for\n    details about an individual capture.\n    ",
+    "description": "List active captures with readable text and structured capture data.\n\n    ``limit`` must be 1–25. Pass the opaque ``next_cursor`` to continue a stable\n    newest-first snapshot; captures evicted before their page is read are\n    omitted. The structured result includes ``page_count`` and the current\n    active ``capture_count``.\n    ",
     "inputSchema": {
-      "properties": {},
+      "properties": {
+        "limit": {
+          "default": 25,
+          "maximum": 25,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cursor"
+        }
+      },
       "title": "list_capturesArguments",
       "type": "object"
     },

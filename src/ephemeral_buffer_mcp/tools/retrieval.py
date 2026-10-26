@@ -6,7 +6,11 @@ from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import Field
 
-from ..engine import CAPTURE_SLICE_SEGMENT_MAX_BYTES, MAX_CAPTURE_SLICE_CONTENT_BYTES
+from ..engine import (
+    CAPTURE_SLICE_SEGMENT_MAX_BYTES,
+    MAX_CAPTURE_LIST_LIMIT,
+    MAX_CAPTURE_SLICE_CONTENT_BYTES,
+)
 from ..mcp_response import (
     ToolErrorEnvelope,
     ToolResponseEnvelope,
@@ -26,6 +30,8 @@ from .formatting import bounded_json_text, bounded_summary_text
 from .instrumentation import _instrument_tool
 from .registry import register_tool
 from .summary import summary_json as _summary_json, summary_response as _summary_response
+
+CAPTURE_LIST_LABEL_MAX_JSON_BYTES = 128
 
 
 @_instrument_tool("get_capture_slice")
@@ -245,13 +251,39 @@ def get_capture_summary(capture_id: str = "latest", include_previews: bool = Fal
 
 
 @_instrument_tool("list_captures")
-def _list_captures_response() -> ToolResponseEnvelope:
+def _list_captures_response(
+    limit: int = MAX_CAPTURE_LIST_LIMIT,
+    cursor: Optional[str] = None,
+) -> ToolResponseEnvelope:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_CAPTURE_LIST_LIMIT
+    ):
+        message = f"limit must be between 1 and {MAX_CAPTURE_LIST_LIMIT}."
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(code="invalid_limit", message=message),
+            text=f"Error: {message}",
+        )
+    page = _active_engine().list_captures_page(limit=limit, cursor=cursor)
+    if page.get("status") != "ok":
+        message = str(page.get("message", "capture listing failed"))
+        return ToolResponseEnvelope(
+            status="error",
+            error=ToolErrorEnvelope(
+                code=str(page.get("error_code") or "listing_failed"),
+                message=message,
+            ),
+            text=f"Error: {message}",
+        )
+
     captures = []
     text_lines = ["Active Captures in Ephemeral Buffer:"]
-    for capture in _active_engine().list_captures():
-        label, label_truncated = bounded_summary_text(
+    for capture in page["captures"]:
+        label, label_truncated = bounded_json_text(
             capture["label"],
-            SUMMARY_LABEL_MAX_BYTES,
+            CAPTURE_LIST_LABEL_MAX_JSON_BYTES,
             SUMMARY_LABEL_TRUNCATION_MARKER,
         )
         captures.append({
@@ -266,31 +298,50 @@ def _list_captures_response() -> ToolResponseEnvelope:
             f"- `{capture['capture_id']}`: \"{label}\" | {capture['total_lines']:,} lines | "
             f"{capture['byte_size']:,} bytes | {capture['timestamp']}"
         )
-    if not captures:
+    if not captures and page["capture_count"] == 0:
         text = "Ephemeral buffer is empty. No captures currently stored."
+    elif not captures:
+        text = "No captures remain on this listing page. Restart listing to refresh."
     else:
         text = "\n".join(text_lines)
+    if page["next_cursor"] is not None:
+        text += f"\nContinue listing with cursor: {page['next_cursor']}"
     return ToolResponseEnvelope(
         status="ok",
-        data={"captures": captures, "capture_count": len(captures)},
+        data={
+            "captures": captures,
+            "capture_count": page["capture_count"],
+            "page_count": page["page_count"],
+        },
         text=text,
+        next_cursor=page["next_cursor"],
+        truncated=page["truncated"],
     )
 
 
 @register_tool("list_captures", "retrieval", structured_result_factory=_list_captures_response)
-def list_captures() -> str:
+def list_captures(
+    limit: Annotated[
+        int, Field(ge=1, le=MAX_CAPTURE_LIST_LIMIT)
+    ] = MAX_CAPTURE_LIST_LIMIT,
+    cursor: Optional[str] = None,
+) -> str:
     """List active captures with readable text and structured capture data.
 
-    The structured result contains ``captures`` and ``capture_count`` alongside
-    the text summary. Use ``get_capture_summary`` or ``get_capture_slice`` for
-    details about an individual capture.
+    ``limit`` must be 1–25. Pass the opaque ``next_cursor`` to continue a stable
+    newest-first snapshot; captures evicted before their page is read are
+    omitted. The structured result includes ``page_count`` and the current
+    active ``capture_count``.
     """
-    return list_captures_result().text or ""
+    return list_captures_result(limit, cursor).text or ""
 
 
-def list_captures_result() -> ToolResponseEnvelope:
+def list_captures_result(
+    limit: int = MAX_CAPTURE_LIST_LIMIT,
+    cursor: Optional[str] = None,
+) -> ToolResponseEnvelope:
     """Return a typed list of active captures for Python callers."""
-    return _list_captures_response()
+    return _list_captures_response(limit, cursor)
 
 
 @_instrument_tool("clear_captures")

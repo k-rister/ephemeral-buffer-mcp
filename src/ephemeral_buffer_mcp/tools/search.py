@@ -155,6 +155,12 @@ def _search_capture_response(
         )
         if key in res
     }
+    if "label" in res:
+        metadata["label"], metadata["label_truncated"] = bounded_summary_text(
+            str(res["label"]),
+            SUMMARY_LABEL_MAX_BYTES,
+            SUMMARY_LABEL_TRUNCATION_MARKER,
+        )
     metadata.setdefault("query", query)
     text_result = dict(res)
     text_result.setdefault("query", query)

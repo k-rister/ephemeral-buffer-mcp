@@ -64,6 +64,7 @@ MAX_SEARCH_CONTEXT_LINES = 100
 MAX_CAPTURE_SLICE_CONTENT_BYTES = 64 * 1024
 CAPTURE_SLICE_SEGMENT_MAX_BYTES = 4 * 1024
 MAX_CAPTURE_EVICTION_DETAILS = 25
+MAX_CAPTURE_LIST_LIMIT = 25
 TOKEN_ESTIMATE_BYTES_PER_TOKEN = 4
 
 
@@ -749,6 +750,9 @@ class _CaptureState:
     # response can identify exactly which captures were displaced.
     evicted_captures: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
     evicted_captures_omitted: int = 0
+    # Monotonic ingestion sequence keeps inventory pagination stable even when
+    # the LRU order changes or newer captures arrive between pages.
+    creation_sequence: int = 0
 
     @property
     def line_count(self) -> int:
@@ -946,6 +950,7 @@ class EphemeralEngine:
             "evicted_capture_details_omitted": 0,
         }
         self._next_id = 1
+        self._next_capture_sequence = 1
         self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
         
         self.embedding_model_name = embedding_model_name or settings.embedding_model_name.value
@@ -1461,13 +1466,15 @@ class EphemeralEngine:
                 for chunk in capture.chunks:
                     cur.execute(
                         "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
-                        (chunk.chunk_id, chunk.text),
+                        (chunk.chunk_id, " ".join(_fts5_tokens(chunk.text))),
                     )
                 fts_conn.commit()
                 capture.fts_conn = fts_conn
 
             if capture.duration_ms is None:
                 capture.duration_ms = round((time.perf_counter() - ingest_started) * 1000, 3)
+            capture.creation_sequence = self._next_capture_sequence
+            self._next_capture_sequence += 1
             self._captures[capture_id] = capture
             self.capture_order[capture_id] = None
             self._total_bytes += capture.retained_byte_size
@@ -2618,14 +2625,127 @@ class EphemeralEngine:
             capture = state
         return self._build_summary(capture, include_previews=include_previews)
 
+    def _encode_capture_list_cursor(
+        self, snapshot_sequence: int, before_sequence: int
+    ) -> str:
+        payload = json.dumps(
+            {"v": 1, "snapshot": snapshot_sequence, "before": before_sequence},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        signature = hmac.new(self._slice_cursor_secret, payload, hashlib.sha256).digest()[:16]
+        token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return token + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+
+    def _decode_capture_list_cursor(self, cursor: str) -> Optional[Tuple[int, int]]:
+        if not isinstance(cursor, str) or len(cursor) > 512:
+            return None
+        try:
+            payload_part, signature_part = cursor.split(".", 1)
+            payload_bytes = base64.urlsafe_b64decode(
+                payload_part + "=" * (-len(payload_part) % 4)
+            )
+            signature = base64.urlsafe_b64decode(
+                signature_part + "=" * (-len(signature_part) % 4)
+            )
+            expected = hmac.new(
+                self._slice_cursor_secret, payload_bytes, hashlib.sha256
+            ).digest()[:16]
+            if not hmac.compare_digest(signature, expected):
+                return None
+            payload = json.loads(payload_bytes.decode("utf-8"))
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+            return None
+        if not isinstance(payload, dict) or payload.get("v") != 1:
+            return None
+        snapshot = payload.get("snapshot")
+        before = payload.get("before")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (snapshot, before)
+        ):
+            return None
+        if before > snapshot:
+            return None
+        return snapshot, before
+
+    @synchronized
+    def list_captures_page(
+        self, limit: int = MAX_CAPTURE_LIST_LIMIT, cursor: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Return one newest-first page of active captures.
+
+        Cursor boundaries are based on immutable creation sequences, so LRU
+        touches and captures added after page one cannot shift later pages.
+        Entries evicted before a page is read are naturally omitted.
+        """
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_CAPTURE_LIST_LIMIT
+        ):
+            return {
+                "status": "error",
+                "error_code": "invalid_limit",
+                "message": f"limit must be between 1 and {MAX_CAPTURE_LIST_LIMIT}.",
+            }
+        if cursor is None:
+            snapshot_sequence = max(
+                (cap.creation_sequence for cap in self._captures.values()), default=0
+            )
+            # The boundary is exclusive for every page, so use one past the
+            # newest sequence for the initial page.
+            before_sequence = snapshot_sequence + 1
+        else:
+            decoded = self._decode_capture_list_cursor(cursor)
+            if decoded is None:
+                return {
+                    "status": "error",
+                    "error_code": "invalid_cursor",
+                    "message": "The capture-list cursor is invalid. Restart listing to refresh.",
+                }
+            snapshot_sequence, before_sequence = decoded
+
+        eligible = sorted(
+            (
+                cap for cap in self._captures.values()
+                if cap.creation_sequence <= snapshot_sequence
+                and cap.creation_sequence < before_sequence
+            ),
+            key=lambda cap: cap.creation_sequence,
+            reverse=True,
+        )
+        page = eligible[:limit]
+        has_more = len(eligible) > len(page)
+        result = [
+            {
+                "capture_id": cap.capture_id,
+                "label": cap.label,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cap.timestamp)),
+                "total_lines": cap.line_count,
+                "byte_size": cap.byte_size,
+            }
+            for cap in page
+        ]
+        next_cursor = (
+            self._encode_capture_list_cursor(snapshot_sequence, page[-1].creation_sequence)
+            if has_more and page
+            else None
+        )
+        return {
+            "status": "ok",
+            "captures": result,
+            "page_count": len(result),
+            "capture_count": len(self._captures),
+            "next_cursor": next_cursor,
+            "truncated": next_cursor is not None,
+        }
+
     @synchronized
     def list_captures(self) -> List[Dict[str, Any]]:
-        """
-        Lists all active captures in the ring buffer.
-        """
+        """List active captures in their current most-recent-first LRU order."""
         result = []
-        for cid in reversed(self.capture_order):
-            cap = self._captures[cid]
+        for capture_id in reversed(self.capture_order):
+            cap = self._captures[capture_id]
             result.append({
                 "capture_id": cap.capture_id,
                 "label": cap.label,

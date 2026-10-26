@@ -30,7 +30,7 @@ flowchart TD
     end
 
     subgraph Indexing["5. Classification & Search Indexing"]
-        E --> F["SQLite FTS5 (BM25 Lexical) or Python lexical fallback"]
+        E --> F["Normalized SQLite FTS5 (BM25) or aligned Python lexical fallback"]
         E --> G["Optional semantic backend; dependencies load on demand or during warm-up"]
         E --> K["Diff & Signal Parser (File Maps & Conflict Detection)"]
         E --> CO["consolidate_captures: bounded source-aware JSON"]
@@ -70,6 +70,14 @@ does not allow setting it. If either optional integration is incompatible or
 fails, the tool remains registered and dispatchable; validation metrics may be
 unavailable or partial, or instruction refresh may be unavailable. Runtime
 diagnostics report these limitations.
+
+BM25 indexes case-folded compatibility-normalized tokens with diacritics
+removed. Query parsing and the Python fallback use the same token rules, while
+the capture's original lines and chunks remain the source for snippets and
+line mapping. Search labels are bounded in the structured response. Capture
+inventory uses bounded 25-entry pages and signed creation-sequence cursors, so
+later captures and LRU touches do not move entries between pages; evicted
+captures may be absent when a later page is read.
 
 On MCP dispatch, `mcp_transport.py` injects `__invocation_mode="mcp"` for
 handlers that support it. It also injects `__background=True` for registrations
