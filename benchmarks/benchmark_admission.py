@@ -619,6 +619,7 @@ def main() -> None:
     except (OSError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
         parser.error(str(exc))
 
+    report_stream = wr.report_stream(args.result)
     for transport in ("mcp", "socket"):
         summary = record["scenarios"][transport]
         print(
@@ -628,7 +629,8 @@ def main() -> None:
             f"accepted_throughput_median={summary['accepted_throughput_per_second_median']:.2f}/s "
             f"active={summary['max_active_at_saturation']} "
             f"queued={summary['max_queued_at_saturation']} "
-            f"passed={summary['passed']}"
+            f"passed={summary['passed']}",
+            file=report_stream,
         )
 
     if args.output:

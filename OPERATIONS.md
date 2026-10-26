@@ -1223,6 +1223,13 @@ and logs are collected alongside it. A benchmark absent from the baseline is
 recorded as skipped, while incompatible result metrics remain visible in the
 comparison reports. Keep the generated bundle outside the repository.
 
+Each local benchmark is bounded by `--benchmark-timeout` (3600 seconds by
+default). On timeout, the runner sends SIGTERM to the benchmark process group,
+waits up to five seconds, then sends SIGKILL to any remaining group members.
+The command is recorded as failed with exit code 124, and collection continues
+with later benchmarks. Agent A/B tasks keep their separate per-task
+`--agent-timeout` (900 seconds by default).
+
 To repeat the agent A/B comparison more heavily without rerunning local
 benchmarks, add `--agent-ab-repetitions N --agent-ab-only`. The independent
 agent A/B count defaults to the value of `--repetitions`; the selected model,
