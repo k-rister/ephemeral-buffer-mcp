@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 import ephemeral_buffer_mcp.engine as engine_module
+import ephemeral_buffer_mcp.semantic_index as semantic_index
 from ephemeral_buffer_mcp.config import (
     CATALOGUE_EMBEDDING_MODEL,
     DEFAULT_MAX_CAPTURES,
@@ -488,28 +489,44 @@ class TestEphemeralEngine(unittest.TestCase):
         self.addCleanup(engine.shutdown)
         return engine
 
+    def test_semantic_coordinator_facade_and_embedding_publication_guards(self):
+        self.assertIsNotNone(EphemeralEngine.embedding_model)
+        engine = self._new_engine(embedding_warmup=False, semantic_prefetch=False)
+        missing = SimpleNamespace(
+            capture_id="missing",
+            active_readers=0,
+            embeddings=None,
+        )
+        vectors = np.zeros((1, 384), dtype=np.float32)
+        self.assertFalse(engine._publish_semantic_embeddings(missing, vectors))
+
+        view = engine.ingest("retained capture")
+        capture = engine._get_capture_state(view.capture_id)
+        capture.embeddings = vectors
+        self.assertFalse(engine._publish_semantic_embeddings(capture, vectors))
+
     def test_semantic_dependency_helpers_report_unavailable_backend(self):
         with patch(
-            "ephemeral_buffer_mcp.engine.importlib.util.find_spec",
+            "ephemeral_buffer_mcp.semantic_index.importlib.util.find_spec",
             side_effect=ValueError("module has no import specification"),
         ):
-            self.assertFalse(engine_module._semantic_dependencies_available())
+            self.assertFalse(semantic_index._semantic_dependencies_available())
 
         with (
-            patch.object(engine_module, "np", object()),
-            patch.object(engine_module, "TextEmbedding", None),
+            patch.object(semantic_index, "np", object()),
+            patch.object(semantic_index, "TextEmbedding", None),
             patch("builtins.__import__", side_effect=ImportError("ONNX backend missing")),
         ):
             with self.assertRaisesRegex(
                 engine_module.SemanticBackendUnavailable, "full distribution"
             ):
-                engine_module._load_semantic_dependencies()
+                semantic_index._load_semantic_dependencies()
 
     def test_lazy_semantic_backend_import_failure_returns_typed_search_error(self):
         with (
             patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}),
             patch(
-                "ephemeral_buffer_mcp.engine._semantic_dependencies_available",
+                "ephemeral_buffer_mcp.semantic_index._semantic_dependencies_available",
                 return_value=True,
             ),
         ):
@@ -518,7 +535,7 @@ class TestEphemeralEngine(unittest.TestCase):
             unavailable = engine_module.SemanticBackendUnavailable("missing dependency")
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}):
                 with patch(
-                    "ephemeral_buffer_mcp.engine._load_semantic_dependencies",
+                    "ephemeral_buffer_mcp.semantic_index._load_semantic_dependencies",
                     side_effect=unavailable,
                 ):
                     with self.assertRaises(engine_module.SemanticBackendUnavailable):
@@ -538,7 +555,7 @@ class TestEphemeralEngine(unittest.TestCase):
             engine.shutdown()
 
     def test_lexical_search_works_without_semantic_dependencies(self):
-        with patch("ephemeral_buffer_mcp.engine._semantic_dependencies_available", return_value=False):
+        with patch("ephemeral_buffer_mcp.semantic_index._semantic_dependencies_available", return_value=False):
             engine = self._new_engine(
                 max_captures=1,
                 embedding_warmup=True,
@@ -1868,7 +1885,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(diagnostics.capture_id, capture.capture_id)
             self.assertGreater(diagnostics.semantic_chunk_count, 0)
             self.assertEqual(diagnostics.retained_embedding_bytes, 0)
-            with patch.object(engine, "_get_embedding_model") as load_model:
+            with patch.object(engine._semantic_index, "_get_embedding_model") as load_model:
                 engine.load_embedding_model()
             load_model.assert_called_once_with()
         finally:
@@ -3277,7 +3294,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             pass
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                patch("ephemeral_buffer_mcp.engine.TextEmbedding", return_value=FakeEmbedding()) as embedding, \
+                patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding", return_value=FakeEmbedding()) as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO) as stderr:
             engine = self._new_engine(
                 max_captures=1,
@@ -3296,7 +3313,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIn("Embedding model ready", stderr.getvalue())
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                patch("ephemeral_buffer_mcp.engine.TextEmbedding", side_effect=RuntimeError("load failed")) as embedding:
+                patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding", side_effect=RuntimeError("load failed")) as embedding:
             failing = self._new_engine(max_captures=1)
             with self.assertRaisesRegex(RuntimeError, "load failed"):
                 failing._get_embedding_model()
@@ -3309,8 +3326,6 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertIsNone(failing.embedding_model)
 
     def test_embedding_model_load_retries_after_backoff_and_clears_failure(self):
-        import ephemeral_buffer_mcp.engine as engine_module
-
         class FakeEmbedding:
             pass
 
@@ -3318,7 +3333,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         try:
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                     patch(
-                        "ephemeral_buffer_mcp.engine.TextEmbedding",
+                        "ephemeral_buffer_mcp.semantic_index.TextEmbedding",
                         side_effect=[RuntimeError("load failed"), FakeEmbedding()],
                     ) as embedding, \
                     patch.object(
@@ -3353,7 +3368,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         try:
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                     patch(
-                        "ephemeral_buffer_mcp.engine.TextEmbedding",
+                        "ephemeral_buffer_mcp.semantic_index.TextEmbedding",
                         side_effect=MultiArgumentLoadError("model", "unavailable"),
                     ):
                 with self.assertRaises(MultiArgumentLoadError):
@@ -3380,7 +3395,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         try:
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                    patch("ephemeral_buffer_mcp.engine.TextEmbedding", side_effect=fail_load) as embedding:
+                    patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding", side_effect=fail_load) as embedding:
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     first = executor.submit(load_model)
                     self.assertTrue(load_started.wait(timeout=2))
@@ -3404,7 +3419,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             capture = engine._ingest_state("lexical fallback marker", label="fallback")
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                     patch(
-                        "ephemeral_buffer_mcp.engine.TextEmbedding",
+                        "ephemeral_buffer_mcp.semantic_index.TextEmbedding",
                         side_effect=RuntimeError("model unavailable"),
                     ) as embedding:
                 first = engine.search("marker", mode="hybrid", capture_id=capture.capture_id)
@@ -3499,7 +3514,7 @@ class TestEmbeddingStartup(unittest.TestCase):
         return engine
 
     def test_embedding_model_loads_lazily(self):
-        with patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding:
+        with patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding") as embedding:
             engine = self._new_engine(max_captures=1)
 
         embedding.assert_not_called()
@@ -3618,7 +3633,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             self._new_engine(max_captures=1, embedding_threads=0)
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
+                patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding") as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO):
             explicit._get_embedding_model()
         # CI may set the embedding cache directory, so only assert settings under test.
@@ -3820,7 +3835,7 @@ class TestEmbeddingStartup(unittest.TestCase):
 
     def test_model_alias_is_passed_to_the_onnx_backend(self):
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
-                patch("ephemeral_buffer_mcp.engine.TextEmbedding") as embedding, \
+                patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding") as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO):
             engine = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
             engine._get_embedding_model()
