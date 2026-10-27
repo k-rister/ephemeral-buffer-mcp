@@ -159,7 +159,17 @@ def _legacy_tool_envelope(
         payload = None
 
     if isinstance(payload, dict):
-        if payload.get("status") == "error":
+        if payload.get("status") == "capture_failed":
+            status = "error"
+            data = payload
+            error = ToolErrorEnvelope(
+                code="capture_failed",
+                message=str(
+                    payload.get("capture_error")
+                    or "Command output could not be retained."
+                ),
+            )
+        elif payload.get("status") == "error":
             status = "error"
             if payload.get("error_code"):
                 error_code = str(payload["error_code"])

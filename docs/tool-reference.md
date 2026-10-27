@@ -54,6 +54,8 @@ version. The server accepts these capture request fields; omitted fields use the
 | `command_exit_code` | integer or null | no | `null` |
 | `timed_out` | boolean | no | `false` |
 | `duration_ms` | finite number or null | no | `null` |
+| `command_cancelled` | boolean | no | `false` |
+| `cleanup_confirmed` | boolean or null | no | `null` |
 | `structured_metrics` | JSON object or null | no | `null` |
 
 The server ignores unknown fields, rejects invalid values for known fields,
@@ -65,8 +67,12 @@ valid UTF-8 JSON are kept as plain-text captures using the `CLI pipe` label;
 valid JSON that is not an object returns an error.
 
 Successful responses contain `status: "ok"`, `capture_id`, `label`,
-`line_count`, and `byte_size`; `summary` is included when available. New error
-responses contain `status: "error"`, a stable `code`, and `message`. When the
+`line_count`, and `byte_size`; `summary` is included when available and carries
+the command/capture statuses and cleanup certainty for wrapped commands. Error
+responses for command capture failures contain `status: "error"`, code
+`capture_failed`, and `message`, plus command outcome fields when supplied.
+Other error responses contain `status: "error"`, a stable `code`, and
+`message`. When the
 CLI receives an error from an earlier v1 server that omits `code`, it assigns
 `socket_request_failed` while preserving the server's message.
 Known socket error codes include `server_starting`, `server_shutting_down`,
@@ -76,7 +82,19 @@ response fields are ignored, while required fields and their types are
 validated.
 
 Capture tools return a compact JSON summary so an agent can decide whether it
-needs the full output before spending context on retrieval. The summary uses
+needs the full output before spending context on retrieval. For
+`execute_and_capture`, `command_status` reports whether the command completed,
+timed out, or was cancelled, while `capture_status` reports whether its output
+was retained. Successful summaries add `command_status`,
+`capture_status: "captured"`, and `cleanup_confirmed` (`null` when the runner
+does not report cleanup certainty); the existing `status` continues to describe
+the captured command summary. If ingestion fails after the command returns,
+the tool reports MCP error code `capture_failed` and preserves a flat outcome
+in `structuredContent.data`, including `exit_code`, `duration_ms`, command and
+capture statuses, timeout/cancellation state, cleanup certainty, and a bounded
+`capture_error`. The output itself is omitted because it was not retained.
+Failures before a command result exists do not include command outcome fields.
+The summary uses
 `schema_version: 1` and includes `status` (`captured`, `success`, `failed`, or
 `timed_out`), `duration_ms`, retained and original byte sizes, approximate
 token counts, truncation and partial-execution flags, typed warning/error

@@ -34,6 +34,8 @@ LOGGER = get_logger("server")
 
 CaptureContentType = Literal["auto", "diff", "log", "text"]
 CAPTURE_CONTENT_TYPES = ("auto", "diff", "log", "text")
+CAPTURE_ERROR_MAX_BYTES = 1024
+CAPTURE_ERROR_TRUNCATION_MARKER = "... [truncated]"
 
 
 def _content_type_error(content_type: object) -> Optional[str]:
@@ -50,6 +52,84 @@ def _bounded_command(command: str) -> tuple[str, bool]:
         SUMMARY_COMMAND_MAX_BYTES,
         SUMMARY_COMMAND_TRUNCATION_MARKER,
     )
+
+
+def _command_status(exit_code: Optional[int], timed_out: bool, cancelled: bool) -> str:
+    """Name the command outcome independently from whether its output was retained."""
+    if cancelled:
+        return "cancelled"
+    if timed_out:
+        return "timed_out"
+    return "completed"
+
+
+def _bounded_capture_error(error: Exception) -> str:
+    """Keep capture failure details useful without returning unbounded text."""
+    return bounded_summary_text(
+        f"{type(error).__name__}: {error}",
+        CAPTURE_ERROR_MAX_BYTES,
+        CAPTURE_ERROR_TRUNCATION_MARKER,
+    )[0]
+
+
+def _capture_failed_payload(
+    error: Exception,
+    *,
+    exit_code: Optional[int] = None,
+    timed_out: bool = False,
+    command_cancelled: bool = False,
+    duration_ms: Optional[float] = None,
+    cleanup_confirmed: Optional[bool] = None,
+    command: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a bounded response without including command output that was not retained."""
+    payload: Dict[str, Any] = {
+        "status": "capture_failed",
+        "capture_status": "failed",
+        "capture_error": _bounded_capture_error(error),
+    }
+    if exit_code is not None:
+        payload.update({
+            "command_status": _command_status(exit_code, timed_out, command_cancelled),
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "command_cancelled": command_cancelled,
+            "duration_ms": duration_ms,
+            "cleanup_confirmed": cleanup_confirmed,
+        })
+    if command is not None:
+        bounded_command, command_truncated = _bounded_command(command)
+        payload["command"] = bounded_command
+        payload["command_truncated"] = command_truncated
+    return payload
+
+
+def _with_socket_command_outcome(
+    result: str,
+    metadata: Dict[str, Any],
+) -> str:
+    """Add command/capture outcome fields to a CLI capture summary or failure."""
+    exit_code = metadata.get("command_exit_code")
+    if exit_code is None:
+        return result
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    timed_out = bool(metadata.get("timed_out", False))
+    command_cancelled = bool(metadata.get("command_cancelled", False))
+    payload.update({
+        "command_status": _command_status(exit_code, timed_out, command_cancelled),
+        "capture_status": "failed" if payload.get("status") == "capture_failed" else "captured",
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "command_cancelled": command_cancelled,
+        "duration_ms": metadata.get("duration_ms"),
+        "cleanup_confirmed": metadata.get("cleanup_confirmed"),
+    })
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _capture_text(
@@ -110,6 +190,8 @@ def _socket_capture_arguments(request):
             "original_byte_size": request["original_byte_size"],
             "command_exit_code": request["command_exit_code"],
             "timed_out": request["timed_out"],
+            "command_cancelled": request["command_cancelled"],
+            "cleanup_confirmed": request["cleanup_confirmed"],
         },
     }
 
@@ -120,6 +202,25 @@ def _socket_capture_response(result):
         payload = json.loads(result)
     except (TypeError, ValueError) as exc:
         raise ValueError("capture handler returned invalid summary JSON") from exc
+    if isinstance(payload, dict) and payload.get("status") == "capture_failed":
+        response = {
+            "status": "error",
+            "code": "capture_failed",
+            "message": payload.get("capture_error", "Command output could not be retained."),
+        }
+        for field in (
+            "command_status",
+            "capture_status",
+            "capture_error",
+            "exit_code",
+            "timed_out",
+            "command_cancelled",
+            "duration_ms",
+            "cleanup_confirmed",
+        ):
+            if field in payload:
+                response[field] = payload[field]
+        return response
     if not isinstance(payload, dict) or "capture_id" not in payload:
         message = (
             payload.get("message", "capture summary is unavailable")
@@ -161,18 +262,29 @@ def capture_text(
     ``structured_metrics``.
     """
     metadata = __ingest_metadata or {}
-    return _capture_text(
-        content,
-        label=label,
-        content_type=content_type,
-        structured_metrics=structured_metrics,
-        source=metadata.get("source", "capture_text"),
-        duration_ms=metadata.get("duration_ms"),
-        truncated=metadata.get("truncated", False),
-        original_byte_size=metadata.get("original_byte_size"),
-        command_exit_code=metadata.get("command_exit_code"),
-        timed_out=metadata.get("timed_out", False),
-    )
+    try:
+        result = _capture_text(
+            content,
+            label=label,
+            content_type=content_type,
+            structured_metrics=structured_metrics,
+            source=metadata.get("source", "capture_text"),
+            duration_ms=metadata.get("duration_ms"),
+            truncated=metadata.get("truncated", False),
+            original_byte_size=metadata.get("original_byte_size"),
+            command_exit_code=metadata.get("command_exit_code"),
+            timed_out=metadata.get("timed_out", False),
+        )
+    except Exception as exc:
+        if metadata.get("source") != "socket":
+            raise
+        result = json.dumps(
+            _capture_failed_payload(exc),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return _with_socket_command_outcome(result, metadata)
 
 
 _capture_text_signature = inspect.signature(capture_text)
@@ -319,25 +431,57 @@ def execute_and_capture(
             cancellation_event=current_request_cancel_event(),
         )
         output, exit_code, truncated, original_byte_size, timed_out = command_result
+        command_cancelled = bool(getattr(command_result, "cancelled", False))
+        runner_cleanup_confirmed = getattr(command_result, "cleanup_confirmed", None)
+        cleanup_confirmed = (
+            runner_cleanup_confirmed
+            if isinstance(runner_cleanup_confirmed, bool)
+            else None
+        )
         duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
 
-        cap, summary = active_engine.ingest_with_summary(
-            output,
-            label=f"cmd: {label}",
-            content_type=content_type,
-            truncated=truncated,
-            original_byte_size=original_byte_size if truncated else None,
-            command_exit_code=exit_code,
-            timed_out=timed_out,
-            source="command",
-            duration_ms=duration_ms,
-            structured_metrics=structured_metrics,
-        )
+        try:
+            _capture, summary = active_engine.ingest_with_summary(
+                output,
+                label=f"cmd: {label}",
+                content_type=content_type,
+                truncated=truncated,
+                original_byte_size=original_byte_size if truncated else None,
+                command_exit_code=exit_code,
+                timed_out=timed_out,
+                source="command",
+                duration_ms=duration_ms,
+                structured_metrics=structured_metrics,
+            )
+        except Exception as capture_error:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "command_capture_failed",
+                error_type=type(capture_error).__name__,
+            )
+            return json.dumps(
+                _capture_failed_payload(
+                    capture_error,
+                    exit_code=exit_code,
+                    timed_out=timed_out,
+                    command_cancelled=command_cancelled,
+                    duration_ms=duration_ms,
+                    cleanup_confirmed=cleanup_confirmed,
+                    command=command,
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         payload = summary_payload(summary)
         bounded_command, command_truncated = _bounded_command(command)
         payload["command"] = bounded_command
         payload["command_truncated"] = command_truncated
-        payload["command_cancelled"] = bool(getattr(command_result, "cancelled", False))
+        payload["command_cancelled"] = command_cancelled
+        payload["command_status"] = _command_status(exit_code, timed_out, command_cancelled)
+        payload["capture_status"] = "captured"
+        payload["cleanup_confirmed"] = cleanup_confirmed
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception as e:
         log_event(LOGGER, logging.ERROR, "command_execution_failed", error_type=type(e).__name__)

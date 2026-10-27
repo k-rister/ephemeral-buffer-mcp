@@ -123,8 +123,10 @@ def _classify_tool_result(tool: str, result) -> str | None:
                 )
             ):
                 return "timeout"
-            if payload.get("status") == "error":
-                return _classify_failure_text(str(payload.get("message", "")))
+            if payload.get("status") in {"error", "capture_failed"}:
+                return _classify_failure_text(
+                    str(payload.get("message") or payload.get("capture_error", ""))
+                )
         if result.startswith(("Error", "Search Error")):
             return _classify_failure_text(result)
     return None
