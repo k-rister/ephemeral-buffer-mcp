@@ -110,8 +110,14 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
 - `admission.py` — bounds active and queued MCP tool and socket work.
 - `engine.py` — ingests and retains captures, classifies content, and supports
   lexical and optional semantic search and indexing.
+- `semantic_index.py` — coordinates embedding inference, semantic indexing,
+  prefetch, and bounded indexing jobs for retained captures.
+- `embedding_backend.py` — loads the BGE-small ONNX model and tokenizer and
+  yields normalized text embeddings.
 - `execution.py` — runs durable, resumable command phases and manages their
   persistent state, bounded output, quotas, and lifecycle.
+- `process_control.py` — tracks process identity and safely cleans up or recovers
+  command process groups for durable execution.
 - `capture_utils.py` — runs bounded commands and reads bounded files, including
   process cleanup for command capture.
 
