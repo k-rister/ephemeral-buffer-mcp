@@ -207,10 +207,10 @@ class TestReleaseBenchmarkTimeoutRunner(unittest.TestCase):
                 process = original_popen(*args, **kwargs)
                 launched_processes.append(process)
                 deadline = time.monotonic() + 5
-                while not ready_file.exists() and process.poll() is None and time.monotonic() < deadline:
+                while not pid_file.exists() and process.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.02)
-                if not ready_file.exists():
-                    raise AssertionError("benchmark child did not become ready during launch")
+                if not pid_file.exists():
+                    raise AssertionError("benchmark process IDs were not reported during launch")
                 os.kill(os.getpid(), signal.SIGTERM)
                 return process
 
