@@ -8,7 +8,7 @@ running `ephemeral-buffer` outside of a local development session.
 Run tests from an active EB shell through `scripts/with-test-env.sh`:
 
 ```bash
-EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest test_server
+EPHEMERAL_TEST_EMBEDDINGS=1 ./scripts/with-test-env.sh .venv/bin/python -m unittest tests.unit.test_server
 ```
 
 The wrapper replaces inherited session, socket, execution-state, metrics, and
