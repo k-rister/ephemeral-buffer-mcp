@@ -106,7 +106,7 @@ jobs:
             tests.benchmarks.test_benchmark_semantic_index tests.benchmarks.test_benchmark_semantic_memory tests.benchmarks.test_benchmark_warmup \
             tests.benchmarks.test_benchmark_relevance tests.benchmarks.test_benchmark_agent_ab tests.benchmarks.test_benchmark_agent_ab_fixtures \
             tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
-            tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_release_checks tests.tooling.test_dependency_audit tests.tooling.test_release_benchmark_timeout \
+            tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_dependabot_config tests.tooling.test_release_checks tests.tooling.test_dependency_audit tests.tooling.test_release_benchmark_timeout \
             tests.benchmarks.test_benchmark_admission tests.benchmarks.test_workload_results \
             tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
             tests.unit.test_mcpserver_adapter tests.unit.test_engine tests.unit.test_embedding_backend tests.unit.test_capture_utils tests.unit.test_config \
