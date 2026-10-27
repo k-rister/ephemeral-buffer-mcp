@@ -664,6 +664,7 @@ class TestServerTools(unittest.TestCase):
                     with patch.object(server, "log_event") as log_event:
                         result = await adapters[name]()
                 gate.assert_called_once_with(category)
+                self.assertTrue(result.is_error)
                 payload = mcp_result_payload(result)
                 self.assertEqual(payload["status"], "error")
                 self.assertEqual(payload["error"]["code"], "server_busy")
@@ -864,6 +865,7 @@ class TestServerTools(unittest.TestCase):
             diagnostic = await app.call_tool("get_buffer_stats", {})
             shutdown_results = (structured, execution, diagnostic)
             for result in (structured, execution, diagnostic):
+                self.assertTrue(result.is_error)
                 payload = mcp_result_payload(result)
                 self.assertEqual(
                     payload.get("status"),
@@ -890,6 +892,7 @@ class TestServerTools(unittest.TestCase):
                     context._closing = False
                 with patch.object(mcp_transport, "admission_gate", return_value=gate):
                     result = await app.call_tool(name, arguments)
+                self.assertTrue(result.is_error)
                 self.assertTrue(gate.ticket.released)
                 with context._lifecycle_lock:
                     context._closing = False
@@ -1208,6 +1211,7 @@ class TestServerTools(unittest.TestCase):
                 )
             )
         self.assertEqual(error, {"reason": "RuntimeError", "status": "error"})
+        self.assertTrue(mcp_response.is_error)
         mcp_error = json.loads(mcp_response.content[0].text)
         self.assertEqual(mcp_error["status"], "error")
         self.assertEqual(mcp_error["error"]["code"], "preflight_failed")
@@ -1363,11 +1367,22 @@ class TestServerTools(unittest.TestCase):
                 capture_tools, "run_command_bounded", return_value=command_result
             ):
                 summary = json.loads(server.execute_and_capture("command"))
+                mcp_response = None
+                if command_result[1] == 7:
+                    mcp_response = asyncio.run(
+                        self.call_mcp_tool_inline(
+                            "execute_and_capture", {"command": "command"}
+                        )
+                    )
             self.assertEqual(summary["command_status"], expected_status)
             self.assertEqual(summary["capture_status"], "captured")
             self.assertEqual(summary["exit_code"], command_result[1])
             self.assertEqual(summary["cleanup_confirmed"], expected_cleanup)
             self.assertEqual(summary["command_cancelled"], expected_status == "cancelled")
+            if mcp_response is not None:
+                self.assertFalse(mcp_response.is_error)
+                self.assertEqual(mcp_response.structured_content["status"], "ok")
+                self.assertEqual(mcp_response.structured_content["data"]["exit_code"], 7)
 
     def test_execute_uses_null_when_runner_does_not_report_cleanup(self):
         with patch.object(
@@ -1857,6 +1872,7 @@ class TestServerTools(unittest.TestCase):
             "Error: runtime semantic-index budget adjustment is disabled; set "
             "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
         )
+        self.assertTrue(mcp_response.is_error)
         mcp_error = json.loads(mcp_response.content[0].text)
         self.assertEqual(mcp_error["status"], "error")
         self.assertEqual(mcp_error["error"]["code"], "index_budget_disabled")
@@ -1888,6 +1904,7 @@ class TestServerTools(unittest.TestCase):
             direct,
             "Error adjusting semantic-index budget: budget must be non-negative",
         )
+        self.assertTrue(mcp_response.is_error)
         mcp_error = json.loads(mcp_response.content[0].text)
         self.assertEqual(mcp_error["status"], "error")
         self.assertEqual(mcp_error["error"]["code"], "invalid_index_budget")
@@ -2093,6 +2110,7 @@ class TestServerTools(unittest.TestCase):
                 returned_error.structured_content["error"]["details"]["call_id"],
                 returned_call_id,
             )
+            self.assertTrue(returned_error.is_error)
 
             with patch.object(
                 context.engine,
@@ -2113,6 +2131,7 @@ class TestServerTools(unittest.TestCase):
                 unexpected_error.structured_content["status"],
                 "error",
             )
+            self.assertTrue(unexpected_error.is_error)
             self.assertEqual(
                 unexpected_error.structured_content["error"]["code"],
                 "operation_failed",
@@ -2139,8 +2158,9 @@ class TestServerTools(unittest.TestCase):
             "diagnostics",
         )
         result = asyncio.run(adapter())
-        payload = json.loads(result)
+        payload = mcp_result_payload(result)
 
+        self.assertTrue(result.is_error)
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["error"]["code"], "operation_failed")
         self.assertEqual(
@@ -2148,10 +2168,72 @@ class TestServerTools(unittest.TestCase):
             "The operation failed unexpectedly.",
         )
         self.assertIsInstance(payload["error"]["details"]["call_id"], str)
-        self.assertNotIn("private exception text", result)
+        self.assertNotIn("private exception text", mcp_result_text(result))
+
+    def test_legacy_execution_api_errors_use_native_mcp_error_flag(self):
+        with patch(
+            "ephemeral_buffer_mcp.tools.execution_responses.get_active_execution_manager"
+        ) as get_manager:
+            get_manager.return_value.public.side_effect = KeyError(
+                "missing-native-error-flag"
+            )
+            result = asyncio.run(
+                self.call_mcp_tool_inline(
+                    "get_execution",
+                    {"execution_id": "missing-native-error-flag"},
+                )
+            )
+
+        body = mcp_result_text(result)
+        payload = json.loads(body)
+        self.assertTrue(result.is_error)
+        self.assertIsNone(result.structured_content)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"]["code"], "execution_not_found")
+        self.assertIsInstance(payload["error"]["details"]["call_id"], str)
+        self.assertEqual(
+            body,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+
+    def test_successful_legacy_json_response_remains_text(self):
+        response_text = '{"status":"ok","message":"still legacy text"}'
+        adapter = self.build_mcp_adapter(
+            lambda: response_text,
+            "legacy_success_probe",
+            "configuration",
+        )
+
+        result = asyncio.run(adapter())
+
+        self.assertIsInstance(result, str)
+        self.assertEqual(result, response_text)
+
+    def test_call_tool_result_size_matches_success_and_error_wire_flags(self):
+        envelopes = (
+            server.ToolResponseEnvelope(status="ok", data={"message": "done"}, text="done"),
+            server.ToolResponseEnvelope(
+                status="error",
+                error=server.ToolErrorEnvelope(
+                    code="capture_not_found", message="missing capture"
+                ),
+                text="Error: missing capture",
+            ),
+        )
+
+        for envelope in envelopes:
+            with self.subTest(status=envelope.status):
+                result = mcp_transport._call_tool_result(envelope)
+                encoded_result = result.model_dump_json(by_alias=True).encode("utf-8")
+                self.assertEqual(result.is_error, envelope.status == "error")
+                self.assertEqual(
+                    mcp_transport._call_tool_result_bytes(envelope),
+                    len(encoded_result),
+                )
 
     def test_legacy_json_error_correlation_ignores_non_text_values(self):
         self.assertIsNone(mcp_transport._correlate_json_error(None, "call-id"))
+        self.assertIsNone(mcp_transport._legacy_text_result(None))
 
     def test_mcp_session_scope_binding_without_request_context_is_a_noop(self):
         original_metrics = server.METRICS
@@ -3326,6 +3408,8 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(missing.structured_content["status"], "error")
         self.assertEqual(missing.structured_content["error"]["code"], "capture_not_found")
         self.assertEqual(missing.structured_content["error"]["message"], direct)
+        self.assertTrue(missing.is_error)
+        self.assertTrue(missing.content[0].text)
 
         cleared = asyncio.run(
             self.call_mcp_tool_inline("clear_captures", {"capture_id": "all"})

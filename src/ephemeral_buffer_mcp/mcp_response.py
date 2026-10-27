@@ -133,7 +133,7 @@ def call_tool_result_bytes(
         "structuredContent": envelope.model_dump(
             mode="json", by_alias=True, exclude={"text"}
         ),
-        "isError": False,
+        "isError": envelope.status == "error",
         "resultType": "complete",
     }
     return len(
