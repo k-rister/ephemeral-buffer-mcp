@@ -17,6 +17,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Preserve direct helper text and successful response shapes while returning
   stable MCP error codes for capture, retrieval, clear, configuration, and
   preflight failures; add exact response-shape regression assertions.
+- Set MCP's native `isError` flag for EB operation failures while preserving
+  legacy JSON error text and successful captured command results.
 - Normalize Unicode identically in BM25 indexes, queries, and fallback search;
   bound structured search labels and paginate capture listings with stable,
   signed cursors and JSON-safe label limits.

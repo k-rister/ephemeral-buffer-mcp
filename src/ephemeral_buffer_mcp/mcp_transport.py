@@ -122,16 +122,29 @@ class _MCPRequestMetricsMiddleware:
                 return await call_next(request_context)
 
 
-
-
 def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
     """Create an MCP result with readable text and its structured envelope."""
     return CallToolResult(
         content=[TextContent(type="text", text=envelope.text or "")],
         structured_content=envelope.model_dump(mode="json", exclude={"text"}),
+        is_error=envelope.status == "error",
     )
 
 
+def _legacy_text_result(result: Any) -> Any:
+    """Flag legacy JSON operation errors while preserving their text body."""
+    if not isinstance(result, str):
+        return result
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(payload, dict) or payload.get("status") != "error":
+        return result
+    return CallToolResult(
+        content=[TextContent(type="text", text=result)],
+        is_error=True,
+    )
 
 
 def _legacy_tool_envelope(
@@ -244,7 +257,7 @@ def _service_rejection_result(
         separators=(",", ":"),
     )
     if not structured:
-        return error_text
+        return _legacy_text_result(error_text)
     response = ToolResponseEnvelope(
         status="error",
         error=ToolErrorEnvelope(code=code, message=message, details=details),
@@ -431,7 +444,7 @@ def _register_mcp_tool_for_app(
                     _service_context=service_context,
                     _call_id=call_id,
                 )
-                return error_text
+                return _legacy_text_result(error_text)
 
             async def invoke(ticket, call_id):
                 if structured_result_factory is not None:
@@ -487,7 +500,7 @@ def _register_mcp_tool_for_app(
                             _service_context=service_context,
                             _call_id=call_id,
                         )
-                        return result
+                        return _legacy_text_result(result)
                     response = _legacy_tool_envelope(
                         name,
                         result,
