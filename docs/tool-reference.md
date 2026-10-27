@@ -103,6 +103,12 @@ ID; exception text is not returned. Direct Python exceptions and MCP SDK
 argument-validation responses keep their existing behavior. MCP clients
 continue to receive readable text in `content[0].text`; the same result data is
 available in `structuredContent`. The envelope's `status` is `ok` or `error`.
+Admission active caps are process-wide across MCP event loops and the socket
+server's separate event loop: defaults reserve 8 MCP workers, 4 socket clients,
+and 1 diagnostic worker. Queue limits remain per event loop; waiters are FIFO
+within a loop, and permit grants rotate among loops waiting in the same lane.
+The diagnostic worker slot remains independent of saturated MCP and socket
+lanes. A full MCP queue returns the existing `server_busy` error.
 Stable capture error codes include `capture_failed` and
 `consolidate_captures_failed`. Stable retrieval and search error codes include
 `capture_not_found`, `retrieval_failed`, `invalid_range`, `invalid_cursor`,
