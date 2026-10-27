@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 from pydantic import ValidationError
 
 import ephemeral_buffer_mcp
+from ephemeral_buffer_mcp.capture_utils import BoundedCommandResult
 from ephemeral_buffer_mcp.metrics import LocalMetrics
 from ephemeral_buffer_mcp.socket_protocol import (
     FRAME_HEADER_SIZE,
@@ -1304,11 +1305,29 @@ class TestServerTools(unittest.TestCase):
             "Error: content_type must be one of: auto, diff, log, or text.",
         )
 
+    def test_capture_text_keeps_non_socket_ingest_exceptions(self):
+        with patch.object(
+            capture_tools, "_capture_text", side_effect=RuntimeError("ingestion failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ingestion failed"):
+                server.capture_text("content")
+
+    def test_socket_command_outcome_leaves_invalid_summary_shapes_unchanged(self):
+        metadata = {"command_exit_code": 1}
+        for result in ("not-json", "[]"):
+            with self.subTest(result=result):
+                self.assertEqual(
+                    capture_tools._with_socket_command_outcome(result, metadata),
+                    result,
+                )
+
     def test_execute_reports_timeout(self):
         with patch.object(
             capture_tools,
             "run_command_bounded",
-            return_value=("partial output", 124, False, 14, True),
+            return_value=BoundedCommandResult(
+                "partial output", 124, False, 14, True, cleanup_confirmed=True
+            ),
         ) as run:
             result = server.execute_and_capture("sleep 10", timeout_seconds=0.5)
 
@@ -1316,7 +1335,104 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(summary["status"], "timed_out")
         self.assertTrue(summary["partial"])
         self.assertTrue(summary["timed_out"])
+        self.assertEqual(summary["command_status"], "timed_out")
+        self.assertEqual(summary["capture_status"], "captured")
+        self.assertTrue(summary["cleanup_confirmed"])
         run.assert_called_once()
+
+    def test_execute_reports_command_and_capture_outcomes_separately(self):
+        cases = (
+            (
+                BoundedCommandResult(
+                    "nonzero", 7, False, 7, False, cleanup_confirmed=False
+                ),
+                "completed",
+                False,
+            ),
+            (
+                BoundedCommandResult(
+                    "cancelled", 130, False, 9, False,
+                    cleanup_confirmed=True, cancelled=True,
+                ),
+                "cancelled",
+                True,
+            ),
+        )
+        for command_result, expected_status, expected_cleanup in cases:
+            with self.subTest(command_status=expected_status), patch.object(
+                capture_tools, "run_command_bounded", return_value=command_result
+            ):
+                summary = json.loads(server.execute_and_capture("command"))
+            self.assertEqual(summary["command_status"], expected_status)
+            self.assertEqual(summary["capture_status"], "captured")
+            self.assertEqual(summary["exit_code"], command_result[1])
+            self.assertEqual(summary["cleanup_confirmed"], expected_cleanup)
+            self.assertEqual(summary["command_cancelled"], expected_status == "cancelled")
+
+    def test_execute_uses_null_when_runner_does_not_report_cleanup(self):
+        with patch.object(
+            capture_tools,
+            "run_command_bounded",
+            return_value=("output", 0, False, 6, False),
+        ):
+            summary = json.loads(server.execute_and_capture("command"))
+
+        self.assertEqual(summary["command_status"], "completed")
+        self.assertEqual(summary["capture_status"], "captured")
+        self.assertIsNone(summary["cleanup_confirmed"])
+
+    def test_execute_preserves_command_outcome_when_capture_fails_and_maps_mcp_error(self):
+        server.engine.max_buffer_bytes = 512
+        command_label = "L" * 600
+        command_output = "unretained command output"
+        with patch.object(
+            capture_tools,
+            "run_command_bounded",
+            return_value=BoundedCommandResult(
+                command_output, 7, False, len(command_output), False,
+                cleanup_confirmed=False,
+            ),
+        ):
+            response = asyncio.run(self.call_mcp_tool_inline(
+                "execute_and_capture",
+                {"command": "failing-command", "label": command_label},
+            ))
+
+        structured = response.structured_content
+        self.assertEqual(structured["status"], "error")
+        self.assertEqual(structured["error"]["code"], "capture_failed")
+        outcome = structured["data"]
+        self.assertEqual(outcome["status"], "capture_failed")
+        self.assertEqual(outcome["capture_status"], "failed")
+        self.assertEqual(outcome["command_status"], "completed")
+        self.assertEqual(outcome["exit_code"], 7)
+        self.assertIsInstance(outcome["duration_ms"], (int, float))
+        self.assertFalse(outcome["cleanup_confirmed"])
+        self.assertIn("exceeding the 512-byte buffer limit", outcome["capture_error"])
+        self.assertNotIn("capture_id", outcome)
+        self.assertNotIn("output", outcome)
+
+    def test_execute_does_not_fabricate_outcomes_before_command_result(self):
+        with patch.object(
+            capture_tools,
+            "run_command_bounded",
+            side_effect=OSError("unable to start command"),
+        ):
+            result = server.execute_and_capture("missing-command")
+
+        self.assertIn("Error executing command", result)
+        self.assertNotIn("command_status", result)
+        self.assertNotIn("cleanup_confirmed", result)
+
+    def test_capture_failure_error_text_is_bounded(self):
+        payload = capture_tools._capture_failed_payload(RuntimeError("x" * 5000))
+
+        self.assertEqual(payload["status"], "capture_failed")
+        self.assertLessEqual(
+            len(payload["capture_error"].encode("utf-8")),
+            capture_tools.CAPTURE_ERROR_MAX_BYTES,
+        )
+        self.assertTrue(payload["capture_error"].endswith("... [truncated]"))
 
     def test_consolidate_captures_preserves_sources_and_is_searchable(self):
         server.capture_text("alpha failure\nalpha detail", label="repo-a")
@@ -2694,11 +2810,18 @@ class TestServerTools(unittest.TestCase):
                     max_output_bytes=1024,
                 )
             compact_payload = json.loads(compact)
+            compact_capture_summary = {
+                key: value
+                for key, value in compact_payload.items()
+                if key not in {"command_status", "capture_status", "cleanup_confirmed"}
+            }
             detailed = server.get_capture_summary(
                 compact_payload["capture_id"],
                 include_previews=True,
             )
-            compact_proxy = math.ceil(len(compact.encode("utf-8")) / 4)
+            compact_proxy = math.ceil(
+                len(json.dumps(compact_capture_summary, separators=(",", ":")).encode("utf-8")) / 4
+            )
             detailed_proxy = math.ceil(len(detailed.encode("utf-8")) / 4)
             self.assertLess(compact_proxy, detailed_proxy, name)
             reductions[name] = detailed_proxy - compact_proxy
@@ -4331,8 +4454,34 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 "original_byte_size": 40,
                 "command_exit_code": 7,
                 "timed_out": True,
+                "command_cancelled": False,
+                "cleanup_confirmed": None,
             },
         })
+
+    async def test_socket_capture_error_retains_cli_command_outcome(self):
+        server.engine.max_buffer_bytes = 512
+        payload = encode_socket_request({
+            "label": "L" * 600,
+            "text": "command output",
+            "command_exit_code": 9,
+            "timed_out": False,
+            "duration_ms": 4.5,
+            "command_cancelled": True,
+            "cleanup_confirmed": False,
+        })
+
+        writer = await self.run_handler(encode_frame(payload))
+
+        response = response_json(writer)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["code"], "capture_failed")
+        self.assertEqual(response["command_status"], "cancelled")
+        self.assertEqual(response["capture_status"], "failed")
+        self.assertEqual(response["exit_code"], 9)
+        self.assertEqual(response["duration_ms"], 4.5)
+        self.assertFalse(response["cleanup_confirmed"])
+        self.assertIn("exceeding the 512-byte buffer limit", response["capture_error"])
 
     async def test_socket_request_adapter_preserves_protocol_error(self):
         payload = encode_socket_request({"label": "invalid-adapter", "text": "hello"})
@@ -4526,6 +4675,8 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
                 "original_byte_size": None,
                 "command_exit_code": None,
                 "timed_out": False,
+                "command_cancelled": False,
+                "cleanup_confirmed": None,
             },
         })
 

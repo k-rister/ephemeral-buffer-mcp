@@ -608,6 +608,13 @@ output. Wrapped command output stays on stdout, while the `ephbuf` execution
 banner and status messages go to stderr.
 Use `--timeout-seconds` to stop a wrapped command after a bounded runtime; timed
 out commands retain the output collected so far and exit with status 124.
+Command completion and output retention are reported separately: a wrapped
+command can finish (or time out or be cancelled) even if its output cannot be
+stored. MCP summaries expose `command_status` and `capture_status`, along with
+`cleanup_confirmed` when the runner can report it. If capture fails, the
+`capture_failed` result retains the command exit code and duration, omits the
+unretained output, and leaves the CLI with a nonzero capture result while
+preserving a nonzero command exit code.
 Requested `max_output_bytes` and `capture_file` `max_bytes` values may not
 exceed the configured buffer byte limit; the tools return a validation error
 instead of silently clamping them.

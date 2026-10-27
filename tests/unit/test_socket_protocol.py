@@ -65,6 +65,8 @@ class TestSocketProtocol(unittest.TestCase):
                 "command_exit_code": None,
                 "timed_out": False,
                 "duration_ms": None,
+                "command_cancelled": False,
+                "cleanup_confirmed": None,
                 "structured_metrics": {"tests": 2},
             },
         )
@@ -82,6 +84,8 @@ class TestSocketProtocol(unittest.TestCase):
             {"text": "x", "original_byte_size": True},
             {"text": "x", "command_exit_code": False},
             {"text": "x", "timed_out": "false"},
+            {"text": "x", "command_cancelled": "false"},
+            {"text": "x", "cleanup_confirmed": "unknown"},
             {"text": "x", "duration_ms": "1"},
             {"text": "x", "duration_ms": math.nan},
             {"text": "x", "duration_ms": 10**400},
@@ -120,7 +124,19 @@ class TestSocketProtocol(unittest.TestCase):
             {key: value for key, value in success.items() if key != "future_field"},
         )
 
-        error = {"status": "error", "code": "server_busy", "message": "retry"}
+        error = {
+            "status": "error",
+            "code": "capture_failed",
+            "message": "capture failed",
+            "command_status": "completed",
+            "capture_status": "failed",
+            "capture_error": "admission rejected",
+            "exit_code": 7,
+            "timed_out": False,
+            "command_cancelled": False,
+            "duration_ms": 12.5,
+            "cleanup_confirmed": None,
+        }
         self.assertEqual(decode_socket_response(encode_socket_response(error)), error)
 
         legacy_error = {"status": "error", "message": "legacy failure"}
@@ -141,6 +157,8 @@ class TestSocketProtocol(unittest.TestCase):
             {"status": "error", "message": "failed"},
             {"status": "error", "code": "", "message": "failed"},
             {"status": "error", "code": "failed"},
+            {"status": "error", "code": "failed", "message": "failed", "cleanup_confirmed": "yes"},
+            {"status": "error", "code": "failed", "message": "failed", "duration_ms": math.nan},
             {"status": "ok", "label": "build", "line_count": 1, "byte_size": 1},
             {"status": "ok", "capture_id": "cap", "line_count": 1, "byte_size": 1},
             {"status": "ok", "capture_id": "cap", "label": "build", "line_count": True, "byte_size": 1},
@@ -156,6 +174,12 @@ class TestSocketProtocol(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(SocketPayloadError, "valid UTF-8 JSON"):
                     decode_socket_response(payload)
+
+    def test_socket_error_outcome_field_validation_handles_nullable_and_invalid_values(self):
+        self.assertTrue(socket_protocol._valid_error_outcome_field("duration_ms", None))
+        self.assertFalse(socket_protocol._valid_error_outcome_field("duration_ms", True))
+        self.assertFalse(socket_protocol._valid_error_outcome_field("duration_ms", 10**400))
+        self.assertFalse(socket_protocol._valid_error_outcome_field("unknown", "value"))
 
 
 if __name__ == "__main__":

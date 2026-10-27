@@ -33,6 +33,8 @@ class SocketRequestPayload(TypedDict, total=False):
     command_exit_code: int | None
     timed_out: bool
     duration_ms: float | None
+    command_cancelled: bool
+    cleanup_confirmed: bool | None
     structured_metrics: dict[str, Any] | None
 
 
@@ -47,6 +49,8 @@ class ParsedSocketRequest(TypedDict):
     command_exit_code: int | None
     timed_out: bool
     duration_ms: float | None
+    command_cancelled: bool
+    cleanup_confirmed: bool | None
     structured_metrics: dict[str, Any] | None
 
 
@@ -68,7 +72,22 @@ class SocketErrorResponse(TypedDict):
     message: str
 
 
-SocketResponse = SocketSuccessResponse | SocketSuccessResponseWithSummary | SocketErrorResponse
+class SocketErrorResponseWithOutcome(SocketErrorResponse, total=False):
+    command_status: str
+    capture_status: str
+    capture_error: str
+    exit_code: int
+    timed_out: bool
+    command_cancelled: bool
+    duration_ms: float | None
+    cleanup_confirmed: bool | None
+
+
+SocketResponse = (
+    SocketSuccessResponse
+    | SocketSuccessResponseWithSummary
+    | SocketErrorResponseWithOutcome
+)
 
 
 _REQUEST_FIELDS = frozenset(
@@ -81,6 +100,8 @@ _REQUEST_FIELDS = frozenset(
         "command_exit_code",
         "timed_out",
         "duration_ms",
+        "command_cancelled",
+        "cleanup_confirmed",
         "structured_metrics",
     }
 )
@@ -94,6 +115,8 @@ _REQUEST_DEFAULTS: ParsedSocketRequest = {
     "command_exit_code": None,
     "timed_out": False,
     "duration_ms": None,
+    "command_cancelled": False,
+    "cleanup_confirmed": None,
     "structured_metrics": None,
 }
 
@@ -193,8 +216,10 @@ def _valid_request_field(field: str, value: Any) -> bool:
         return isinstance(value, str)
     if field == "content_type":
         return isinstance(value, str) and value in _CONTENT_TYPES
-    if field in {"truncated", "timed_out"}:
+    if field in {"truncated", "timed_out", "command_cancelled"}:
         return isinstance(value, bool)
+    if field == "cleanup_confirmed":
+        return value is None or isinstance(value, bool)
     if field == "original_byte_size":
         return value is None or _is_integer(value, nonnegative=True)
     if field == "command_exit_code":
@@ -211,6 +236,27 @@ def _valid_request_field(field: str, value: Any) -> bool:
     if field == "structured_metrics":
         return value is None or isinstance(value, dict)
     return field not in _REQUEST_FIELDS
+
+
+def _valid_error_outcome_field(field: str, value: Any) -> bool:
+    if field in {"command_status", "capture_status", "capture_error"}:
+        return isinstance(value, str)
+    if field == "exit_code":
+        return _is_integer(value)
+    if field in {"timed_out", "command_cancelled"}:
+        return isinstance(value, bool)
+    if field == "duration_ms":
+        if value is None:
+            return True
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+    if field == "cleanup_confirmed":
+        return value is None or isinstance(value, bool)
+    return False
 
 
 def _is_integer(value: Any, *, nonnegative: bool = False) -> bool:
@@ -239,7 +285,29 @@ def _normalize_socket_response(
             raise SocketPayloadError("socket error response requires a non-empty code")
         if not isinstance(message, str):
             raise SocketPayloadError("socket error response requires a message")
-        return cast(SocketErrorResponse, {"status": "error", "code": code, "message": message})
+        normalized_error: dict[str, Any] = {
+            "status": "error",
+            "code": code,
+            "message": message,
+        }
+        error_fields = {
+            "command_status",
+            "capture_status",
+            "capture_error",
+            "exit_code",
+            "timed_out",
+            "command_cancelled",
+            "duration_ms",
+            "cleanup_confirmed",
+        }
+        for field, value in response.items():
+            if field in error_fields:
+                if not _valid_error_outcome_field(field, value):
+                    raise SocketPayloadError(
+                        f"socket error response field '{field}' has an invalid value"
+                    )
+                normalized_error[field] = value
+        return cast(SocketErrorResponseWithOutcome, normalized_error)
 
     if status == "ok":
         capture_id = response.get("capture_id")

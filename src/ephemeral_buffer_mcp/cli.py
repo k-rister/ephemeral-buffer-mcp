@@ -47,17 +47,28 @@ def send_to_mcp(
     command_exit_code: int | None = None,
     timed_out: bool = False,
     duration_ms: float | None = None,
+    command_cancelled: bool = False,
+    cleanup_confirmed: bool | None = None,
 ) -> dict:
+    def error_response(message: str) -> dict:
+        response = {"status": "error", "message": message}
+        return _attach_cli_command_outcome(
+            response,
+            command_exit_code=command_exit_code,
+            timed_out=timed_out,
+            duration_ms=duration_ms,
+            command_cancelled=command_cancelled,
+            cleanup_confirmed=cleanup_confirmed,
+        )
+
     if SETTINGS.socket_require_isolation.value and not SETTINGS.identity.isolation_configured:
-        return {
-            "status": "error",
-            "message": "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH",
-        }
+        return error_response(
+            "Socket isolation is required; set EPHEMERAL_SESSION_ID or EPHEMERAL_SOCKET_PATH"
+        )
     if not os.path.exists(SOCKET_PATH):
-        return {
-            "status": "error",
-            "message": f"MCP server socket not found at {SOCKET_PATH}. Is the ephemeral-buffer MCP server running?"
-        }
+        return error_response(
+            f"MCP server socket not found at {SOCKET_PATH}. Is the ephemeral-buffer MCP server running?"
+        )
 
     sock = None
     try:
@@ -65,7 +76,7 @@ def send_to_mcp(
         sock.settimeout(SETTINGS.socket_timeout_seconds.value)
         sock.connect(SOCKET_PATH)
         
-        payload = encode_socket_request({
+        request = {
             "label": label,
             "text": text,
             "content_type": content_type,
@@ -74,25 +85,77 @@ def send_to_mcp(
             "command_exit_code": command_exit_code,
             "timed_out": timed_out,
             "duration_ms": duration_ms,
-        })
+        }
+        if command_exit_code is not None:
+            request["command_cancelled"] = command_cancelled
+            request["cleanup_confirmed"] = cleanup_confirmed
+        payload = encode_socket_request(request)
         frame = encode_frame(payload)
         if len(frame) <= 1024:
             sock.sendall(frame)
-            return _recv_response(sock)
-        return _send_large_frame_with_early_response(sock, frame)
+            response = _recv_response(sock)
+        else:
+            response = _send_large_frame_with_early_response(sock, frame)
+        return _attach_cli_command_outcome(
+            response,
+            command_exit_code=command_exit_code,
+            timed_out=timed_out,
+            duration_ms=duration_ms,
+            command_cancelled=command_cancelled,
+            cleanup_confirmed=cleanup_confirmed,
+        )
     except socket.timeout:
-        return {
-            "status": "error",
-            "message": (
-                "Timed out communicating with MCP server after "
-                f"{SETTINGS.socket_timeout_seconds.value:g}s"
-            ),
-        }
+        return error_response(
+            "Timed out communicating with MCP server after "
+            f"{SETTINGS.socket_timeout_seconds.value:g}s"
+        )
     except Exception as e:
-        return {"status": "error", "message": f"Failed to communicate with MCP server: {e}"}
+        return error_response(f"Failed to communicate with MCP server: {e}")
     finally:
         if sock is not None:
             sock.close()
+
+
+def _attach_cli_command_outcome(
+    response: dict,
+    *,
+    command_exit_code: int | None,
+    timed_out: bool,
+    duration_ms: float | None,
+    command_cancelled: bool,
+    cleanup_confirmed: bool | None,
+) -> dict:
+    """Keep the local command result visible when socket capture fails."""
+    if command_exit_code is None:
+        return response
+    command_status = (
+        "cancelled"
+        if command_cancelled
+        else "timed_out"
+        if timed_out
+        else "completed"
+    )
+    outcome = {
+        "command_status": command_status,
+        "exit_code": command_exit_code,
+        "timed_out": timed_out,
+        "command_cancelled": command_cancelled,
+        "duration_ms": duration_ms,
+        "cleanup_confirmed": cleanup_confirmed,
+    }
+    if response.get("status") == "ok":
+        summary = response.get("summary")
+        if isinstance(summary, dict):
+            summary.update({**outcome, "capture_status": "captured"})
+    elif response.get("code") == "capture_failed" or response.get("capture_status") == "failed":
+        response.update({
+            **outcome,
+            "capture_status": "failed",
+            "capture_error": response.get("capture_error", response.get("message", "Capture failed.")),
+        })
+    else:
+        response.update(outcome)
+    return response
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -240,11 +303,19 @@ def main():
         
         command_started = time.perf_counter()
         try:
-            output, exit_code, truncated, original_byte_size, timed_out = run_command_bounded(
+            command_result = run_command_bounded(
                 cmd_str, None, args.max_output_bytes, args.timeout_seconds
             )
         except ValueError as e:
             parser.error(str(e))
+        output, exit_code, truncated, original_byte_size, timed_out = command_result
+        command_cancelled = bool(getattr(command_result, "cancelled", False))
+        runner_cleanup_confirmed = getattr(command_result, "cleanup_confirmed", None)
+        cleanup_confirmed = (
+            runner_cleanup_confirmed
+            if isinstance(runner_cleanup_confirmed, bool)
+            else None
+        )
         duration_ms = round((time.perf_counter() - command_started) * 1000, 3)
         # Also print output locally so user can see it if desired
         sys.stdout.write(output)
@@ -259,6 +330,8 @@ def main():
             command_exit_code=exit_code,
             timed_out=timed_out,
             duration_ms=duration_ms,
+            command_cancelled=command_cancelled,
+            cleanup_confirmed=cleanup_confirmed,
         )
         if res.get("status") == "ok":
             _report_success(res)

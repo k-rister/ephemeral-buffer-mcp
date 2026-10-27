@@ -17,6 +17,7 @@ from unittest.mock import patch
 from ephemeral_buffer_mcp.socket_protocol import FRAME_HEADER_SIZE, decode_header, encode_frame
 import ephemeral_buffer_mcp.socket_protocol as socket_protocol
 from ephemeral_buffer_mcp.config import load_settings
+from ephemeral_buffer_mcp.capture_utils import BoundedCommandResult
 
 import ephemeral_buffer_mcp.cli as cli
 
@@ -28,6 +29,24 @@ RUN_SH = REPOSITORY_ROOT / "run.sh"
 
 
 class TestCliConfiguration(unittest.TestCase):
+    def test_attach_cli_command_outcome_to_successful_socket_summary(self):
+        response = {"status": "ok", "summary": {"status": "failed"}}
+
+        result = cli._attach_cli_command_outcome(
+            response,
+            command_exit_code=4,
+            timed_out=False,
+            duration_ms=12.5,
+            command_cancelled=False,
+            cleanup_confirmed=True,
+        )
+
+        self.assertEqual(result["summary"]["status"], "failed")
+        self.assertEqual(result["summary"]["command_status"], "completed")
+        self.assertEqual(result["summary"]["capture_status"], "captured")
+        self.assertEqual(result["summary"]["exit_code"], 4)
+        self.assertTrue(result["summary"]["cleanup_confirmed"])
+
     def test_test_environment_wrapper_overrides_active_session_paths(self):
         probe = (
             "import ephemeral_buffer_mcp.cli as cli, json, os, "
@@ -330,6 +349,76 @@ class TestCliConfiguration(unittest.TestCase):
                 "duration_ms": None,
             },
         )
+
+    def test_send_to_mcp_forwards_and_returns_command_outcome_on_capture_error(self):
+        class FakeSocket:
+            def __init__(self):
+                self.sent = None
+                self.response = bytearray(encode_frame(json.dumps({
+                    "status": "error",
+                    "code": "capture_failed",
+                    "message": "output could not be retained",
+                    "capture_error": "label exceeds the buffer limit",
+                    "capture_status": "failed",
+                    "command_status": "cancelled",
+                    "exit_code": 9,
+                    "timed_out": False,
+                    "command_cancelled": True,
+                    "duration_ms": 2.5,
+                    "cleanup_confirmed": False,
+                }).encode()))
+
+            def settimeout(self, _value):
+                pass
+
+            def connect(self, _path):
+                pass
+
+            def sendall(self, payload):
+                self.sent = payload
+
+            def recv(self, size):
+                chunk = bytes(self.response[:size])
+                del self.response[:size]
+                return chunk
+
+            def close(self):
+                pass
+
+        fake_socket = FakeSocket()
+        with patch.object(cli, "SOCKET_PATH", "/tmp/ephemeral.sock"), \
+                patch.object(cli.os.path, "exists", return_value=True), \
+                patch.object(cli.socket, "socket", return_value=fake_socket):
+            result = cli.send_to_mcp(
+                "output",
+                command_exit_code=9,
+                timed_out=False,
+                duration_ms=2.5,
+                command_cancelled=True,
+                cleanup_confirmed=False,
+            )
+
+        sent_length = decode_header(fake_socket.sent[:FRAME_HEADER_SIZE])
+        request = json.loads(fake_socket.sent[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + sent_length])
+        self.assertTrue(request["command_cancelled"])
+        self.assertFalse(request["cleanup_confirmed"])
+        self.assertEqual(result["capture_status"], "failed")
+        self.assertEqual(result["command_status"], "cancelled")
+        self.assertEqual(result["exit_code"], 9)
+        self.assertFalse(result["cleanup_confirmed"])
+        self.assertEqual(result["capture_error"], "label exceeds the buffer limit")
+
+        transport_error = cli._attach_cli_command_outcome(
+            {"status": "error", "code": "socket_read_timeout", "message": "reply timed out"},
+            command_exit_code=9,
+            timed_out=False,
+            duration_ms=2.5,
+            command_cancelled=False,
+            cleanup_confirmed=False,
+        )
+        self.assertEqual(transport_error["exit_code"], 9)
+        self.assertNotIn("capture_status", transport_error)
+        self.assertNotIn("capture_error", transport_error)
 
     def test_large_socket_frame_stops_upload_when_busy_response_arrives_first(self):
         client_socket, server_socket = socket.socketpair()
@@ -819,6 +908,28 @@ class TestCliConfiguration(unittest.TestCase):
 
         self.assertEqual(exit_result.exception.code, 1)
         self.assertIn("socket unavailable", stderr.getvalue())
+
+    def test_wrapped_command_capture_failure_preserves_command_exit_and_metadata(self):
+        response = {
+            "status": "error",
+            "code": "capture_failed",
+            "message": "output could not be retained",
+        }
+        command_result = BoundedCommandResult(
+            "output", 9, False, 6, False,
+            cleanup_confirmed=False, cancelled=True,
+        )
+        with patch.object(cli, "run_command_bounded", return_value=command_result), \
+                patch.object(cli, "send_to_mcp", return_value=response) as send, \
+                patch.object(sys, "argv", ["cli.py", "--", "echo", "ok"]), \
+                patch.object(sys, "stdout", io.StringIO()), \
+                patch.object(sys, "stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                cli.main()
+
+        self.assertEqual(exit_result.exception.code, 9)
+        self.assertTrue(send.call_args.kwargs["command_cancelled"])
+        self.assertFalse(send.call_args.kwargs["cleanup_confirmed"])
 
     def test_wrapped_command_reports_invalid_output_limit(self):
         with patch.object(cli, "run_command_bounded", side_effect=ValueError("limit too small")), \
