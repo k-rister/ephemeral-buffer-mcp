@@ -20,6 +20,9 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Normalize Unicode identically in BM25 indexes, queries, and fallback search;
   bound structured search labels and paginate capture listings with stable,
   signed cursors and JSON-safe label limits.
+- Share MCP, socket, and diagnostic active-work caps process-wide across event
+  loops, while keeping bounded FIFO queues per loop and rotating grants fairly
+  among waiting loops; reclaim grants discarded during loop shutdown.
 
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: documented the Unicode search and bounded capture listing fixes
 

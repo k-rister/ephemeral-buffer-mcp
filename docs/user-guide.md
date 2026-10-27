@@ -647,14 +647,21 @@ counts in cumulative snapshots and task-window deltas.
 
 Foreground MCP work and CLI socket clients have bounded active and queued
 capacity. Defaults are 8 active and 16 queued MCP calls, plus 4 active and 8
-queued socket clients. When a lane is full, the server returns a `server_busy`
-error that can be retried. MCP admission errors include `details.call_id` for
-correlation with the rejection log. Configure these limits with
+queued socket clients. Active caps apply once per process across all MCP event
+loops and the socket server's separate event loop, so adding another loop does
+not add more worker capacity. Queue limits apply separately to each event loop.
+Each loop serves its waiters in FIFO order, and the shared arbiter rotates
+grants among loops waiting for the same lane. Diagnostics have a separate
+reserved worker slot, so `get_buffer_stats` remains available when MCP and
+socket work reach their caps. When a lane's local queue is full, the server
+returns a `server_busy` error that can be retried. MCP admission errors include
+`details.call_id` for correlation with the rejection log. Configure active and
+queued values with
 `EPHEMERAL_MAX_ACTIVE_TOOL_WORK`, `EPHEMERAL_MAX_QUEUED_TOOL_WORK`,
 `EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS`, and
 `EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS`. `get_buffer_stats` reports active,
 queued, and rejected work and reader-pinned storage that remains after capture
-eviction, and has a reserved worker slot so it remains available under load.
+eviction.
 If socket admission fails unexpectedly, the server returns a generic
 `socket_admission_failed` error and closes that client connection.
 The CLI can receive a busy response while uploading a large socket frame. These

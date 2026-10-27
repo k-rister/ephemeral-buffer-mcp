@@ -174,7 +174,13 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
 ## Admission and storage bounds
 
 Admission control limits active and queued MCP and socket work before requests
-run. The capture engine maintains a bounded LRU buffer; its default limits are
+run. Active caps are process-wide across all MCP event loops and the socket
+server's separate event loop: defaults allow 8 MCP calls, 4 socket clients, and
+1 diagnostic call, matching the shared 13-worker executor. Configured queue
+limits remain per event loop. Each loop keeps FIFO order, while the process
+arbiter rotates grants among loops waiting for the same lane. Diagnostics keep
+their own worker slot while MCP and socket lanes are saturated. The capture
+engine maintains a bounded LRU buffer; its default limits are
 256 captures and 50 MiB of captured UTF-8 content, with a separate lexical
 index-chunk budget. When a new capture would exceed a configured limit, least-
 recently-used captures are evicted to make room when possible; an individual
