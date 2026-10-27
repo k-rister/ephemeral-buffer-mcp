@@ -390,7 +390,7 @@ class TestMetrics(unittest.TestCase):
     def test_engine_records_content_free_usage_events(self):
         metrics = LocalMetrics(enabled=True)
         engine = EphemeralEngine(max_captures=1, embedding_model_name="test", metrics=metrics)
-        engine.embedding_model = type(
+        engine._semantic_index.embedding_model = type(
             "TestEmbedding",
             (),
             {"embed": lambda _self, texts: [[0.0] * 384 for _ in texts]},

@@ -14,9 +14,8 @@ import platform
 import random
 import statistics
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import benchmarks.workload_results as wr
 from ephemeral_buffer_mcp.engine import EphemeralEngine
@@ -126,26 +125,6 @@ def _needle_rank(result: dict[str, Any], line_number: int) -> int | None:
     return None
 
 
-@contextmanager
-def _timed_semantic_index(engine: EphemeralEngine, sink: dict[str, float]) -> Iterator[None]:
-    """Record how long lazy embedding materialization takes inside a search."""
-    coordinator = getattr(engine, "_semantic_index", engine)
-    original = coordinator._ensure_embeddings
-
-    def timed(capture):
-        started = time.perf_counter()
-        try:
-            return original(capture)
-        finally:
-            sink["semantic_index_seconds"] += time.perf_counter() - started
-
-    coordinator._ensure_embeddings = timed
-    try:
-        yield
-    finally:
-        coordinator._ensure_embeddings = original
-
-
 def measure_once(
     engine: EphemeralEngine,
     line_count: int,
@@ -171,7 +150,10 @@ def measure_once(
 
     timing = {"semantic_index_seconds": 0.0}
     first_index, first_line = positions[0]
-    with _timed_semantic_index(engine, timing):
+    def record_indexing_duration(elapsed_seconds: float) -> None:
+        timing["semantic_index_seconds"] += elapsed_seconds
+
+    with engine.observe_semantic_indexing(record_indexing_duration):
         started = time.perf_counter()
         first = engine.search(
             NEEDLES[first_index]["query"], mode=mode, capture_id=capture.capture_id, top_k=top_k
@@ -302,6 +284,7 @@ def run_benchmark(
                 for sample in range(samples)
             ]
             by_size.append(summarize(measurements))
+        engine_stats = engine.get_buffer_stats()
     finally:
         engine.shutdown()
 
@@ -311,18 +294,18 @@ def run_benchmark(
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "cpu_count": os.cpu_count(),
-        "embedding_model": engine.embedding_model_name,
-        "embedding_threads": engine.embedding_threads,
+        "embedding_model": engine_stats["embedding_model"],
+        "embedding_threads": engine_stats["embedding_threads"],
         "semantic_chunking": {
-            "lines": engine.semantic_chunk_lines,
-            "bytes": engine.semantic_chunk_bytes,
-            "overlap": engine.semantic_chunk_overlap,
+            "lines": engine_stats["semantic_chunk_lines"],
+            "bytes": engine_stats["semantic_chunk_bytes"],
+            "overlap": engine_stats["semantic_chunk_overlap"],
         },
         "test_embeddings": os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1",
         "engine_options": {key: value for key, value in options.items() if key != "max_captures"},
         "mode": mode,
         "samples": samples,
-        "semantic_wait_seconds": engine.semantic_wait_seconds,
+        "semantic_wait_seconds": engine_stats["semantic_wait_seconds"],
         "model_load_seconds": model_load_seconds,
         "measurements": by_size,
     }

@@ -3,6 +3,7 @@ Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 """
 
 import base64
+from dataclasses import replace
 import hashlib
 import hmac
 import io
@@ -489,21 +490,22 @@ class TestEphemeralEngine(unittest.TestCase):
         self.addCleanup(engine.shutdown)
         return engine
 
-    def test_semantic_coordinator_facade_and_embedding_publication_guards(self):
-        self.assertIsNotNone(EphemeralEngine.embedding_model)
+    def test_semantic_coordinator_owns_state_and_embedding_publication_guards(self):
+        self.assertNotIn("embedding_model", EphemeralEngine.__dict__)
         engine = self._new_engine(embedding_warmup=False, semantic_prefetch=False)
+        self.assertNotIn("embedding_model", engine.__dict__)
         missing = SimpleNamespace(
             capture_id="missing",
             active_readers=0,
             embeddings=None,
         )
         vectors = np.zeros((1, 384), dtype=np.float32)
-        self.assertFalse(engine._publish_semantic_embeddings(missing, vectors))
+        self.assertFalse(engine.publish_embeddings(missing, vectors))
 
         view = engine.ingest("retained capture")
         capture = engine._get_capture_state(view.capture_id)
         capture.embeddings = vectors
-        self.assertFalse(engine._publish_semantic_embeddings(capture, vectors))
+        self.assertFalse(engine.publish_embeddings(capture, vectors))
 
     def test_semantic_dependency_helpers_report_unavailable_backend(self):
         with patch(
@@ -539,18 +541,18 @@ class TestEphemeralEngine(unittest.TestCase):
                     side_effect=unavailable,
                 ):
                     with self.assertRaises(engine_module.SemanticBackendUnavailable):
-                        engine._get_embedding_model()
-            self.assertFalse(engine.semantic_backend_available)
+                        engine._semantic_index._get_embedding_model()
+            self.assertFalse(engine._semantic_index.semantic_backend_available)
 
-            engine.semantic_backend_available = True
+            engine._semantic_index.semantic_backend_available = True
             capture = engine.ingest("semantic dependency probe content")
-            with patch.object(engine, "_await_semantic_index", side_effect=unavailable):
+            with patch.object(engine._semantic_index, "await_semantic_index", side_effect=unavailable):
                 result = engine.search(
                     "dependency probe", mode="semantic", capture_id=capture.capture_id
                 )
             self.assertEqual(result["status"], "error")
             self.assertEqual(result["error_code"], "semantic_backend_unavailable")
-            self.assertFalse(engine.semantic_backend_available)
+            self.assertFalse(engine._semantic_index.semantic_backend_available)
         finally:
             engine.shutdown()
 
@@ -842,7 +844,7 @@ STEP 3: Summary
 
     def test_deferred_storage_accounting_tracks_embeddings_published_by_reader(self):
         engine = self._new_engine(max_captures=1, semantic_prefetch=False)
-        engine.embedding_model = type(
+        engine._semantic_index.embedding_model = type(
             "TestEmbedding",
             (),
             {"embed": lambda _self, texts: [[1.0] * 384 for _ in texts]},
@@ -975,7 +977,7 @@ STEP 3: Summary
 
         engine = self._new_engine(max_captures=1, semantic_prefetch=False)
         embedding = BlockingEmbedding()
-        engine.embedding_model = embedding
+        engine._semantic_index.embedding_model = embedding
         capture = engine._ingest_state("semantic payload", label="lazy-eviction")
         result_holder = {}
         search_thread = threading.Thread(
@@ -1923,7 +1925,10 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(engine.index_capture(capture.capture_id), "ready")
 
             over_budget = engine.ingest("semantic index too large", label="budget-index")
-            engine.semantic_max_index_input_bytes = 1
+            engine._semantic_index.config = replace(
+                engine._semantic_index.config,
+                semantic_max_index_input_bytes=1,
+            )
             self.assertEqual(engine.index_capture(over_budget.capture_id), "budget_exceeded")
             self.assertEqual(
                 engine.get_capture_diagnostics(over_budget.capture_id).semantic_index_state,
@@ -1939,7 +1944,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 raise RuntimeError("embedding unavailable")
 
         engine = self._new_engine(max_captures=1, semantic_prefetch=False)
-        engine.embedding_model = FailingEmbedding()
+        engine._semantic_index.embedding_model = FailingEmbedding()
         try:
             capture = engine.ingest("indexing failure", label="failed-index")
             self.assertEqual(
@@ -1998,9 +2003,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 self.release.wait()
                 return [[0.0] * 384 for _ in texts]
 
-        original_model = self.engine.embedding_model
+        original_model = self.engine._semantic_index.embedding_model
         blocker = BlockingEmbedding()
-        self.engine.embedding_model = blocker
+        self.engine._semantic_index.embedding_model = blocker
         capture = self.engine._ingest_state("blocked embedding")
         worker = threading.Thread(target=self.engine.search_semantic, args=(capture, "blocked"))
         read_workers = []
@@ -2044,7 +2049,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             worker.join(timeout=30)
             for read_worker in read_workers:
                 read_worker.join(timeout=30)
-            self.engine.embedding_model = original_model
+            self.engine._semantic_index.embedding_model = original_model
         self.assertFalse(worker.is_alive(), "embedding worker did not stop after release")
 
     def test_13_rejects_invalid_buffer_limits(self):
@@ -2094,7 +2099,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 raise RuntimeError("model unavailable")
 
         engine = self._new_engine(max_captures=1)
-        engine.embedding_model = FailingEmbedding()
+        engine._semantic_index.embedding_model = FailingEmbedding()
         capture = engine._ingest_state("payload", label="embedding-failure")
         with self.assertRaisesRegex(RuntimeError, "model unavailable"):
             engine.search_semantic(capture, "payload")
@@ -2107,7 +2112,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(engine.search_semantic(capture, "payload"), [])
 
         capture.embeddings = np.ones((1, 384), dtype=np.float32)
-        engine._ensure_embeddings(capture)
+        engine._semantic_index.ensure_embeddings(capture)
 
         class EmbeddingPublishedWhileWaiting:
             def __enter__(self):
@@ -2118,16 +2123,16 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return False
 
         capture.embeddings = None
-        original_lock = engine._embedding_lock
-        engine._embedding_lock = EmbeddingPublishedWhileWaiting()
+        original_lock = engine._semantic_index._embedding_lock
+        engine._semantic_index._embedding_lock = EmbeddingPublishedWhileWaiting()
         try:
-            engine._ensure_embeddings(capture)
+            engine._semantic_index.ensure_embeddings(capture)
         finally:
-            engine._embedding_lock = original_lock
+            engine._semantic_index._embedding_lock = original_lock
 
     def test_embedding_snapshot_aborts_when_capture_is_not_current(self):
         engine = self._new_engine(max_captures=1, semantic_prefetch=False)
-        engine._ensure_embeddings(SimpleNamespace(capture_id="missing", embeddings=None, chunks=[]))
+        engine._semantic_index.ensure_embeddings(SimpleNamespace(capture_id="missing", embeddings=None, chunks=[]))
         capture = engine._ingest_state("evicted before embedding", label="evicted")
 
         class EvictOnEnter:
@@ -2138,12 +2143,12 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def __exit__(self, *_args):
                 return False
 
-        original_lock = engine._embedding_lock
-        engine._embedding_lock = EvictOnEnter()
+        original_lock = engine._semantic_index._embedding_lock
+        engine._semantic_index._embedding_lock = EvictOnEnter()
         try:
-            engine._ensure_embeddings(capture)
+            engine._semantic_index.ensure_embeddings(capture)
         finally:
-            engine._embedding_lock = original_lock
+            engine._semantic_index._embedding_lock = original_lock
         self.assertIsNone(capture.embeddings)
 
     def test_async_semantic_prefetch_materializes_once_and_search_waits(self):
@@ -2157,15 +2162,15 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         engine = self._new_engine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             capture = engine._ingest_state("prefetch payload", label="prefetch")
             self.assertTrue(started.wait(timeout=2))
             self.assertEqual(capture.semantic_index_state, "pending")
             self.assertIsNone(capture.embeddings)
-            self.assertIn(capture.capture_id, engine._prefetch_running)
-            engine._schedule_semantic_prefetch(capture)
-            self.assertEqual(engine._prefetch_queue, {})
+            self.assertIn(capture.capture_id, engine._semantic_index._prefetch_running)
+            engine._semantic_index.schedule_semantic_prefetch(capture)
+            self.assertEqual(engine._semantic_index._prefetch_queue, {})
             stats = engine.get_buffer_stats()
             self.assertEqual((stats["semantic_prefetch_queued"], stats["semantic_prefetch_running"]), (0, 1))
 
@@ -2173,8 +2178,8 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertTrue(engine.search_semantic(capture, "payload"))
             self.assertEqual(capture.semantic_index_state, "ready")
             self.assertIsNotNone(capture.embeddings)
-            engine._schedule_semantic_prefetch(capture)
-            self.assertEqual(engine._prefetch_queue, {})
+            engine._semantic_index.schedule_semantic_prefetch(capture)
+            self.assertEqual(engine._semantic_index._prefetch_queue, {})
         finally:
             release.set()
             engine.shutdown()
@@ -2185,7 +2190,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 raise RuntimeError("prefetch unavailable")
 
         engine = self._new_engine(max_captures=1, semantic_prefetch=True, semantic_prefetch_workers=1)
-        engine.embedding_model = FailingEmbedding()
+        engine._semantic_index.embedding_model = FailingEmbedding()
         try:
             capture = engine._ingest_state("prefetch failure", label="prefetch-failure")
             deadline = time.time() + 2
@@ -2215,7 +2220,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             embedding_model_name="test",
             metrics=metrics,
         )
-        engine.embedding_model = type(
+        engine._semantic_index.embedding_model = type(
             "TestEmbedding",
             (),
             {"embed": lambda _self, texts: [[1.0] + [0.0] * 383 for _ in texts]},
@@ -2244,7 +2249,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         try:
             capture = submit_engine._ingest_state("submit failure", label="private")
             with patch.object(
-                submit_engine._on_demand_executor,
+                submit_engine._semantic_index._on_demand_executor,
                 "submit",
                 side_effect=RuntimeError("executor closed"),
             ):
@@ -2283,7 +2288,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             semantic_prefetch_workers=1,
             metrics=metrics,
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
 
         def capture_task():
             with metrics.measure("capture_text"):
@@ -2305,7 +2310,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertEqual(prefetch_delta["semantic_index"]["prefetch"]["completed"], 0)
 
             with engine._lock:
-                prefetch_done = engine._prefetch_running[capture_holder[0].capture_id]
+                prefetch_done = engine._semantic_index._prefetch_running[capture_holder[0].capture_id]
             release.set()
             self.assertTrue(prefetch_done.wait(timeout=2))
             capture_thread.join(timeout=2)
@@ -2337,7 +2342,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             semantic_prefetch=False,
             metrics=on_demand_metrics,
         )
-        on_demand_engine.embedding_model = BlockingOnDemandEmbedding()
+        on_demand_engine._semantic_index.embedding_model = BlockingOnDemandEmbedding()
         capture = on_demand_engine._ingest_state("on demand payload", label="private")
 
         def search_task():
@@ -2394,7 +2399,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         try:
             with self.assertLogs("ephemeral_buffer.engine", level="WARNING") as logs:
                 with engine._lock:
-                    engine._record_semantic_job_metrics_locked("on_demand", "failed")
+                    engine._semantic_index._record_semantic_job_metrics_locked("on_demand", "failed")
                 engine._flush_metrics_snapshot()
             self.assertIn("metrics_snapshot_callback_failed", "\n".join(logs.output))
             self.assertEqual(callback_lock_owned, [False])
@@ -2431,7 +2436,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             semantic_wait_seconds=0.01,
             metrics=metrics,
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             capture = engine._ingest_state("pending payload", label="private")
             result = engine.search("payload", mode="hybrid", capture_id=capture.capture_id)
@@ -2456,7 +2461,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             def embed(self, _texts):
                 raise RuntimeError("private embedding failure")
 
-        fallback_engine.embedding_model = FailingEmbedding()
+        fallback_engine._semantic_index.embedding_model = FailingEmbedding()
         try:
             capture = fallback_engine._ingest_state("fallback payload", label="private")
             result = fallback_engine.search(
@@ -2495,17 +2500,17 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             semantic_prefetch_workers=1,
             metrics=metrics,
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             first = engine._ingest_state("first payload", label="first")
             self.assertTrue(started.wait(timeout=2))
             second = engine._ingest_state("second payload", label="second")
-            self.assertIn(second.capture_id, engine._prefetch_queue)
+            self.assertIn(second.capture_id, engine._semantic_index._prefetch_queue)
             self.assertEqual(engine.clear(second.capture_id), f"Cleared capture '{second.capture_id}'.")
 
             release.set()
             deadline = time.time() + 2
-            while engine._prefetch_running and time.time() < deadline:
+            while engine._semantic_index._prefetch_running and time.time() < deadline:
                 time.sleep(0.01)
 
             source = metrics.snapshot()["semantic_index"]["prefetch"]
@@ -2531,7 +2536,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         engine = self._new_engine(max_captures=8, semantic_prefetch=True, semantic_prefetch_workers=1)
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             first = engine._ingest_state("first payload", label="first")
             self.assertTrue(started.wait(timeout=2))
@@ -2540,25 +2545,25 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             fourth = engine._ingest_state("fourth payload", label="fourth")
             # A burst never drops eligible captures: every one is queued behind the running job.
             self.assertEqual(
-                list(engine._prefetch_queue),
+                list(engine._semantic_index._prefetch_queue),
                 [second.capture_id, third.capture_id, fourth.capture_id],
             )
             self.assertEqual(engine.get_buffer_stats()["semantic_prefetch_queued"], 3)
             self.assertEqual(engine.clear(second.capture_id), "Cleared capture 'cap_2'.")
-            self.assertNotIn(second.capture_id, engine._prefetch_queue)
+            self.assertNotIn(second.capture_id, engine._semantic_index._prefetch_queue)
             self.assertEqual(second.semantic_index_state, "evicted")
             self.assertEqual(first.semantic_index_state, "pending")
 
             release.set()
             deadline = time.time() + 2
-            while (engine._prefetch_queue or engine._prefetch_running) and time.time() < deadline:
+            while (engine._semantic_index._prefetch_queue or engine._semantic_index._prefetch_running) and time.time() < deadline:
                 time.sleep(0.01)
             self.assertEqual(embedded_order, ["first payload", "fourth payload", "third payload"])
             self.assertEqual(
                 [cap.semantic_index_state for cap in (first, third, fourth)],
                 ["ready", "ready", "ready"],
             )
-            self.assertEqual(engine._prefetch_workers_active, 0)
+            self.assertEqual(engine._semantic_index._prefetch_workers_active, 0)
         finally:
             release.set()
             engine.shutdown()
@@ -2575,26 +2580,26 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         engine = self._new_engine(max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1)
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             engine._ingest_state("first payload", label="first")
             self.assertTrue(started.wait(timeout=2))
             queued = engine._ingest_state("queued payload", label="queued")
-            self.assertIn(queued.capture_id, engine._prefetch_queue)
+            self.assertIn(queued.capture_id, engine._semantic_index._prefetch_queue)
 
             # The on-demand job is blocked behind the running prefetch job's
             # model lock, so a bounded wait reports pending without dequeuing twice.
-            self.assertEqual(engine._await_semantic_index(queued, 0.05), "pending")
-            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
-            self.assertIn(queued.capture_id, engine._on_demand_jobs)
+            self.assertEqual(engine._semantic_index.await_semantic_index(queued, 0.05), "pending")
+            self.assertNotIn(queued.capture_id, engine._semantic_index._prefetch_queue)
+            self.assertIn(queued.capture_id, engine._semantic_index._on_demand_jobs)
             self.assertEqual(queued.semantic_index_state, "pending")
-            engine._schedule_semantic_prefetch(queued)
-            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
+            engine._semantic_index.schedule_semantic_prefetch(queued)
+            self.assertNotIn(queued.capture_id, engine._semantic_index._prefetch_queue)
             self.assertEqual(engine.get_buffer_stats()["semantic_index_on_demand_running"], 1)
             release.set()
             self.assertTrue(engine.search_semantic(queued, "payload"))
             self.assertEqual(queued.semantic_index_state, "ready")
-            self.assertEqual(engine._on_demand_jobs, {})
+            self.assertEqual(engine._semantic_index._on_demand_jobs, {})
         finally:
             release.set()
             engine.shutdown()
@@ -2612,7 +2617,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         engine = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0.05
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             capture = engine._ingest_state("alpha needle\nbeta line", label="budget")
             self.assertEqual(capture.semantic_index_state, "not-requested")
@@ -2663,7 +2668,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         engine = self._new_engine(max_captures=2, semantic_prefetch=False, semantic_wait_seconds=0)
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             capture = engine._ingest_state("semantic payload", label="semantic-wait")
             outcome = {}
@@ -2679,7 +2684,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             # A hybrid search issued meanwhile shares the job and answers immediately.
             hybrid = engine.search("payload", mode="hybrid", capture_id=capture.capture_id)
             self.assertEqual(hybrid["semantic_coverage"], "pending")
-            self.assertEqual(len(engine._on_demand_jobs), 1)
+            self.assertEqual(len(engine._semantic_index._on_demand_jobs), 1)
             release.set()
             worker.join(timeout=2)
             self.assertFalse(worker.is_alive())
@@ -2696,7 +2701,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         with patch.dict("os.environ", {"EPHEMERAL_SEMANTIC_WAIT_SECONDS": "2.5"}, clear=False):
             configured = self._new_engine(semantic_prefetch=False)
         try:
-            self.assertEqual(configured.semantic_wait_seconds, 2.5)
+            self.assertEqual(configured._semantic_index.config.semantic_wait_seconds, 2.5)
             self.assertEqual(configured.get_buffer_stats()["semantic_wait_seconds"], 2.5)
         finally:
             configured.shutdown()
@@ -2729,10 +2734,10 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             # to inline indexing so the waiter still gets a ready index.
             finished = threading.Event()
             finished.set()
-            engine._prefetch_running[capture.capture_id] = finished
-            self.assertEqual(engine._await_semantic_index(capture, 1.0), "ready")
+            engine._semantic_index._prefetch_running[capture.capture_id] = finished
+            self.assertEqual(engine._semantic_index.await_semantic_index(capture, 1.0), "ready")
             self.assertIsNotNone(capture.embeddings)
-            engine._prefetch_running.clear()
+            engine._semantic_index._prefetch_running.clear()
 
             # An on-demand job whose capture was evicted mid-flight leaves it lazily indexable.
             started = threading.Event()
@@ -2744,16 +2749,16 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                     release.wait(timeout=2)
                     return [[1.0] + [0.0] * 383 for _ in texts]
 
-            engine.embedding_model = BlockingEmbedding()
+            engine._semantic_index.embedding_model = BlockingEmbedding()
             stale = engine._ingest_state("stale payload", label="stale")
-            self.assertEqual(engine._await_semantic_index(stale, 0), "pending")
+            self.assertEqual(engine._semantic_index.await_semantic_index(stale, 0), "pending")
             self.assertTrue(started.wait(timeout=2))
             engine.clear(stale.capture_id)
             self.assertEqual(stale.semantic_index_state, "evicted")
             stale.semantic_index_state = "pending"
             release.set()
             deadline = time.time() + 2
-            while stale.capture_id in engine._on_demand_jobs and time.time() < deadline:
+            while stale.capture_id in engine._semantic_index._on_demand_jobs and time.time() < deadline:
                 time.sleep(0.01)
             self.assertEqual(stale.semantic_index_state, "not-requested")
             self.assertIsNone(stale.embeddings)
@@ -2781,7 +2786,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         engine = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_prefetch_workers=1, semantic_wait_seconds=0
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         other_pools = _semantic_index_threads()
         capture = engine._ingest_state("shutdown payload", label="on-demand-shutdown")
         self.assertEqual(engine.search("payload", mode="hybrid", capture_id=capture.capture_id)["semantic_coverage"], "pending")
@@ -2789,25 +2794,25 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         # A second search queues behind the single pool worker.
         queued = engine._ingest_state("queued payload", label="queued-at-shutdown")
         self.assertEqual(engine.search("payload", mode="hybrid", capture_id=queued.capture_id)["semantic_coverage"], "pending")
-        queued_job = engine._on_demand_jobs[queued.capture_id]
+        queued_job = engine._semantic_index._on_demand_jobs[queued.capture_id]
         self.assertFalse(queued_job.future.running())
         shutdown_report = engine.shutdown(timeout_seconds=0)
         self.assertIn("semantic_index:1", shutdown_report["unfinished_work"])
-        self.assertTrue(engine._on_demand_jobs[capture.capture_id].future.running())
+        self.assertTrue(engine._semantic_index._on_demand_jobs[capture.capture_id].future.running())
         # Shutdown cancels queued work and reports the running job.
         self.assertTrue(queued_job.done.wait(timeout=2))
         self.assertTrue(queued_job.future.cancelled())
         self.assertEqual(queued.semantic_index_state, "not-requested")
-        self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
+        self.assertNotIn(queued.capture_id, engine._semantic_index._on_demand_jobs)
         release.set()
         deadline = time.monotonic() + 2
         while (
-            capture.capture_id in engine._on_demand_jobs
+            capture.capture_id in engine._semantic_index._on_demand_jobs
             or _semantic_index_threads() - other_pools
         ) and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(_semantic_index_threads() - other_pools, set())
-        self.assertEqual(engine._on_demand_jobs, {})
+        self.assertEqual(engine._semantic_index._on_demand_jobs, {})
         self.assertEqual(capture.semantic_index_state, "ready")
         self.assertIsNone(queued.embeddings)
         # The cancelled capture is still buffered and indexes inline on demand.
@@ -2820,7 +2825,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         self.assertEqual(result["semantic_coverage"], "complete")
         self.assertEqual(late.semantic_index_state, "ready")
         self.assertEqual(_semantic_index_threads() - other_pools, set())
-        self.assertEqual(engine._on_demand_jobs, {})
+        self.assertEqual(engine._semantic_index._on_demand_jobs, {})
 
     def test_on_demand_indexing_stays_bounded_under_capture_churn(self):
         started = threading.Event()
@@ -2838,7 +2843,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             semantic_prefetch_workers=1,
             semantic_wait_seconds=0,
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         other_pools = _semantic_index_threads()
         try:
             captures = []
@@ -2860,7 +2865,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             # evicted mid-flight) and the live capture's job remain: every
             # other evicted capture's job was cancelled while still queued.
             self.assertEqual(
-                set(engine._on_demand_jobs),
+                set(engine._semantic_index._on_demand_jobs),
                 {captures[0].capture_id, captures[-1].capture_id},
             )
             stats = engine.get_buffer_stats()
@@ -2871,7 +2876,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
             release.set()
             self.assertEqual(engine.wait_for_semantic_index(captures[-1], timeout=5), "ready")
-            self.assertEqual(engine._on_demand_jobs, {})
+            self.assertEqual(engine._semantic_index._on_demand_jobs, {})
             stats = engine.get_buffer_stats()
             self.assertEqual(stats["semantic_index_on_demand_running"], 0)
             self.assertEqual(stats["semantic_index_on_demand_queued"], 0)
@@ -2900,10 +2905,10 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         engine = self._new_engine(
             max_captures=2, semantic_prefetch=False, semantic_prefetch_workers=1, semantic_wait_seconds=5
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             blocker = engine._ingest_state("blocker payload", label="blocker")
-            self.assertEqual(engine._await_semantic_index(blocker, 0), "pending")
+            self.assertEqual(engine._semantic_index.await_semantic_index(blocker, 0), "pending")
             self.assertTrue(started.wait(timeout=2))
             queued = engine._ingest_state("queued payload", label="queued")
             outcome = {}
@@ -2921,7 +2926,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             deadline = time.time() + 2
             while queued.active_readers < 2 and time.time() < deadline:
                 time.sleep(0.01)
-            job = engine._on_demand_jobs[queued.capture_id]
+            job = engine._semantic_index._on_demand_jobs[queued.capture_id]
             self.assertFalse(job.future.running())
             self.assertEqual(engine.get_buffer_stats()["semantic_index_on_demand_queued"], 1)
 
@@ -2935,7 +2940,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertTrue(job.done.wait(timeout=2))
             self.assertTrue(job.cancelled)
             self.assertTrue(job.future.cancelled())
-            self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
+            self.assertNotIn(queued.capture_id, engine._semantic_index._on_demand_jobs)
             hybrid_waiter.join(timeout=2)
             self.assertFalse(hybrid_waiter.is_alive())
             self.assertLess(time.monotonic() - cleared_at, 2)
@@ -2972,20 +2977,20 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         engine = self._new_engine(
             max_captures=4, semantic_prefetch=True, semantic_prefetch_workers=1, semantic_wait_seconds=0
         )
-        engine.embedding_model = FlakyEmbedding()
+        engine._semantic_index.embedding_model = FlakyEmbedding()
         try:
             engine._ingest_state("first payload", label="first")
             self.assertTrue(started.wait(timeout=2))
             queued = engine._ingest_state("queued payload", label="queued")
-            self.assertIn(queued.capture_id, engine._prefetch_queue)
+            self.assertIn(queued.capture_id, engine._semantic_index._prefetch_queue)
             self.assertEqual(queued.semantic_index_state, "pending")
 
             # A search pulls the capture out of the prefetch queue; its job is
             # blocked behind the running prefetch job's model lock.
             result = engine.search("payload", mode="hybrid", capture_id=queued.capture_id)
             self.assertEqual(result["semantic_coverage"], "pending")
-            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
-            job = engine._on_demand_jobs[queued.capture_id]
+            self.assertNotIn(queued.capture_id, engine._semantic_index._prefetch_queue)
+            job = engine._semantic_index._on_demand_jobs[queued.capture_id]
 
             # When the dequeued job fails it is not left as a stale pending
             # entry: the capture is marked failed and no job or queue slot remains.
@@ -2993,9 +2998,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
             self.assertTrue(job.done.wait(timeout=2))
             self.assertIsInstance(job.error, RuntimeError)
             self.assertEqual(queued.semantic_index_state, "failed")
-            self.assertNotIn(queued.capture_id, engine._prefetch_queue)
-            self.assertNotIn(queued.capture_id, engine._prefetch_running)
-            self.assertNotIn(queued.capture_id, engine._on_demand_jobs)
+            self.assertNotIn(queued.capture_id, engine._semantic_index._prefetch_queue)
+            self.assertNotIn(queued.capture_id, engine._semantic_index._prefetch_running)
+            self.assertNotIn(queued.capture_id, engine._semantic_index._on_demand_jobs)
             stats = engine.get_buffer_stats()
             self.assertEqual(stats["semantic_prefetch_failed"], 1)
             self.assertEqual(stats["semantic_prefetch_pending"], 0)
@@ -3017,22 +3022,22 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
         submit_failure = self._new_engine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
         try:
             with patch.object(
-                submit_failure._prefetch_executor,
+                submit_failure._semantic_index._prefetch_executor,
                 "submit",
                 side_effect=RuntimeError("executor closed"),
             ):
                 capture = submit_failure._ingest_state("submit failure", label="submit-failure")
                 self.assertEqual(capture.semantic_index_state, "failed")
-                self.assertEqual(submit_failure._prefetch_queue, {})
+                self.assertEqual(submit_failure._semantic_index._prefetch_queue, {})
                 # With a worker already active, a submit failure leaves the capture queued.
-                submit_failure._prefetch_workers_active = 1
+                submit_failure._semantic_index._prefetch_workers_active = 1
                 queued = submit_failure._ingest_state("still queued", label="still-queued")
                 self.assertEqual(queued.semantic_index_state, "pending")
-                self.assertIn(queued.capture_id, submit_failure._prefetch_queue)
-                submit_failure._prefetch_workers_active = 0
+                self.assertIn(queued.capture_id, submit_failure._semantic_index._prefetch_queue)
+                submit_failure._semantic_index._prefetch_workers_active = 0
             submit_failure._captures.clear()
-            submit_failure._schedule_semantic_prefetch(capture)
-            self.assertNotIn(capture.capture_id, submit_failure._prefetch_queue)
+            submit_failure._semantic_index.schedule_semantic_prefetch(capture)
+            self.assertNotIn(capture.capture_id, submit_failure._semantic_index._prefetch_queue)
         finally:
             submit_failure.shutdown()
             submit_failure.shutdown()
@@ -3048,12 +3053,12 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 active_readers=0,
             )
             # A worker that finds its capture already evicted leaves it lazily indexable.
-            evicted_engine._prefetch_queue[capture.capture_id] = capture
-            evicted_engine._prefetch_workers_active = 1
-            evicted_engine._prefetch_worker()
+            evicted_engine._semantic_index._prefetch_queue[capture.capture_id] = capture
+            evicted_engine._semantic_index._prefetch_workers_active = 1
+            evicted_engine._semantic_index._prefetch_worker()
             self.assertEqual(capture.semantic_index_state, "not-requested")
-            self.assertEqual(evicted_engine._prefetch_running, {})
-            self.assertEqual(evicted_engine._prefetch_workers_active, 0)
+            self.assertEqual(evicted_engine._semantic_index._prefetch_running, {})
+            self.assertEqual(evicted_engine._semantic_index._prefetch_workers_active, 0)
         finally:
             evicted_engine.shutdown()
 
@@ -3068,29 +3073,29 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         engine = self._new_engine(max_captures=2, semantic_prefetch=True, semantic_prefetch_workers=1)
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         try:
             first = engine._ingest_state("first shutdown payload", label="shutdown-first")
             self.assertTrue(started.wait(timeout=2))
             second = engine._ingest_state("queued shutdown payload", label="shutdown-second")
-            self.assertIn(second.capture_id, engine._prefetch_queue)
+            self.assertIn(second.capture_id, engine._semantic_index._prefetch_queue)
 
             shutdown_report = engine.shutdown(timeout_seconds=0)
             self.assertIn("semantic_prefetch:1", shutdown_report["unfinished_work"])
-            self.assertIn(first.capture_id, engine._prefetch_running)
+            self.assertIn(first.capture_id, engine._semantic_index._prefetch_running)
             deadline = time.time() + 2
-            while second.capture_id in engine._prefetch_queue and time.time() < deadline:
+            while second.capture_id in engine._semantic_index._prefetch_queue and time.time() < deadline:
                 time.sleep(0.01)
-            self.assertNotIn(second.capture_id, engine._prefetch_queue)
+            self.assertNotIn(second.capture_id, engine._semantic_index._prefetch_queue)
             self.assertEqual(second.semantic_index_state, "not-requested")
 
             release.set()
             deadline = time.monotonic() + 2
-            while engine._prefetch_running and time.monotonic() < deadline:
+            while engine._semantic_index._prefetch_running and time.monotonic() < deadline:
                 time.sleep(0.01)
-            self.assertTrue(engine._shutdown)
-            self.assertEqual(engine._prefetch_queue, {})
-            self.assertEqual(engine._prefetch_running, {})
+            self.assertTrue(engine._semantic_index._shutdown)
+            self.assertEqual(engine._semantic_index._prefetch_queue, {})
+            self.assertEqual(engine._semantic_index._prefetch_running, {})
             self.assertEqual(first.semantic_index_state, "ready")
         finally:
             release.set()
@@ -3109,12 +3114,12 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 return [[1.0] + [0.0] * 383 for _ in texts]
 
         engine = self._new_engine(max_captures=1, embedding_warmup=True)
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
         shutdown_thread = None
         try:
             self.assertTrue(engine.start_embedding_warmup())
             self.assertTrue(started.wait(timeout=30))
-            warmup_thread = engine._embedding_warmup_thread
+            warmup_thread = engine._semantic_index._embedding_warmup_thread
             self.assertIsNotNone(warmup_thread)
             original_join = warmup_thread.join
 
@@ -3136,7 +3141,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 shutdown_thread.join(timeout=30)
             self.assertFalse(shutdown_thread.is_alive())
             self.assertTrue(shutdown_done.is_set())
-            self.assertEqual(engine.embedding_warmup_state, "ready")
+            self.assertEqual(engine._semantic_index.embedding_warmup_state, "ready")
         finally:
             release.set()
             if shutdown_thread is not None:
@@ -3156,7 +3161,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         engine = self._new_engine(embedding_warmup=False, semantic_prefetch=False)
         warmup = StillRunning()
-        engine._embedding_warmup_thread = warmup
+        engine._semantic_index._embedding_warmup_thread = warmup
 
         report = engine.shutdown(timeout_seconds=0)
 
@@ -3380,11 +3385,11 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 embedding_cache_path="/cache",
                 embedding_cpu_mem_arena_enabled=False,
             )
-            loaded = engine._get_embedding_model()
+            loaded = engine._semantic_index._get_embedding_model()
 
         self.assertIsInstance(loaded, FakeEmbedding)
         embedding.assert_called_once_with(
-            model_name=engine.embedding_model_name,
+            model_name=engine._semantic_index.config.embedding_model_name,
             cache_dir="/cache",
             enable_cpu_mem_arena=False,
         )
@@ -3395,14 +3400,14 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding", side_effect=RuntimeError("load failed")) as embedding:
             failing = self._new_engine(max_captures=1)
             with self.assertRaisesRegex(RuntimeError, "load failed"):
-                failing._get_embedding_model()
+                failing._semantic_index._get_embedding_model()
             with self.assertRaisesRegex(RuntimeError, "retry backoff"):
-                failing._get_embedding_model()
+                failing._semantic_index._get_embedding_model()
             embedding.assert_called_once()
             stats = failing.get_buffer_stats()
             self.assertEqual(stats["embedding_model_load_failure"], "RuntimeError")
             self.assertGreater(stats["embedding_model_retry_after_seconds"], 0)
-        self.assertIsNone(failing.embedding_model)
+        self.assertIsNone(failing._semantic_index.embedding_model)
 
     def test_embedding_model_load_retries_after_backoff_and_clears_failure(self):
         class FakeEmbedding:
@@ -3422,13 +3427,13 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                     ), \
                     patch("sys.stderr", new_callable=io.StringIO):
                 with self.assertRaisesRegex(RuntimeError, "load failed"):
-                    engine._get_embedding_model()
+                    engine._semantic_index._get_embedding_model()
                 with self.assertRaisesRegex(RuntimeError, "retry backoff"):
-                    engine._get_embedding_model()
+                    engine._semantic_index._get_embedding_model()
                 expired_stats = engine.get_buffer_stats()
                 self.assertEqual(expired_stats["embedding_model_load_failure"], "RuntimeError")
                 self.assertEqual(expired_stats["embedding_model_retry_after_seconds"], 0.0)
-                loaded = engine._get_embedding_model()
+                loaded = engine._semantic_index._get_embedding_model()
 
             self.assertIsInstance(loaded, FakeEmbedding)
             self.assertEqual(embedding.call_count, 2)
@@ -3451,9 +3456,9 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                         side_effect=MultiArgumentLoadError("model", "unavailable"),
                     ):
                 with self.assertRaises(MultiArgumentLoadError):
-                    engine._get_embedding_model()
+                    engine._semantic_index._get_embedding_model()
                 with self.assertRaisesRegex(RuntimeError, "after MultiArgumentLoadError"):
-                    engine._get_embedding_model()
+                    engine._semantic_index._get_embedding_model()
         finally:
             engine.shutdown()
 
@@ -3470,7 +3475,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         def load_model():
             with self.assertRaises(RuntimeError):
-                engine._get_embedding_model()
+                engine._semantic_index._get_embedding_model()
 
         try:
             with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
@@ -3527,7 +3532,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
 
         engine = self._new_engine(max_captures=1, embedding_warmup=True)
         embedding = WarmEmbedding()
-        engine.embedding_model = embedding
+        engine._semantic_index.embedding_model = embedding
         try:
             self.assertTrue(engine.start_embedding_warmup())
             self.assertEqual(engine.wait_for_embedding_warmup(timeout=2), "ready")
@@ -3545,7 +3550,7 @@ E   ConnectionError: ERROR: Connection timed out after 10000ms
                 raise RuntimeError("model unavailable")
 
         engine = self._new_engine(max_captures=1, embedding_warmup=True)
-        engine.embedding_model = FailingEmbedding()
+        engine._semantic_index.embedding_model = FailingEmbedding()
         try:
             self.assertTrue(engine.start_embedding_warmup())
             self.assertEqual(engine.wait_for_embedding_warmup(timeout=2), "failed")
@@ -3597,34 +3602,34 @@ class TestEmbeddingStartup(unittest.TestCase):
             engine = self._new_engine(max_captures=1)
 
         embedding.assert_not_called()
-        self.assertIsNone(engine.embedding_model)
+        self.assertIsNone(engine._semantic_index.embedding_model)
 
     def test_embedding_warmup_thread_start_failure_is_degraded(self):
         engine = self._new_engine(max_captures=1, embedding_warmup=True)
         try:
             with patch.object(threading.Thread, "start", side_effect=RuntimeError("thread limit")):
                 self.assertFalse(engine.start_embedding_warmup())
-            self.assertEqual(engine.embedding_warmup_state, "failed")
-            self.assertEqual(engine.embedding_warmup_failure, "RuntimeError")
+            self.assertEqual(engine._semantic_index.embedding_warmup_state, "failed")
+            self.assertEqual(engine._semantic_index.embedding_warmup_failure, "RuntimeError")
         finally:
             engine.shutdown()
 
     def test_semantic_chunks_pack_lines_by_line_and_byte_caps(self):
         engine = self._new_engine(max_captures=1, semantic_chunk_lines=3, semantic_chunk_bytes=20)
-        self.assertEqual(engine._semantic_chunk_lines([]), [])
+        self.assertEqual(engine._semantic_index.semantic_chunk_lines([]), [])
 
         lines = ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff", "gggg"]
-        chunks = engine._semantic_chunk_lines(lines)
+        chunks = engine._semantic_index.semantic_chunk_lines(lines)
         self.assertEqual([(c.chunk_id, c.start_line, c.end_line) for c in chunks], [(0, 1, 3), (1, 4, 6), (2, 7, 7)])
         self.assertEqual(chunks[0].text, "aaaa\nbbbb\ncccc")
 
         # The byte cap closes a window early, and an oversized line still gets its own chunk.
         wide = ["x" * 15, "y" * 10, "z" * 40, "w"]
-        chunks = engine._semantic_chunk_lines(wide)
+        chunks = engine._semantic_index.semantic_chunk_lines(wide)
         self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 1), (2, 2), (3, 3), (4, 4)])
 
         overlapping = self._new_engine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=2)
-        chunks = overlapping._semantic_chunk_lines(lines)
+        chunks = overlapping._semantic_index.semantic_chunk_lines(lines)
         self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 4), (3, 6), (5, 7)])
 
         capture = engine._ingest_state("\n".join(lines), label="semantic-chunks")
@@ -3648,7 +3653,7 @@ class TestEmbeddingStartup(unittest.TestCase):
         ):
             engine = self._new_engine(max_captures=1)
         self.assertEqual(
-            (engine.semantic_chunk_lines, engine.semantic_chunk_bytes, engine.semantic_chunk_overlap),
+            (engine._semantic_index.config.semantic_chunk_lines, engine._semantic_index.config.semantic_chunk_bytes, engine._semantic_index.config.semantic_chunk_overlap),
             (6, 512, 1),
         )
         with self.assertRaisesRegex(ValueError, "semantic_chunk_lines"):
@@ -3701,23 +3706,23 @@ class TestEmbeddingStartup(unittest.TestCase):
     def test_embedding_threads_configuration_and_validation(self):
         with patch.dict("os.environ", {"EPHEMERAL_EMBEDDING_THREADS": "3"}, clear=False):
             configured = self._new_engine(max_captures=1)
-        self.assertEqual(configured.embedding_threads, 3)
+        self.assertEqual(configured._semantic_index.config.embedding_threads, 3)
         self.assertEqual(configured.get_buffer_stats()["embedding_threads"], 3)
 
         explicit = self._new_engine(
             max_captures=1, embedding_threads=2, embedding_model_name=CATALOGUE_EMBEDDING_MODEL
         )
-        self.assertEqual(explicit.embedding_threads, 2)
+        self.assertEqual(explicit._semantic_index.config.embedding_threads, 2)
         with self.assertRaisesRegex(ValueError, "embedding_threads"):
             self._new_engine(max_captures=1, embedding_threads=0)
 
         with patch.dict("os.environ", {"EPHEMERAL_TEST_EMBEDDINGS": "0"}, clear=False), \
                 patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding") as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO):
-            explicit._get_embedding_model()
+            explicit._semantic_index._get_embedding_model()
         # CI may set the embedding cache directory, so only assert settings under test.
         self.assertEqual(embedding.call_count, 1)
-        self.assertEqual(embedding.call_args.kwargs["model_name"], explicit.embedding_model_name)
+        self.assertEqual(embedding.call_args.kwargs["model_name"], explicit._semantic_index.config.embedding_model_name)
         self.assertEqual(embedding.call_args.kwargs["threads"], 2)
         self.assertFalse(embedding.call_args.kwargs["enable_cpu_mem_arena"])
         self.assertNotIn("fastembed", embedding.call_args.kwargs)
@@ -3746,7 +3751,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             embedding_max_batch_tokens=64,
         )
         embedding = FakeEmbedding()
-        engine.embedding_model = embedding
+        engine._semantic_index.embedding_model = embedding
         try:
             capture = engine._ingest_state("a\nb\nc\nd", label="bounded-batches")
             capture.semantic_chunks = [
@@ -3754,7 +3759,7 @@ class TestEmbeddingStartup(unittest.TestCase):
                 for index, text in enumerate(("a", "b", "c", "d"))
             ]
 
-            engine._ensure_embeddings(capture)
+            engine._semantic_index.ensure_embeddings(capture)
 
             self.assertEqual(embedding.calls, [["b", "c"], ["a"], ["d"]])
             for index, text in enumerate(("a", "b", "c", "d")):
@@ -3798,10 +3803,10 @@ class TestEmbeddingStartup(unittest.TestCase):
             # exercise the defensive byte-count check in the lazy path too.
             capture.semantic_index_state = "not-requested"
             with self.assertRaises(SemanticIndexBudgetExceeded):
-                engine._ensure_embeddings(capture)
+                engine._semantic_index.ensure_embeddings(capture)
             self.assertEqual(capture.semantic_index_state, "budget-exceeded")
             with self.assertRaises(SemanticIndexBudgetExceeded):
-                engine._ensure_embeddings(capture)
+                engine._semantic_index.ensure_embeddings(capture)
 
             capture.semantic_index_state = "not-requested"
 
@@ -3812,9 +3817,9 @@ class TestEmbeddingStartup(unittest.TestCase):
                 def __exit__(self, *_args):
                     return False
 
-            engine._embedding_lock = MarkBudgetLock()
+            engine._semantic_index._embedding_lock = MarkBudgetLock()
             with self.assertRaises(SemanticIndexBudgetExceeded):
-                engine._ensure_embeddings(capture)
+                engine._semantic_index.ensure_embeddings(capture)
         finally:
             engine.shutdown()
 
@@ -3830,22 +3835,22 @@ class TestEmbeddingStartup(unittest.TestCase):
         for result, message in invalid_results:
             with self.subTest(result=message):
                 engine = self._new_engine(max_captures=1, semantic_prefetch=False)
-                engine.embedding_model = StaticEmbedding(result)
+                engine._semantic_index.embedding_model = StaticEmbedding(result)
                 try:
                     capture = make_capture(engine)
                     with self.assertRaisesRegex(RuntimeError, message):
-                        engine._ensure_embeddings(capture)
+                        engine._semantic_index.ensure_embeddings(capture)
                 finally:
                     engine.shutdown()
 
         engine = self._new_engine(max_captures=1, semantic_prefetch=False)
-        engine.embedding_model = StaticEmbedding(
+        engine._semantic_index.embedding_model = StaticEmbedding(
             lambda _texts: self.fail("empty semantic chunks must not call embed")
         )
         try:
             capture = make_capture(engine, ("only chunk",))
             capture.semantic_chunks = []
-            engine._ensure_embeddings(capture)
+            engine._semantic_index.ensure_embeddings(capture)
             self.assertIsNone(capture.embeddings)
         finally:
             engine.shutdown()
@@ -3865,7 +3870,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             semantic_max_index_input_bytes=8,
         )
         embedding = UnexpectedEmbedding()
-        engine.embedding_model = embedding
+        engine._semantic_index.embedding_model = embedding
         try:
             capture = engine._ingest_state("alpha\nbeta", label="semantic-budget")
             hybrid = engine.search("alpha", mode="hybrid", capture_id=capture.capture_id)
@@ -3873,7 +3878,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             self.assertEqual(hybrid["semantic_fallback"], "SemanticIndexBudgetExceeded")
             self.assertEqual(hybrid["matches"][0]["chunk_index"], "lexical")
             self.assertEqual(capture.semantic_index_state, "budget-exceeded")
-            self.assertNotIn(capture.capture_id, engine._prefetch_queue)
+            self.assertNotIn(capture.capture_id, engine._semantic_index._prefetch_queue)
 
             semantic = engine.search("alpha", mode="semantic", capture_id=capture.capture_id)
             self.assertEqual(semantic["semantic_fallback"], "SemanticIndexBudgetExceeded")
@@ -3900,7 +3905,7 @@ class TestEmbeddingStartup(unittest.TestCase):
             semantic_wait_seconds=1,
             embedding_max_batch_tokens=4,
         )
-        engine.embedding_model = UnexpectedEmbedding()
+        engine._semantic_index.embedding_model = UnexpectedEmbedding()
         try:
             capture = engine._ingest_state("alpha beta", label="on-demand-token-budget")
             result = engine.search("alpha", mode="semantic", capture_id=capture.capture_id)
@@ -3917,7 +3922,7 @@ class TestEmbeddingStartup(unittest.TestCase):
                 patch("ephemeral_buffer_mcp.semantic_index.TextEmbedding") as embedding, \
                 patch("sys.stderr", new_callable=io.StringIO):
             engine = self._new_engine(max_captures=1, embedding_model_name=FP32_EMBEDDING_MODEL)
-            engine._get_embedding_model()
+            engine._semantic_index._get_embedding_model()
 
         self.assertEqual(embedding.call_count, 1)
         self.assertEqual(embedding.call_args.kwargs["model_name"], FP32_EMBEDDING_MODEL)

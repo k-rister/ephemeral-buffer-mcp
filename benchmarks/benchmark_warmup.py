@@ -34,8 +34,10 @@ def _measure_in_process(warmup: bool) -> dict[str, Any]:
             warmup_state = engine.wait_for_embedding_warmup()
             embedding_ready_seconds = time.perf_counter() - embedding_ready_started
         else:
-            warmup_state = engine.embedding_warmup_state
             startup_ready_seconds = engine_init_seconds + (time.perf_counter() - started)
+            # Diagnostics include RSS and scheduler accounting; keep that work
+            # outside the startup-readiness interval.
+            warmup_state = engine.get_buffer_stats()["embedding_warmup_state"]
             embedding_ready_seconds = None
 
         capture = engine.ingest("embedding warmup benchmark", label=f"warmup-{warmup}")

@@ -109,9 +109,15 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
   durable execution state paths.
 - `admission.py` — bounds active and queued MCP tool and socket work.
 - `engine.py` — ingests and retains captures, classifies content, and supports
-  lexical and optional semantic search and indexing.
+  lexical and optional semantic search and indexing. It resolves semantic
+  settings into an immutable configuration and implements the typed capture
+  store used by the coordinator while retaining ownership of capture lifetimes.
 - `semantic_index.py` — coordinates embedding inference, semantic indexing,
-  prefetch, and bounded indexing jobs for retained captures.
+  prefetch, and bounded indexing jobs for retained captures. It owns semantic
+  configuration and scheduler state behind `SemanticIndexConfig` and the
+  `SemanticCaptureLease` / `SemanticCaptureStore` boundary; the engine passes
+  the shared lock so capture eviction and embedding publication remain
+  synchronized.
 - `embedding_backend.py` — loads the BGE-small ONNX model and tokenizer and
   yields normalized text embeddings.
 - `execution.py` — runs durable, resumable command phases and manages their

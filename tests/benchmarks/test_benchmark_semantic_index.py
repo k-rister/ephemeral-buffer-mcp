@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from benchmarks.benchmark_semantic_index import (
     run_benchmark,
     summarize,
 )
+from ephemeral_buffer_mcp.engine import EphemeralEngine
 
 
 class TestSemanticIndexBenchmark(unittest.TestCase):
@@ -95,7 +97,8 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             def get_capture_diagnostics(self, capture_id):
                 return None
 
-            _ensure_embeddings = None
+            def observe_semantic_indexing(self, observer):
+                return nullcontext()
 
         with self.assertRaisesRegex(RuntimeError, "did not become ready: failed"):
             benchmark_semantic_index.measure_once(BrokenEngine(), 4)
@@ -108,6 +111,19 @@ class TestSemanticIndexBenchmark(unittest.TestCase):
             measurement["semantic_index_seconds_median"],
             measurement["first_search_seconds_median"] + 0.01,
         )
+
+    def test_measure_once_unregisters_its_indexing_observer(self):
+        engine = EphemeralEngine(
+            max_captures=1,
+            embedding_warmup=False,
+            semantic_prefetch=False,
+        )
+        try:
+            measurement = benchmark_semantic_index.measure_once(engine, 8)
+            self.assertGreater(measurement["semantic_index_seconds"], 0)
+            self.assertEqual(engine._semantic_index._indexing_observers, {})
+        finally:
+            engine.shutdown()
 
     def test_single_needle_capture_measures_a_subsequent_search(self):
         measurement = run_benchmark((1,), samples=1)["measurements"][0]
