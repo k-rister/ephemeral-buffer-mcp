@@ -308,8 +308,8 @@ class TestServerTools(unittest.TestCase):
         server.engine.clear("all")
         self.original_limit = server.engine.max_buffer_bytes
         self.original_index_limit = server.engine.max_indexed_chunks
-        self.original_model = server.engine.embedding_model
-        server.engine.embedding_model = type(
+        self.original_model = server.engine._semantic_index.embedding_model
+        server.engine._semantic_index.embedding_model = type(
             "TestEmbedding",
             (),
             {"embed": lambda _self, texts: [[0.0] * 384 for _ in texts]},
@@ -318,7 +318,7 @@ class TestServerTools(unittest.TestCase):
     def tearDown(self):
         server.engine.max_buffer_bytes = self.original_limit
         server.engine.max_indexed_chunks = self.original_index_limit
-        server.engine.embedding_model = self.original_model
+        server.engine._semantic_index.embedding_model = self.original_model
         server.engine.clear("all")
 
     def test_service_context_start_starts_embedding_warmup(self):
@@ -1726,33 +1726,33 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Unaccounted RSS bytes:", result)
 
     def test_buffer_stats_reports_embedding_warmup_failure(self):
-        original_state = server.engine.embedding_warmup_state
-        original_failure = server.engine.embedding_warmup_failure
-        server.engine.embedding_warmup_state = "failed"
-        server.engine.embedding_warmup_failure = "RuntimeError"
+        original_state = server.engine._semantic_index.embedding_warmup_state
+        original_failure = server.engine._semantic_index.embedding_warmup_failure
+        server.engine._semantic_index.embedding_warmup_state = "failed"
+        server.engine._semantic_index.embedding_warmup_failure = "RuntimeError"
         try:
             result = server.get_buffer_stats()
         finally:
-            server.engine.embedding_warmup_state = original_state
-            server.engine.embedding_warmup_failure = original_failure
+            server.engine._semantic_index.embedding_warmup_state = original_state
+            server.engine._semantic_index.embedding_warmup_failure = original_failure
 
         self.assertIn("Embedding warm-up: failed (RuntimeError)", result)
 
     def test_buffer_stats_reports_embedding_model_load_backoff(self):
-        original_failure = server.engine._embedding_model_load_failure
-        server.engine._embedding_model_load_failure = (
+        original_failure = server.engine._semantic_index._embedding_model_load_failure
+        server.engine._semantic_index._embedding_model_load_failure = (
             RuntimeError,
             time.monotonic() + 60,
         )
         try:
             result = server.get_buffer_stats()
-            server.engine._embedding_model_load_failure = (
+            server.engine._semantic_index._embedding_model_load_failure = (
                 RuntimeError,
                 time.monotonic() - 1,
             )
             expired_result = server.get_buffer_stats()
         finally:
-            server.engine._embedding_model_load_failure = original_failure
+            server.engine._semantic_index._embedding_model_load_failure = original_failure
 
         self.assertIn("Embedding model load backoff: RuntimeError (retry in ", result)
         self.assertIn("Embedding model load retry: available (RuntimeError)", expired_result)
@@ -2556,7 +2556,7 @@ class TestServerTools(unittest.TestCase):
             semantic_prefetch_workers=1,
             metrics=metrics,
         )
-        engine.embedding_model = BlockingEmbedding()
+        engine._semantic_index.embedding_model = BlockingEmbedding()
 
         def write_snapshot():
             server._write_metrics_snapshot()
@@ -2572,7 +2572,7 @@ class TestServerTools(unittest.TestCase):
                 capture = engine.ingest("async snapshot content", label="private")
                 self.assertTrue(started.wait(timeout=2))
                 with engine._lock:
-                    prefetch_done = engine._prefetch_running[capture.capture_id]
+                    prefetch_done = engine._semantic_index._prefetch_running[capture.capture_id]
                 release.set()
                 self.assertTrue(prefetch_done.wait(timeout=2))
                 self.assertTrue(snapshot_written.wait(timeout=2))
@@ -4022,9 +4022,9 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         socket_transport.engine.clear("all")
         self.original_limit = socket_transport.engine.max_buffer_bytes
-        self.original_model = socket_transport.engine.embedding_model
+        self.original_model = socket_transport.engine._semantic_index.embedding_model
         socket_transport.engine.max_buffer_bytes = 1024
-        socket_transport.engine.embedding_model = type(
+        socket_transport.engine._semantic_index.embedding_model = type(
             "TestEmbedding",
             (),
             {"embed": lambda _self, texts: [[0.0] * 384 for _ in texts]},
@@ -4032,7 +4032,7 @@ class TestServerSocket(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         socket_transport.engine.max_buffer_bytes = self.original_limit
-        socket_transport.engine.embedding_model = self.original_model
+        socket_transport.engine._semantic_index.embedding_model = self.original_model
         socket_transport.engine.clear("all")
 
     async def run_handler(self, payload):

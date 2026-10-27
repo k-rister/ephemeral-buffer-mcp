@@ -22,7 +22,7 @@ import binascii
 import secrets
 from types import MappingProxyType
 from collections import Counter, OrderedDict
-from typing import Callable, List, Dict, Any, Optional, Tuple, Mapping
+from typing import Callable, ContextManager, List, Dict, Any, Optional, Tuple, Mapping, cast
 from dataclasses import dataclass, field
 from functools import wraps
 from .logging_utils import get_logger, log_event
@@ -44,7 +44,9 @@ from . import semantic_index
 from .semantic_index import (
     Chunk,
     SemanticBackendUnavailable,
+    SemanticCaptureLease,
     SemanticIndexBudgetExceeded,
+    SemanticIndexConfig,
     SemanticIndexCoordinator,
     _embedding_nbytes,
 )
@@ -836,65 +838,12 @@ class CaptureDiagnostics:
     retained_embedding_bytes: int
 
 
-class _SemanticIndexAttribute:
-    """Keep selected engine attributes as a façade over the coordinator."""
-
-    def __set_name__(self, owner, name: str) -> None:
-        self.name = name
-
-    def __get__(self, instance, owner):
-        if instance is None:
-            return self
-        coordinator = instance.__dict__.get("_semantic_index")
-        if coordinator is not None:
-            return getattr(coordinator, self.name)
-        return instance.__dict__[self.name]
-
-    def __set__(self, instance, value) -> None:
-        coordinator = instance.__dict__.get("_semantic_index")
-        if coordinator is None:
-            instance.__dict__[self.name] = value
-        else:
-            setattr(coordinator, self.name, value)
-
-
 # Keep the public type name pointed at the safe metadata view. Live storage is
 # represented only by the private _CaptureState class.
 Capture = CaptureView
 
 
 class EphemeralEngine:
-    embedding_model_name = _SemanticIndexAttribute()
-    embedding_threads = _SemanticIndexAttribute()
-    embedding_batch_size = _SemanticIndexAttribute()
-    embedding_max_batch_tokens = _SemanticIndexAttribute()
-    embedding_cpu_mem_arena_enabled = _SemanticIndexAttribute()
-    semantic_max_index_input_bytes = _SemanticIndexAttribute()
-    semantic_chunk_lines = _SemanticIndexAttribute()
-    semantic_chunk_bytes = _SemanticIndexAttribute()
-    semantic_chunk_overlap = _SemanticIndexAttribute()
-    embedding_cache_path = _SemanticIndexAttribute()
-    semantic_backend_available = _SemanticIndexAttribute()
-    embedding_model = _SemanticIndexAttribute()
-    _embedding_model_load_failure = _SemanticIndexAttribute()
-    embedding_warmup_enabled = _SemanticIndexAttribute()
-    embedding_warmup_state = _SemanticIndexAttribute()
-    embedding_warmup_failure = _SemanticIndexAttribute()
-    _embedding_warmup_thread = _SemanticIndexAttribute()
-    semantic_prefetch_enabled = _SemanticIndexAttribute()
-    semantic_prefetch_workers = _SemanticIndexAttribute()
-    semantic_wait_seconds = _SemanticIndexAttribute()
-    _embedding_lock = _SemanticIndexAttribute()
-    _prefetch_executor = _SemanticIndexAttribute()
-    _prefetch_queue = _SemanticIndexAttribute()
-    _prefetch_running = _SemanticIndexAttribute()
-    _prefetch_job_meta = _SemanticIndexAttribute()
-    _semantic_job_dispositions = _SemanticIndexAttribute()
-    _prefetch_workers_active = _SemanticIndexAttribute()
-    _on_demand_jobs = _SemanticIndexAttribute()
-    _on_demand_executor = _SemanticIndexAttribute()
-    _shutdown = _SemanticIndexAttribute()
-
     def __init__(
         self,
         max_captures: Optional[int] = None,
@@ -953,73 +902,69 @@ class EphemeralEngine:
         self._next_capture_sequence = 1
         self.lexical_backend = "fts5" if sqlite_fts5_available() else "python-fallback"
         
-        self.embedding_model_name = embedding_model_name or settings.embedding_model_name.value
-        self.embedding_threads = (
+        resolved_embedding_model_name = embedding_model_name or settings.embedding_model_name.value
+        resolved_embedding_threads = (
             settings.embedding_threads.value if embedding_threads is None else embedding_threads
         )
-        if self.embedding_threads is not None and self.embedding_threads < 1:
+        if resolved_embedding_threads is not None and resolved_embedding_threads < 1:
             raise ValueError("embedding_threads must be at least 1")
-        self.embedding_batch_size = (
+        resolved_embedding_batch_size = (
             settings.embedding_batch_size.value
             if embedding_batch_size is None
             else embedding_batch_size
         )
-        if self.embedding_batch_size < 1:
+        if resolved_embedding_batch_size < 1:
             raise ValueError("embedding_batch_size must be at least 1")
-        self.embedding_max_batch_tokens = (
+        resolved_embedding_max_batch_tokens = (
             settings.embedding_max_batch_tokens.value
             if embedding_max_batch_tokens is None
             else embedding_max_batch_tokens
         )
-        if self.embedding_max_batch_tokens < 1:
+        if resolved_embedding_max_batch_tokens < 1:
             raise ValueError("embedding_max_batch_tokens must be at least 1")
-        self.embedding_cpu_mem_arena_enabled = (
+        resolved_embedding_cpu_mem_arena_enabled = (
             settings.embedding_cpu_mem_arena_enabled.value
             if embedding_cpu_mem_arena_enabled is None
             else embedding_cpu_mem_arena_enabled
         )
-        self.semantic_max_index_input_bytes = (
+        resolved_semantic_max_index_input_bytes = (
             settings.semantic_max_index_input_bytes.value
             if semantic_max_index_input_bytes is None
             else semantic_max_index_input_bytes
         )
-        if self.semantic_max_index_input_bytes < 1:
+        if resolved_semantic_max_index_input_bytes < 1:
             raise ValueError("semantic_max_index_input_bytes must be at least 1")
-        self.semantic_chunk_lines = (
+        resolved_semantic_chunk_lines = (
             settings.semantic_chunk_lines.value if semantic_chunk_lines is None else semantic_chunk_lines
         )
-        self.semantic_chunk_bytes = (
+        resolved_semantic_chunk_bytes = (
             settings.semantic_chunk_bytes.value if semantic_chunk_bytes is None else semantic_chunk_bytes
         )
-        self.semantic_chunk_overlap = (
+        resolved_semantic_chunk_overlap = (
             settings.semantic_chunk_overlap.value
             if semantic_chunk_overlap is None
             else semantic_chunk_overlap
         )
-        if self.semantic_chunk_lines < 1:
+        if resolved_semantic_chunk_lines < 1:
             raise ValueError("semantic_chunk_lines must be at least 1")
-        if self.semantic_chunk_bytes < 1:
+        if resolved_semantic_chunk_bytes < 1:
             raise ValueError("semantic_chunk_bytes must be at least 1")
-        if not 0 <= self.semantic_chunk_overlap < self.semantic_chunk_lines:
+        if not 0 <= resolved_semantic_chunk_overlap < resolved_semantic_chunk_lines:
             raise ValueError("semantic_chunk_overlap must be non-negative and smaller than semantic_chunk_lines")
-        self.embedding_cache_path = embedding_cache_path or settings.embedding_cache_dir.value
-        self.semantic_backend_available = semantic_index._semantic_dependencies_available()
-        self.embedding_model = None
-        self._embedding_model_load_failure: Optional[Tuple[type, float]] = None
-        self.embedding_warmup_enabled = (
+        resolved_embedding_cache_path = embedding_cache_path or settings.embedding_cache_dir.value
+        semantic_backend_available = semantic_index._semantic_dependencies_available()
+        resolved_embedding_warmup_enabled = (
             settings.embedding_warmup_enabled.value
             if embedding_warmup is None
             else embedding_warmup
         )
-        self.embedding_warmup_state = (
+        embedding_warmup_state = (
             "not-started"
-            if self.embedding_warmup_enabled and self.semantic_backend_available
+            if resolved_embedding_warmup_enabled and semantic_backend_available
             else "unavailable"
-            if self.embedding_warmup_enabled
+            if resolved_embedding_warmup_enabled
             else "disabled"
         )
-        self.embedding_warmup_failure = None
-        self._embedding_warmup_thread: Optional[threading.Thread] = None
         self.metrics = metrics or LocalMetrics(enabled=False)
         self._capture_removals_by_reason = dict.fromkeys(
             CAPTURE_REMOVAL_REASONS, 0
@@ -1029,45 +974,47 @@ class EphemeralEngine:
         )
         self._metrics_snapshot_callback: Optional[Callable[[], None]] = None
         self._metrics_snapshot_pending = False
-        self.semantic_prefetch_enabled = (
+        resolved_semantic_prefetch_enabled = (
             settings.semantic_prefetch_enabled.value if semantic_prefetch is None else semantic_prefetch
         )
-        self.semantic_prefetch_workers = (
+        resolved_semantic_prefetch_workers = (
             settings.semantic_prefetch_workers.value
             if semantic_prefetch_workers is None
             else semantic_prefetch_workers
         )
-        if self.semantic_prefetch_workers < 1:
+        if resolved_semantic_prefetch_workers < 1:
             raise ValueError("semantic_prefetch_workers must be at least 1")
-        self.semantic_wait_seconds = (
+        resolved_semantic_wait_seconds = (
             settings.semantic_wait_seconds.value if semantic_wait_seconds is None else semantic_wait_seconds
         )
-        if math.isnan(self.semantic_wait_seconds) or self.semantic_wait_seconds < 0:
+        if math.isnan(resolved_semantic_wait_seconds) or resolved_semantic_wait_seconds < 0:
             raise ValueError("semantic_wait_seconds must be non-negative")
+        semantic_config = SemanticIndexConfig(
+            embedding_model_name=resolved_embedding_model_name,
+            embedding_cache_path=resolved_embedding_cache_path,
+            embedding_threads=resolved_embedding_threads,
+            embedding_batch_size=resolved_embedding_batch_size,
+            embedding_max_batch_tokens=resolved_embedding_max_batch_tokens,
+            embedding_cpu_mem_arena_enabled=resolved_embedding_cpu_mem_arena_enabled,
+            semantic_max_index_input_bytes=resolved_semantic_max_index_input_bytes,
+            semantic_chunk_lines=resolved_semantic_chunk_lines,
+            semantic_chunk_bytes=resolved_semantic_chunk_bytes,
+            semantic_chunk_overlap=resolved_semantic_chunk_overlap,
+            embedding_warmup_enabled=resolved_embedding_warmup_enabled,
+            semantic_prefetch_enabled=resolved_semantic_prefetch_enabled,
+            semantic_prefetch_workers=resolved_semantic_prefetch_workers,
+            semantic_wait_seconds=resolved_semantic_wait_seconds,
+        )
         self._semantic_index = SemanticIndexCoordinator(
             lock=self._lock,
             metrics=self.metrics,
-            get_retained_capture=self._get_retained_capture,
-            publish_embeddings=self._publish_semantic_embeddings,
+            capture_store=self,
             mark_metrics_snapshot_pending=self._mark_metrics_snapshot_pending,
             flush_metrics_snapshot=self._flush_metrics_snapshot,
-            embedding_model_name=self.embedding_model_name,
-            embedding_cache_path=self.embedding_cache_path,
-            embedding_threads=self.embedding_threads,
-            embedding_batch_size=self.embedding_batch_size,
-            embedding_max_batch_tokens=self.embedding_max_batch_tokens,
-            embedding_cpu_mem_arena_enabled=self.embedding_cpu_mem_arena_enabled,
-            semantic_max_index_input_bytes=self.semantic_max_index_input_bytes,
-            semantic_chunk_lines=self.semantic_chunk_lines,
-            semantic_chunk_bytes=self.semantic_chunk_bytes,
-            semantic_chunk_overlap=self.semantic_chunk_overlap,
-            semantic_backend_available=self.semantic_backend_available,
-            embedding_warmup_enabled=self.embedding_warmup_enabled,
-            embedding_warmup_state=self.embedding_warmup_state,
-            embedding_warmup_failure=self.embedding_warmup_failure,
-            semantic_prefetch_enabled=self.semantic_prefetch_enabled,
-            semantic_prefetch_workers=self.semantic_prefetch_workers,
-            semantic_wait_seconds=self.semantic_wait_seconds,
+            config=semantic_config,
+            semantic_backend_available=semantic_backend_available,
+            embedding_warmup_state=embedding_warmup_state,
+            embedding_warmup_failure=None,
         )
 
     def set_metrics_snapshot_callback(self, callback: Optional[Callable[[], None]]) -> None:
@@ -1098,28 +1045,29 @@ class EphemeralEngine:
         with self._lock:
             self._metrics_snapshot_pending = True
 
-    def _get_retained_capture(self, capture_id: str) -> Optional[_CaptureState]:
+    def get_retained_capture(self, capture_id: str) -> Optional[_CaptureState]:
         """Return the engine-owned capture for a semantic retention check."""
         return self._captures.get(capture_id)
 
-    def _publish_semantic_embeddings(
-        self, capture: _CaptureState, embeddings: Any
+    def publish_embeddings(
+        self, capture: SemanticCaptureLease, embeddings: Any
     ) -> bool:
         """Publish vectors and account deferred storage under the shared lock."""
+        capture_state = cast(_CaptureState, capture)
         with self._lock:
             if (
-                self._captures.get(capture.capture_id) is not capture
-                and not getattr(capture, "active_readers", 0)
+                self._captures.get(capture_state.capture_id) is not capture_state
+                and not capture_state.active_readers
             ):
                 return False
-            if capture.embeddings is not None:
+            if capture_state.embeddings is not None:
                 return False
-            capture.embeddings = embeddings
-            capture.semantic_index_state = "ready"
-            if capture.deferred_storage_tracked:
+            capture_state.embeddings = embeddings
+            capture_state.semantic_index_state = "ready"
+            if capture_state.deferred_storage_tracked:
                 embedding_bytes = int(embeddings.nbytes)
                 self._deferred_storage_bytes += embedding_bytes
-                capture.deferred_storage_accounted_bytes += embedding_bytes
+                capture_state.deferred_storage_accounted_bytes += embedding_bytes
             return True
 
     def start_embedding_warmup(self) -> bool:
@@ -1130,45 +1078,15 @@ class EphemeralEngine:
         """Wait for coordinator model warm-up to finish."""
         return self._semantic_index.wait_for_embedding_warmup(timeout)
 
-    def _get_embedding_model(self):
-        """Return the embedding model owned by the semantic coordinator."""
-        return self._semantic_index._get_embedding_model()
-
     def load_embedding_model(self) -> None:
         """Load the configured embedding model through the coordinator."""
         self._semantic_index.load_embedding_model()
 
-    def _semantic_chunk_lines(self, lines: List[str]) -> List[Chunk]:
-        """Build semantic windows through the semantic coordinator."""
-        return self._semantic_index._semantic_chunk_lines(lines)
-
-    def _schedule_semantic_prefetch(self, capture: _CaptureState) -> None:
-        """Delegate post-ingestion semantic work to the coordinator."""
-        self._semantic_index._schedule_semantic_prefetch(capture)
-
-    def _prefetch_worker(self) -> None:
-        """Compatibility wrapper for the coordinator's prefetch worker."""
-        self._semantic_index._prefetch_worker()
-
-    def _await_semantic_index(
-        self, capture: _CaptureState, timeout: Optional[float] = None
-    ) -> str:
-        """Wait for semantic indexing through the coordinator."""
-        return self._semantic_index._await_semantic_index(capture, timeout)
-
-    def _wait_for_state_index(
-        self, capture: _CaptureState, timeout: Optional[float] = None
-    ) -> str:
-        """Return a bounded semantic-index state through the coordinator."""
-        return self._semantic_index._wait_for_state_index(capture, timeout)
-
-    def _record_semantic_job_metrics_locked(self, *args, **kwargs) -> None:
-        """Compatibility wrapper for semantic job metrics tests."""
-        self._semantic_index._record_semantic_job_metrics_locked(*args, **kwargs)
-
-    def _ensure_embeddings(self, capture: _CaptureState) -> None:
-        """Ensure embeddings through the semantic coordinator."""
-        self._semantic_index._ensure_embeddings(capture)
+    def observe_semantic_indexing(
+        self, observer: Callable[[float], None]
+    ) -> ContextManager[None]:
+        """Observe embedding attempt durations for the lifetime of the context."""
+        return self._semantic_index.observe_indexing(observer)
 
     def shutdown(self, timeout_seconds: float = 10.0) -> Dict[str, Any]:
         """Stop semantic workers using the coordinator's bounded shutdown."""
@@ -1339,7 +1257,7 @@ class EphemeralEngine:
                 f"{self.max_indexed_chunks:,}-chunk index budget"
             )
         chunks = self._chunk_lines(lines)
-        semantic_chunks = self._semantic_chunk_lines(lines)
+        semantic_chunks = self._semantic_index.semantic_chunk_lines(lines)
 
         # Semantic embeddings are materialized lazily by the first semantic or
         # hybrid search. Ingestion remains useful for fast BM25 search without
@@ -1486,7 +1404,7 @@ class EphemeralEngine:
                 "capture_original_bytes",
                 capture.original_byte_size if capture.original_byte_size is not None else capture.byte_size,
             )
-        self._schedule_semantic_prefetch(capture)
+        self._semantic_index.schedule_semantic_prefetch(capture)
         return capture
 
     def _record_capture_rejection(self, reasons: Tuple[str, ...]) -> None:
@@ -1706,7 +1624,7 @@ class EphemeralEngine:
             if not capture.semantic_chunks:
                 return "ready"
             try:
-                self._ensure_embeddings(capture)
+                self._semantic_index.ensure_embeddings(capture)
             except SemanticIndexBudgetExceeded:
                 return "budget_exceeded"
             return "ready" if capture.semantic_index_state == "ready" else capture.semantic_index_state
@@ -1731,14 +1649,14 @@ class EphemeralEngine:
         if capture is None:
             return "not-found"
         try:
-            return self._wait_for_state_index(capture, timeout)
+            return self._semantic_index.wait_for_state_index(capture, timeout)
         finally:
             self._release_capture_reader(capture)
 
     def wait_for_semantic_index(self, capture: Any, timeout: Optional[float] = None) -> str:
         """Compatibility wrapper accepting a view, ID, or legacy internal state."""
         if isinstance(capture, _CaptureState):
-            return self._wait_for_state_index(capture, timeout)
+            return self._semantic_index.wait_for_state_index(capture, timeout)
         capture_id = capture.capture_id if isinstance(capture, CaptureView) else capture
         if not isinstance(capture_id, str):
             return "failed"
@@ -1835,7 +1753,7 @@ class EphemeralEngine:
             return []
 
         semantic_index._load_semantic_dependencies()
-        self._await_semantic_index(capture)
+        self._semantic_index.await_semantic_index(capture)
         with self._lock:
             embeddings = capture.embeddings
         if embeddings is None or len(embeddings) == 0:
@@ -1938,7 +1856,7 @@ class EphemeralEngine:
     ) -> Dict[str, Any]:
         """Run search while the caller retains the capture storage lease."""
 
-        if mode in ("semantic", "hybrid") and not self.semantic_backend_available:
+        if mode in ("semantic", "hybrid") and not self._semantic_index.semantic_backend_available:
             return {
                 "status": "error",
                 "error_code": "semantic_backend_unavailable",
@@ -1973,9 +1891,11 @@ class EphemeralEngine:
                 # up to the budget; semantic mode has nothing else to return
                 # and waits for the index.
                 if mode == "hybrid":
-                    index_state = self._await_semantic_index(capture, self.semantic_wait_seconds)
+                    index_state = self._semantic_index.await_semantic_index(
+                        capture, self._semantic_index.config.semantic_wait_seconds
+                    )
                 else:
-                    index_state = self._await_semantic_index(capture)
+                    index_state = self._semantic_index.await_semantic_index(capture)
                 if index_state == "ready":
                     semantic_results = self.search_semantic(capture, query, top_k=top_k * 3)
                 else:
@@ -1987,7 +1907,7 @@ class EphemeralEngine:
                         "hybrid_search_semantic_pending",
                         capture_id=capture.capture_id,
                         line_count=capture.line_count,
-                        wait_seconds=self.semantic_wait_seconds,
+                        wait_seconds=self._semantic_index.config.semantic_wait_seconds,
                     )
             except SemanticIndexBudgetExceeded as exc:
                 semantic_fallback = type(exc).__name__
@@ -2003,7 +1923,7 @@ class EphemeralEngine:
                     error_type=semantic_fallback,
                 )
             except SemanticBackendUnavailable:
-                self.semantic_backend_available = False
+                self._semantic_index.semantic_backend_available = False
                 return {
                     "status": "error",
                     "error_code": "semantic_backend_unavailable",
@@ -2188,7 +2108,7 @@ class EphemeralEngine:
                 result["message"] = "Semantic indexing exceeded its work budget; returning BM25 results."
         if semantic_coverage == "pending":
             result["semantic_index_state"] = capture.semantic_index_state
-            result["semantic_wait_seconds"] = self.semantic_wait_seconds
+            result["semantic_wait_seconds"] = self._semantic_index.config.semantic_wait_seconds
             result["message"] = (
                 "Semantic index still building for this capture; results are lexical "
                 "(BM25) only. Repeat the search for hybrid ranking."
@@ -2907,9 +2827,9 @@ class EphemeralEngine:
             "total_lines": total_lines,
             "total_chunks": total_chunks,
             "total_semantic_chunks": total_semantic_chunks,
-            "semantic_chunk_lines": self.semantic_chunk_lines,
-            "semantic_chunk_bytes": self.semantic_chunk_bytes,
-            "semantic_chunk_overlap": self.semantic_chunk_overlap,
+            "semantic_chunk_lines": self._semantic_index.config.semantic_chunk_lines,
+            "semantic_chunk_bytes": self._semantic_index.config.semantic_chunk_bytes,
+            "semantic_chunk_overlap": self._semantic_index.config.semantic_chunk_overlap,
             "indexed_chunks": self._indexed_chunks,
             "max_indexed_chunks": self.max_indexed_chunks,
             "last_index_budget_adjustment": copy.deepcopy(
@@ -2922,27 +2842,27 @@ class EphemeralEngine:
             "deferred_storage_readers": self._deferred_storage_readers,
             "deferred_storage_bytes": self._deferred_storage_bytes,
             "embedding_bytes": embedding_bytes,
-            "embedding_model": self.embedding_model_name,
-            "semantic_backend_available": self.semantic_backend_available,
-            "embedding_model_loaded": self.embedding_model is not None,
+            "embedding_model": self._semantic_index.config.embedding_model_name,
+            "semantic_backend_available": self._semantic_index.semantic_backend_available,
+            "embedding_model_loaded": self._semantic_index.embedding_model is not None,
             "embedding_model_load_failure": semantic_diagnostics[
                 "embedding_model_load_failure"
             ],
             "embedding_model_retry_after_seconds": semantic_diagnostics[
                 "embedding_model_retry_after_seconds"
             ],
-            "embedding_threads": self.embedding_threads,
-            "embedding_batch_size": self.embedding_batch_size,
-            "embedding_max_batch_tokens": self.embedding_max_batch_tokens,
-            "embedding_cpu_mem_arena_enabled": self.embedding_cpu_mem_arena_enabled,
-            "semantic_max_index_input_bytes": self.semantic_max_index_input_bytes,
-            "embedding_warmup_enabled": self.embedding_warmup_enabled,
-            "embedding_warmup_state": self.embedding_warmup_state,
-            "embedding_warmup_failure": self.embedding_warmup_failure,
+            "embedding_threads": self._semantic_index.config.embedding_threads,
+            "embedding_batch_size": self._semantic_index.config.embedding_batch_size,
+            "embedding_max_batch_tokens": self._semantic_index.config.embedding_max_batch_tokens,
+            "embedding_cpu_mem_arena_enabled": self._semantic_index.config.embedding_cpu_mem_arena_enabled,
+            "semantic_max_index_input_bytes": self._semantic_index.config.semantic_max_index_input_bytes,
+            "embedding_warmup_enabled": self._semantic_index.config.embedding_warmup_enabled,
+            "embedding_warmup_state": self._semantic_index.embedding_warmup_state,
+            "embedding_warmup_failure": self._semantic_index.embedding_warmup_failure,
             "lexical_backend": self.lexical_backend,
-            "embedding_cache_dir": self.embedding_cache_path,
-            "semantic_prefetch_enabled": self.semantic_prefetch_enabled,
-            "semantic_prefetch_workers": self.semantic_prefetch_workers,
+            "embedding_cache_dir": self._semantic_index.config.embedding_cache_path,
+            "semantic_prefetch_enabled": self._semantic_index.config.semantic_prefetch_enabled,
+            "semantic_prefetch_workers": self._semantic_index.config.semantic_prefetch_workers,
             "semantic_prefetch_pending": semantic_diagnostics[
                 "semantic_prefetch_pending"
             ],
@@ -2958,7 +2878,7 @@ class EphemeralEngine:
             "semantic_index_on_demand_queued": semantic_diagnostics[
                 "semantic_index_on_demand_queued"
             ],
-            "semantic_wait_seconds": self.semantic_wait_seconds,
+            "semantic_wait_seconds": self._semantic_index.config.semantic_wait_seconds,
             "semantic_prefetch_failed": semantic_diagnostics[
                 "semantic_prefetch_failed"
             ],

@@ -37,6 +37,9 @@ class FakeEngine:
         self.events.append(("summary", capture_id))
         return {}
 
+    def get_buffer_stats(self):
+        return {"embedding_model": self.embedding_model_name}
+
 
 class TestBenchmarkLatency(unittest.TestCase):
     def test_warmup_materializes_embeddings_before_warm_samples(self):

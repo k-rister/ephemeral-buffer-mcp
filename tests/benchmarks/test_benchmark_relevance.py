@@ -42,7 +42,7 @@ class TestRelevanceBenchmark(unittest.TestCase):
         )
         try:
             for case in first:
-                chunks = engine._semantic_chunk_lines(case["lines"])
+                chunks = engine._semantic_index.semantic_chunk_lines(case["lines"])
                 expected = case["expected_range"]
                 self.assertEqual(len(chunks), 4)
                 self.assertGreater(expected["start_line"], chunks[0].end_line)

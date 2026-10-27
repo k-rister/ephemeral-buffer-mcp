@@ -4,6 +4,7 @@ import io
 import json
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmarks.benchmark_warmup as benchmark_warmup
@@ -12,6 +13,36 @@ from benchmarks.benchmark_warmup import run_benchmark, workload_result
 
 
 class TestWarmupBenchmark(unittest.TestCase):
+    def test_lazy_startup_timing_excludes_diagnostics_cost(self):
+        clock = {"now": 0.0, "stats_calls": 0}
+
+        class SlowStatsEngine:
+            def __init__(self, **_kwargs):
+                clock["now"] += 2.0
+
+            def get_buffer_stats(self):
+                clock["stats_calls"] += 1
+                clock["now"] += 50.0
+                return {"embedding_warmup_state": "disabled"}
+
+            def ingest(self, _text, *, label):
+                return SimpleNamespace(capture_id=label)
+
+            def search(self, *_args, **_kwargs):
+                return {}
+
+            def shutdown(self):
+                pass
+
+        with patch.object(benchmark_warmup, "EphemeralEngine", SlowStatsEngine), \
+                patch.object(benchmark_warmup.time, "perf_counter", side_effect=lambda: clock["now"]), \
+                patch.object(benchmark_warmup, "process_rss_bytes", return_value=None):
+            measurement = benchmark_warmup._measure_in_process(warmup=False)
+
+        self.assertEqual(clock["stats_calls"], 1)
+        self.assertEqual(measurement["warmup_state"], "disabled")
+        self.assertEqual(measurement["startup_ready_seconds"], 2.0)
+
     def test_benchmark_reports_lazy_and_warmup_modes(self):
         result = run_benchmark(samples=1)
 

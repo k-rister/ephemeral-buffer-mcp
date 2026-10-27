@@ -126,6 +126,7 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
         for line_count in line_counts:
             measurements = [_measure_once(line_count, engine) for _ in range(samples)]
             by_size.append(_summary(measurements))
+        embedding_model = engine.get_buffer_stats()["embedding_model"]
     finally:
         engine.shutdown()
 
@@ -133,7 +134,7 @@ def run_benchmark(line_counts: tuple[int, ...], samples: int) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
-        "embedding_model": engine.embedding_model_name,
+        "embedding_model": embedding_model,
         "cold_start_seconds": cold_start_seconds,
         "warm_measurements": by_size,
     }
