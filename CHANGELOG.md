@@ -19,6 +19,19 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
   preflight failures; add exact response-shape regression assertions.
 - Set MCP's native `isError` flag for EB operation failures while preserving
   legacy JSON error text and successful captured command results.
+- Declare each tool's MCP result policy explicitly and add independently
+  versioned, typed `structuredContent.data` contracts for durable execution,
+  search, and capture retrieval while keeping execution JSON text unchanged.
+- Accept compact execution and diagnostic summaries in truncated
+  `list_executions` MCP payloads so oversized pages remain valid responses.
+- Preserve sanitized `list_executions` diagnostics when neither the record nor
+  its companion summary contains a recoverable execution ID.
+- Keep `get_execution_output` JSON valid under the MCP wire budget by reducing
+  oversized MCP pages while preserving byte-offset continuation.
+- Accept compact `response_truncated` execution-output summaries as a typed
+  success payload when the full output response exceeds its serialization cap.
+- Publish MCP `outputSchema` envelopes with the registered payload contracts for
+  execution, search, and retrieval tools.
 - Normalize Unicode identically in BM25 indexes, queries, and fallback search;
   bound structured search labels and paginate capture listings with stable,
   signed cursors and JSON-safe label limits.
@@ -29,6 +42,16 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: documented the Unicode search and bounded capture listing fixes
 
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: replaced the semantic embedding dependency stack and removed the CI audit exception
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: accepted compact execution-list summaries in the typed MCP result contract
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: modeled ID-less malformed execution-list diagnostics with their record-file fallback
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: bounded execution-output MCP pages without changing Python helper limits or JSON text
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: accepted compact execution-output fallback payloads in the MCP contract
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: exposed registered payload contracts through MCP output schemas
 
 ## 0.11.0 - 2026-10-18
 

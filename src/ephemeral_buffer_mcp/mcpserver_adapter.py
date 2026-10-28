@@ -1,9 +1,10 @@
 """Narrow compatibility boundary for MCPServer SDK integrations.
 
-Normal tool registration and dispatch use MCPServer's public API. Validation
-failure observation and instruction refresh still require contained SDK
-internals. Failure to install either capability never removes or disables a
-registered tool.
+Normal tool registration and dispatch use MCPServer's public API. Publishing a
+supplied result schema, observing validation failures, and refreshing
+instructions require contained SDK internals. Failure to publish a required
+result schema aborts that tool's registration; the optional observation and
+instruction capabilities can degrade without disabling registered tools.
 """
 
 from __future__ import annotations
@@ -80,11 +81,27 @@ def register_tool(
     fn,
     *,
     name: str,
+    output_schema: dict[str, Any] | None = None,
     validation_scope: Callable[[], Any] | None = None,
     validation_observer: Callable[[], None] | None = None,
 ) -> None:
-    """Register a tool publicly and best-effort install validation metrics."""
-    app.add_tool(fn, name=name)
+    """Register a tool, publish its optional schema, and add validation metrics."""
+    if output_schema is None:
+        app.add_tool(fn, name=name)
+    else:
+        # Keep SDK output-model validation disabled: runtime payload validation
+        # happens at the transport boundary, while this schema is published to
+        # clients for discovery and their own validation/code generation.
+        app.add_tool(fn, name=name, structured_output=False)
+        try:
+            tool = app._tool_manager._tools[name]
+            tool.fn_metadata.output_model = None
+            tool.fn_metadata.output_schema = output_schema
+            tool.__dict__.pop("output_schema", None)
+        except Exception as exc:
+            raise RuntimeError(
+                "MCP output schema could not be installed through the SDK adapter"
+            ) from exc
     if validation_scope is None or validation_observer is None:
         return
 

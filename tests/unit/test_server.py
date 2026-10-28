@@ -255,6 +255,9 @@ class TestServerTools(unittest.TestCase):
         category,
         *,
         structured_result_factory=None,
+        result_policy=None,
+        payload_model=None,
+        payload_schema_version=None,
         service_context=None,
     ):
         adapters = {}
@@ -274,6 +277,9 @@ class TestServerTools(unittest.TestCase):
                 category,
                 structured_result_factory,
                 service_context or server.DEFAULT_SERVICES,
+                result_policy=result_policy,
+                payload_model=payload_model,
+                payload_schema_version=payload_schema_version,
             )
         return adapters[name]
 
@@ -610,6 +616,7 @@ class TestServerTools(unittest.TestCase):
                 "diagnostics",
                 None,
                 server.DEFAULT_SERVICES,
+                result_policy="legacy_text",
             )
             try:
                 offload = AsyncMock(return_value="worker result")
@@ -636,11 +643,31 @@ class TestServerTools(unittest.TestCase):
 
         async def exercise():
             adapters = {}
-            for name, category, structured in (
-                ("busy_retrieval_probe", "retrieval", True),
-                ("busy_execution_probe", "execution", False),
-                ("busy_diagnostics_probe", "diagnostics", False),
-                ("get_buffer_stats", "diagnostics", False),
+            for name, category, structured, result_policy in (
+                (
+                    "busy_retrieval_probe",
+                    "retrieval",
+                    True,
+                    "structured_envelope",
+                ),
+                (
+                    "busy_execution_probe",
+                    "execution",
+                    False,
+                    "legacy_text",
+                ),
+                (
+                    "busy_diagnostics_probe",
+                    "diagnostics",
+                    False,
+                    "legacy_text",
+                ),
+                (
+                    "get_buffer_stats",
+                    "diagnostics",
+                    False,
+                    "legacy_text",
+                ),
             ):
                 factory = (
                     (lambda: server.ToolResponseEnvelope(status="ok", data={}, text="ok"))
@@ -652,6 +679,7 @@ class TestServerTools(unittest.TestCase):
                     name,
                     category,
                     structured_result_factory=factory,
+                    result_policy=result_policy,
                 )
 
             for name, category in (
@@ -959,7 +987,52 @@ class TestServerTools(unittest.TestCase):
 
     def test_tool_registry_rejects_unknown_category(self):
         with self.assertRaisesRegex(ValueError, "unknown tool category"):
-            register_tool("invalid_category_probe", "unknown")
+            register_tool(
+                "invalid_category_probe",
+                "unknown",
+                result_policy="legacy_text",
+            )
+
+    def test_tool_registry_validates_result_and_payload_contract_metadata(self):
+        with self.assertRaisesRegex(ValueError, "unknown tool result policy"):
+            register_tool("invalid_result_policy_probe", "retrieval", result_policy="other")
+        with self.assertRaisesRegex(ValueError, "unknown tool text policy"):
+            register_tool(
+                "invalid_text_policy_probe",
+                "retrieval",
+                result_policy="structured_envelope",
+                text_policy="other",
+            )
+        with self.assertRaisesRegex(ValueError, "must be registered together"):
+            register_tool(
+                "incomplete_payload_contract_probe",
+                "retrieval",
+                result_policy="structured_envelope",
+                payload_model=object(),
+            )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            register_tool(
+                "invalid_payload_version_probe",
+                "retrieval",
+                result_policy="structured_envelope",
+                payload_model=object(),
+                payload_schema_version=True,
+            )
+        with self.assertRaisesRegex(ValueError, "require the structured_envelope"):
+            register_tool(
+                "legacy_payload_contract_probe",
+                "retrieval",
+                result_policy="legacy_text",
+                payload_model=object(),
+                payload_schema_version=1,
+            )
+        with self.assertRaisesRegex(ValueError, "factories require the structured_envelope"):
+            register_tool(
+                "legacy_structured_factory_probe",
+                "retrieval",
+                result_policy="legacy_text",
+                structured_result_factory=lambda: None,
+            )
 
     def test_tool_registry_carries_transport_policy_and_socket_entrypoint(self):
         capture_registration = get_tool_registration("capture_text")
@@ -982,6 +1055,104 @@ class TestServerTools(unittest.TestCase):
             get_tool_registration("resume_execution").background_execution
         )
 
+    def test_tool_result_policy_is_independent_of_descriptive_category(self):
+        adapter = self.build_mcp_adapter(
+            lambda: "legacy category-independent result",
+            "category_policy_probe",
+            "retrieval",
+            result_policy="legacy_text",
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            result = asyncio.run(adapter())
+        self.assertEqual(result, "legacy category-independent result")
+
+    def test_registered_mcp_adapter_inherits_registered_result_policy(self):
+        adapter = self.build_mcp_adapter(
+            lambda: "registered legacy result",
+            "get_buffer_stats",
+            "diagnostics",
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            result = asyncio.run(adapter())
+        self.assertEqual(result, "registered legacy result")
+
+    def test_unregistered_mcp_adapter_requires_explicit_result_policy(self):
+        with self.assertRaisesRegex(ValueError, "must declare an explicit result_policy"):
+            self.build_mcp_adapter(
+                lambda: "plain result",
+                "missing_result_policy_probe",
+                "diagnostics",
+            )
+
+        with self.assertRaisesRegex(ValueError, "unknown tool result policy"):
+            self.build_mcp_adapter(
+                lambda: "plain result",
+                "invalid_result_policy_adapter_probe",
+                "diagnostics",
+                result_policy="other",
+            )
+
+    def test_payload_validation_failure_returns_generic_versioned_error(self):
+        from ephemeral_buffer_mcp.tools.payloads import PAYLOAD_CONTRACTS
+
+        adapter = self.build_mcp_adapter(
+            lambda: "unused",
+            "invalid_payload_probe",
+            "diagnostics",
+            result_policy="structured_envelope",
+            payload_model=PAYLOAD_CONTRACTS["get_capture_slice"],
+            payload_schema_version=1,
+            structured_result_factory=lambda: server.ToolResponseEnvelope(
+                status="ok",
+                data={"capture_id": "bad", "content_bytes": "wrong type"},
+                text="should not be returned",
+            ),
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            result = asyncio.run(adapter())
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["status"], "error")
+        self.assertEqual(result.structured_content["error"]["code"], "operation_failed")
+        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertEqual(result.structured_content["data"], {})
+        self.assertNotIn("wrong type", result.content[0].text)
+
     def test_tool_registry_requires_one_socket_entrypoint(self):
         registration = get_tool_registration("capture_text")
         with patch.object(tool_registry, "_REGISTRATIONS", []):
@@ -1000,6 +1171,7 @@ class TestServerTools(unittest.TestCase):
             register_tool(
                 "incomplete_socket_probe",
                 "capture",
+                result_policy="structured_envelope",
                 socket_request_adapter=lambda request: request,
             )(lambda: None)
 
@@ -2156,6 +2328,7 @@ class TestServerTools(unittest.TestCase):
             fail_with_private_text,
             "unexpected_plain_probe",
             "diagnostics",
+            result_policy="legacy_text",
         )
         result = asyncio.run(adapter())
         payload = mcp_result_payload(result)
@@ -2170,7 +2343,7 @@ class TestServerTools(unittest.TestCase):
         self.assertIsInstance(payload["error"]["details"]["call_id"], str)
         self.assertNotIn("private exception text", mcp_result_text(result))
 
-    def test_legacy_execution_api_errors_use_native_mcp_error_flag(self):
+    def test_execution_api_errors_use_versioned_mcp_envelope_and_native_error_flag(self):
         with patch(
             "ephemeral_buffer_mcp.tools.execution_responses.get_active_execution_manager"
         ) as get_manager:
@@ -2187,7 +2360,10 @@ class TestServerTools(unittest.TestCase):
         body = mcp_result_text(result)
         payload = json.loads(body)
         self.assertTrue(result.is_error)
-        self.assertIsNone(result.structured_content)
+        self.assertEqual(result.structured_content["schema_version"], TOOL_RESPONSE_SCHEMA_VERSION)
+        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(result.structured_content["status"], "error")
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["error"]["code"], "execution_not_found")
         self.assertIsInstance(payload["error"]["details"]["call_id"], str)
@@ -2202,6 +2378,7 @@ class TestServerTools(unittest.TestCase):
             lambda: response_text,
             "legacy_success_probe",
             "configuration",
+            result_policy="legacy_text",
         )
 
         result = asyncio.run(adapter())
@@ -2398,7 +2575,8 @@ class TestServerTools(unittest.TestCase):
         description_characters = sum(
             len(tool.description or "") for tool in mcp_tools
         )
-        self.assertLess(len(compact_catalog), 30000)
+        # Payload-versioned tools publish their full structured output schemas.
+        self.assertLess(len(compact_catalog), 100000)
         self.assertLess(description_characters, 7000)
         self.assertLess(len(mcp_transport._mcp_instructions()), 200)
 
@@ -3298,7 +3476,16 @@ class TestServerTools(unittest.TestCase):
         )
         self.assertEqual(
             set(missing_summary_response.structured_content),
-            {"schema_version", "status", "data", "error", "truncated", "next_cursor"},
+            {
+                "schema_version", "status", "data", "error", "truncated", "next_cursor",
+                "payload_schema_version",
+            },
+        )
+        self.assertEqual(
+            summary_response.structured_content["payload_schema_version"], 1
+        )
+        self.assertEqual(
+            missing_summary_response.structured_content["payload_schema_version"], 1
         )
 
         with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
@@ -3326,6 +3513,7 @@ class TestServerTools(unittest.TestCase):
                 "available_match_count",
             },
         )
+        self.assertEqual(search_response.structured_content["payload_schema_version"], 1)
         self.assertEqual(
             set(search_response.structured_content["data"]["matches"][0]),
             {
@@ -3386,6 +3574,7 @@ class TestServerTools(unittest.TestCase):
                 "segments",
             },
         )
+        self.assertEqual(slice_response.structured_content["payload_schema_version"], 1)
         self.assertEqual(
             set(slice_response.structured_content["data"]["segments"][0]),
             {"line", "byte_offset", "byte_length", "line_complete", "separator_after"},
@@ -3682,6 +3871,13 @@ class TestServerTools(unittest.TestCase):
                 self.assertEqual(envelope.status, "error")
                 self.assertEqual(envelope.error.code, code)
 
+        non_object_error_details = mcp_transport._legacy_tool_envelope(
+            "unregistered_tool",
+            '{"status":"error","error":{"code":"bad","message":"bad details",'
+            '"details":"not an object"}}',
+        )
+        self.assertIsNone(non_object_error_details.error.details)
+
         text_errors = [
             ("get_capture_summary", "Error: capture not found", "operation_failed"),
             ("get_capture_summary", "Error: storage failed", "operation_failed"),
@@ -3742,6 +3938,7 @@ class TestServerTools(unittest.TestCase):
                 "retrieval",
                 lambda: "not an envelope",
                 server.DEFAULT_SERVICES,
+                result_policy="structured_envelope",
             )
             adapter = add_tool.call_args.args[0]
             with self.assertRaisesRegex(TypeError, "must return ToolResponseEnvelope"):

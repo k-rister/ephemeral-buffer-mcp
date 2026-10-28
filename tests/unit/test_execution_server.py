@@ -13,13 +13,18 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
+
+from jsonschema import Draft202012Validator
+
 from ephemeral_buffer_mcp.config import DEFAULT_MAX_BUFFER_BYTES
 
 os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 os.environ.setdefault("EPHEMERAL_TEST_EMBEDDINGS", "1")
 
 import ephemeral_buffer_mcp.server as server
+import ephemeral_buffer_mcp.mcp_transport as mcp_transport
 import ephemeral_buffer_mcp.socket_transport as socket_transport
+import ephemeral_buffer_mcp.tools.execution as execution_tools
 import ephemeral_buffer_mcp.tools.execution_responses as execution_responses
 from ephemeral_buffer_mcp.execution import (
     ExecutionBusyError,
@@ -108,6 +113,107 @@ class TestExecutionTools(unittest.TestCase):
         self.assertEqual(missing_phase["error"]["code"], "phase_not_found")
         listed = json.loads(server.list_executions())
         self.assertEqual(listed["executions"][0]["execution_id"], "tool-execution")
+
+    def test_execution_mcp_payloads_are_versioned_and_match_legacy_json_text(self):
+        self.manager.start(
+            [self.phase("versioned-phase", "prepared")],
+            execution_id="versioned-workflow",
+        )
+
+        async def invoke(name, arguments):
+            result = await server.mcp.call_tool(name, arguments)
+            try:
+                payload = json.loads(result.content[0].text)
+            except json.JSONDecodeError:
+                self.fail(
+                    f"{name} did not preserve its JSON text result: "
+                    f"{result.structured_content!r}"
+                )
+            self.assertEqual(
+                result.content[0].text,
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            self.assertEqual(result.structured_content["data"], payload)
+            self.assertEqual(result.structured_content["schema_version"], 1)
+            self.assertEqual(result.structured_content["payload_schema_version"], 1)
+            return result
+
+        async def exercise():
+            started = await invoke(
+                "start_execution",
+                {
+                    "phases": [self.phase("mcp-phase", "started")],
+                    "execution_id": "mcp-versioned-workflow",
+                },
+            )
+            start_future = self.manager._background_futures.get(
+                "mcp-versioned-workflow"
+            )
+            if start_future is not None:
+                start_future.result(timeout=10)
+
+            responses = [
+                started,
+                await invoke("resume_execution", {"execution_id": "versioned-workflow"}),
+                await invoke("cancel_execution", {"execution_id": "versioned-workflow"}),
+                await invoke("get_execution", {"execution_id": "versioned-workflow"}),
+                await invoke(
+                    "get_execution_output",
+                    {"execution_id": "versioned-workflow", "phase_name": "versioned-phase"},
+                ),
+                await invoke(
+                    "get_execution_output",
+                    {
+                        "execution_id": "missing-output-contract-workflow",
+                        "phase_name": "missing-phase",
+                    },
+                ),
+                await invoke("list_executions", {"limit": 25}),
+                await invoke("get_execution_capacity", {}),
+                await invoke(
+                    "retire_executions",
+                    {"execution_ids": ["versioned-workflow"], "dry_run": True},
+                ),
+                await invoke("get_execution", {"execution_id": "missing-contract-workflow"}),
+            ]
+            return responses
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            responses = asyncio.run(exercise())
+        self.assertTrue(all(response.structured_content["payload_schema_version"] == 1 for response in responses))
+        self.assertEqual(responses[-1].structured_content["status"], "error")
+        self.assertEqual(responses[-1].structured_content["error"]["code"], "execution_not_found")
+
+        record_path = self.manager.store._path("versioned-workflow")
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["schema_version"] = 999
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        diagnostic = asyncio.run(
+            server.mcp.call_tool(
+                "get_execution", {"execution_id": "versioned-workflow"}
+            )
+        )
+        payload = json.loads(diagnostic.content[0].text)
+        self.assertEqual(diagnostic.structured_content["payload_schema_version"], 1)
+        self.assertEqual(diagnostic.structured_content["schema_version"], 1)
+        self.assertEqual(diagnostic.structured_content["data"], payload)
+        self.assertEqual(diagnostic.structured_content["data"]["schema_version"], 999)
 
     def test_service_context_allocates_execution_storage_on_first_use(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -206,6 +312,266 @@ class TestExecutionTools(unittest.TestCase):
         response = server.get_execution_output("control-output", "control", max_bytes=8192)
         self.assertFalse(response.startswith("Error managing execution: response exceeds"))
         self.assertEqual(len(json.loads(response)["phases"][0]["output"]), 8192)
+
+    def test_mcp_control_character_output_fits_budget_and_remains_pageable(self):
+        self.runner.results["mcp-control"] = ("\x00" * 8192, 0, False, 8192, False)
+        self.runner.results["mcp-ascii"] = ("a" * 8192, 0, False, 8192, False)
+        server.start_execution(
+            [self.phase("control", "mcp-control")],
+            execution_id="mcp-control-output",
+        )
+        server.start_execution(
+            [self.phase("ascii", "mcp-ascii")],
+            execution_id="mcp-ascii-output",
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        async def get_page(execution_id, phase_name, offset=0):
+            return await server.mcp.call_tool(
+                "get_execution_output",
+                {
+                    "execution_id": execution_id,
+                    "phase_name": phase_name,
+                    "offset": offset,
+                    "max_bytes": 8192,
+                },
+            )
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            control = asyncio.run(get_page("mcp-control-output", "control"))
+            ascii_result = asyncio.run(get_page("mcp-ascii-output", "ascii"))
+
+        def assert_valid_response(result):
+            payload = json.loads(result.content[0].text)
+            self.assertFalse(result.is_error)
+            self.assertEqual(result.structured_content["data"], payload)
+            self.assertEqual(
+                result.content[0].text,
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            envelope = server.ToolResponseEnvelope(
+                status="ok",
+                data=payload,
+                text=result.content[0].text,
+                payload_schema_version=1,
+            )
+            self.assertLessEqual(
+                mcp_transport._call_tool_result_bytes(envelope),
+                server.MCP_TOOL_RESPONSE_MAX_BYTES
+                - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+            )
+            return payload
+
+        control_payload = assert_valid_response(control)
+        control_phase = control_payload["phases"][0]
+        self.assertLess(len(control_phase["output"].encode("utf-8")), 8192)
+        self.assertTrue(control_phase["truncated"])
+        self.assertEqual(
+            control_phase["next_offset"],
+            len(control_phase["output"].encode("utf-8")),
+        )
+
+        ascii_payload = assert_valid_response(ascii_result)
+        self.assertEqual(len(ascii_payload["phases"][0]["output"]), 8192)
+        self.assertFalse(ascii_payload["phases"][0]["truncated"])
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            continuation = asyncio.run(
+                get_page(
+                    "mcp-control-output",
+                    "control",
+                    control_phase["next_offset"],
+                )
+            )
+        continuation_payload = assert_valid_response(continuation)
+        continuation_phase = continuation_payload["phases"][0]
+        self.assertEqual(continuation_phase["offset"], control_phase["next_offset"])
+        self.assertEqual(
+            continuation_phase["output"],
+            "\x00" * len(continuation_phase["output"]),
+        )
+
+    def test_mcp_execution_output_returns_valid_error_if_minimum_page_cannot_fit(self):
+        too_large = execution_responses._execution_error_json(
+            "response_too_large",
+            "Execution response exceeds its configured byte limit.",
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(execution_tools, "_execution_json", return_value=too_large):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                result = asyncio.run(
+                    server.mcp.call_tool(
+                        "get_execution_output",
+                        {
+                            "execution_id": "minimum-page-too-large",
+                            "phase_name": "phase",
+                            "max_bytes": 8192,
+                        },
+                    )
+                )
+
+        payload = json.loads(result.content[0].text)
+        self.assertTrue(result.is_error)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"]["code"], "response_too_large")
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(
+            result.content[0].text,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+
+    def test_mcp_compact_execution_output_fallback_matches_typed_contract(self):
+        self.runner.results["compact-control-one"] = (
+            "\x00" * 4096,
+            0,
+            False,
+            4096,
+            False,
+        )
+        self.runner.results["compact-control-two"] = (
+            "\x00" * 4096,
+            0,
+            False,
+            4096,
+            False,
+        )
+        server.start_execution(
+            [
+                self.phase("phase-one", "compact-control-one"),
+                self.phase("phase-two", "compact-control-two"),
+            ],
+            execution_id="compact-control-output",
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        # Lower the helper's JSON cap to exercise its real compact-success path
+        # deterministically with the multi-phase control-character output.
+        with patch.object(execution_tools, "EXECUTION_OUTPUT_RESPONSE_MAX_BYTES", 512):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                result = asyncio.run(
+                    server.mcp.call_tool(
+                        "get_execution_output",
+                        {
+                            "execution_id": "compact-control-output",
+                            "max_bytes": 8192,
+                        },
+                    )
+                )
+
+        payload = json.loads(result.content[0].text)
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertTrue(payload["response_truncated"])
+        self.assertNotIn("max_bytes", payload)
+        self.assertEqual(
+            payload["phases"],
+            [
+                {
+                    "name": "phase-one",
+                    "status": "completed",
+                    "attempts": None,
+                    "error": None,
+                },
+                {
+                    "name": "phase-two",
+                    "status": "completed",
+                    "attempts": None,
+                    "error": None,
+                },
+            ],
+        )
+        execution_tools.PAYLOAD_CONTRACTS["get_execution_output"].validate_python(
+            payload,
+            strict=True,
+        )
+        listed_tools = {
+            tool.name: tool for tool in asyncio.run(server.mcp.list_tools())
+        }
+        Draft202012Validator(
+            listed_tools["get_execution_output"].output_schema
+        ).validate(result.structured_content)
+
+    def test_mcp_execution_output_preserves_operation_error_during_page_reduction(self):
+        self.runner.results["changing-output"] = ("\x00" * 8192, 0, False, 8192, False)
+        server.start_execution(
+            [self.phase("changing", "changing-output")],
+            execution_id="changing-output",
+        )
+        original_output = self.manager.output
+        calls = 0
+
+        def output_then_fail(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return original_output(*args, **kwargs)
+            raise KeyError("execution changed during paging")
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(self.manager, "output", side_effect=output_then_fail):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                result = asyncio.run(
+                    server.mcp.call_tool(
+                        "get_execution_output",
+                        {
+                            "execution_id": "changing-output",
+                            "phase_name": "changing",
+                            "max_bytes": 8192,
+                        },
+                    )
+                )
+
+        payload = json.loads(result.content[0].text)
+        self.assertTrue(result.is_error)
+        self.assertEqual(payload["error"]["code"], "execution_not_found")
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertGreater(calls, 1)
 
     def test_durable_execution_marks_session_capture_unavailable_after_restart(self):
         original_engine = server.EphemeralEngine(
@@ -688,6 +1054,133 @@ class TestExecutionTools(unittest.TestCase):
         self.assertTrue(response["response_truncated"])
         self.assertEqual(response["omitted_count"], 0)
         self.assertEqual(response["executions"][0]["execution_id"], "execution-0")
+
+    def test_oversized_mcp_execution_list_accepts_compact_success_and_diagnostic_items(self):
+        resume = {
+            "available": False,
+            "retry_required": False,
+            "unsafe_confirmation_required": False,
+            "attempt_limit_reached": False,
+            "next_phase": None,
+            "policy": "safe",
+            "blocked_reason": None,
+        }
+        phases = [
+            {"name": "é" * 256, "status": "completed"}
+            for _ in range(64)
+        ]
+        entries = [
+            {
+                "status": "ok",
+                "schema_version": 1,
+                "execution_id": f"execution-{index}",
+                "label": "large execution",
+                "execution_status": "completed",
+                "execution_in_progress": False,
+                "partial": False,
+                "summary": "completed",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "resume": resume,
+                "completed_phase_count": len(phases),
+                "phase_count": len(phases),
+                "phases": phases,
+            }
+            for index in range(19)
+        ]
+        entries.append(
+            {
+                "status": "unsupported_record",
+                "execution_id": "unsupported-execution",
+                "schema_version": 999,
+                "read_only": True,
+                "reason_code": "UNSUPPORTED_SCHEMA_VERSION",
+                "message": "The record uses a newer schema.",
+                "record_bytes": 32,
+                "record_preview": "{}",
+                "record_preview_sanitized": True,
+                "record_preview_redacted": False,
+                "record_preview_truncated": False,
+            }
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(self.manager, "list_public", return_value=entries):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                result = asyncio.run(server.mcp.call_tool("list_executions", {}))
+
+        payload = json.loads(result.content[0].text)
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["status"], "ok")
+        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(
+            result.content[0].text,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+        self.assertTrue(payload["response_truncated"])
+        self.assertEqual(payload["returned_count"], len(entries))
+        self.assertEqual(payload["omitted_count"], 0)
+        self.assertEqual(payload["executions"][0]["status"], "ok")
+        self.assertEqual(payload["executions"][0]["execution_id"], "execution-0")
+        self.assertNotIn("created_at", payload["executions"][0])
+        self.assertNotIn("resume", payload["executions"][0])
+        self.assertNotIn("phases", payload["executions"][0])
+        diagnostic = payload["executions"][-1]
+        self.assertEqual(diagnostic["status"], "unsupported_record")
+        self.assertEqual(diagnostic["error"]["code"], "unsupported_schema_version")
+
+    def test_mcp_execution_list_accepts_diagnostic_without_recoverable_id(self):
+        store = self.manager.store
+        store._ensure_state_dir()
+        record_path = store._path("unrecoverable-listing-id")
+        record_path.write_text("not json", encoding="utf-8")
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            result = asyncio.run(server.mcp.call_tool("list_executions", {}))
+
+        payload = json.loads(result.content[0].text)
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(len(payload["executions"]), 1)
+        diagnostic = payload["executions"][0]
+        self.assertEqual(diagnostic["status"], "invalid_record")
+        self.assertIsNone(diagnostic["execution_id"])
+        self.assertEqual(
+            diagnostic["record_file_id"], record_path.name.removesuffix(".json")
+        )
+        self.assertEqual(diagnostic["error"]["code"], "malformed_record")
+        execution_tools.PAYLOAD_CONTRACTS["list_executions"].validate_python(
+            payload,
+            strict=True,
+        )
+        listed_tools = {
+            tool.name: tool for tool in asyncio.run(server.mcp.list_tools())
+        }
+        Draft202012Validator(
+            listed_tools["list_executions"].output_schema
+        ).validate(result.structured_content)
 
     def test_list_compaction_skips_invalid_entries_and_bounds_large_summaries(self):
         entries = [

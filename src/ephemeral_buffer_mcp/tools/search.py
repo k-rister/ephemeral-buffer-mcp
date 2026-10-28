@@ -28,6 +28,7 @@ from ._context import (
 from .formatting import bounded_summary_text
 from .instrumentation import _instrument_tool
 from .registry import register_tool
+from .payloads import PAYLOAD_CONTRACTS, PAYLOAD_SCHEMA_VERSIONS
 
 
 def _render_search_text(
@@ -240,7 +241,10 @@ def _search_capture_response(
 @register_tool(
     "search_capture",
     "search",
+    result_policy="structured_envelope",
     structured_result_factory=_search_capture_response,
+    payload_model=PAYLOAD_CONTRACTS["search_capture"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["search_capture"],
 )
 def search_capture(
     query: str,

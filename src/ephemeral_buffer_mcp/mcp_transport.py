@@ -23,6 +23,8 @@ from .mcp_response import (
     ToolResponseEnvelope,
     call_tool_result_bytes as _call_tool_result_bytes,
     compact_tool_text as _compact_tool_text,
+    structured_tool_output_schema,
+    structured_content as _structured_content,
 )
 from .mcpserver_adapter import (
     refresh_instructions as _refresh_mcpserver_instructions,
@@ -126,7 +128,7 @@ def _call_tool_result(envelope: ToolResponseEnvelope) -> CallToolResult:
     """Create an MCP result with readable text and its structured envelope."""
     return CallToolResult(
         content=[TextContent(type="text", text=envelope.text or "")],
-        structured_content=envelope.model_dump(mode="json", exclude={"text"}),
+        structured_content=_structured_content(envelope),
         is_error=envelope.status == "error",
     )
 
@@ -152,6 +154,7 @@ def _legacy_tool_envelope(
     result: Any,
     *,
     compact_text: bool = False,
+    defer_fit: bool = False,
     legacy_error_code: str | None = None,
 ) -> ToolResponseEnvelope:
     """Wrap an existing Python text result in the versioned MCP result shape."""
@@ -184,13 +187,28 @@ def _legacy_tool_envelope(
             )
         elif payload.get("status") == "error":
             status = "error"
-            if payload.get("error_code"):
+            payload_error = payload.get("error")
+            if isinstance(payload_error, dict):
+                data = payload
+                error_code = str(payload_error.get("code") or "operation_failed")
+                error_message = str(
+                    payload_error.get("message") or "The operation failed."
+                )
+                error_details = payload_error.get("details")
+                if not isinstance(error_details, dict):
+                    error_details = None
+            elif payload.get("error_code"):
                 error_code = str(payload["error_code"])
+                error_message = str(payload.get("message") or "The operation failed.")
+                error_details = None
             else:
                 error_code = legacy_error_code or "operation_failed"
+                error_message = str(payload.get("message") or "The operation failed.")
+                error_details = None
             error = ToolErrorEnvelope(
                 code=error_code,
-                message=str(payload.get("message") or "The operation failed."),
+                message=error_message,
+                details=error_details,
             )
         else:
             data = payload
@@ -202,7 +220,24 @@ def _legacy_tool_envelope(
         data = {"message": text}
 
     envelope = ToolResponseEnvelope(status=status, data=data, error=error, text=text)
+    if defer_fit:
+        return envelope
     return _fit_tool_envelope(envelope, compact_text=compact_text)
+
+
+def _validate_registered_payload(
+    response: ToolResponseEnvelope,
+    payload_model,
+    payload_schema_version,
+) -> ToolResponseEnvelope:
+    """Validate nonempty contract data and attach its independent version."""
+    if payload_model is not None and (response.status == "ok" or response.data):
+        payload_model.validate_python(response.data, strict=True)
+    if payload_schema_version is not None:
+        response = response.model_copy(
+            update={"payload_schema_version": payload_schema_version}
+        )
+    return response
 
 
 def _fit_tool_envelope(
@@ -245,6 +280,7 @@ def _service_rejection_result(
     call_id: str,
     structured: bool,
     compact_text: bool = False,
+    payload_schema_version: int | None = None,
 ) -> CallToolResult | str:
     """Return a consistent JSON error body for busy and shutdown failures."""
     details = {"call_id": call_id}
@@ -260,6 +296,7 @@ def _service_rejection_result(
         return _legacy_text_result(error_text)
     response = ToolResponseEnvelope(
         status="error",
+        payload_schema_version=payload_schema_version,
         error=ToolErrorEnvelope(code=code, message=message, details=details),
         text=error_text,
     )
@@ -320,6 +357,10 @@ def create_mcp_server(context: "ServiceContext | None" = None):
             registration.category,
             registration.structured_result_factory,
             service_context,
+            result_policy=registration.result_policy,
+            text_policy=registration.text_policy,
+            payload_model=registration.payload_model,
+            payload_schema_version=registration.payload_schema_version,
             mcp_admission_lane=registration.mcp_admission_lane,
             background_execution=registration.background_execution,
             legacy_error_code=registration.legacy_error_code,
@@ -347,6 +388,10 @@ def _register_mcp_tool_for_app(
     structured_result_factory,
     service_context,
     *,
+    result_policy=None,
+    text_policy=None,
+    payload_model=None,
+    payload_schema_version=None,
     mcp_admission_lane=None,
     background_execution=None,
     legacy_error_code=None,
@@ -357,6 +402,14 @@ def _register_mcp_tool_for_app(
     except KeyError:
         registration = None
     if registration is not None:
+        if result_policy is None:
+            result_policy = registration.result_policy
+        if text_policy is None:
+            text_policy = registration.text_policy
+        if payload_model is None:
+            payload_model = registration.payload_model
+        if payload_schema_version is None:
+            payload_schema_version = registration.payload_schema_version
         if mcp_admission_lane is None:
             mcp_admission_lane = registration.mcp_admission_lane
         if background_execution is None:
@@ -364,12 +417,20 @@ def _register_mcp_tool_for_app(
         if legacy_error_code is None:
             legacy_error_code = registration.legacy_error_code
     mcp_admission_lane = mcp_admission_lane or "mcp"
+    if result_policy is None:
+        raise ValueError(
+            f"tool {name!r} must declare an explicit result_policy"
+        )
+    if result_policy not in {"structured_envelope", "legacy_text"}:
+        raise ValueError(f"unknown tool result policy: {result_policy}")
+    if text_policy is None:
+        text_policy = "compact"
     background_execution = bool(background_execution)
     # Reuse the registration behavior installed by the decorator factory.
     @wraps(function)
     async def adapter(*args, **kwargs):
         with _activate_service_context(service_context):
-            compact_text = bool(
+            compact_text = text_policy == "compact" and bool(
                 getattr(
                     getattr(
                         getattr(service_context, "settings", None),
@@ -380,10 +441,7 @@ def _register_mcp_tool_for_app(
                     False,
                 )
             )
-            structured = (
-                structured_result_factory is not None
-                or category in {"capture", "retrieval", "search", "lifecycle"}
-            )
+            structured = result_policy == "structured_envelope"
 
             async def on_rejection(code, message, call_id):
                 return _service_rejection_result(
@@ -392,6 +450,7 @@ def _register_mcp_tool_for_app(
                     call_id=call_id,
                     structured=structured,
                     compact_text=compact_text,
+                    payload_schema_version=payload_schema_version,
                 )
 
             async def on_admission_error(exc):
@@ -403,6 +462,7 @@ def _register_mcp_tool_for_app(
                 if structured:
                     response = ToolResponseEnvelope(
                         status="error",
+                        payload_schema_version=payload_schema_version,
                         error=ToolErrorEnvelope(
                             code="operation_failed",
                             message=message,
@@ -490,7 +550,7 @@ def _register_mcp_tool_for_app(
                         )
                     except Exception:
                         return await unexpected_tool_failure(ticket, call_id)
-                    if category not in {"capture", "retrieval", "search", "lifecycle"}:
+                    if not structured:
                         result = _correlate_json_error(result, call_id)
                         _record_tool_response_bytes(service_context, name, result)
                         await _run_admitted_thread(
@@ -501,12 +561,23 @@ def _register_mcp_tool_for_app(
                             _call_id=call_id,
                         )
                         return _legacy_text_result(result)
+                    if payload_model is not None:
+                        result = _correlate_json_error(result, call_id)
                     response = _legacy_tool_envelope(
                         name,
                         result,
                         compact_text=compact_text,
+                        defer_fit=payload_model is not None,
                         legacy_error_code=legacy_error_code,
                     )
+                try:
+                    response = _validate_registered_payload(
+                        response,
+                        payload_model,
+                        payload_schema_version,
+                    )
+                except Exception:
+                    return await unexpected_tool_failure(ticket, call_id)
                 response = _correlate_tool_error(response, call_id)
                 fitted = _fit_tool_envelope(response, compact_text=compact_text)
                 _record_tool_response_bytes(service_context, name, fitted.text)
@@ -532,15 +603,21 @@ def _register_mcp_tool_for_app(
                 busy_message="Foreground work capacity is full; retry this tool call shortly.",
             )
 
-    if structured_result_factory is not None or category in {
-        "capture", "retrieval", "search", "lifecycle"
-    }:
+    if result_policy == "structured_envelope":
         signature = inspect.signature(function)
-        adapter.__signature__ = signature.replace(return_annotation=ToolResponseEnvelope)
+        return_annotation = (
+            inspect.Signature.empty
+            if payload_model is not None
+            else ToolResponseEnvelope
+        )
+        adapter.__signature__ = signature.replace(return_annotation=return_annotation)
         adapter.__annotations__ = {
             **getattr(function, "__annotations__", {}),
-            "return": ToolResponseEnvelope,
         }
+        if payload_model is None:
+            adapter.__annotations__["return"] = return_annotation
+        else:
+            adapter.__annotations__.pop("return", None)
     @contextmanager
     def validation_scope():
         with _activate_service_context(service_context):
@@ -552,10 +629,18 @@ def _register_mcp_tool_for_app(
             state["failure_category"] = "validation"
         _write_metrics_snapshot(service_context)
 
+    output_schema = None
+    if payload_model is not None:
+        output_schema = structured_tool_output_schema(
+            payload_model.json_schema(mode="validation"),
+            payload_schema_version,
+        )
+
     _register_mcpserver_tool(
         app,
         adapter,
         name=name,
+        output_schema=output_schema,
         validation_scope=validation_scope,
         validation_observer=observe_validation_failure,
     )

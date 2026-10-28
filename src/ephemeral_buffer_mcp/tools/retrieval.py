@@ -29,6 +29,7 @@ from ._context import (
 from .formatting import bounded_json_text, bounded_summary_text
 from .instrumentation import _instrument_tool
 from .registry import register_tool
+from .payloads import PAYLOAD_CONTRACTS, PAYLOAD_SCHEMA_VERSIONS
 from .summary import summary_json as _summary_json, summary_response as _summary_response
 
 CAPTURE_LIST_LABEL_MAX_JSON_BYTES = 128
@@ -188,7 +189,14 @@ def _capture_slice_response(
     return best
 
 
-@register_tool("get_capture_slice", "retrieval", structured_result_factory=_capture_slice_response)
+@register_tool(
+    "get_capture_slice",
+    "retrieval",
+    result_policy="structured_envelope",
+    structured_result_factory=_capture_slice_response,
+    payload_model=PAYLOAD_CONTRACTS["get_capture_slice"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_capture_slice"],
+)
 def get_capture_slice(
     start_line: Annotated[int, Field(ge=1)],
     end_line: Annotated[int, Field(ge=1)],
@@ -238,7 +246,10 @@ _capture_summary_response.__signature__ = _capture_summary_response_signature.re
 @register_tool(
     "get_capture_summary",
     "retrieval",
+    result_policy="structured_envelope",
     structured_result_factory=_capture_summary_response,
+    payload_model=PAYLOAD_CONTRACTS["get_capture_summary"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_capture_summary"],
 )
 @_instrument_tool("get_capture_summary")
 def get_capture_summary(capture_id: str = "latest", include_previews: bool = False) -> str:
@@ -319,7 +330,14 @@ def _list_captures_response(
     )
 
 
-@register_tool("list_captures", "retrieval", structured_result_factory=_list_captures_response)
+@register_tool(
+    "list_captures",
+    "retrieval",
+    result_policy="structured_envelope",
+    structured_result_factory=_list_captures_response,
+    payload_model=PAYLOAD_CONTRACTS["list_captures"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["list_captures"],
+)
 def list_captures(
     limit: Annotated[
         int, Field(ge=1, le=MAX_CAPTURE_LIST_LIMIT)
@@ -380,6 +398,7 @@ _clear_captures_response.__signature__ = _clear_captures_response_signature.repl
 @register_tool(
     "clear_captures",
     "lifecycle",
+    result_policy="structured_envelope",
     structured_result_factory=_clear_captures_response,
 )
 @_instrument_tool("clear_captures")

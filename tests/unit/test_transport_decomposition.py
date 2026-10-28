@@ -11,8 +11,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from jsonschema import Draft202012Validator
+
 from ephemeral_buffer_mcp import create_mcp_server, create_service_context
 from ephemeral_buffer_mcp.config import load_settings
+from ephemeral_buffer_mcp.mcp_response import structured_tool_output_schema
 from ephemeral_buffer_mcp.mcp_transport import _record_tool_response_bytes
 import ephemeral_buffer_mcp.server as server
 from ephemeral_buffer_mcp.tools.registry import (
@@ -22,6 +25,10 @@ from ephemeral_buffer_mcp.tools.registry import (
     get_tool_registration,
     get_tool_registrations,
     register_tool,
+)
+from ephemeral_buffer_mcp.tools.payloads import (
+    PAYLOAD_CONTRACTS,
+    PAYLOAD_SCHEMA_VERSIONS,
 )
 
 
@@ -75,10 +82,72 @@ class TestTransportDecomposition(unittest.TestCase):
         register_tool(
             registration.name,
             registration.category,
+            result_policy=registration.result_policy,
             structured_result_factory=registration.structured_result_factory,
+            payload_model=registration.payload_model,
+            payload_schema_version=registration.payload_schema_version,
         )(registration.function)
         with self.assertRaisesRegex(ValueError, "duplicate tool registration"):
-            register_tool(registration.name, registration.category)(lambda: None)
+            register_tool(
+                registration.name,
+                registration.category,
+                result_policy=registration.result_policy,
+            )(lambda: None)
+
+    def test_every_registered_tool_declares_a_result_policy_and_payload_fixture(self):
+        registrations = get_tool_registrations()
+        self.assertTrue(registrations)
+        for registration in registrations:
+            with self.subTest(tool=registration.name):
+                self.assertIn(
+                    registration.result_policy,
+                    {"structured_envelope", "legacy_text"},
+                )
+                self.assertEqual(
+                    registration.payload_model is not None,
+                    registration.payload_schema_version is not None,
+                )
+                if registration.payload_model is not None:
+                    self.assertEqual(registration.result_policy, "structured_envelope")
+
+        fixture_path = Path(__file__).parents[1] / "fixtures" / "mcp-result-contract.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        actual = {
+            name: {
+                "payload_schema_version": PAYLOAD_SCHEMA_VERSIONS[name],
+                "schema": adapter.json_schema(mode="validation"),
+            }
+            for name, adapter in sorted(PAYLOAD_CONTRACTS.items())
+        }
+        self.assertEqual(fixture, actual)
+        self.assertEqual(
+            {registration.name for registration in registrations if registration.payload_model},
+            set(fixture),
+        )
+
+        tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+        for registration in registrations:
+            if registration.payload_model is None:
+                continue
+            with self.subTest(output_schema=registration.name):
+                output_schema = tools[registration.name].output_schema
+                expected_schema = structured_tool_output_schema(
+                    registration.payload_model.json_schema(mode="validation"),
+                    registration.payload_schema_version,
+                )
+                self.assertEqual(output_schema, expected_schema)
+                self.assertEqual(
+                    tools[registration.name].model_dump(
+                        mode="json", by_alias=True, exclude_none=True
+                    )["outputSchema"],
+                    output_schema,
+                )
+                Draft202012Validator.check_schema(output_schema)
+                self.assertIsNone(
+                    server.mcp._tool_manager._tools[
+                        registration.name
+                    ].fn_metadata.output_model
+                )
 
     def test_core_socket_wrapper_delegates_to_lazy_transport(self):
         marker = object()
@@ -107,7 +176,7 @@ class TestTransportDecomposition(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_mcp_tool_schemas_match_pre_decomposition_contract(self):
+    def test_mcp_tool_inputs_match_pre_payload_contract_fixture(self):
         fixture = Path(__file__).parents[1] / "fixtures" / "mcp-tool-contract.json"
         expected = json.loads(fixture.read_text(encoding="utf-8"))
         context = create_service_context(
@@ -118,12 +187,19 @@ class TestTransportDecomposition(unittest.TestCase):
             app = create_mcp_server(context)
             tools = asyncio.run(app.list_tools())
             actual = [
-                tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                {
+                    key: tool.model_dump(mode="json", by_alias=True, exclude_none=True)[key]
+                    for key in ("name", "description", "inputSchema")
+                }
                 for tool in sorted(tools, key=lambda item: item.name)
             ]
         finally:
             context.close()
-        self.assertEqual(actual, expected)
+        expected_inputs = [
+            {key: tool[key] for key in ("name", "description", "inputSchema")}
+            for tool in expected
+        ]
+        self.assertEqual(actual, expected_inputs)
 
     def test_mcp_success_and_error_response_envelopes_keep_their_shape(self):
         context = create_service_context(
@@ -132,15 +208,22 @@ class TestTransportDecomposition(unittest.TestCase):
         )
         try:
             app = create_mcp_server(context)
-            success = asyncio.run(
+            success_result = asyncio.run(
                 app.call_tool("capture_text", {"content": "contract response"})
+            )
+            success = success_result.structured_content
+            capture_id = success["data"]["capture_id"]
+            summary_success = asyncio.run(
+                app.call_tool("get_capture_summary", {"capture_id": capture_id})
             ).structured_content
-            failure = asyncio.run(
+            failure_result = asyncio.run(
                 app.call_tool(
                     "get_capture_summary",
                     {"capture_id": "missing-contract-capture"},
                 )
-            ).structured_content
+            )
+            failure = failure_result.structured_content
+            tools = {tool.name: tool for tool in asyncio.run(app.list_tools())}
         finally:
             context.close()
 
@@ -153,10 +236,17 @@ class TestTransportDecomposition(unittest.TestCase):
         self.assertIn("capture_id", success["data"])
         self.assertEqual(
             set(failure),
-            {"schema_version", "status", "data", "error", "truncated", "next_cursor"},
+            {
+                "schema_version", "status", "data", "error", "truncated", "next_cursor",
+                "payload_schema_version",
+            },
         )
         self.assertEqual(failure["status"], "error")
         self.assertEqual(failure["error"]["code"], "capture_not_found")
+        summary_output_schema = tools["get_capture_summary"].output_schema
+        self.assertIsNotNone(summary_output_schema)
+        Draft202012Validator(summary_output_schema).validate(summary_success)
+        Draft202012Validator(summary_output_schema).validate(failure)
 
     def test_mcp_response_byte_metrics_measure_the_final_adapter_text_once(self):
         settings = load_settings({**os.environ, "EPHEMERAL_METRICS": "1"})

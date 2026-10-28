@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 
 TOOL_CATEGORIES = (
@@ -24,7 +24,11 @@ class ToolRegistration:
     function: Callable[..., Any]
     name: str
     category: str
+    result_policy: Literal["structured_envelope", "legacy_text"]
+    text_policy: Literal["compact", "preserve"] = "compact"
     structured_result_factory: Callable[..., Any] | None = None
+    payload_model: Any = None
+    payload_schema_version: int | None = None
     mcp_admission_lane: str = "mcp"
     socket_admission_lane: str = "socket"
     background_execution: bool = False
@@ -41,7 +45,11 @@ def register_tool(
     name: str,
     category: str,
     *,
+    result_policy: Literal["structured_envelope", "legacy_text"],
+    text_policy: Literal["compact", "preserve"] = "compact",
     structured_result_factory: Callable[..., Any] | None = None,
+    payload_model: Any = None,
+    payload_schema_version: int | None = None,
     mcp_admission_lane: str = "mcp",
     socket_admission_lane: str = "socket",
     background_execution: bool = False,
@@ -52,6 +60,25 @@ def register_tool(
     """Register a transport-neutral handler and retain its public metadata."""
     if category not in TOOL_CATEGORIES:
         raise ValueError(f"unknown tool category: {category}")
+    if result_policy not in {"structured_envelope", "legacy_text"}:
+        raise ValueError(f"unknown tool result policy: {result_policy}")
+    if text_policy not in {"compact", "preserve"}:
+        raise ValueError(f"unknown tool text policy: {text_policy}")
+    if (payload_model is None) != (payload_schema_version is None):
+        raise ValueError("payload model and payload schema version must be registered together")
+    if payload_schema_version is not None and (
+        type(payload_schema_version) is not int or payload_schema_version < 1
+    ):
+        raise ValueError("payload schema version must be a positive integer")
+    if payload_model is not None and result_policy != "structured_envelope":
+        raise ValueError("payload contracts require the structured_envelope result policy")
+    if (
+        structured_result_factory is not None
+        and result_policy != "structured_envelope"
+    ):
+        raise ValueError(
+            "structured result factories require the structured_envelope result policy"
+        )
 
     def decorator(function):
         current = _REGISTRATIONS_BY_NAME.get(name)
@@ -59,7 +86,11 @@ def register_tool(
             function=function,
             name=name,
             category=category,
+            result_policy=result_policy,
+            text_policy=text_policy,
             structured_result_factory=structured_result_factory,
+            payload_model=payload_model,
+            payload_schema_version=payload_schema_version,
             mcp_admission_lane=mcp_admission_lane,
             socket_admission_lane=socket_admission_lane,
             background_execution=background_execution,
