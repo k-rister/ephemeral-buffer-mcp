@@ -2695,34 +2695,39 @@ class EphemeralEngine:
                 f"({self.max_buffer_bytes:,})"
             )
 
-        # Capture content and chunks are immutable after ingestion. Snapshot
-        # their metadata and lines under the lock, then serialize outside it.
+        # Capture content and chunks are immutable after ingestion. Keep source
+        # references alive and snapshot their metadata under the lock, then walk
+        # only the bounded record prefix outside it.
         with self._lock:
             requested_ids = list(capture_ids) if capture_ids else list(reversed(self.capture_order))
             selected_ids = list(dict.fromkeys(requested_ids))[:max_captures]
             sources: List[Dict[str, Any]] = []
-            records: List[Dict[str, Any]] = []
+            source_lines: List[Tuple[str, List[str]]] = []
             missing_ids: List[str] = []
+            total_record_count = 0
+            capture_state: Optional[_CaptureState] = None
             for capture_id in selected_ids:
-                capture = self._captures.get(capture_id)
-                if not capture:
+                capture_state = self._captures.get(capture_id)
+                if not capture_state:
                     missing_ids.append(capture_id)
                     continue
+                line_count = capture_state.line_count
                 sources.append({
-                    "capture_id": capture.capture_id,
-                    "label": capture.label,
-                    "content_type": capture.content_type,
-                    "total_lines": capture.line_count,
-                    "byte_size": capture.byte_size,
-                    "truncated": capture.truncated,
-                    "original_byte_size": capture.original_byte_size,
-                    "command_exit_code": capture.command_exit_code,
-                    "timed_out": capture.timed_out,
+                    "capture_id": capture_state.capture_id,
+                    "label": capture_state.label,
+                    "content_type": capture_state.content_type,
+                    "total_lines": line_count,
+                    "byte_size": capture_state.byte_size,
+                    "truncated": capture_state.truncated,
+                    "original_byte_size": capture_state.original_byte_size,
+                    "command_exit_code": capture_state.command_exit_code,
+                    "timed_out": capture_state.timed_out,
                 })
-                records.extend(
-                    {"capture_id": capture.capture_id, "source_line": line_number, "text": line}
-                    for line_number, line in enumerate(capture.raw_lines, start=1)
-                )
+                source_lines.append((capture_state.capture_id, capture_state.raw_lines))
+                total_record_count += line_count
+            # Keep just the source text needed for serialization alive after
+            # eviction; the full capture can own sizable index allocations.
+            capture_state = None
 
         metadata_before_records = json.dumps(
             {
@@ -2747,37 +2752,56 @@ class EphemeralEngine:
                 separators=(",", ":"),
             )[1:]
 
-        encoded_records = [
-            json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-            for record in records
-        ]
         metadata_bytes = len(metadata_before_records.encode("utf-8"))
         record_bytes = 0
         included_count = 0
-        for index, encoded_record in enumerate(encoded_records):
-            candidate_record_bytes = record_bytes + len(encoded_record.encode("utf-8"))
-            if index:
-                candidate_record_bytes += 2  # comma and newline between records
-            candidate_bytes = (
-                metadata_bytes
-                + candidate_record_bytes
-                + len(compact_suffix(len(records) - index - 1, index + 1).encode("utf-8"))
-            )
-            if candidate_bytes > output_limit:
+        records: List[Dict[str, Any]] = []
+        encoded_records: List[str] = []
+        stopped_at_limit = False
+        for capture_id, raw_lines in source_lines:
+            for line_number, line in enumerate(raw_lines, start=1):
+                record = {
+                    "capture_id": capture_id,
+                    "source_line": line_number,
+                    "text": line,
+                }
+                encoded_record = json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                candidate_record_bytes = record_bytes + len(encoded_record.encode("utf-8"))
+                if included_count:
+                    candidate_record_bytes += 2  # comma and newline between records
+                candidate_count = included_count + 1
+                candidate_omitted_count = total_record_count - candidate_count
+                candidate_bytes = (
+                    metadata_bytes
+                    + candidate_record_bytes
+                    + len(
+                        compact_suffix(candidate_omitted_count, candidate_count).encode("utf-8")
+                    )
+                )
+                if candidate_bytes > output_limit:
+                    stopped_at_limit = True
+                    break
+                records.append(record)
+                encoded_records.append(encoded_record)
+                record_bytes = candidate_record_bytes
+                included_count = candidate_count
+            if stopped_at_limit:
                 break
-            record_bytes = candidate_record_bytes
-            included_count = index + 1
 
-        omitted_count = len(records) - included_count
+        omitted_count = total_record_count - included_count
         encoded = (
             metadata_before_records
-            + ",\n".join(encoded_records[:included_count])
+            + ",\n".join(encoded_records)
             + compact_suffix(omitted_count, included_count)
         )
         payload: Dict[str, Any] = {
             "schema_version": CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
             "sources": sources,
-            "records": records[:included_count],
+            "records": records,
             "requested_capture_count": len(requested_ids),
             "selected_capture_count": len(selected_ids),
             "missing_capture_ids": missing_ids,
@@ -2793,7 +2817,7 @@ class EphemeralEngine:
             payload = {
                 "schema_version": CONSOLIDATED_CAPTURE_SCHEMA_VERSION,
                 "records": [],
-                "omitted_record_count": len(records),
+                "omitted_record_count": total_record_count,
                 "metadata_omitted": True,
             }
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
