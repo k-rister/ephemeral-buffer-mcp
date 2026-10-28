@@ -3353,6 +3353,73 @@ class TestServerTools(unittest.TestCase):
             server.MCP_TOOL_RESPONSE_MAX_BYTES,
         )
 
+    def test_mcp_search_budget_includes_payload_version_at_match_boundary(self):
+        matches = [
+            {
+                "chunk_id": index,
+                "chunk_index": index,
+                "score": 1.0,
+                "matched_range": f"L{index + 1}-L{index + 1}",
+                "context_range": f"L{index + 1}-L{index + 1}",
+                "context_start_line": index + 1,
+                "context_end_line": index + 1,
+                "snippet": "s" * 1800,
+                "context": "c" * (365 if index == 0 else 372),
+            }
+            for index in range(15)
+        ]
+        engine_result = {
+            "status": "ok",
+            "query": "q",
+            "capture_id": "version-boundary-capture",
+            "label": "label",
+            "total_lines": 15,
+            "mode": "bm25",
+            "semantic_coverage": "not-requested",
+            "matches": matches,
+        }
+        noncompact_settings = settings_with_environment(
+            EPHEMERAL_COMPACT_TOOL_RESULTS="false"
+        )
+        with (
+            patch.object(server.engine, "search", return_value=engine_result),
+            patch.object(server, "SETTINGS", noncompact_settings),
+            patch.object(server.DEFAULT_SERVICES, "settings", noncompact_settings),
+        ):
+            response = asyncio.run(
+                self.call_mcp_tool_inline(
+                    "search_capture",
+                    {"query": "q", "mode": "bm25", "context_lines": 0},
+                )
+            )
+
+        self.assertFalse(response.is_error)
+        self.assertEqual(response.structured_content["status"], "ok")
+        self.assertIn("available_match_count", response.structured_content["data"])
+        data = response.structured_content["data"]
+        self.assertEqual(data["available_match_count"], 15)
+        self.assertEqual(data["match_count"], 14)
+        self.assertEqual(data["match_count"], len(data["matches"]))
+        self.assertLess(data["match_count"], data["available_match_count"])
+        self.assertTrue(response.structured_content["truncated"])
+        self.assertEqual(response.structured_content["payload_schema_version"], 1)
+        envelope = server.ToolResponseEnvelope(
+            status=response.structured_content["status"],
+            data=data,
+            text=response.content[0].text,
+            truncated=response.structured_content["truncated"],
+            next_cursor=response.structured_content["next_cursor"],
+            payload_schema_version=response.structured_content[
+                "payload_schema_version"
+            ],
+        )
+        self.assertLessEqual(
+            mcp_transport._call_tool_result_bytes(envelope),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES
+            - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+        self.assertIn("Additional matches omitted", response.content[0].text)
+
     def test_mcp_capture_inventory_pages_with_bounded_labels_and_stable_cursor(self):
         captures = []
         for index in range(80):

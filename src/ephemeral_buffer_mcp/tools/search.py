@@ -121,6 +121,11 @@ def _search_capture_response(
             status="error", error=ToolErrorEnvelope(code="query_too_large", message=message), text=message
         )
     response_budget = SEARCH_RESPONSE_MAX_BYTES
+    payload_schema_version = (
+        PAYLOAD_SCHEMA_VERSIONS["search_capture"]
+        if __invocation_mode == "mcp"
+        else None
+    )
     res = _active_engine().search(
         query=query,
         mode=mode,
@@ -207,6 +212,7 @@ def _search_capture_response(
             data=data,
             text=_render_search_text(text_result, candidate_matches, omitted=omitted, query=query),
             truncated=omitted,
+            payload_schema_version=payload_schema_version,
         )
         if _call_tool_result_bytes(
             candidate,
@@ -221,7 +227,13 @@ def _search_capture_response(
         # stable bounded response if a future metadata field changes that.
         data = {**metadata, "matches": [], "match_count": 0, "available_match_count": len(engine_matches)}
         text = _render_search_text(text_result, [], omitted=True, query=query)
-        best = ToolResponseEnvelope(status="ok", data=data, text=text, truncated=True)
+        best = ToolResponseEnvelope(
+            status="ok",
+            data=data,
+            text=text,
+            truncated=True,
+            payload_schema_version=payload_schema_version,
+        )
     if best is None:
         text = _render_search_text(
             text_result,
@@ -234,6 +246,7 @@ def _search_capture_response(
             data={**metadata, "matches": [], "match_count": 0},
             text=text,
             truncated=construction_omitted,
+            payload_schema_version=payload_schema_version,
         )
     return best
 

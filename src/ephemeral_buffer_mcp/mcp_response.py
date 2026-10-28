@@ -45,6 +45,17 @@ def structured_content(envelope: ToolResponseEnvelope) -> Dict[str, Any]:
     return result
 
 
+def _strip_schema_titles(schema: Any) -> None:
+    """Drop optional title metadata to keep the composed tool catalog bounded."""
+    if isinstance(schema, dict):
+        schema.pop("title", None)
+        for value in schema.values():
+            _strip_schema_titles(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            _strip_schema_titles(value)
+
+
 def structured_tool_output_schema(
     payload_schema: Dict[str, Any],
     payload_schema_version: int,
@@ -100,6 +111,7 @@ def structured_tool_output_schema(
     }
     if definitions:
         schema["$defs"] = definitions
+    _strip_schema_titles(schema)
     return schema
 
 
