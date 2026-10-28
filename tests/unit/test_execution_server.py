@@ -333,6 +333,70 @@ class TestExecutionTools(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(json.loads(server.list_executions())["executions"], [])
 
+    def test_completed_retirement_is_a_typed_mcp_success_without_preview_items(self):
+        execution_tools.start_execution(
+            [self.phase("mcp-retire", "mcp-retire")],
+            execution_id="mcp-retire-completed",
+        )
+        with tempfile.TemporaryDirectory() as archive_directory:
+            archive_path = os.path.join(archive_directory, "completed-retirement.tar")
+
+            async def run_inline(
+                _ticket,
+                function,
+                /,
+                *args,
+                _service_context=None,
+                _call_id=None,
+                **kwargs,
+            ):
+                return function(*args, **kwargs)
+
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                result = asyncio.run(
+                    server.mcp.call_tool(
+                        "retire_executions",
+                        {
+                            "execution_ids": ["mcp-retire-completed"],
+                            "archive_path": archive_path,
+                            "dry_run": False,
+                        },
+                    )
+                )
+            self.assertTrue(os.path.isfile(archive_path))
+
+        self.assertFalse(result.is_error)
+        data = result.structured_content["data"]
+        self.assertEqual(data["status"], "ok")
+        self.assertFalse(data["dry_run"])
+        self.assertNotIn("items", data)
+        self.assertEqual(data["retired"][0]["execution_id"], "mcp-retire-completed")
+        execution_tools.PAYLOAD_CONTRACTS["retire_executions"].validate_python(
+            data, strict=True
+        )
+        listed_tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+        Draft202012Validator(
+            listed_tools["retire_executions"].output_schema
+        ).validate(result.structured_content)
+        refused = {
+            "status": "refused",
+            "dry_run": False,
+            "items": [{
+                "execution_id": "active-execution",
+                "eligible": False,
+                "record_bytes": 1,
+                "summary_bytes": 1,
+                "projected_reclaimed_bytes": 0,
+                "reason": "execution is active",
+            }],
+            "projected_reclaimed_bytes": 0,
+            "reason": "one or more selected executions are not eligible",
+        }
+        execution_tools.PAYLOAD_CONTRACTS["retire_executions"].validate_python(
+            refused, strict=True
+        )
+        self.assertEqual(self.manager.list_public(), [])
+
     def test_partial_timeout_is_machine_readable_and_capture_is_searchable(self):
         self.runner.results["timeout"] = ("partial output", 124, True, 2000, True)
         result = json.loads(
@@ -778,16 +842,49 @@ class TestExecutionTools(unittest.TestCase):
             ),
             {},
         )
+        self.assertEqual(
+            execution_responses._compact_execution_retirement_payload(
+                {"status": "partial", "dry_run": False, "retired": "malformed"}
+            ),
+            {},
+        )
+        compact_preview = execution_responses._compact_execution_retirement_payload(
+            {
+                "status": "ok",
+                "dry_run": True,
+                "items": [None, {"execution_id": "retired-id", "eligible": True}],
+            }
+        )
+        self.assertEqual(
+            compact_preview["items"],
+            [{"execution_id": "retired-id", "eligible": True}],
+        )
+        compact_refusal = execution_responses._compact_execution_retirement_payload(
+            {
+                "status": "refused",
+                "dry_run": False,
+                "items": [{"execution_id": "retired-id", "eligible": False}],
+                "projected_reclaimed_bytes": 0,
+                "reason": "active execution",
+            }
+        )
+        self.assertEqual(compact_refusal["reason"], "active execution")
+
         compact_retirement = execution_responses._compact_execution_retirement_payload(
             {
                 "status": "partial",
-                "items": [None, {"execution_id": "retired-id", "eligible": True}],
+                "dry_run": False,
                 "retired": [None, {"execution_id": "retired-id"}],
                 "removal_errors": [None, {"execution_id": "failed-id", "error": "OSError"}],
+                "projected_reclaimed_bytes": 128,
+                "archive_path": "/archives/retired.json",
+                "archive_bytes": 64,
+                "retired_count": 1,
+                "archive_is_durable": True,
             }
         )
-        self.assertEqual(compact_retirement["items"], [{"execution_id": "retired-id", "eligible": True}])
         self.assertEqual(compact_retirement["retired"], [{"execution_id": "retired-id"}])
+        self.assertNotIn("items", compact_retirement)
         self.assertEqual(
             compact_retirement["removal_errors"],
             [{"execution_id": "failed-id", "error": "OSError"}],
@@ -1513,7 +1610,7 @@ class TestExecutionTools(unittest.TestCase):
         retirement = {
             "status": "partial",
             "dry_run": False,
-            "items": [],
+            "projected_reclaimed_bytes": 2,
             "retired": [{
                 "execution_id": "retired-execution",
                 "eligible": True,
@@ -1527,7 +1624,6 @@ class TestExecutionTools(unittest.TestCase):
             "archive_path": "/tmp/" + "x" * 40_000,
             "archive_bytes": 1,
             "archive_is_durable": True,
-            "projected_reclaimed_bytes": 2,
         }
         payloads = {
             "start_execution": public,

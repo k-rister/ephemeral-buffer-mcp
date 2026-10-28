@@ -393,9 +393,9 @@ def _compact_execution_retirement_payload(payload: Dict[str, Any]) -> Dict[str, 
             if isinstance(item, dict)
         ]
 
-    items = compact_items(payload.get("items", []))
-    if items is None:
-        return {}
+    completed = payload.get("dry_run") is False and payload.get("status") in {
+        "ok", "partial",
+    }
     compact = {
         key: payload[key]
         for key in (
@@ -404,11 +404,19 @@ def _compact_execution_retirement_payload(payload: Dict[str, Any]) -> Dict[str, 
         )
         if key in payload
     }
-    compact["items"] = items
     compact["response_truncated"] = True
-    retired = compact_items(payload.get("retired"))
-    if retired is not None:
+    if completed:
+        retired = compact_items(payload.get("retired"))
+        if retired is None:
+            return {}
         compact["retired"] = retired
+    else:
+        items = compact_items(payload.get("items"))
+        if items is None:
+            return {}
+        compact["items"] = items
+        if isinstance(payload.get("reason"), str):
+            compact["reason"] = payload["reason"]
     removal_errors = payload.get("removal_errors")
     if isinstance(removal_errors, list):
         compact["removal_errors"] = [

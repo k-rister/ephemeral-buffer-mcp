@@ -273,21 +273,34 @@ class ExecutionRemovalError(PayloadModel):
     error: str
 
 
-class ExecutionRetirement(PayloadModel):
-    status: Literal["ok", "partial", "refused"]
-    dry_run: bool
+class ExecutionRetirementPreview(PayloadModel):
+    status: Literal["ok"]
+    dry_run: Literal[True]
     items: list[ExecutionRetirementItem]
     projected_reclaimed_bytes: int
     archive_required_for_retirement: Optional[bool] = None
     eligible_count: Optional[int] = None
     blocked_count: Optional[int] = None
+
+
+class ExecutionRetirementRefused(PayloadModel):
+    status: Literal["refused"]
+    dry_run: Literal[False]
+    items: list[ExecutionRetirementItem]
+    projected_reclaimed_bytes: int
     reason: Optional[str] = None
-    archive_path: Optional[str] = None
-    archive_bytes: Optional[int] = None
-    retired_count: Optional[int] = None
-    retired: Optional[list[ExecutionRetirementItem]] = None
-    removal_errors: Optional[list[ExecutionRemovalError]] = None
-    archive_is_durable: Optional[bool] = None
+
+
+class ExecutionRetirementCompleted(PayloadModel):
+    status: Literal["ok", "partial"]
+    dry_run: Literal[False]
+    projected_reclaimed_bytes: int
+    archive_path: str
+    archive_bytes: int
+    retired_count: int
+    retired: list[ExecutionRetirementItem]
+    removal_errors: list[ExecutionRemovalError]
+    archive_is_durable: bool
 
 
 class ExecutionRetirementCompactItem(PayloadModel):
@@ -300,21 +313,41 @@ class ExecutionRetirementCompactItem(PayloadModel):
     projected_reclaimed_bytes: int
 
 
-class ExecutionRetirementCompact(PayloadModel):
-    """Bounded retirement result retaining each returned execution ID."""
+class ExecutionRetirementPreviewCompact(PayloadModel):
+    """Bounded retirement preview retaining each returned execution ID."""
 
-    status: Literal["ok", "partial", "refused"]
-    dry_run: bool
+    status: Literal["ok"]
+    dry_run: Literal[True]
     items: list[ExecutionRetirementCompactItem]
     projected_reclaimed_bytes: int
     response_truncated: Literal[True]
     eligible_count: Optional[int] = None
     blocked_count: Optional[int] = None
-    retired: Optional[list[ExecutionRetirementCompactItem]] = None
-    removal_errors: Optional[list[ExecutionRemovalError]] = None
-    retired_count: Optional[int] = None
-    archive_bytes: Optional[int] = None
-    archive_is_durable: Optional[bool] = None
+
+
+class ExecutionRetirementRefusedCompact(PayloadModel):
+    """Bounded refusal retaining the selected execution identities."""
+
+    status: Literal["refused"]
+    dry_run: Literal[False]
+    items: list[ExecutionRetirementCompactItem]
+    projected_reclaimed_bytes: int
+    response_truncated: Literal[True]
+    reason: Optional[str] = None
+
+
+class ExecutionRetirementCompletedCompact(PayloadModel):
+    """Bounded completed retirement retaining retired execution identities."""
+
+    status: Literal["ok", "partial"]
+    dry_run: Literal[False]
+    projected_reclaimed_bytes: int
+    response_truncated: Literal[True]
+    retired: list[ExecutionRetirementCompactItem]
+    removal_errors: list[ExecutionRemovalError]
+    retired_count: int
+    archive_bytes: int
+    archive_is_durable: bool
 
 
 class SearchMatch(PayloadModel):
@@ -456,8 +489,12 @@ PAYLOAD_CONTRACTS: dict[str, TypeAdapter] = {
     "list_executions": TypeAdapter(Union[ExecutionList, ExecutionFailure]),
     "get_execution_capacity": TypeAdapter(Union[ExecutionCapacity, ExecutionFailure]),
     "retire_executions": TypeAdapter(Union[
-        ExecutionRetirementCompact,
-        ExecutionRetirement,
+        ExecutionRetirementPreviewCompact,
+        ExecutionRetirementRefusedCompact,
+        ExecutionRetirementCompletedCompact,
+        ExecutionRetirementPreview,
+        ExecutionRetirementRefused,
+        ExecutionRetirementCompleted,
         ExecutionFailure,
     ]),
     "search_capture": TypeAdapter(SearchPayload),

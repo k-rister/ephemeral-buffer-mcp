@@ -4303,303 +4303,6 @@
           "title": "ExecutionRemovalError",
           "type": "object"
         },
-        "ExecutionRetirement": {
-          "additionalProperties": true,
-          "properties": {
-            "archive_bytes": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Archive Bytes"
-            },
-            "archive_is_durable": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Archive Is Durable"
-            },
-            "archive_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Archive Path"
-            },
-            "archive_required_for_retirement": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Archive Required For Retirement"
-            },
-            "blocked_count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Blocked Count"
-            },
-            "dry_run": {
-              "title": "Dry Run",
-              "type": "boolean"
-            },
-            "eligible_count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Eligible Count"
-            },
-            "items": {
-              "items": {
-                "$ref": "#/$defs/ExecutionRetirementItem"
-              },
-              "title": "Items",
-              "type": "array"
-            },
-            "projected_reclaimed_bytes": {
-              "title": "Projected Reclaimed Bytes",
-              "type": "integer"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Reason"
-            },
-            "removal_errors": {
-              "anyOf": [
-                {
-                  "items": {
-                    "$ref": "#/$defs/ExecutionRemovalError"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Removal Errors"
-            },
-            "retired": {
-              "anyOf": [
-                {
-                  "items": {
-                    "$ref": "#/$defs/ExecutionRetirementItem"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Retired"
-            },
-            "retired_count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Retired Count"
-            },
-            "status": {
-              "enum": [
-                "ok",
-                "partial",
-                "refused"
-              ],
-              "title": "Status",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "dry_run",
-            "items",
-            "projected_reclaimed_bytes"
-          ],
-          "title": "ExecutionRetirement",
-          "type": "object"
-        },
-        "ExecutionRetirementCompact": {
-          "additionalProperties": true,
-          "description": "Bounded retirement result retaining each returned execution ID.",
-          "properties": {
-            "archive_bytes": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Archive Bytes"
-            },
-            "archive_is_durable": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Archive Is Durable"
-            },
-            "blocked_count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Blocked Count"
-            },
-            "dry_run": {
-              "title": "Dry Run",
-              "type": "boolean"
-            },
-            "eligible_count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Eligible Count"
-            },
-            "items": {
-              "items": {
-                "$ref": "#/$defs/ExecutionRetirementCompactItem"
-              },
-              "title": "Items",
-              "type": "array"
-            },
-            "projected_reclaimed_bytes": {
-              "title": "Projected Reclaimed Bytes",
-              "type": "integer"
-            },
-            "removal_errors": {
-              "anyOf": [
-                {
-                  "items": {
-                    "$ref": "#/$defs/ExecutionRemovalError"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Removal Errors"
-            },
-            "response_truncated": {
-              "const": true,
-              "title": "Response Truncated",
-              "type": "boolean"
-            },
-            "retired": {
-              "anyOf": [
-                {
-                  "items": {
-                    "$ref": "#/$defs/ExecutionRetirementCompactItem"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Retired"
-            },
-            "retired_count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Retired Count"
-            },
-            "status": {
-              "enum": [
-                "ok",
-                "partial",
-                "refused"
-              ],
-              "title": "Status",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "dry_run",
-            "items",
-            "projected_reclaimed_bytes",
-            "response_truncated"
-          ],
-          "title": "ExecutionRetirementCompact",
-          "type": "object"
-        },
         "ExecutionRetirementCompactItem": {
           "additionalProperties": true,
           "description": "Retirement summary that keeps the durable execution identity.",
@@ -4633,6 +4336,138 @@
             "projected_reclaimed_bytes"
           ],
           "title": "ExecutionRetirementCompactItem",
+          "type": "object"
+        },
+        "ExecutionRetirementCompleted": {
+          "additionalProperties": true,
+          "properties": {
+            "archive_bytes": {
+              "title": "Archive Bytes",
+              "type": "integer"
+            },
+            "archive_is_durable": {
+              "title": "Archive Is Durable",
+              "type": "boolean"
+            },
+            "archive_path": {
+              "title": "Archive Path",
+              "type": "string"
+            },
+            "dry_run": {
+              "const": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "removal_errors": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRemovalError"
+              },
+              "title": "Removal Errors",
+              "type": "array"
+            },
+            "retired": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementItem"
+              },
+              "title": "Retired",
+              "type": "array"
+            },
+            "retired_count": {
+              "title": "Retired Count",
+              "type": "integer"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "partial"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "projected_reclaimed_bytes",
+            "archive_path",
+            "archive_bytes",
+            "retired_count",
+            "retired",
+            "removal_errors",
+            "archive_is_durable"
+          ],
+          "title": "ExecutionRetirementCompleted",
+          "type": "object"
+        },
+        "ExecutionRetirementCompletedCompact": {
+          "additionalProperties": true,
+          "description": "Bounded completed retirement retaining retired execution identities.",
+          "properties": {
+            "archive_bytes": {
+              "title": "Archive Bytes",
+              "type": "integer"
+            },
+            "archive_is_durable": {
+              "title": "Archive Is Durable",
+              "type": "boolean"
+            },
+            "dry_run": {
+              "const": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "removal_errors": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRemovalError"
+              },
+              "title": "Removal Errors",
+              "type": "array"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "retired": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementCompactItem"
+              },
+              "title": "Retired",
+              "type": "array"
+            },
+            "retired_count": {
+              "title": "Retired Count",
+              "type": "integer"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "partial"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "projected_reclaimed_bytes",
+            "response_truncated",
+            "retired",
+            "removal_errors",
+            "retired_count",
+            "archive_bytes",
+            "archive_is_durable"
+          ],
+          "title": "ExecutionRetirementCompletedCompact",
           "type": "object"
         },
         "ExecutionRetirementItem": {
@@ -4716,14 +4551,260 @@
           ],
           "title": "ExecutionRetirementItem",
           "type": "object"
+        },
+        "ExecutionRetirementPreview": {
+          "additionalProperties": true,
+          "properties": {
+            "archive_required_for_retirement": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Required For Retirement"
+            },
+            "blocked_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Count"
+            },
+            "dry_run": {
+              "const": true,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "eligible_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible Count"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "items",
+            "projected_reclaimed_bytes"
+          ],
+          "title": "ExecutionRetirementPreview",
+          "type": "object"
+        },
+        "ExecutionRetirementPreviewCompact": {
+          "additionalProperties": true,
+          "description": "Bounded retirement preview retaining each returned execution ID.",
+          "properties": {
+            "blocked_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Count"
+            },
+            "dry_run": {
+              "const": true,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "eligible_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible Count"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementCompactItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "items",
+            "projected_reclaimed_bytes",
+            "response_truncated"
+          ],
+          "title": "ExecutionRetirementPreviewCompact",
+          "type": "object"
+        },
+        "ExecutionRetirementRefused": {
+          "additionalProperties": true,
+          "properties": {
+            "dry_run": {
+              "const": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "status": {
+              "const": "refused",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "items",
+            "projected_reclaimed_bytes"
+          ],
+          "title": "ExecutionRetirementRefused",
+          "type": "object"
+        },
+        "ExecutionRetirementRefusedCompact": {
+          "additionalProperties": true,
+          "description": "Bounded refusal retaining the selected execution identities.",
+          "properties": {
+            "dry_run": {
+              "const": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementCompactItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "status": {
+              "const": "refused",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "items",
+            "projected_reclaimed_bytes",
+            "response_truncated"
+          ],
+          "title": "ExecutionRetirementRefusedCompact",
+          "type": "object"
         }
       },
       "anyOf": [
         {
-          "$ref": "#/$defs/ExecutionRetirementCompact"
+          "$ref": "#/$defs/ExecutionRetirementPreviewCompact"
         },
         {
-          "$ref": "#/$defs/ExecutionRetirement"
+          "$ref": "#/$defs/ExecutionRetirementRefusedCompact"
+        },
+        {
+          "$ref": "#/$defs/ExecutionRetirementCompletedCompact"
+        },
+        {
+          "$ref": "#/$defs/ExecutionRetirementPreview"
+        },
+        {
+          "$ref": "#/$defs/ExecutionRetirementRefused"
+        },
+        {
+          "$ref": "#/$defs/ExecutionRetirementCompleted"
         },
         {
           "$ref": "#/$defs/ExecutionFailure"
