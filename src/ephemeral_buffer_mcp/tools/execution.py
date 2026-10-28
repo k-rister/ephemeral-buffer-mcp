@@ -40,6 +40,7 @@ from .execution_responses import (
     _execution_get_payload,
     _execution_json,
     _execution_public_payload,
+    _compact_execution_public_payload,
 )
 from .instrumentation import _instrument_tool
 from .registry import register_tool
@@ -430,14 +431,63 @@ def get_execution(
         min_length=1, json_schema_extra={"maxUtf8Bytes": MAX_EXECUTION_ID_BYTES}
     )],
     include_output: bool = False,
+    __invocation_mode: str = "direct",
 ) -> str:
     """Return durable phase metadata and event history for one execution."""
-    return _execution_json(
+    result = _execution_json(
         lambda: _execution_public_payload(
             _execution_get_payload(execution_id, include_output)
         ),
         max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
     )
+    if __invocation_mode != "mcp":
+        return result
+
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return result
+
+    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+
+    def fits(response_payload, response_text):
+        envelope = ToolResponseEnvelope(
+            status="ok",
+            data=response_payload,
+            text=response_text,
+            payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_execution"],
+        )
+        return _call_tool_result_bytes(envelope) <= response_budget
+
+    if fits(payload, result):
+        return result
+
+    compact = _compact_execution_public_payload(payload)
+    compact_text = json.dumps(
+        compact,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if fits(compact, compact_text):
+        return compact_text
+    return _execution_error_json(
+        "response_too_large",
+        "Execution response cannot fit within the MCP response byte budget.",
+    )
+
+
+_get_execution_signature = inspect.signature(get_execution)
+get_execution.__signature__ = _get_execution_signature.replace(
+    parameters=tuple(
+        parameter
+        for parameter in _get_execution_signature.parameters.values()
+        if parameter.name != "__invocation_mode"
+    )
+)
 
 
 @register_tool(

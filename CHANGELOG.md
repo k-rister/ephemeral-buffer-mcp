@@ -32,6 +32,9 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
   success payload when the full output response exceeds its serialization cap.
 - Publish MCP `outputSchema` envelopes with the registered payload contracts for
   execution, search, and retrieval tools.
+- Include the payload version when sizing capture-slice pages, preserve valid
+  JSON when MCP compacts oversized `get_execution` output, and retain
+  `record_file_id` in compact malformed execution-list diagnostics.
 - Normalize Unicode identically in BM25 indexes, queries, and fallback search;
   bound structured search labels and paginate capture listings with stable,
   signed cursors and JSON-safe label limits.
@@ -52,6 +55,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: accepted compact execution-output fallback payloads in the MCP contract
 
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: exposed registered payload contracts through MCP output schemas
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: bounded execution and retrieval MCP results without losing typed data or diagnostic identity
 
 ## 0.11.0 - 2026-10-18
 

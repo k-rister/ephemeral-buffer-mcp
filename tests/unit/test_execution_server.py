@@ -1035,6 +1035,95 @@ class TestExecutionTools(unittest.TestCase):
         self.assertNotIn("output", response["phases"][0])
         public.assert_called_once_with("large-output", include_output=False)
 
+    def test_mcp_get_execution_compacts_oversized_output_without_corrupting_json(self):
+        self.runner.results["mcp-nul-output"] = ("\x00" * 8192, 0, False, 8192, False)
+        server.start_execution(
+            [self.phase("nul-output", "mcp-nul-output")],
+            execution_id="mcp-get-execution-nul-output",
+        )
+
+        direct_text = server.get_execution(
+            "mcp-get-execution-nul-output", include_output=True
+        )
+        direct_payload = json.loads(direct_text)
+        self.assertEqual(direct_payload["phases"][0]["output"], "\x00" * 8192)
+        self.assertNotIn("response_truncated", direct_payload)
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+            result = asyncio.run(
+                server.mcp.call_tool(
+                    "get_execution",
+                    {
+                        "execution_id": "mcp-get-execution-nul-output",
+                        "include_output": True,
+                    },
+                )
+            )
+
+        payload = json.loads(result.content[0].text)
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertTrue(payload["response_truncated"])
+        self.assertNotIn("output", payload["phases"][0])
+        self.assertEqual(
+            result.content[0].text,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+        envelope = server.ToolResponseEnvelope(
+            status="ok",
+            data=payload,
+            text=result.content[0].text,
+            payload_schema_version=1,
+        )
+        self.assertLessEqual(
+            mcp_transport._call_tool_result_bytes(envelope),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+        listed_tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+        Draft202012Validator(listed_tools["get_execution"].output_schema).validate(
+            result.structured_content
+        )
+
+    def test_mcp_get_execution_keeps_malformed_and_unfittable_fallbacks_safe(self):
+        with patch.object(execution_tools, "_execution_json", return_value="not-json"):
+            malformed = execution_tools.get_execution(
+                "unused", __invocation_mode="mcp"
+            )
+        self.assertEqual(malformed, "not-json")
+
+        oversized_payload = {
+            "status": "ok",
+            "execution_id": "x" * server.MCP_TOOL_RESPONSE_MAX_BYTES,
+        }
+        oversized_text = json.dumps(oversized_payload)
+        with patch.object(
+            execution_tools, "_execution_json", return_value=oversized_text
+        ):
+            with patch.object(
+                execution_tools,
+                "_compact_execution_public_payload",
+                return_value={
+                    "status": "ok",
+                    "execution_id": "x" * server.MCP_TOOL_RESPONSE_MAX_BYTES,
+                },
+            ):
+                unfittable = execution_tools.get_execution(
+                    "unused", __invocation_mode="mcp"
+                )
+        self.assertEqual(json.loads(unfittable)["error"]["code"], "response_too_large")
+
     def test_oversized_list_response_returns_compact_page_metadata(self):
         entries = [
             {
@@ -1103,6 +1192,22 @@ class TestExecutionTools(unittest.TestCase):
                 "record_preview_truncated": False,
             }
         )
+        entries.append(
+            {
+                "status": "invalid_record",
+                "execution_id": None,
+                "record_file_id": "unrecoverable-listing-id",
+                "schema_version": 1,
+                "read_only": True,
+                "reason_code": "MALFORMED_JSON",
+                "message": "The record is malformed.",
+                "record_bytes": 8,
+                "error": {
+                    "code": "malformed_record",
+                    "message": "The record is malformed.",
+                },
+            }
+        )
 
         async def run_inline(
             _ticket,
@@ -1137,8 +1242,15 @@ class TestExecutionTools(unittest.TestCase):
         self.assertNotIn("resume", payload["executions"][0])
         self.assertNotIn("phases", payload["executions"][0])
         diagnostic = payload["executions"][-1]
-        self.assertEqual(diagnostic["status"], "unsupported_record")
-        self.assertEqual(diagnostic["error"]["code"], "unsupported_schema_version")
+        self.assertEqual(diagnostic["status"], "invalid_record")
+        self.assertIsNone(diagnostic["execution_id"])
+        self.assertEqual(diagnostic["record_file_id"], "unrecoverable-listing-id")
+        self.assertEqual(diagnostic["error"]["code"], "malformed_record")
+        self.assertEqual(diagnostic["reason_code"], "MALFORMED_JSON")
+        self.assertEqual(payload["executions"][-2]["status"], "unsupported_record")
+        self.assertEqual(
+            payload["executions"][-2]["error"]["code"], "unsupported_schema_version"
+        )
 
     def test_mcp_execution_list_accepts_diagnostic_without_recoverable_id(self):
         store = self.manager.store

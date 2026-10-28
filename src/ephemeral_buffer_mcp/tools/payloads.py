@@ -74,6 +74,12 @@ class ExecutionPublic(PayloadModel):
     background_error: Optional[str] = None
 
 
+class ExecutionPublicTruncated(ExecutionPublic):
+    """Compact successful execution response retained under the byte limit."""
+
+    response_truncated: Literal[True]
+
+
 class ExecutionRecordDiagnostic(PayloadModel):
     status: Literal["invalid_record", "unsupported_record"]
     execution_id: str
@@ -105,6 +111,20 @@ class ExecutionListFileDiagnostic(PayloadModel):
     record_preview_redacted: bool
     record_preview_truncated: bool
     error: ExecutionError
+
+
+class ExecutionListFileDiagnosticSummary(PayloadModel):
+    """Compact malformed-record entry retaining its filename identity."""
+
+    status: Literal["invalid_record"]
+    execution_id: Optional[str]
+    record_file_id: str
+    schema_version: Optional[Union[str, int, float, bool]] = None
+    read_only: Optional[Literal[True]] = None
+    reason_code: Optional[str] = None
+    message: Optional[str] = None
+    record_bytes: Optional[int] = None
+    error: Optional[ExecutionError] = None
 
 
 class ExecutionListSummary(PayloadModel):
@@ -183,9 +203,11 @@ class ExecutionList(PayloadModel):
     offset: int
     executions: list[
         Union[
+            ExecutionPublicTruncated,
             ExecutionPublic,
             ExecutionRecordDiagnostic,
             ExecutionListFileDiagnostic,
+            ExecutionListFileDiagnosticSummary,
             ExecutionListSummary,
         ]
     ]
@@ -387,6 +409,7 @@ PAYLOAD_CONTRACTS: dict[str, TypeAdapter] = {
         ExecutionFailure,
     ]),
     "get_execution": TypeAdapter(Union[
+        ExecutionPublicTruncated,
         ExecutionPublic,
         ExecutionRecordDiagnostic,
         ExecutionFailure,

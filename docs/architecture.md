@@ -161,8 +161,10 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
   socket-enabled registration. Each registration declares its result policy;
   categories remain descriptive metadata.
 - `tools/payloads.py` — defines strict, per-tool payload models for durable
-  execution, search, and retrieval results. Their `payload_schema_version` is
-  independent of the MCP envelope and any durable-record version.
+  execution, search, and retrieval results, including compact success and
+  malformed-record summaries used when responses are bounded. Their
+  `payload_schema_version` is independent of the MCP envelope and any
+  durable-record version.
 - `tools/_context.py` — bridges domain handlers to the active service context.
 - `tools/instrumentation.py` — wraps handlers with content-free metrics and
   lifecycle logging.
@@ -177,10 +179,12 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
 - `tools/execution.py` — implements command preflight and durable execution
   tools, including start, resume, cancellation, retrieval, and retirement.
 - `tools/execution_responses.py` — builds execution responses and ingests phase
-  output into the searchable capture ring.
+  output into the searchable capture ring; the MCP adapter checks the paired
+  text and structured result budget before returning execution details.
 - `tools/formatting.py` — builds bounded summary and diff-file-map payloads.
 - `tools/retrieval.py` — implements capture listing, clearing, summaries, and
-  exact-line retrieval.
+  exact-line retrieval, including version-aware response sizing for paged
+  capture slices.
 - `tools/search.py` — implements capture search and result rendering.
 - `tools/summary.py` — builds shared capture summary JSON and responses.
 
