@@ -86,6 +86,72 @@ class TestExecutionTools(unittest.TestCase):
         value.update(overrides)
         return value
 
+    @staticmethod
+    def public_execution_payload(execution_id, phase_names):
+        resume = {
+            "available": False,
+            "retry_required": False,
+            "unsafe_confirmation_required": False,
+            "attempt_limit_reached": False,
+            "next_phase": None,
+            "policy": "safe",
+            "blocked_reason": None,
+        }
+        phases = [
+            {
+                "name": name,
+                "status": "pending",
+                "attempts": 0,
+                "events": [{"event": "phase_pending", "detail": "x" * 256}],
+            }
+            for name in phase_names
+        ]
+        return {
+            "status": "ok",
+            "schema_version": 1,
+            "execution_id": execution_id,
+            "label": "large response",
+            "execution_status": "running",
+            "execution_in_progress": True,
+            "partial": False,
+            "summary": "running",
+            "created_at": "2026-10-28T00:00:00Z",
+            "updated_at": "2026-10-28T00:00:00Z",
+            "resume": resume,
+            "completed_phase_count": 0,
+            "phase_count": len(phases),
+            "phases": phases,
+        }
+
+    def assert_valid_execution_mcp_result(self, result, tool_name):
+        payload = json.loads(result.content[0].text)
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(
+            result.content[0].text,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+        self.assertLessEqual(
+            mcp_transport._call_tool_result_bytes(
+                server.ToolResponseEnvelope(
+                    status=result.structured_content["status"],
+                    data=result.structured_content["data"],
+                    text=result.content[0].text,
+                    truncated=result.structured_content["truncated"],
+                    next_cursor=result.structured_content["next_cursor"],
+                    payload_schema_version=result.structured_content[
+                        "payload_schema_version"
+                    ],
+                )
+            ),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+        listed_tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+        Draft202012Validator(listed_tools[tool_name].output_schema).validate(
+            result.structured_content
+        )
+        return payload
+
     def test_start_resume_get_output_and_list_tools(self):
         started = json.loads(
             server.start_execution(
@@ -665,6 +731,159 @@ class TestExecutionTools(unittest.TestCase):
         self.assertNotIn("capture_available", payload["phases"][1]["result"])
         self.assertEqual(execution_responses._json_dumps_with_limit({"ok": True}, None), '{"ok":true}')
 
+    def test_execution_compaction_helpers_cover_optional_payload_shapes(self):
+        self.assertEqual(execution_responses._compact_execution_list_payload({}), {})
+        compact_list = execution_responses._compact_execution_list_payload(
+            {
+                "executions": [
+                    None,
+                    {
+                        "status": "invalid_record",
+                        "execution_id": None,
+                        "record_file_id": "record-file",
+                        "schema_version": 2,
+                        "reason_code": "MALFORMED_JSON",
+                        "read_only": True,
+                    },
+                    {"status": "invalid_record", "execution_id": None},
+                    {
+                        "status": "ok",
+                        "execution_id": "execution-id",
+                        "phase_count": 2,
+                    },
+                ]
+            }
+        )
+        self.assertEqual(compact_list["returned_count"], 2)
+        self.assertEqual(compact_list["omitted_count"], 2)
+        self.assertEqual(
+            compact_list["executions"][0]["record_file_id"], "record-file"
+        )
+        self.assertEqual(
+            compact_list["executions"][1]["execution_id"], "execution-id"
+        )
+
+        self.assertEqual(
+            execution_responses._compact_execution_output_payload({"phases": None}),
+            {},
+        )
+        compact_output = execution_responses._compact_execution_output_payload(
+            {"phases": [None, {"name": "phase", "status": "completed"}]}
+        )
+        self.assertEqual(compact_output["phases"], [{"name": "phase", "status": "completed"}])
+
+        self.assertEqual(
+            execution_responses._compact_execution_retirement_payload(
+                {"items": "malformed"}
+            ),
+            {},
+        )
+        compact_retirement = execution_responses._compact_execution_retirement_payload(
+            {
+                "status": "partial",
+                "items": [None, {"execution_id": "retired-id", "eligible": True}],
+                "retired": [None, {"execution_id": "retired-id"}],
+                "removal_errors": [None, {"execution_id": "failed-id", "error": "OSError"}],
+            }
+        )
+        self.assertEqual(compact_retirement["items"], [{"execution_id": "retired-id", "eligible": True}])
+        self.assertEqual(compact_retirement["retired"], [{"execution_id": "retired-id"}])
+        self.assertEqual(
+            compact_retirement["removal_errors"],
+            [{"execution_id": "failed-id", "error": "OSError"}],
+        )
+
+        self.assertTrue(
+            execution_responses._execution_compact_candidates(
+                "start_execution", {"execution_id": "execution-id", "phases": []}
+            )
+        )
+        self.assertTrue(
+            execution_responses._execution_compact_candidates(
+                "get_execution_output", {"phases": []}
+            )
+        )
+        self.assertEqual(
+            execution_responses._execution_compact_candidates(
+                "list_executions", {"executions": "malformed"}
+            ),
+            [],
+        )
+        self.assertEqual(
+            execution_responses._execution_compact_candidates(
+                "retire_executions", {"items": "malformed"}
+            ),
+            [],
+        )
+        self.assertEqual(
+            execution_responses._execution_compact_candidates("unknown", {}), []
+        )
+
+    def test_execution_identity_fallbacks_and_output_metadata_selection(self):
+        self.assertEqual(execution_responses._execution_identity_details({}), {})
+        details = execution_responses._execution_identity_details(
+            {
+                "execution_id": "top-level-id",
+                "executions": [
+                    None,
+                    {},
+                    {"record_file_id": "record-file-id"},
+                ],
+                "items": [],
+                "retired": [{"execution_id": "retired-id"}],
+            }
+        )
+        self.assertEqual(details["execution_id"], "top-level-id")
+        self.assertEqual(details["executions"], [{"record_file_id": "record-file-id"}])
+        self.assertEqual(details["execution_ids"], ["retired-id"])
+
+        response = server.ToolResponseEnvelope(
+            status="ok",
+            data={"execution_id": "oversized-id"},
+            text="oversized text",
+        )
+        compact_error = execution_responses._compact_execution_error_response(response)
+        self.assertEqual(compact_error.error.code, "response_too_large")
+        self.assertEqual(compact_error.error.details["execution_id"], "oversized-id")
+        self.assertEqual(json.loads(compact_error.text), compact_error.data)
+        self.assertIs(
+            execution_responses.fit_execution_mcp_response("get_execution", response),
+            response,
+        )
+
+        class Manager:
+            def __init__(self, metadata, full):
+                self.metadata = metadata
+                self.full = full
+                self.calls = []
+
+            def public(self, execution_id, *, include_output):
+                self.calls.append((execution_id, include_output))
+                return self.full if include_output else self.metadata
+
+        metadata = {"phases": [None, {}, {"output_bytes": 4}, {"output_bytes": 1.5}]}
+        manager = Manager(metadata, {"full_output": True})
+        with patch.object(
+            execution_responses, "get_active_execution_manager", return_value=manager
+        ):
+            self.assertIs(execution_responses._execution_get_payload("execution-id", False), metadata)
+            self.assertEqual(
+                execution_responses._execution_get_payload("execution-id", True),
+                {"full_output": True},
+            )
+        self.assertEqual(manager.calls, [("execution-id", False), ("execution-id", False), ("execution-id", True)])
+
+        large_metadata = {
+            "phases": [{"output_bytes": execution_responses.EXECUTION_OUTPUT_RESPONSE_MAX_BYTES + 1}]
+        }
+        manager = Manager(large_metadata, {"full_output": True})
+        with patch.object(
+            execution_responses, "get_active_execution_manager", return_value=manager
+        ):
+            result = execution_responses._execution_get_payload("large-id", True)
+        self.assertTrue(result["response_truncated"])
+        self.assertEqual(manager.calls, [("large-id", False)])
+
     def test_socket_probe_paths_are_covered_without_host_socket_permissions(self):
         class FailingLoop:
             def close(self):
@@ -1096,33 +1315,329 @@ class TestExecutionTools(unittest.TestCase):
             result.structured_content
         )
 
-    def test_mcp_get_execution_keeps_malformed_and_unfittable_fallbacks_safe(self):
-        with patch.object(execution_tools, "_execution_json", return_value="not-json"):
-            malformed = execution_tools.get_execution(
-                "unused", __invocation_mode="mcp"
-            )
-        self.assertEqual(malformed, "not-json")
-
-        oversized_payload = {
-            "status": "ok",
-            "execution_id": "x" * server.MCP_TOOL_RESPONSE_MAX_BYTES,
+    def test_execution_mcp_fitter_keeps_oversized_errors_and_fallback_json_valid(self):
+        error_payload = {
+            "status": "error",
+            "error": {
+                "code": "malformed_record",
+                "message": "x" * 20_000,
+                "details": {"execution_id": "malformed-execution"},
+            },
         }
-        oversized_text = json.dumps(oversized_payload)
+        error_text = json.dumps(
+            error_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        error_response = server.ToolResponseEnvelope(
+            status="error",
+            data=error_payload,
+            error=server.ToolErrorEnvelope(
+                code="malformed_record",
+                message="x" * 20_000,
+                details={"execution_id": "malformed-execution"},
+            ),
+            text=error_text,
+            payload_schema_version=1,
+        )
+        compact_error = execution_responses.fit_execution_mcp_response(
+            "get_execution", error_response
+        )
+        parsed_error = json.loads(compact_error.text)
+        self.assertEqual(parsed_error["status"], "error")
+        self.assertEqual(compact_error.data, parsed_error)
+        self.assertEqual(
+            parsed_error["error"]["details"]["execution_id"],
+            "malformed-execution",
+        )
+        self.assertLessEqual(
+            mcp_transport._call_tool_result_bytes(compact_error),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+
+        oversized_success = {
+            "status": "ok",
+            "execution_id": "oversized-execution",
+            "phases": [],
+        }
+        success_text = json.dumps(
+            oversized_success,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         with patch.object(
-            execution_tools, "_execution_json", return_value=oversized_text
+            execution_responses,
+            "call_tool_result_bytes",
+            return_value=server.MCP_TOOL_RESPONSE_MAX_BYTES * 2,
         ):
-            with patch.object(
-                execution_tools,
-                "_compact_execution_public_payload",
-                return_value={
-                    "status": "ok",
-                    "execution_id": "x" * server.MCP_TOOL_RESPONSE_MAX_BYTES,
-                },
-            ):
-                unfittable = execution_tools.get_execution(
-                    "unused", __invocation_mode="mcp"
+            fallback = execution_responses.fit_execution_mcp_response(
+                "get_execution",
+                server.ToolResponseEnvelope(
+                    status="ok",
+                    data=oversized_success,
+                    text=success_text,
+                    payload_schema_version=1,
+                ),
+            )
+        parsed_fallback = json.loads(fallback.text)
+        self.assertEqual(parsed_fallback["status"], "error")
+        self.assertEqual(parsed_fallback["error"]["code"], "response_too_large")
+        self.assertEqual(fallback.data, parsed_fallback)
+        self.assertLessEqual(
+            mcp_transport._call_tool_result_bytes(fallback),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+
+    def test_mcp_execution_fitter_compacts_large_start_and_list_payloads(self):
+        def phase_name(index):
+            prefix = f"phase-{index:02d}-"
+            return prefix + ("n" * (239 - len(prefix)))
+
+        start_names = [phase_name(index) for index in range(64)]
+        start_payload = self.public_execution_payload("large-start", start_names)
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(self.manager, "start_background", return_value=start_payload):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                start_result = asyncio.run(
+                    server.mcp.call_tool(
+                        "start_execution",
+                        {
+                            "phases": [
+                                {"name": name, "command": "ignored"}
+                                for name in start_names
+                            ]
+                        },
+                    )
                 )
-        self.assertEqual(json.loads(unfittable)["error"]["code"], "response_too_large")
+        start_data = self.assert_valid_execution_mcp_result(
+            start_result, "start_execution"
+        )
+        self.assertTrue(start_data["response_truncated"])
+        self.assertEqual(start_data["execution_id"], "large-start")
+        self.assertEqual(start_data["phase_count"], 64)
+
+        listed = [
+            self.public_execution_payload(
+                f"large-list-{execution_index}",
+                [phase_name(index) for index in range(40)],
+            )
+            for execution_index in range(2)
+        ]
+        with patch.object(self.manager, "list_public", return_value=listed):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                list_result = asyncio.run(
+                    server.mcp.call_tool("list_executions", {"limit": 2})
+                )
+        list_data = self.assert_valid_execution_mcp_result(
+            list_result, "list_executions"
+        )
+        self.assertTrue(list_data["response_truncated"])
+        self.assertEqual(
+            [item["execution_id"] for item in list_data["executions"]],
+            ["large-list-0", "large-list-1"],
+        )
+        self.assertEqual(list_data["returned_count"], 2)
+        self.assertEqual(list_data["omitted_count"], 0)
+
+    def test_execution_mcp_fitter_handles_all_registered_execution_tools(self):
+        public = self.public_execution_payload("contract-execution", ["phase"])
+        public["phases"][0]["result"] = {"output": "x" * 40_000}
+        output = {
+            "status": "ok",
+            "execution_id": "contract-execution",
+            "execution_status": "completed",
+            "partial": False,
+            "max_bytes": 40_000,
+            "phases": [{
+                "name": "phase",
+                "status": "completed",
+                "output": "x" * 40_000,
+                "output_byte_size": 40_000,
+                "offset": 0,
+                "next_offset": 40_000,
+                "truncated": False,
+                "result": {},
+            }],
+        }
+        listed_public = dict(public, execution_id="listed-execution")
+        listed = {
+            "status": "ok",
+            "limit": 1,
+            "offset": 0,
+            "executions": [listed_public],
+        }
+        capacity = {
+            "status": "ok",
+            "state_directory": "x" * 50_000,
+            "state_directory_exists": True,
+            "quota_bytes": 1,
+            "checkpoint_reserve_bytes": 1,
+            "record_storage_limit_bytes": 1,
+            "record_count": 1,
+            "summary_count": 1,
+            "paired_record_count": 1,
+            "unpaired_record_count": 0,
+            "unpaired_summary_count": 0,
+            "record_bytes": 1,
+            "summary_bytes": 1,
+            "committed_bytes": 1,
+            "temporary_file_bytes": 0,
+            "accounted_bytes": 1,
+            "active_reserved_bytes": 0,
+            "stale_reserved_bytes": 0,
+            "available_bytes": 1,
+            "capacity_confident": True,
+            "active_record_count": 1,
+            "fence_pending_record_count": 0,
+            "invalid_record_count": 0,
+            "invalid_reservation_count": 0,
+            "uncertain_lock_count": 0,
+            "other_file_count": 0,
+            "other_file_bytes": 0,
+            "symlink_count": 0,
+            "filesystem": {"total_bytes": 1, "free_bytes": 1},
+            "background_execution_limit": 8,
+            "background_execution_active": 0,
+            "background_execution_queued": 0,
+        }
+        retirement = {
+            "status": "partial",
+            "dry_run": False,
+            "items": [],
+            "retired": [{
+                "execution_id": "retired-execution",
+                "eligible": True,
+                "record_bytes": 1,
+                "summary_bytes": 1,
+                "projected_reclaimed_bytes": 2,
+                "label": "x" * 40_000,
+            }],
+            "retired_count": 1,
+            "removal_errors": [{"execution_id": "failed-retirement", "error": "OSError"}],
+            "archive_path": "/tmp/" + "x" * 40_000,
+            "archive_bytes": 1,
+            "archive_is_durable": True,
+            "projected_reclaimed_bytes": 2,
+        }
+        payloads = {
+            "start_execution": public,
+            "resume_execution": public,
+            "cancel_execution": public,
+            "get_execution": public,
+            "get_execution_output": output,
+            "list_executions": listed,
+            "get_execution_capacity": capacity,
+            "retire_executions": retirement,
+        }
+
+        for tool_name, payload in payloads.items():
+            with self.subTest(tool=tool_name):
+                text = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                response = execution_responses.fit_execution_mcp_response(
+                    tool_name,
+                    server.ToolResponseEnvelope(
+                        status="ok",
+                        data=payload,
+                        text=text,
+                        payload_schema_version=1,
+                    ),
+                )
+                self.assertEqual(json.loads(response.text), response.data)
+                execution_tools.PAYLOAD_CONTRACTS[tool_name].validate_python(
+                    response.data,
+                    strict=True,
+                )
+                self.assertLessEqual(
+                    mcp_transport._call_tool_result_bytes(response),
+                    server.MCP_TOOL_RESPONSE_MAX_BYTES
+                    - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+                )
+                if tool_name == "get_execution_capacity":
+                    self.assertEqual(response.status, "error")
+                    self.assertEqual(response.error.code, "response_too_large")
+                else:
+                    self.assertEqual(response.status, "ok")
+                    self.assertTrue(response.data["response_truncated"])
+
+    def test_execution_mcp_error_fallback_preserves_list_and_retirement_ids(self):
+        cases = (
+            (
+                "list_executions",
+                {
+                    "status": "ok",
+                    "limit": 2,
+                    "offset": 0,
+                    "executions": [
+                        {"status": "ok", "execution_id": "list-a"},
+                        {
+                            "status": "invalid_record",
+                            "execution_id": None,
+                            "record_file_id": "file-b",
+                        },
+                    ],
+                },
+                "executions",
+            ),
+            (
+                "retire_executions",
+                {
+                    "status": "ok",
+                    "dry_run": True,
+                    "items": [{
+                        "execution_id": "retire-a",
+                        "eligible": True,
+                        "record_bytes": 1,
+                        "summary_bytes": 1,
+                        "projected_reclaimed_bytes": 2,
+                    }],
+                    "projected_reclaimed_bytes": 2,
+                },
+                "execution_ids",
+            ),
+        )
+        for tool_name, payload, identity_key in cases:
+            with self.subTest(tool=tool_name):
+                text = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                response = server.ToolResponseEnvelope(
+                    status="ok",
+                    data=payload,
+                    text=text,
+                    payload_schema_version=1,
+                )
+                with patch.object(
+                    execution_responses,
+                    "call_tool_result_bytes",
+                    side_effect=[server.MCP_TOOL_RESPONSE_MAX_BYTES * 2,
+                                 server.MCP_TOOL_RESPONSE_MAX_BYTES * 2, 0],
+                ):
+                    compact_error = execution_responses.fit_execution_mcp_response(
+                        tool_name, response
+                    )
+                self.assertEqual(compact_error.status, "error")
+                self.assertTrue(compact_error.error.details[identity_key])
+                self.assertEqual(json.loads(compact_error.text), compact_error.data)
+                self.assertLessEqual(
+                    mcp_transport._call_tool_result_bytes(compact_error),
+                    server.MCP_TOOL_RESPONSE_MAX_BYTES
+                    - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+                )
 
     def test_oversized_list_response_returns_compact_page_metadata(self):
         entries = [

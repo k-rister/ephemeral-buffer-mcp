@@ -59,17 +59,14 @@ def structured_tool_output_schema(
         "properties": {
             "schema_version": {
                 "const": TOOL_RESPONSE_SCHEMA_VERSION,
-                "title": "Schema Version",
                 "type": "integer",
             },
             "payload_schema_version": {
                 "const": payload_schema_version,
-                "title": "Payload Schema Version",
                 "type": "integer",
             },
             "status": {
                 "enum": ["ok", "error"],
-                "title": "Status",
                 "type": "string",
             },
             "data": {
@@ -81,16 +78,13 @@ def structured_tool_output_schema(
                         "type": "object",
                     },
                 ],
-                "title": "Data",
             },
             "error": {
                 "anyOf": [error_schema, {"type": "null"}],
-                "title": "Error",
             },
-            "truncated": {"title": "Truncated", "type": "boolean"},
+            "truncated": {"type": "boolean"},
             "next_cursor": {
                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                "title": "Next Cursor",
             },
         },
         "required": [
@@ -102,7 +96,6 @@ def structured_tool_output_schema(
             "truncated",
             "next_cursor",
         ],
-        "title": "StructuredToolResult",
         "type": "object",
     }
     if definitions:

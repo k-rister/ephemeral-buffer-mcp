@@ -92,6 +92,7 @@ class TestTransportDecomposition(unittest.TestCase):
             structured_result_factory=registration.structured_result_factory,
             payload_model=registration.payload_model,
             payload_schema_version=registration.payload_schema_version,
+            mcp_response_fitter=registration.mcp_response_fitter,
         )(registration.function)
         with self.assertRaisesRegex(ValueError, "duplicate tool registration"):
             register_tool(
@@ -99,6 +100,17 @@ class TestTransportDecomposition(unittest.TestCase):
                 registration.category,
                 result_policy=registration.result_policy,
             )(lambda: None)
+
+    def test_registry_requires_payload_contract_for_mcp_response_fitter(self):
+        with self.assertRaisesRegex(
+            ValueError, "MCP response fitters require a structured payload contract"
+        ):
+            register_tool(
+                "coverage_missing_fitter_contract",
+                "diagnostics",
+                result_policy="structured_envelope",
+                mcp_response_fitter=lambda _name, response: response,
+            )
 
     def test_every_registered_tool_declares_a_result_policy_and_payload_fixture(self):
         registrations = get_tool_registrations()
@@ -115,6 +127,20 @@ class TestTransportDecomposition(unittest.TestCase):
                 )
                 if registration.payload_model is not None:
                     self.assertEqual(registration.result_policy, "structured_envelope")
+
+        execution_tool_names = {
+            "start_execution", "resume_execution", "cancel_execution", "get_execution",
+            "get_execution_output", "list_executions", "get_execution_capacity",
+            "retire_executions",
+        }
+        self.assertEqual(
+            {
+                registration.name
+                for registration in registrations
+                if registration.mcp_response_fitter is not None
+            },
+            execution_tool_names,
+        )
 
         fixture_path = Path(__file__).parents[1] / "fixtures" / "mcp-result-contract.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -354,6 +380,37 @@ class TestTransportDecomposition(unittest.TestCase):
         self.assertLessEqual(
             call_tool_result_bytes(envelope),
             server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+        )
+
+    def test_search_on_empty_capture_returns_typed_success(self):
+        settings = load_settings({**os.environ, "EPHEMERAL_TEST_EMBEDDINGS": "1"})
+        context = create_service_context(
+            settings,
+            metrics_file=None,
+            engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+        )
+        try:
+            app = create_mcp_server(context)
+            captured = asyncio.run(app.call_tool("capture_text", {"content": ""}))
+            capture_id = captured.structured_content["data"]["capture_id"]
+            result = asyncio.run(
+                app.call_tool(
+                    "search_capture",
+                    {"query": "missing", "mode": "bm25", "capture_id": capture_id},
+                )
+            )
+            tools = {tool.name: tool for tool in asyncio.run(app.list_tools())}
+        finally:
+            context.close()
+
+        self.assertFalse(result.is_error)
+        payload = result.structured_content["data"]
+        self.assertEqual(result.structured_content["status"], "ok")
+        self.assertEqual(payload["mode"], "bm25")
+        self.assertEqual(payload["total_lines"], 0)
+        self.assertEqual(payload["matches"], [])
+        Draft202012Validator(tools["search_capture"].output_schema).validate(
+            result.structured_content
         )
 
 

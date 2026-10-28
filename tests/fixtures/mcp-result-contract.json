@@ -435,6 +435,126 @@
           "title": "ExecutionPublic",
           "type": "object"
         },
+        "ExecutionPublicTruncated": {
+          "additionalProperties": true,
+          "description": "Compact successful execution response retained under the byte limit.",
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases",
+            "response_truncated"
+          ],
+          "title": "ExecutionPublicTruncated",
+          "type": "object"
+        },
         "ExecutionRecordDiagnostic": {
           "additionalProperties": true,
           "properties": {
@@ -595,6 +715,9 @@
         }
       },
       "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublicTruncated"
+        },
         {
           "$ref": "#/$defs/ExecutionPublic"
         },
@@ -3903,6 +4026,126 @@
           "title": "ExecutionPublic",
           "type": "object"
         },
+        "ExecutionPublicTruncated": {
+          "additionalProperties": true,
+          "description": "Compact successful execution response retained under the byte limit.",
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases",
+            "response_truncated"
+          ],
+          "title": "ExecutionPublicTruncated",
+          "type": "object"
+        },
         "ExecutionResume": {
           "additionalProperties": true,
           "properties": {
@@ -3967,6 +4210,9 @@
         }
       },
       "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublicTruncated"
+        },
         {
           "$ref": "#/$defs/ExecutionPublic"
         },
@@ -4220,6 +4466,175 @@
           "title": "ExecutionRetirement",
           "type": "object"
         },
+        "ExecutionRetirementCompact": {
+          "additionalProperties": true,
+          "description": "Bounded retirement result retaining each returned execution ID.",
+          "properties": {
+            "archive_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Bytes"
+            },
+            "archive_is_durable": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Is Durable"
+            },
+            "blocked_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Count"
+            },
+            "dry_run": {
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "eligible_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible Count"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementCompactItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "removal_errors": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/ExecutionRemovalError"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Removal Errors"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "retired": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/ExecutionRetirementCompactItem"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retired"
+            },
+            "retired_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retired Count"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "partial",
+                "refused"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "items",
+            "projected_reclaimed_bytes",
+            "response_truncated"
+          ],
+          "title": "ExecutionRetirementCompact",
+          "type": "object"
+        },
+        "ExecutionRetirementCompactItem": {
+          "additionalProperties": true,
+          "description": "Retirement summary that keeps the durable execution identity.",
+          "properties": {
+            "eligible": {
+              "title": "Eligible",
+              "type": "boolean"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "summary_bytes": {
+              "title": "Summary Bytes",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "execution_id",
+            "eligible",
+            "record_bytes",
+            "summary_bytes",
+            "projected_reclaimed_bytes"
+          ],
+          "title": "ExecutionRetirementCompactItem",
+          "type": "object"
+        },
         "ExecutionRetirementItem": {
           "additionalProperties": true,
           "properties": {
@@ -4304,6 +4719,9 @@
         }
       },
       "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionRetirementCompact"
+        },
         {
           "$ref": "#/$defs/ExecutionRetirement"
         },
@@ -4918,6 +5336,126 @@
           "title": "ExecutionPublic",
           "type": "object"
         },
+        "ExecutionPublicTruncated": {
+          "additionalProperties": true,
+          "description": "Compact successful execution response retained under the byte limit.",
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases",
+            "response_truncated"
+          ],
+          "title": "ExecutionPublicTruncated",
+          "type": "object"
+        },
         "ExecutionResume": {
           "additionalProperties": true,
           "properties": {
@@ -4982,6 +5520,9 @@
         }
       },
       "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublicTruncated"
+        },
         {
           "$ref": "#/$defs/ExecutionPublic"
         },

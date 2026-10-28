@@ -15,7 +15,16 @@ from ..execution import (
     ExecutionQuotaError,
     ExecutionRecordError,
 )
-from ..response_limits import EXECUTION_OUTPUT_RESPONSE_MAX_BYTES
+from ..mcp_response import (
+    ToolErrorEnvelope,
+    ToolResponseEnvelope,
+    call_tool_result_bytes,
+)
+from ..response_limits import (
+    EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+    MCP_TOOL_RESPONSE_MAX_BYTES,
+)
 from ._context import active_engine as get_active_engine
 from ._context import active_execution_manager as get_active_execution_manager
 
@@ -292,6 +301,272 @@ def _compact_execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         if isinstance(phase, dict)
     ]
     return compact
+
+
+def _compact_execution_list_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce list entries while retaining each recoverable durable identity."""
+    executions = payload.get("executions")
+    if not isinstance(executions, list):
+        return {}
+
+    summaries = []
+    for item in executions:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        execution_id = item.get("execution_id")
+        record_file_id = item.get("record_file_id")
+        if status == "invalid_record" and isinstance(record_file_id, str):
+            summary = {
+                "status": "invalid_record",
+                "execution_id": execution_id if isinstance(execution_id, str) else None,
+                "record_file_id": record_file_id,
+            }
+            for key in ("schema_version", "reason_code"):
+                value = item.get(key)
+                if isinstance(value, (str, int, float, bool)):
+                    summary[key] = value
+            if item.get("read_only") is True:
+                summary["read_only"] = True
+            summaries.append(summary)
+            continue
+        if not isinstance(execution_id, str):
+            continue
+        summary = {"status": status, "execution_id": execution_id}
+        for key in (
+            "execution_status", "partial", "execution_in_progress",
+            "cancellation_requested", "completed_phase_count", "phase_count",
+            "reason_code", "schema_version", "read_only",
+        ):
+            if key in item:
+                summary[key] = item[key]
+        summaries.append(summary)
+
+    total = len(executions)
+    return {
+        "status": payload.get("status", "ok"),
+        "limit": payload.get("limit", 1),
+        "offset": payload.get("offset", 0),
+        "response_truncated": True,
+        "executions": summaries,
+        "returned_count": len(summaries),
+        "omitted_count": max(0, total - len(summaries)),
+    }
+
+
+def _compact_execution_output_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove output bytes while keeping the execution and phase identities."""
+    phases = payload.get("phases")
+    if not isinstance(phases, list):
+        return {}
+    return {
+        "status": payload.get("status", "ok"),
+        "execution_id": payload.get("execution_id"),
+        "execution_status": payload.get("execution_status"),
+        "partial": payload.get("partial", False),
+        "response_truncated": True,
+        "phases": [
+            {
+                key: phase[key]
+                for key in ("name", "status", "attempts", "error")
+                if key in phase
+            }
+            for phase in phases
+            if isinstance(phase, dict)
+        ],
+    }
+
+
+def _compact_execution_retirement_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop descriptive retirement fields while retaining execution IDs."""
+    compact_item_keys = (
+        "execution_id", "eligible", "record_bytes", "summary_bytes",
+        "projected_reclaimed_bytes",
+    )
+
+    def compact_items(items):
+        if not isinstance(items, list):
+            return None
+        return [
+            {key: item[key] for key in compact_item_keys if key in item}
+            for item in items
+            if isinstance(item, dict)
+        ]
+
+    items = compact_items(payload.get("items", []))
+    if items is None:
+        return {}
+    compact = {
+        key: payload[key]
+        for key in (
+            "status", "dry_run", "projected_reclaimed_bytes", "eligible_count",
+            "blocked_count", "retired_count", "archive_bytes", "archive_is_durable",
+        )
+        if key in payload
+    }
+    compact["items"] = items
+    compact["response_truncated"] = True
+    retired = compact_items(payload.get("retired"))
+    if retired is not None:
+        compact["retired"] = retired
+    removal_errors = payload.get("removal_errors")
+    if isinstance(removal_errors, list):
+        compact["removal_errors"] = [
+            {
+                key: item[key]
+                for key in ("execution_id", "error")
+                if key in item
+            }
+            for item in removal_errors
+            if isinstance(item, dict)
+        ]
+    return compact
+
+
+def _execution_compact_candidates(tool_name: str, payload: Dict[str, Any]):
+    """Return typed summary shapes ordered from richest to smallest."""
+    if tool_name in {
+        "start_execution", "resume_execution", "cancel_execution", "get_execution",
+    } and isinstance(payload.get("execution_id"), str) and isinstance(
+        payload.get("phases"), list
+    ):
+        compact = _compact_execution_public_payload(payload)
+        return [compact, {**compact, "phases": []}]
+    if tool_name == "get_execution_output":
+        compact = _compact_execution_output_payload(payload)
+        if compact:
+            return [compact, {**compact, "phases": []}]
+    if tool_name == "list_executions":
+        compact = _compact_execution_list_payload(payload)
+        if compact:
+            return [compact]
+    if tool_name == "retire_executions":
+        compact = _compact_execution_retirement_payload(payload)
+        if compact:
+            return [compact]
+    return []
+
+
+def _execution_identity_details(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep execution identifiers in the final bounded-size error when possible."""
+    details: Dict[str, Any] = {}
+    execution_id = payload.get("execution_id")
+    if isinstance(execution_id, str):
+        details["execution_id"] = execution_id
+    executions = payload.get("executions")
+    if isinstance(executions, list):
+        identities = []
+        for item in executions:
+            if not isinstance(item, dict):
+                continue
+            identity = {}
+            if isinstance(item.get("execution_id"), str):
+                identity["execution_id"] = item["execution_id"]
+            if isinstance(item.get("record_file_id"), str):
+                identity["record_file_id"] = item["record_file_id"]
+            if identity:
+                identities.append(identity)
+        if identities:
+            details["executions"] = identities
+    for key in ("items", "retired"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            ids = [
+                item["execution_id"]
+                for item in items
+                if isinstance(item, dict) and isinstance(item.get("execution_id"), str)
+            ]
+            if ids:
+                details["execution_ids"] = ids
+                break
+    return details
+
+
+def _compact_execution_error_response(
+    response: ToolResponseEnvelope,
+) -> ToolResponseEnvelope:
+    """Replace an oversized execution result with a small parseable JSON error."""
+    data = response.data if isinstance(response.data, dict) else {}
+    details = dict(response.error.details or {}) if response.error is not None else {}
+    details.update(_execution_identity_details(data))
+    code = response.error.code if response.error is not None else "response_too_large"
+    message = (
+        response.error.message
+        if response.error is not None
+        else "Execution response exceeds the MCP response byte budget."
+    )
+    message = message[:512]
+    error_payload = {"code": code, "message": message}
+    if details:
+        error_payload["details"] = details
+    payload = {"status": "error", "error": error_payload}
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return response.model_copy(
+        update={
+            "status": "error",
+            "data": payload,
+            "error": ToolErrorEnvelope(
+                code=code,
+                message=message,
+                details=details or None,
+            ),
+            "text": text,
+            "truncated": True,
+        }
+    )
+
+
+def fit_execution_mcp_response(
+    tool_name: str,
+    response: ToolResponseEnvelope,
+) -> ToolResponseEnvelope:
+    """Fit a typed execution result before generic MCP text truncation runs."""
+    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+    if call_tool_result_bytes(response) <= response_budget:
+        return response
+
+    if response.status == "ok":
+        for payload in _execution_compact_candidates(tool_name, response.data):
+            text = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            candidate = response.model_copy(
+                update={"data": payload, "text": text, "truncated": True}
+            )
+            if call_tool_result_bytes(candidate) <= response_budget:
+                return candidate
+    compact_error = _compact_execution_error_response(response)
+    if call_tool_result_bytes(compact_error) <= response_budget:
+        return compact_error
+    fallback_payload = {
+        "status": "error",
+        "error": {
+            "code": "response_too_large",
+            "message": "Execution response exceeds the MCP response byte budget.",
+        },
+    }
+    fallback_text = json.dumps(
+        fallback_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return response.model_copy(
+        update={
+            "status": "error",
+            "data": fallback_payload,
+            "error": ToolErrorEnvelope(
+                code="response_too_large",
+                message=fallback_payload["error"]["message"],
+            ),
+            "text": fallback_text,
+            "truncated": True,
+        }
+    )
 
 
 def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str, Any]:
