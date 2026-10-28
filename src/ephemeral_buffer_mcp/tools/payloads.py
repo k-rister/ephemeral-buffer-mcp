@@ -290,6 +290,33 @@ class ExecutionRetirement(PayloadModel):
     archive_is_durable: Optional[bool] = None
 
 
+class ExecutionRetirementCompactItem(PayloadModel):
+    """Retirement summary that keeps the durable execution identity."""
+
+    execution_id: str
+    eligible: bool
+    record_bytes: int
+    summary_bytes: int
+    projected_reclaimed_bytes: int
+
+
+class ExecutionRetirementCompact(PayloadModel):
+    """Bounded retirement result retaining each returned execution ID."""
+
+    status: Literal["ok", "partial", "refused"]
+    dry_run: bool
+    items: list[ExecutionRetirementCompactItem]
+    projected_reclaimed_bytes: int
+    response_truncated: Literal[True]
+    eligible_count: Optional[int] = None
+    blocked_count: Optional[int] = None
+    retired: Optional[list[ExecutionRetirementCompactItem]] = None
+    removal_errors: Optional[list[ExecutionRemovalError]] = None
+    retired_count: Optional[int] = None
+    archive_bytes: Optional[int] = None
+    archive_is_durable: Optional[bool] = None
+
+
 class SearchMatch(PayloadModel):
     chunk_id: int
     chunk_index: Union[int, str]
@@ -400,9 +427,18 @@ class CaptureListPayload(PayloadModel):
 
 
 PAYLOAD_CONTRACTS: dict[str, TypeAdapter] = {
-    "start_execution": TypeAdapter(Union[ExecutionPublic, ExecutionFailure]),
-    "resume_execution": TypeAdapter(Union[ExecutionPublic, ExecutionFailure]),
+    "start_execution": TypeAdapter(Union[
+        ExecutionPublicTruncated,
+        ExecutionPublic,
+        ExecutionFailure,
+    ]),
+    "resume_execution": TypeAdapter(Union[
+        ExecutionPublicTruncated,
+        ExecutionPublic,
+        ExecutionFailure,
+    ]),
     "cancel_execution": TypeAdapter(Union[
+        ExecutionPublicTruncated,
         ExecutionPublic,
         ExecutionCancelAcknowledgement,
         ExecutionRecordDiagnostic,
@@ -419,7 +455,11 @@ PAYLOAD_CONTRACTS: dict[str, TypeAdapter] = {
     ),
     "list_executions": TypeAdapter(Union[ExecutionList, ExecutionFailure]),
     "get_execution_capacity": TypeAdapter(Union[ExecutionCapacity, ExecutionFailure]),
-    "retire_executions": TypeAdapter(Union[ExecutionRetirement, ExecutionFailure]),
+    "retire_executions": TypeAdapter(Union[
+        ExecutionRetirementCompact,
+        ExecutionRetirement,
+        ExecutionFailure,
+    ]),
     "search_capture": TypeAdapter(SearchPayload),
     "get_capture_slice": TypeAdapter(CaptureSlicePayload),
     "get_capture_summary": TypeAdapter(CaptureSummaryPayload),

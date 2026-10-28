@@ -1871,6 +1871,8 @@ class EphemeralEngine:
                 "status": "ok",
                 "capture_id": capture.capture_id,
                 "label": capture.label,
+                "total_lines": 0,
+                "mode": mode,
                 "matches": [],
                 "semantic_coverage": "complete" if mode in ("semantic", "hybrid") else "not-requested",
                 "message": "Capture is empty (0 lines).",

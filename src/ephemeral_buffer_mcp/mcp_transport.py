@@ -361,6 +361,7 @@ def create_mcp_server(context: "ServiceContext | None" = None):
             text_policy=registration.text_policy,
             payload_model=registration.payload_model,
             payload_schema_version=registration.payload_schema_version,
+            mcp_response_fitter=registration.mcp_response_fitter,
             mcp_admission_lane=registration.mcp_admission_lane,
             background_execution=registration.background_execution,
             legacy_error_code=registration.legacy_error_code,
@@ -392,6 +393,7 @@ def _register_mcp_tool_for_app(
     text_policy=None,
     payload_model=None,
     payload_schema_version=None,
+    mcp_response_fitter=None,
     mcp_admission_lane=None,
     background_execution=None,
     legacy_error_code=None,
@@ -410,6 +412,8 @@ def _register_mcp_tool_for_app(
             payload_model = registration.payload_model
         if payload_schema_version is None:
             payload_schema_version = registration.payload_schema_version
+        if mcp_response_fitter is None:
+            mcp_response_fitter = registration.mcp_response_fitter
         if mcp_admission_lane is None:
             mcp_admission_lane = registration.mcp_admission_lane
         if background_execution is None:
@@ -576,9 +580,20 @@ def _register_mcp_tool_for_app(
                         payload_model,
                         payload_schema_version,
                     )
+                    response = _correlate_tool_error(response, call_id)
+                    if mcp_response_fitter is not None:
+                        response = mcp_response_fitter(name, response)
+                        if not isinstance(response, ToolResponseEnvelope):
+                            raise TypeError(
+                                "mcp_response_fitter must return ToolResponseEnvelope"
+                            )
+                        response = _validate_registered_payload(
+                            response,
+                            payload_model,
+                            payload_schema_version,
+                        )
                 except Exception:
                     return await unexpected_tool_failure(ticket, call_id)
-                response = _correlate_tool_error(response, call_id)
                 fitted = _fit_tool_envelope(response, compact_text=compact_text)
                 _record_tool_response_bytes(service_context, name, fitted.text)
                 await _run_admitted_thread(

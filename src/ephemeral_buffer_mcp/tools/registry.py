@@ -29,6 +29,7 @@ class ToolRegistration:
     structured_result_factory: Callable[..., Any] | None = None
     payload_model: Any = None
     payload_schema_version: int | None = None
+    mcp_response_fitter: Callable[..., Any] | None = None
     mcp_admission_lane: str = "mcp"
     socket_admission_lane: str = "socket"
     background_execution: bool = False
@@ -50,6 +51,7 @@ def register_tool(
     structured_result_factory: Callable[..., Any] | None = None,
     payload_model: Any = None,
     payload_schema_version: int | None = None,
+    mcp_response_fitter: Callable[..., Any] | None = None,
     mcp_admission_lane: str = "mcp",
     socket_admission_lane: str = "socket",
     background_execution: bool = False,
@@ -72,6 +74,10 @@ def register_tool(
         raise ValueError("payload schema version must be a positive integer")
     if payload_model is not None and result_policy != "structured_envelope":
         raise ValueError("payload contracts require the structured_envelope result policy")
+    if mcp_response_fitter is not None and (
+        result_policy != "structured_envelope" or payload_model is None
+    ):
+        raise ValueError("MCP response fitters require a structured payload contract")
     if (
         structured_result_factory is not None
         and result_policy != "structured_envelope"
@@ -91,6 +97,7 @@ def register_tool(
             structured_result_factory=structured_result_factory,
             payload_model=payload_model,
             payload_schema_version=payload_schema_version,
+            mcp_response_fitter=mcp_response_fitter,
             mcp_admission_lane=mcp_admission_lane,
             socket_admission_lane=socket_admission_lane,
             background_execution=background_execution,

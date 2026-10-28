@@ -258,6 +258,7 @@ class TestServerTools(unittest.TestCase):
         result_policy=None,
         payload_model=None,
         payload_schema_version=None,
+        mcp_response_fitter=None,
         service_context=None,
     ):
         adapters = {}
@@ -280,6 +281,7 @@ class TestServerTools(unittest.TestCase):
                 result_policy=result_policy,
                 payload_model=payload_model,
                 payload_schema_version=payload_schema_version,
+                mcp_response_fitter=mcp_response_fitter,
             )
         return adapters[name]
 
@@ -3943,6 +3945,31 @@ class TestServerTools(unittest.TestCase):
             adapter = add_tool.call_args.args[0]
             with self.assertRaisesRegex(TypeError, "must return ToolResponseEnvelope"):
                 asyncio.run(adapter())
+
+    def test_mcp_adapter_converts_invalid_response_fitter_result_to_operation_error(self):
+        from ephemeral_buffer_mcp.tools.payloads import PAYLOAD_CONTRACTS
+
+        failure = {"status": "error", "error": {"code": "failed", "message": "failed"}}
+        response = server.ToolResponseEnvelope(
+            status="error",
+            data=failure,
+            error=server.ToolErrorEnvelope(code="failed", message="failed"),
+            text=json.dumps(failure, separators=(",", ":")),
+        )
+        adapter = self.build_mcp_adapter(
+            lambda: "unused",
+            "coverage_invalid_response_fitter",
+            "execution",
+            structured_result_factory=lambda: response,
+            result_policy="structured_envelope",
+            payload_model=PAYLOAD_CONTRACTS["get_execution"],
+            payload_schema_version=1,
+            mcp_response_fitter=lambda _name, _response: None,
+        )
+
+        result = asyncio.run(adapter())
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content["error"]["code"], "operation_failed")
 
     def test_search_response_uses_bounded_fallback_when_first_match_cannot_fit(self):
         result = {
