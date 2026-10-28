@@ -343,6 +343,9 @@ def _compact_execution_list_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         summaries.append(summary)
 
     total = len(executions)
+    previously_omitted = payload.get("omitted_count", 0)
+    if type(previously_omitted) is not int or previously_omitted < 0:
+        previously_omitted = 0
     return {
         "status": payload.get("status", "ok"),
         "limit": payload.get("limit", 1),
@@ -350,7 +353,7 @@ def _compact_execution_list_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "response_truncated": True,
         "executions": summaries,
         "returned_count": len(summaries),
-        "omitted_count": max(0, total - len(summaries)),
+        "omitted_count": previously_omitted + max(0, total - len(summaries)),
     }
 
 

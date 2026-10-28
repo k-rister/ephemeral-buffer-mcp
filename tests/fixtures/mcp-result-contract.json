@@ -1,8 +1,27 @@
 {
   "cancel_execution": {
-    "payload_schema_version": 1,
+    "payload_schema_version": 2,
     "schema": {
       "$defs": {
+        "ExecutionBlockedReason": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "remedy": {
+              "title": "Remedy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "remedy"
+          ],
+          "title": "ExecutionBlockedReason",
+          "type": "object"
+        },
         "ExecutionCancelAcknowledgement": {
           "additionalProperties": true,
           "properties": {
@@ -123,14 +142,13 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "title": "Blocked Reason"
+              "default": null
             },
             "blocked_reason_code": {
               "anyOf": [
@@ -665,13 +683,12 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "title": "Blocked Reason"
+              ]
             },
             "next_phase": {
               "anyOf": [
@@ -1116,9 +1133,28 @@
     }
   },
   "get_execution": {
-    "payload_schema_version": 1,
+    "payload_schema_version": 2,
     "schema": {
       "$defs": {
+        "ExecutionBlockedReason": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "remedy": {
+              "title": "Remedy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "remedy"
+          ],
+          "title": "ExecutionBlockedReason",
+          "type": "object"
+        },
         "ExecutionError": {
           "additionalProperties": true,
           "properties": {
@@ -1204,14 +1240,13 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "title": "Blocked Reason"
+              "default": null
             },
             "blocked_reason_code": {
               "anyOf": [
@@ -1746,13 +1781,12 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "title": "Blocked Reason"
+              ]
             },
             "next_phase": {
               "anyOf": [
@@ -2432,9 +2466,28 @@
     }
   },
   "list_executions": {
-    "payload_schema_version": 1,
+    "payload_schema_version": 2,
     "schema": {
       "$defs": {
+        "ExecutionBlockedReason": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "remedy": {
+              "title": "Remedy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "remedy"
+          ],
+          "title": "ExecutionBlockedReason",
+          "type": "object"
+        },
         "ExecutionError": {
           "additionalProperties": true,
           "properties": {
@@ -3024,14 +3077,13 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "title": "Blocked Reason"
+              "default": null
             },
             "blocked_reason_code": {
               "anyOf": [
@@ -3566,13 +3618,12 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "title": "Blocked Reason"
+              ]
             },
             "next_phase": {
               "anyOf": [
@@ -3626,9 +3677,28 @@
     }
   },
   "resume_execution": {
-    "payload_schema_version": 1,
+    "payload_schema_version": 2,
     "schema": {
       "$defs": {
+        "ExecutionBlockedReason": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "remedy": {
+              "title": "Remedy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "remedy"
+          ],
+          "title": "ExecutionBlockedReason",
+          "type": "object"
+        },
         "ExecutionError": {
           "additionalProperties": true,
           "properties": {
@@ -3714,14 +3784,13 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "title": "Blocked Reason"
+              "default": null
             },
             "blocked_reason_code": {
               "anyOf": [
@@ -4160,13 +4229,12 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "title": "Blocked Reason"
+              ]
             },
             "next_phase": {
               "anyOf": [
@@ -5017,9 +5085,28 @@
     }
   },
   "start_execution": {
-    "payload_schema_version": 1,
+    "payload_schema_version": 2,
     "schema": {
       "$defs": {
+        "ExecutionBlockedReason": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "remedy": {
+              "title": "Remedy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "remedy"
+          ],
+          "title": "ExecutionBlockedReason",
+          "type": "object"
+        },
         "ExecutionError": {
           "additionalProperties": true,
           "properties": {
@@ -5105,14 +5192,13 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "default": null,
-              "title": "Blocked Reason"
+              "default": null
             },
             "blocked_reason_code": {
               "anyOf": [
@@ -5551,13 +5637,12 @@
             "blocked_reason": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/$defs/ExecutionBlockedReason"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "title": "Blocked Reason"
+              ]
             },
             "next_phase": {
               "anyOf": [
