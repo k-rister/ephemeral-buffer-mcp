@@ -4,6 +4,7 @@ Comprehensive unit & integration tests for EphemeralEngine and MCP Server tools.
 
 import base64
 from dataclasses import replace
+import gc
 import hashlib
 import hmac
 import io
@@ -15,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -1097,6 +1099,129 @@ STEP 3: Summary
                 engine.consolidate()
         finally:
             engine.shutdown()
+
+    def test_consolidate_stops_processing_at_first_non_fitting_record(self):
+        engine = self._new_engine(
+            max_buffer_bytes=64 * 1024,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        source_lines = ["λ", "界" * 2048, *(f"later-{index}" for index in range(2000))]
+        capture = engine._ingest_state("\n".join(source_lines), label="bounded-work")
+        counts = {"lines": 0, "record_encodings": 0}
+
+        class CountingLines(list):
+            def __iter__(self):
+                for line in super().__iter__():
+                    counts["lines"] += 1
+                    yield line
+
+        capture.raw_lines = CountingLines(capture.raw_lines)
+        original_dumps = engine_module.json.dumps
+
+        def counting_dumps(value, *args, **kwargs):
+            if isinstance(value, dict) and set(value) == {"capture_id", "source_line", "text"}:
+                counts["record_encodings"] += 1
+            return original_dumps(value, *args, **kwargs)
+
+        with patch.object(engine_module.json, "dumps", side_effect=counting_dumps):
+            result = engine.consolidate([capture.capture_id], max_captures=1, max_bytes=512)
+
+        payload = json.loads(result["content"])
+        self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
+        self.assertEqual(payload["sources"][0]["capture_id"], capture.capture_id)
+        self.assertEqual(payload["sources"][0]["total_lines"], len(source_lines))
+        self.assertEqual(payload["records"], [
+            {"capture_id": capture.capture_id, "source_line": 1, "text": "λ"},
+        ])
+        self.assertEqual(payload["omitted_record_count"], len(source_lines) - 1)
+        self.assertEqual(result["source_capture_ids"], [capture.capture_id])
+        self.assertEqual(result["record_count"], 1)
+        self.assertEqual(result["omitted_record_count"], len(source_lines) - 1)
+        self.assertEqual(counts["lines"], 2)
+        self.assertEqual(counts["record_encodings"], 2)
+
+    def test_consolidate_reports_no_fitting_records_with_multibyte_text(self):
+        engine = self._new_engine(
+            max_buffer_bytes=16 * 1024,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        capture = engine._ingest_state("界" * 2048, label="no-fitting-record")
+
+        result = engine.consolidate([capture.capture_id], max_captures=1, max_bytes=512)
+
+        payload = json.loads(result["content"])
+        self.assertLessEqual(len(result["content"].encode("utf-8")), 512)
+        self.assertEqual(payload["records"], [])
+        self.assertEqual(payload["omitted_record_count"], 1)
+        self.assertEqual(result["record_count"], 0)
+        self.assertEqual(result["omitted_record_count"], 1)
+
+    def test_consolidate_does_not_retain_evicted_capture_state(self):
+        engine = self._new_engine(
+            max_captures=1,
+            max_buffer_bytes=16 * 1024,
+            semantic_prefetch=False,
+            embedding_warmup=False,
+        )
+        capture = engine._ingest_state("retained source line", label="consolidation-reader")
+        capture.embeddings = np.zeros((1, 384), dtype=np.float32)
+        capture_id = capture.capture_id
+        capture_ref = weakref.ref(capture)
+        embeddings_ref = weakref.ref(capture.embeddings)
+        entered = threading.Event()
+        proceed = threading.Event()
+        result_holder = {}
+        failures = []
+        original_dumps = engine_module.json.dumps
+
+        def blocked_dumps(value, *args, **kwargs):
+            if isinstance(value, dict) and set(value) == {"capture_id", "source_line", "text"}:
+                entered.set()
+                if not proceed.wait(timeout=3):
+                    raise TimeoutError("consolidation test was not released")
+            return original_dumps(value, *args, **kwargs)
+
+        def consolidate():
+            try:
+                result_holder["result"] = engine.consolidate(
+                    [capture_id], max_captures=1, max_bytes=1024
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        worker = threading.Thread(target=consolidate)
+        with patch.object(engine_module.json, "dumps", side_effect=blocked_dumps):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=2), "consolidation did not reach record encoding")
+                engine._ingest_state("replacement capture", label="replacement")
+                self.assertNotIn(capture_id, engine._captures)
+                deferred = engine.get_buffer_stats()
+                self.assertEqual(deferred["deferred_storage_capture_count"], 0)
+                self.assertEqual(deferred["deferred_storage_bytes"], 0)
+
+                del capture
+                gc.collect()
+                self.assertIsNone(capture_ref())
+                self.assertIsNone(embeddings_ref())
+            finally:
+                proceed.set()
+                worker.join(timeout=3)
+
+        self.assertFalse(worker.is_alive(), "consolidation worker did not finish")
+        if failures:
+            raise failures[0]
+
+        result = result_holder["result"]
+        payload = json.loads(result["content"])
+        self.assertEqual(result["source_capture_ids"], [capture_id])
+        self.assertEqual(
+            payload["records"],
+            [{"capture_id": capture_id, "source_line": 1, "text": "retained source line"}],
+        )
+        self.assertLessEqual(len(result["content"].encode("utf-8")), 1024)
 
     def test_04a_previews_are_utf8_bounded_without_changing_retained_content(self):
         long_line = "界" * 10_000
