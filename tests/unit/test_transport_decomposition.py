@@ -15,9 +15,15 @@ from jsonschema import Draft202012Validator
 
 from ephemeral_buffer_mcp import create_mcp_server, create_service_context
 from ephemeral_buffer_mcp.config import load_settings
-from ephemeral_buffer_mcp.mcp_response import structured_tool_output_schema
+from ephemeral_buffer_mcp.mcp_response import (
+    ToolResponseEnvelope,
+    call_tool_result_bytes,
+    structured_tool_output_schema,
+)
 from ephemeral_buffer_mcp.mcp_transport import _record_tool_response_bytes
 import ephemeral_buffer_mcp.server as server
+import ephemeral_buffer_mcp.mcp_transport as mcp_transport
+import ephemeral_buffer_mcp.tools.retrieval as retrieval_tools
 from ephemeral_buffer_mcp.tools.registry import (
     TOOL_CATEGORIES,
     get_tool_categories,
@@ -289,6 +295,65 @@ class TestTransportDecomposition(unittest.TestCase):
         self.assertEqual(
             byte_counts["retrieval_response_bytes"],
             len(retrieval_text.encode("utf-8")),
+        )
+
+    def test_capture_slice_candidate_budget_includes_payload_version(self):
+        settings = load_settings({**os.environ, "EPHEMERAL_TEST_EMBEDDINGS": "1"})
+        context = create_service_context(
+            settings,
+            metrics_file=None,
+            engine_options={"semantic_prefetch": False, "embedding_warmup": False},
+        )
+        content = "\n".join(
+            f"line-{index:04d}-" + "x" * 36 for index in range(1500)
+        )
+        try:
+            app = create_mcp_server(context)
+            captured = asyncio.run(app.call_tool("capture_text", {"content": content}))
+            capture_id = captured.structured_content["data"]["capture_id"]
+            measured_versions = []
+            measure_response = mcp_transport._call_tool_result_bytes
+
+            def measure_candidate(envelope, *, compact_text=False):
+                measured_versions.append(envelope.payload_schema_version)
+                return measure_response(envelope, compact_text=compact_text)
+
+            with patch.object(
+                retrieval_tools,
+                "_call_tool_result_bytes",
+                side_effect=measure_candidate,
+            ):
+                result = asyncio.run(
+                    app.call_tool(
+                        "get_capture_slice",
+                        {
+                            "start_line": 1,
+                            "end_line": 1500,
+                            "capture_id": capture_id,
+                        },
+                    )
+                )
+        finally:
+            context.close()
+
+        self.assertTrue(measured_versions)
+        self.assertEqual(set(measured_versions), {1})
+        self.assertFalse(result.is_error)
+        structured = result.structured_content
+        self.assertEqual(structured["status"], "ok")
+        self.assertEqual(structured["payload_schema_version"], 1)
+        self.assertTrue(structured["data"]["content"])
+        envelope = ToolResponseEnvelope(
+            status=structured["status"],
+            data=structured["data"],
+            text=result.content[0].text,
+            truncated=structured["truncated"],
+            next_cursor=structured["next_cursor"],
+            payload_schema_version=structured["payload_schema_version"],
+        )
+        self.assertLessEqual(
+            call_tool_result_bytes(envelope),
+            server.MCP_TOOL_RESPONSE_MAX_BYTES - server.MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
         )
 
 

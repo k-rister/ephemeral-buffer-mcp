@@ -187,6 +187,7 @@ def _execution_json(operation, *, max_response_bytes: Optional[int] = None) -> s
                             "background_error", "updated_at",
                             "completed_phase_count", "phase_count",
                             "reason_code", "schema_version", "read_only", "error",
+                            "record_file_id", "message", "record_bytes",
                         )
                         if key in execution
                     }
@@ -266,6 +267,31 @@ def _execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             and active_engine.get_capture(result["capture_id"]) is not None
         )
     return payload
+
+
+def _compact_execution_public_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop verbose phase history and output while retaining execution identity."""
+    compact = {
+        key: payload[key]
+        for key in (
+            "status", "schema_version", "execution_id", "label",
+            "execution_status", "execution_in_progress",
+            "cancellation_requested", "partial", "summary", "created_at",
+            "background_error", "updated_at", "resume",
+            "completed_phase_count", "phase_count",
+        )
+        if key in payload
+    }
+    compact["response_truncated"] = True
+    compact["phases"] = [
+        {
+            key: phase.get(key)
+            for key in ("name", "status", "attempts", "error")
+        }
+        for phase in payload.get("phases", [])
+        if isinstance(phase, dict)
+    ]
+    return compact
 
 
 def _execution_get_payload(execution_id: str, include_output: bool) -> Dict[str, Any]:

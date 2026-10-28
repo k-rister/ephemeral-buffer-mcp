@@ -170,6 +170,7 @@ def _capture_slice_response(
             text=text,
             truncated=is_truncated,
             next_cursor=candidate_cursor,
+            payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_capture_slice"],
         )
         if _call_tool_result_bytes(
             candidate,
