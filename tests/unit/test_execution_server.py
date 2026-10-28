@@ -185,6 +185,16 @@ class TestExecutionTools(unittest.TestCase):
             [self.phase("versioned-phase", "prepared")],
             execution_id="versioned-workflow",
         )
+        expected_versions = {
+            "start_execution": 2,
+            "resume_execution": 2,
+            "cancel_execution": 2,
+            "get_execution": 2,
+            "get_execution_output": 1,
+            "list_executions": 2,
+            "get_execution_capacity": 1,
+            "retire_executions": 1,
+        }
 
         async def invoke(name, arguments):
             result = await server.mcp.call_tool(name, arguments)
@@ -206,7 +216,10 @@ class TestExecutionTools(unittest.TestCase):
             )
             self.assertEqual(result.structured_content["data"], payload)
             self.assertEqual(result.structured_content["schema_version"], 1)
-            self.assertEqual(result.structured_content["payload_schema_version"], 1)
+            self.assertEqual(
+                result.structured_content["payload_schema_version"],
+                expected_versions[name],
+            )
             return result
 
         async def exercise():
@@ -262,7 +275,15 @@ class TestExecutionTools(unittest.TestCase):
 
         with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
             responses = asyncio.run(exercise())
-        self.assertTrue(all(response.structured_content["payload_schema_version"] == 1 for response in responses))
+        self.assertEqual(
+            [response.structured_content["payload_schema_version"] for response in responses],
+            [expected_versions[name] for name in (
+                "start_execution", "resume_execution", "cancel_execution",
+                "get_execution", "get_execution_output", "get_execution_output",
+                "list_executions", "get_execution_capacity", "retire_executions",
+                "get_execution",
+            )],
+        )
         self.assertEqual(responses[-1].structured_content["status"], "error")
         self.assertEqual(responses[-1].structured_content["error"]["code"], "execution_not_found")
 
@@ -276,10 +297,78 @@ class TestExecutionTools(unittest.TestCase):
             )
         )
         payload = json.loads(diagnostic.content[0].text)
-        self.assertEqual(diagnostic.structured_content["payload_schema_version"], 1)
+        self.assertEqual(diagnostic.structured_content["payload_schema_version"], 2)
         self.assertEqual(diagnostic.structured_content["schema_version"], 1)
         self.assertEqual(diagnostic.structured_content["data"], payload)
         self.assertEqual(diagnostic.structured_content["data"]["schema_version"], 999)
+
+    def test_blocked_recovery_reason_is_typed_for_get_and_inactive_cancel(self):
+        blocked_reason = {
+            "code": "PROCESS_STATE_UNVERIFIABLE",
+            "remedy": "Inspect the execution record and host process state before requesting recovery again.",
+        }
+        blocked_payload = self.public_execution_payload("fenced-execution", ["fenced-phase"])
+        blocked_payload["execution_status"] = "interrupted"
+        blocked_payload["execution_in_progress"] = False
+        blocked_payload["resume"]["blocked_reason"] = blocked_reason
+        blocked_payload["phases"][0].update(
+            {
+                "status": "interrupted",
+                "blocked_reason_code": blocked_reason["code"],
+                "blocked_reason": blocked_reason,
+            }
+        )
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(
+            self.manager,
+            "public",
+            side_effect=lambda _execution_id, **_kwargs: {
+                **blocked_payload,
+                "resume": dict(blocked_payload["resume"]),
+                "phases": [dict(blocked_payload["phases"][0])],
+            },
+        ):
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                get_result = asyncio.run(
+                    server.mcp.call_tool(
+                        "get_execution", {"execution_id": "fenced-execution"}
+                    )
+                )
+                cancel_result = asyncio.run(
+                    server.mcp.call_tool(
+                        "cancel_execution", {"execution_id": "fenced-execution"}
+                    )
+                )
+
+        listed_tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
+        for tool_name, result in (
+            ("get_execution", get_result),
+            ("cancel_execution", cancel_result),
+        ):
+            with self.subTest(tool=tool_name):
+                self.assertFalse(result.is_error, result.structured_content)
+                self.assertEqual(result.structured_content["payload_schema_version"], 2)
+                data = result.structured_content["data"]
+                self.assertEqual(data["resume"]["blocked_reason"], blocked_reason)
+                self.assertEqual(data["phases"][0]["blocked_reason"], blocked_reason)
+                execution_tools.PAYLOAD_CONTRACTS[tool_name].validate_python(
+                    data, strict=True
+                )
+                Draft202012Validator(
+                    listed_tools[tool_name].output_schema
+                ).validate(result.structured_content)
+        self.assertFalse(cancel_result.structured_content["data"]["cancellation_requested"])
 
     def test_service_context_allocates_execution_storage_on_first_use(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -826,6 +915,31 @@ class TestExecutionTools(unittest.TestCase):
         self.assertEqual(
             compact_list["executions"][1]["execution_id"], "execution-id"
         )
+        compact_list_after_prior_omissions = (
+            execution_responses._compact_execution_list_payload(
+                {
+                    "executions": [
+                        None,
+                        {"status": "ok", "execution_id": "retained-id"},
+                    ],
+                    "returned_count": 2,
+                    "omitted_count": 50,
+                }
+            )
+        )
+        self.assertEqual(compact_list_after_prior_omissions["returned_count"], 1)
+        self.assertEqual(compact_list_after_prior_omissions["omitted_count"], 51)
+        compact_list_with_invalid_omissions = (
+            execution_responses._compact_execution_list_payload(
+                {
+                    "executions": [
+                        {"status": "ok", "execution_id": "retained-id"}
+                    ],
+                    "omitted_count": "invalid",
+                }
+            )
+        )
+        self.assertEqual(compact_list_with_invalid_omissions["omitted_count"], 0)
 
         self.assertEqual(
             execution_responses._compact_execution_output_payload({"phases": None}),
@@ -1390,7 +1504,7 @@ class TestExecutionTools(unittest.TestCase):
         payload = json.loads(result.content[0].text)
         self.assertFalse(result.is_error)
         self.assertEqual(result.structured_content["data"], payload)
-        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertEqual(result.structured_content["payload_schema_version"], 2)
         self.assertTrue(payload["response_truncated"])
         self.assertNotIn("output", payload["phases"][0])
         self.assertEqual(
@@ -1401,7 +1515,7 @@ class TestExecutionTools(unittest.TestCase):
             status="ok",
             data=payload,
             text=result.content[0].text,
-            payload_schema_version=1,
+            payload_schema_version=2,
         )
         self.assertLessEqual(
             mcp_transport._call_tool_result_bytes(envelope),
@@ -1433,7 +1547,7 @@ class TestExecutionTools(unittest.TestCase):
                 details={"execution_id": "malformed-execution"},
             ),
             text=error_text,
-            payload_schema_version=1,
+            payload_schema_version=2,
         )
         compact_error = execution_responses.fit_execution_mcp_response(
             "get_execution", error_response
@@ -1472,7 +1586,7 @@ class TestExecutionTools(unittest.TestCase):
                     status="ok",
                     data=oversized_success,
                     text=success_text,
-                    payload_schema_version=1,
+                    payload_schema_version=2,
                 ),
             )
         parsed_fallback = json.loads(fallback.text)
@@ -1650,7 +1764,9 @@ class TestExecutionTools(unittest.TestCase):
                         status="ok",
                         data=payload,
                         text=text,
-                        payload_schema_version=1,
+                        payload_schema_version=execution_tools.PAYLOAD_SCHEMA_VERSIONS[
+                            tool_name
+                        ],
                     ),
                 )
                 self.assertEqual(json.loads(response.text), response.data)
@@ -1715,7 +1831,9 @@ class TestExecutionTools(unittest.TestCase):
                     status="ok",
                     data=payload,
                     text=text,
-                    payload_schema_version=1,
+                    payload_schema_version=execution_tools.PAYLOAD_SCHEMA_VERSIONS[
+                        tool_name
+                    ],
                 )
                 with patch.object(
                     execution_responses,
@@ -1754,6 +1872,53 @@ class TestExecutionTools(unittest.TestCase):
         self.assertTrue(response["response_truncated"])
         self.assertEqual(response["omitted_count"], 0)
         self.assertEqual(response["executions"][0]["execution_id"], "execution-0")
+
+    def test_mcp_execution_list_preserves_omissions_from_legacy_compaction(self):
+        entries = []
+        for index in range(100):
+            entry = self.public_execution_payload(f"large-label-{index}", ["phase"])
+            entry["label"] = f"label-{index}-" + ("x" * 1_024)
+            entry["execution_status"] = "completed"
+            entry["execution_in_progress"] = False
+            entries.append(entry)
+
+        async def run_inline(
+            _ticket,
+            function,
+            /,
+            *args,
+            _service_context=None,
+            _call_id=None,
+            **kwargs,
+        ):
+            return function(*args, **kwargs)
+
+        with patch.object(self.manager, "list_public", return_value=entries):
+            legacy_payload = json.loads(server.list_executions(limit=100))
+            with patch.object(mcp_transport, "_run_admitted_thread", new=run_inline):
+                result = asyncio.run(
+                    server.mcp.call_tool("list_executions", {"limit": 100})
+                )
+
+        payload = json.loads(result.content[0].text)
+        self.assertTrue(legacy_payload["response_truncated"])
+        self.assertGreater(legacy_payload["omitted_count"], 0)
+        self.assertEqual(
+            legacy_payload["returned_count"] + legacy_payload["omitted_count"],
+            len(entries),
+        )
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["payload_schema_version"], 2)
+        self.assertEqual(result.structured_content["data"], payload)
+        self.assertEqual(
+            result.content[0].text,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+        self.assertTrue(payload["response_truncated"])
+        self.assertEqual(
+            payload["returned_count"] + payload["omitted_count"], len(entries)
+        )
+        self.assertGreaterEqual(payload["omitted_count"], legacy_payload["omitted_count"])
 
     def test_oversized_mcp_execution_list_accepts_compact_success_and_diagnostic_items(self):
         resume = {
@@ -1838,7 +2003,7 @@ class TestExecutionTools(unittest.TestCase):
         payload = json.loads(result.content[0].text)
         self.assertFalse(result.is_error)
         self.assertEqual(result.structured_content["status"], "ok")
-        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertEqual(result.structured_content["payload_schema_version"], 2)
         self.assertEqual(result.structured_content["data"], payload)
         self.assertEqual(
             result.content[0].text,

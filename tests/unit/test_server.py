@@ -2363,7 +2363,7 @@ class TestServerTools(unittest.TestCase):
         payload = json.loads(body)
         self.assertTrue(result.is_error)
         self.assertEqual(result.structured_content["schema_version"], TOOL_RESPONSE_SCHEMA_VERSION)
-        self.assertEqual(result.structured_content["payload_schema_version"], 1)
+        self.assertEqual(result.structured_content["payload_schema_version"], 2)
         self.assertEqual(result.structured_content["data"], payload)
         self.assertEqual(result.structured_content["status"], "error")
         self.assertEqual(payload["status"], "error")

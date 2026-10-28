@@ -39,6 +39,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
   generic text truncation, and return typed success metadata for empty searches.
 - Model preview/refusal and completed retirement results separately, and include
   search payload-version bytes when fitting MCP match pages.
+- Type blocked execution recovery reasons as `{code, remedy}` and preserve
+  previously omitted execution-list entries across MCP compaction.
 - Normalize Unicode identically in BM25 indexes, queries, and fallback search;
   bound structured search labels and paginate capture listings with stable,
   signed cursors and JSON-safe label limits.
@@ -65,6 +67,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: fitted all execution MCP results and completed the empty-search payload contract
 
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: modeled completed execution retirements and budgeted search payload versions
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: typed blocked execution recovery metadata and preserved cumulative execution-list omissions
 
 ## 0.11.0 - 2026-10-18
 

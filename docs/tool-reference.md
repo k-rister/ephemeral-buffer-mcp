@@ -19,7 +19,7 @@ sections for full workflows.
 | `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Persists and starts a sequential, durably checkpointed execution, then returns its ID and current status promptly. Use when expected duration may approach or exceed the client's tool-call window, even for one command as one phase; follow with `get_execution` and `get_execution_output`. Requires Linux recovery support and has a combined capacity of eight active or queued executions. |
 | `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase and returns promptly; use `get_execution` to follow progress. Retries and unsafe side effects require explicit controls. |
 | `cancel_execution(execution_id)` | Requests cancellation of active durable work by ID. Completed phases remain checkpointed; process cleanup uses the existing interruption and fencing path. |
-| `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. When `include_output=True` would exceed the complete MCP result budget, MCP returns valid compact JSON with `response_truncated: true` and phase summaries; use `get_execution_output` to page the output. Direct Python calls retain their existing response-size behavior. |
+| `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. When process recovery is blocked, `resume.blocked_reason` and the affected phase's `blocked_reason` contain `code` and `remedy`. When `include_output=True` would exceed the complete MCP result budget, MCP returns valid compact JSON with `response_truncated: true` and phase summaries; use `get_execution_output` to page the output. Direct Python calls retain their existing response-size behavior. |
 | `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves bounded persisted output for all phases or one phase, including after a server restart. The all-phase response shares its byte budget across phases; set `phase_name` to page through a phase with a UTF-8 byte `offset`. Returned `offset` and `next_offset` values are byte positions. An input offset inside a multibyte character advances to the next character boundary, and the returned `offset` reports that effective position. MCP may return a smaller page than `max_bytes` when needed to keep the complete structured response within its size budget; use `next_offset` to continue. If the serialized output exceeds the execution response cap, the tool returns a compact success summary with `response_truncated: true` and no page offsets; request a smaller `max_bytes` or select one `phase_name` to retrieve output. Offsets beyond the output return an empty, non-truncated page. |
 | `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact, typed execution summaries with `response_truncated`, `returned_count`, and `omitted_count` metadata. Compact malformed-record diagnostics retain `record_file_id`, including when no execution ID can be recovered. |
 | `get_execution_capacity()` | Reports durable record storage and quota diagnostics plus active and queued background execution counts; it does not attempt recovery. |
@@ -133,13 +133,18 @@ Every registered tool declares its MCP result policy explicitly: either a
 `retrieval`, and `diagnostics` describe the tool domain and do not select its
 wire format. The eight durable-execution tools, `search_capture`,
 `get_capture_slice`, `get_capture_summary`, and `list_captures` also publish a
-per-tool `payload_schema_version` (currently `1`) at the top level of
+per-tool `payload_schema_version` at the top level of
 `structuredContent`. Their `data` payloads are checked against typed contracts
 at the MCP adapter boundary. Other tool families keep their existing response
 shapes in this change. `tools/list` publishes an `outputSchema` for those tools;
 it describes the complete `structuredContent` envelope, including the selected
 tool's typed `data` contract and an empty `data` object for generic envelope
 errors. The server validates payload data at the adapter boundary.
+
+The recovery-bearing execution tools `start_execution`, `resume_execution`,
+`cancel_execution`, `get_execution`, and `list_executions` use payload schema
+version `2`; `blocked_reason` is a `{code, remedy}` object when present. Other
+payload-versioned tools remain at version `1`.
 
 Response fitting includes the registered `payload_schema_version` before
 choosing a capture-slice page. MCP `get_execution(include_output=True)` also

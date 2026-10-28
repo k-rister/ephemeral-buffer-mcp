@@ -24,6 +24,11 @@ class ExecutionFailure(PayloadModel):
     error: ExecutionError
 
 
+class ExecutionBlockedReason(PayloadModel):
+    code: str
+    remedy: str
+
+
 class ExecutionPhase(PayloadModel):
     name: str
     status: Literal["pending", "started", "completed", "failed", "interrupted", "timed_out"]
@@ -32,7 +37,7 @@ class ExecutionPhase(PayloadModel):
     attempts: Optional[int] = None
     error: Optional[str] = None
     blocked_reason_code: Optional[str] = None
-    blocked_reason: Optional[str] = None
+    blocked_reason: Optional[ExecutionBlockedReason] = None
     cwd: Optional[str] = None
     timeout_seconds: Optional[float] = None
     max_output_bytes: Optional[int] = None
@@ -52,7 +57,7 @@ class ExecutionResume(PayloadModel):
     attempt_limit_reached: bool
     next_phase: Optional[str]
     policy: Literal["safe", "allow-unsafe"]
-    blocked_reason: Optional[str]
+    blocked_reason: Optional[ExecutionBlockedReason]
 
 
 class ExecutionPublic(PayloadModel):
@@ -503,4 +508,15 @@ PAYLOAD_CONTRACTS: dict[str, TypeAdapter] = {
     "list_captures": TypeAdapter(CaptureListPayload),
 }
 
-PAYLOAD_SCHEMA_VERSIONS = {name: 1 for name in PAYLOAD_CONTRACTS}
+PAYLOAD_SCHEMA_VERSIONS = {
+    name: 2
+    if name in {
+        "start_execution",
+        "resume_execution",
+        "cancel_execution",
+        "get_execution",
+        "list_executions",
+    }
+    else 1
+    for name in PAYLOAD_CONTRACTS
+}
