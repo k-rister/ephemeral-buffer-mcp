@@ -10,7 +10,9 @@ from .instrumentation import _instrument_tool
 from .registry import register_tool
 
 
-@register_tool("set_semantic_index_budget", "configuration")
+@register_tool(
+    "set_semantic_index_budget", "configuration", result_policy="legacy_text"
+)
 @_instrument_tool("set_semantic_index_budget")
 def set_semantic_index_budget(
     max_indexed_chunks: int,

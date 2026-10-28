@@ -57,7 +57,10 @@ def _mcpserver_compatibility_diagnostics():
 
 
 @register_tool(
-    "get_buffer_stats", "diagnostics", mcp_admission_lane="diagnostics"
+    "get_buffer_stats",
+    "diagnostics",
+    result_policy="legacy_text",
+    mcp_admission_lane="diagnostics",
 )
 @_instrument_tool("get_buffer_stats")
 def get_buffer_stats() -> str:
@@ -166,7 +169,9 @@ def get_buffer_stats() -> str:
     return result
 
 
-@register_tool("get_runtime_diagnostics", "diagnostics")
+@register_tool(
+    "get_runtime_diagnostics", "diagnostics", result_policy="legacy_text"
+)
 @_instrument_tool("get_runtime_diagnostics")
 def get_runtime_diagnostics() -> str:
     """Returns opt-in runtime metadata without exposing captured content."""
@@ -272,7 +277,7 @@ def get_runtime_diagnostics() -> str:
     return "\n".join(lines)
 
 
-@register_tool("get_usage_metrics", "diagnostics")
+@register_tool("get_usage_metrics", "diagnostics", result_policy="legacy_text")
 @_instrument_tool("get_usage_metrics")
 def get_usage_metrics(since: Optional[str] = None) -> str:
     """Return content-free usage metrics, optionally since a snapshot token."""

@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from mcp.server import MCPServer
+from mcp.types import CallToolResult, TextContent
 from pydantic import TypeAdapter
 
 import ephemeral_buffer_mcp.mcpserver_adapter as adapter
@@ -53,6 +54,53 @@ class TestMCPServerAdapter(TestCase):
             asyncio.run(app.call_tool("sync_probe", {}))
         self.assertEqual(calls, [3])
         self.assertEqual(observations, ["validation"])
+
+    def test_hand_built_output_schema_is_published_without_sdk_output_validation(self):
+        app = MCPServer("manual-output-schema")
+        output_schema = {
+            "type": "object",
+            "properties": {"data": {"type": "object"}},
+            "required": ["data"],
+        }
+
+        def schema_probe() -> CallToolResult:
+            return CallToolResult(
+                content=[TextContent(type="text", text="probe")],
+                structured_content={"data": {"value": "preserved"}},
+            )
+
+        adapter.register_tool(
+            app,
+            schema_probe,
+            name="schema_probe",
+            output_schema=output_schema,
+            validation_scope=nullcontext,
+            validation_observer=lambda: None,
+        )
+
+        tool = {tool.name: tool for tool in asyncio.run(app.list_tools())}["schema_probe"]
+        metadata = app._tool_manager._tools["schema_probe"].fn_metadata
+        self.assertEqual(tool.output_schema, output_schema)
+        self.assertIsNone(metadata.output_model)
+
+        result = asyncio.run(app.call_tool("schema_probe", {}))
+        self.assertEqual(result.structured_content, {"data": {"value": "preserved"}})
+
+    def test_output_schema_installation_failure_is_reported(self):
+        class IncompatibleApp:
+            def __init__(self):
+                self._tool_manager = SimpleNamespace(_tools={})
+
+            def add_tool(self, _fn, name=None, structured_output=None):
+                return None
+
+        with self.assertRaisesRegex(RuntimeError, "output schema could not be installed"):
+            adapter.register_tool(
+                IncompatibleApp(),
+                lambda: None,
+                name="schema_install_failure",
+                output_schema={"type": "object"},
+            )
 
     def test_async_tool_and_tool_validation_error_are_not_misclassified(self):
         app = MCPServer("async-validation-observer")

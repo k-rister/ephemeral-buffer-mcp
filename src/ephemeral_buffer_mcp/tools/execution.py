@@ -7,7 +7,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,7 +21,15 @@ from ..execution import (
     MAX_PHASE_NAME_BYTES,
     MAX_STRUCTURED_METRICS_BYTES,
 )
-from ..response_limits import EXECUTION_OUTPUT_RESPONSE_MAX_BYTES
+from ..mcp_response import (
+    ToolResponseEnvelope,
+    call_tool_result_bytes as _call_tool_result_bytes,
+)
+from ..response_limits import (
+    EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+    MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+    MCP_TOOL_RESPONSE_MAX_BYTES,
+)
 from ._context import (
     active_engine as _active_engine,
     active_execution_manager as _active_execution_manager,
@@ -35,6 +43,7 @@ from .execution_responses import (
 )
 from .instrumentation import _instrument_tool
 from .registry import register_tool
+from .payloads import PAYLOAD_CONTRACTS, PAYLOAD_SCHEMA_VERSIONS
 
 
 class ExecutionPhaseInput(BaseModel):
@@ -164,7 +173,9 @@ def _resolve_preflight_executable(tokens: list[str], resolved_cwd: str) -> dict[
     return {"status": "unavailable", "requested": token, "reason": "executable was not found on PATH"}
 
 
-@register_tool("preflight_command", "diagnostics")
+@register_tool(
+    "preflight_command", "diagnostics", result_policy="legacy_text"
+)
 @_instrument_tool("preflight_command")
 def preflight_command(
     command: str,
@@ -245,7 +256,15 @@ preflight_command.__signature__ = _preflight_command_signature.replace(
 )
 
 
-@register_tool("start_execution", "execution", background_execution=True)
+@register_tool(
+    "start_execution",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["start_execution"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["start_execution"],
+    background_execution=True,
+)
 @_instrument_tool("start_execution")
 def start_execution(
     phases: Annotated[List[ExecutionPhaseInput], Field(min_length=1, max_length=MAX_EXECUTION_PHASES)],
@@ -325,7 +344,15 @@ def _hide_internal_background_parameter(function):
 start_execution = _hide_internal_background_parameter(start_execution)
 
 
-@register_tool("resume_execution", "execution", background_execution=True)
+@register_tool(
+    "resume_execution",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["resume_execution"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["resume_execution"],
+    background_execution=True,
+)
 @_instrument_tool("resume_execution")
 def resume_execution(
     execution_id: Annotated[str, Field(
@@ -368,7 +395,14 @@ def resume_execution(
 resume_execution = _hide_internal_background_parameter(resume_execution)
 
 
-@register_tool("cancel_execution", "execution")
+@register_tool(
+    "cancel_execution",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["cancel_execution"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["cancel_execution"],
+)
 @_instrument_tool("cancel_execution")
 def cancel_execution(
     execution_id: Annotated[str, Field(
@@ -382,7 +416,14 @@ def cancel_execution(
     )
 
 
-@register_tool("get_execution", "execution")
+@register_tool(
+    "get_execution",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["get_execution"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_execution"],
+)
 @_instrument_tool("get_execution")
 def get_execution(
     execution_id: Annotated[str, Field(
@@ -399,7 +440,14 @@ def get_execution(
     )
 
 
-@register_tool("get_execution_output", "execution")
+@register_tool(
+    "get_execution_output",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["get_execution_output"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_execution_output"],
+)
 @_instrument_tool("get_execution_output")
 def get_execution_output(
     execution_id: Annotated[str, Field(
@@ -412,22 +460,103 @@ def get_execution_output(
         int, Field(ge=0, description="UTF-8 byte offset when paging one phase")
     ] = 0,
     max_bytes: Annotated[int, Field(ge=512, le=MAX_EXECUTION_OUTPUT_CHUNK_BYTES)] = MAX_EXECUTION_OUTPUT_CHUNK_BYTES,
+    __invocation_mode: str = "direct",
 ) -> str:
     """Retrieve bounded output; page one phase using UTF-8 byte offsets."""
-    return _execution_json(
-        lambda: _execution_public_payload(
-            _active_execution_manager().output(
-                execution_id,
-                phase_name,
-                offset=offset,
-                max_bytes=max_bytes,
-            )
-        ),
-        max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+
+    def output_page(page_bytes: int) -> str:
+        return _execution_json(
+            lambda: _execution_public_payload(
+                _active_execution_manager().output(
+                    execution_id,
+                    phase_name,
+                    offset=offset,
+                    max_bytes=page_bytes,
+                )
+            ),
+            max_response_bytes=EXECUTION_OUTPUT_RESPONSE_MAX_BYTES,
+        )
+
+    if __invocation_mode != "mcp":
+        return output_page(max_bytes)
+
+    response_budget = MCP_TOOL_RESPONSE_MAX_BYTES - MCP_JSONRPC_ENVELOPE_RESERVE_BYTES
+
+    def parsed_response(response_text: str) -> Dict[str, Any]:
+        return cast(Dict[str, Any], json.loads(response_text))
+
+    def fits_mcp_budget(response_text: str) -> bool:
+        payload = parsed_response(response_text)
+        response = ToolResponseEnvelope(
+            status="ok",
+            data=payload,
+            text=response_text,
+            payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_execution_output"],
+        )
+        return _call_tool_result_bytes(response) <= response_budget
+
+    result = output_page(max_bytes)
+    initial_payload = parsed_response(result)
+    if initial_payload.get("status") == "error":
+        initial_error = initial_payload.get("error")
+        if not (
+            isinstance(initial_error, dict)
+            and initial_error.get("code") == "response_too_large"
+        ):
+            return result
+    elif fits_mcp_budget(result):
+        return result
+
+    # Search the bounded 512–8192 byte range for the largest page whose exact
+    # text-plus-structured MCP representation fits the response budget.
+    low = 512
+    high = max_bytes - 1
+    best_result = None
+    while low <= high:
+        page_bytes = (low + high) // 2
+        candidate = output_page(page_bytes)
+        candidate_payload = parsed_response(candidate)
+        if candidate_payload.get("status") == "error":
+            candidate_error = candidate_payload.get("error")
+            if (
+                isinstance(candidate_error, dict)
+                and candidate_error.get("code") == "response_too_large"
+            ):
+                high = page_bytes - 1
+                continue
+            return candidate
+        if fits_mcp_budget(candidate):
+            best_result = candidate
+            low = page_bytes + 1
+            continue
+        high = page_bytes - 1
+
+    if best_result is not None:
+        return best_result
+    return _execution_error_json(
+        "response_too_large",
+        "Execution output cannot fit within the MCP response byte budget at the minimum page size.",
     )
 
 
-@register_tool("list_executions", "execution")
+_get_execution_output_signature = inspect.signature(get_execution_output)
+get_execution_output.__signature__ = _get_execution_output_signature.replace(
+    parameters=tuple(
+        parameter
+        for parameter in _get_execution_output_signature.parameters.values()
+        if parameter.name != "__invocation_mode"
+    )
+)
+
+
+@register_tool(
+    "list_executions",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["list_executions"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["list_executions"],
+)
 @_instrument_tool("list_executions")
 def list_executions(
     limit: Annotated[
@@ -447,7 +576,14 @@ def list_executions(
     )
 
 
-@register_tool("get_execution_capacity", "execution")
+@register_tool(
+    "get_execution_capacity",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["get_execution_capacity"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_execution_capacity"],
+)
 @_instrument_tool("get_execution_capacity")
 def get_execution_capacity() -> str:
     """Report durable storage diagnostics and active/queued background execution counts."""
@@ -457,7 +593,14 @@ def get_execution_capacity() -> str:
     )
 
 
-@register_tool("retire_executions", "execution")
+@register_tool(
+    "retire_executions",
+    "execution",
+    result_policy="structured_envelope",
+    text_policy="preserve",
+    payload_model=PAYLOAD_CONTRACTS["retire_executions"],
+    payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["retire_executions"],
+)
 @_instrument_tool("retire_executions")
 def retire_executions(
     execution_ids: Annotated[

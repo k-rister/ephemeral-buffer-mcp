@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -23,12 +24,90 @@ class ToolResponseEnvelope(BaseModel):
     """Versioned structured result paired with readable MCP text content."""
 
     schema_version: Literal[TOOL_RESPONSE_SCHEMA_VERSION] = TOOL_RESPONSE_SCHEMA_VERSION
+    payload_schema_version: Optional[int] = Field(default=None, exclude=True, ge=1)
     status: Literal["ok", "error"]
     data: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[ToolErrorEnvelope] = None
     text: Optional[str] = None
     truncated: bool = False
     next_cursor: Optional[str] = None
+
+
+def structured_content(envelope: ToolResponseEnvelope) -> Dict[str, Any]:
+    """Serialize an envelope while exposing a contract version only when set."""
+    result = envelope.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude={"text", "payload_schema_version"},
+    )
+    if envelope.payload_schema_version is not None:
+        result["payload_schema_version"] = envelope.payload_schema_version
+    return result
+
+
+def structured_tool_output_schema(
+    payload_schema: Dict[str, Any],
+    payload_schema_version: int,
+) -> Dict[str, Any]:
+    """Describe the complete structured MCP result around one tool payload."""
+    payload = deepcopy(payload_schema)
+    definitions = payload.pop("$defs", {})
+    error_schema = ToolErrorEnvelope.model_json_schema()
+
+    schema: Dict[str, Any] = {
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {
+                "const": TOOL_RESPONSE_SCHEMA_VERSION,
+                "title": "Schema Version",
+                "type": "integer",
+            },
+            "payload_schema_version": {
+                "const": payload_schema_version,
+                "title": "Payload Schema Version",
+                "type": "integer",
+            },
+            "status": {
+                "enum": ["ok", "error"],
+                "title": "Status",
+                "type": "string",
+            },
+            "data": {
+                "anyOf": [
+                    payload,
+                    {
+                        "additionalProperties": False,
+                        "maxProperties": 0,
+                        "type": "object",
+                    },
+                ],
+                "title": "Data",
+            },
+            "error": {
+                "anyOf": [error_schema, {"type": "null"}],
+                "title": "Error",
+            },
+            "truncated": {"title": "Truncated", "type": "boolean"},
+            "next_cursor": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "title": "Next Cursor",
+            },
+        },
+        "required": [
+            "schema_version",
+            "payload_schema_version",
+            "status",
+            "data",
+            "error",
+            "truncated",
+            "next_cursor",
+        ],
+        "title": "StructuredToolResult",
+        "type": "object",
+    }
+    if definitions:
+        schema["$defs"] = definitions
+    return schema
 
 
 COMPACT_RESULT_SUMMARY_FIELDS = (
@@ -130,9 +209,7 @@ def call_tool_result_bytes(
         "content": [
             {"type": "text", "text": text, "annotations": None, "_meta": None}
         ],
-        "structuredContent": envelope.model_dump(
-            mode="json", by_alias=True, exclude={"text"}
-        ),
+        "structuredContent": structured_content(envelope),
         "isError": envelope.status == "error",
         "resultType": "complete",
     }

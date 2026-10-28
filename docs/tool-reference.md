@@ -20,8 +20,8 @@ sections for full workflows.
 | `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase and returns promptly; use `get_execution` to follow progress. Retries and unsafe side effects require explicit controls. |
 | `cancel_execution(execution_id)` | Requests cancellation of active durable work by ID. Completed phases remain checkpointed; process cleanup uses the existing interruption and fencing path. |
 | `get_execution(execution_id, include_output=False)` | Retrieves persisted phase metadata, event history, retry requirements, and human/machine-readable completion status. |
-| `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves bounded persisted output for all phases or one phase, including after a server restart. The all-phase response shares its byte budget across phases; set `phase_name` to page through a phase with a UTF-8 byte `offset`. Returned `offset` and `next_offset` values are byte positions. An input offset inside a multibyte character advances to the next character boundary, and the returned `offset` reports that effective position. Offsets beyond the output return an empty, non-truncated page. |
-| `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact IDs with pagination metadata. |
+| `get_execution_output(execution_id, phase_name=None, offset=0, max_bytes=8192)` | Retrieves bounded persisted output for all phases or one phase, including after a server restart. The all-phase response shares its byte budget across phases; set `phase_name` to page through a phase with a UTF-8 byte `offset`. Returned `offset` and `next_offset` values are byte positions. An input offset inside a multibyte character advances to the next character boundary, and the returned `offset` reports that effective position. MCP may return a smaller page than `max_bytes` when needed to keep the complete structured response within its size budget; use `next_offset` to continue. If the serialized output exceeds the execution response cap, the tool returns a compact success summary with `response_truncated: true` and no page offsets; request a smaller `max_bytes` or select one `phase_name` to retrieve output. Offsets beyond the output return an empty, non-truncated page. |
+| `list_executions(limit=20, offset=0)` | Lists a bounded page of durable executions and their partial/completed summaries; oversized pages return compact, typed execution summaries with `response_truncated`, `returned_count`, and `omitted_count` metadata. Malformed-record diagnostics include `execution_id` when it can be recovered, otherwise `record_file_id` identifies the durable record file. |
 | `get_execution_capacity()` | Reports durable record storage and quota diagnostics plus active and queued background execution counts; it does not attempt recovery. |
 | `retire_executions(execution_ids, archive_path=None, dry_run=True)` | Previews eligibility and projected reclaimed space; accepts at most 20 execution IDs per request. Actual retirement writes a private tar archive outside the state directory before removing selected record pairs. |
 | `capture_text(content, label='', content_type='auto', structured_metrics=None)` | Ingests text directly into the buffer and returns the same compact summary schema. `content_type` accepts `auto`, `diff`, `log`, or `text`; other values are rejected. |
@@ -110,7 +110,7 @@ targeted content. Diff file maps are also bounded and report omitted entries;
 use `get_capture_slice` for the complete diff. Raw retained captures are
 unchanged by summary generation.
 
-Capture, search, retrieval, and clear tools return a versioned MCP result
+Tools with the `structured_envelope` result policy return a versioned MCP result
 envelope with `schema_version`, `status`, `data`, optional `error` (`code` and
 `message`, and optional `details`), and truncation or continuation metadata.
 Returned MCP tool errors include `error.details.call_id`, including admission
@@ -121,11 +121,36 @@ ID; exception text is not returned. Direct Python exceptions and MCP SDK
 argument-validation responses keep their existing behavior. MCP clients
 continue to receive readable text in `content[0].text`; the same result data is
 available in `structuredContent`. The envelope's `status` is `ok` or `error`.
-An EB operation failure also sets MCP's native `isError` flag, including
-legacy JSON errors from execution, configuration, and diagnostics tools and
-admission or shutdown rejections. Existing error text and fields are preserved;
-successful legacy text remains unchanged. A captured command with a nonzero
-exit code is still a successful MCP call when capture succeeds.
+An EB operation failure also sets MCP's native `isError` flag, including JSON
+text errors from execution tools, legacy JSON errors from configuration and
+diagnostics tools, and admission or shutdown rejections. Existing error text
+and fields are preserved; successful legacy text remains unchanged. A captured
+command with a nonzero exit code is still a successful MCP call when capture
+succeeds.
+
+Every registered tool declares its MCP result policy explicitly: either a
+`structured_envelope` or `legacy_text` result. Categories such as `execution`,
+`retrieval`, and `diagnostics` describe the tool domain and do not select its
+wire format. The eight durable-execution tools, `search_capture`,
+`get_capture_slice`, `get_capture_summary`, and `list_captures` also publish a
+per-tool `payload_schema_version` (currently `1`) at the top level of
+`structuredContent`. Their `data` payloads are checked against typed contracts
+at the MCP adapter boundary. Other tool families keep their existing response
+shapes in this change. `tools/list` publishes an `outputSchema` for those tools;
+it describes the complete `structuredContent` envelope, including the selected
+tool's typed `data` contract and an empty `data` object for generic envelope
+errors. The server validates payload data at the adapter boundary.
+
+`payload_schema_version` versions one tool's `data` contract. It is independent
+of the envelope's `schema_version` and any `schema_version` inside `data`, such
+as a capture summary or durable execution record. An additive field keeps the
+payload version when existing fields retain their types and meanings; removing,
+renaming, or changing an existing field's type or meaning increments that
+tool's payload version. Execution tools keep their current JSON text in
+`content[0].text`; MCP clients can adopt the equivalent parsed object in
+`structuredContent.data` without changing their text handling. Python execution
+helpers keep their string return values, as do the existing search and
+retrieval text helpers.
 Admission active caps are process-wide across MCP event loops and the socket
 server's separate event loop: defaults reserve 8 MCP workers, 4 socket clients,
 and 1 diagnostic worker. Queue limits remain per event loop; waiters are FIFO
@@ -187,6 +212,10 @@ Clients should interpret structured data only when they recognize its
 `schema_version`. For an unknown version, treat the structured data as
 unsupported, preserve any readable text in `content[0].text`, and report the
 unsupported version instead of guessing at compatibility.
+
+For tools that expose `payload_schema_version`, clients should also recognize
+that per-tool version before interpreting `structuredContent.data`. A payload
+version does not replace the envelope version; clients should check both.
 
 The Python text helpers `search_capture` and `get_capture_slice` retain their
 string return values. Python callers that need the structured form can use

@@ -241,6 +241,7 @@ def _socket_capture_response(result):
 @register_tool(
     "capture_text",
     "capture",
+    result_policy="structured_envelope",
     socket_request_adapter=_socket_capture_arguments,
     socket_response_adapter=_socket_capture_response,
     legacy_error_code="capture_failed",
@@ -300,6 +301,7 @@ capture_text.__signature__ = _capture_text_signature.replace(
 @register_tool(
     "capture_file",
     "capture",
+    result_policy="structured_envelope",
     legacy_error_code="capture_failed",
 )
 @_instrument_tool("capture_file")
@@ -363,6 +365,7 @@ def capture_file(
 @register_tool(
     "execute_and_capture",
     "capture",
+    result_policy="structured_envelope",
     legacy_error_code="capture_failed",
 )
 @_instrument_tool("execute_and_capture")
@@ -500,6 +503,7 @@ def _consolidated_jsonl(
 @register_tool(
     "consolidate_captures",
     "capture",
+    result_policy="structured_envelope",
     legacy_error_code="consolidate_captures_failed",
 )
 @_instrument_tool("consolidate_captures")

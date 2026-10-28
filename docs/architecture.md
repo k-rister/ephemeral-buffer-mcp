@@ -135,11 +135,14 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
 - `socket_transport.py` — manages the Unix socket lifecycle and dispatches its
   single registry-selected capture entrypoint.
 - `mcp_transport.py` — assembles MCPServer, registers the MCP tool set, binds
-  service context and middleware, and converts and bounds MCP results.
-- `mcpserver_adapter.py` — isolates MCP SDK compatibility integrations and
-  reports when optional capabilities degrade.
-- `mcp_response.py` — defines transport-neutral structured tool results and
-  response-size measurement.
+  service context and middleware, applies each registration's explicit
+  `structured_envelope` or `legacy_text` result policy, validates versioned
+  payload contracts at the MCP boundary, and converts and bounds results.
+- `mcpserver_adapter.py` — isolates MCP SDK compatibility integrations,
+  publishes registered output schemas, and reports when optional capabilities
+  degrade.
+- `mcp_response.py` — defines transport-neutral structured tool results,
+  publishes their composed output schema, and measures response size.
 
 ### Runtime and response support
 
@@ -155,7 +158,11 @@ The map covers every Python module currently under `src/ephemeral_buffer_mcp/`.
 - `tools/__init__.py` — imports domain modules in stable order and loads their
   registrations.
 - `tools/registry.py` — stores handler metadata and selects the unique
-  socket-enabled registration.
+  socket-enabled registration. Each registration declares its result policy;
+  categories remain descriptive metadata.
+- `tools/payloads.py` — defines strict, per-tool payload models for durable
+  execution, search, and retrieval results. Their `payload_schema_version` is
+  independent of the MCP envelope and any durable-record version.
 - `tools/_context.py` — bridges domain handlers to the active service context.
 - `tools/instrumentation.py` — wraps handlers with content-free metrics and
   lifecycle logging.

@@ -1,0 +1,4631 @@
+{
+  "cancel_execution": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionCancelAcknowledgement": {
+          "additionalProperties": true,
+          "properties": {
+            "cancellation_requested": {
+              "title": "Cancellation Requested",
+              "type": "boolean"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "execution_in_progress",
+            "cancellation_requested",
+            "message"
+          ],
+          "title": "ExecutionCancelAcknowledgement",
+          "type": "object"
+        },
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionPhase": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_results": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempt Results"
+            },
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempts"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason"
+            },
+            "blocked_reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason Code"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cwd"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Events"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "max_output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Output Bytes"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output Bytes"
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Result"
+            },
+            "side_effects": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "unsafe"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side Effects"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "structured_metrics": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Structured Metrics"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timeout Seconds"
+            },
+            "unsafe_side_effects": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unsafe Side Effects"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "title": "ExecutionPhase",
+          "type": "object"
+        },
+        "ExecutionPublic": {
+          "additionalProperties": true,
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases"
+          ],
+          "title": "ExecutionPublic",
+          "type": "object"
+        },
+        "ExecutionRecordDiagnostic": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "read_only": {
+              "const": true,
+              "title": "Read Only",
+              "type": "boolean"
+            },
+            "reason_code": {
+              "title": "Reason Code",
+              "type": "string"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "record_preview": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Record Preview"
+            },
+            "record_preview_redacted": {
+              "title": "Record Preview Redacted",
+              "type": "boolean"
+            },
+            "record_preview_sanitized": {
+              "title": "Record Preview Sanitized",
+              "type": "boolean"
+            },
+            "record_preview_truncated": {
+              "title": "Record Preview Truncated",
+              "type": "boolean"
+            },
+            "schema_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Schema Version"
+            },
+            "status": {
+              "enum": [
+                "invalid_record",
+                "unsupported_record"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "read_only",
+            "reason_code",
+            "message",
+            "record_bytes",
+            "record_preview_sanitized",
+            "record_preview_redacted",
+            "record_preview_truncated",
+            "error"
+          ],
+          "title": "ExecutionRecordDiagnostic",
+          "type": "object"
+        },
+        "ExecutionResume": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_limit_reached": {
+              "title": "Attempt Limit Reached",
+              "type": "boolean"
+            },
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Blocked Reason"
+            },
+            "next_phase": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Next Phase"
+            },
+            "policy": {
+              "enum": [
+                "safe",
+                "allow-unsafe"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "retry_required": {
+              "title": "Retry Required",
+              "type": "boolean"
+            },
+            "unsafe_confirmation_required": {
+              "title": "Unsafe Confirmation Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "available",
+            "retry_required",
+            "unsafe_confirmation_required",
+            "attempt_limit_reached",
+            "next_phase",
+            "policy",
+            "blocked_reason"
+          ],
+          "title": "ExecutionResume",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublic"
+        },
+        {
+          "$ref": "#/$defs/ExecutionCancelAcknowledgement"
+        },
+        {
+          "$ref": "#/$defs/ExecutionRecordDiagnostic"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "get_capture_slice": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "CaptureSliceSegment": {
+          "additionalProperties": true,
+          "properties": {
+            "byte_length": {
+              "title": "Byte Length",
+              "type": "integer"
+            },
+            "byte_offset": {
+              "title": "Byte Offset",
+              "type": "integer"
+            },
+            "line": {
+              "title": "Line",
+              "type": "integer"
+            },
+            "line_complete": {
+              "title": "Line Complete",
+              "type": "boolean"
+            },
+            "separator_after": {
+              "title": "Separator After",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "line",
+            "byte_offset",
+            "byte_length",
+            "line_complete",
+            "separator_after"
+          ],
+          "title": "CaptureSliceSegment",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "properties": {
+        "capture_id": {
+          "title": "Capture Id",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "content_bytes": {
+          "title": "Content Bytes",
+          "type": "integer"
+        },
+        "end_line": {
+          "title": "End Line",
+          "type": "integer"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "requested_end_line": {
+          "title": "Requested End Line",
+          "type": "integer"
+        },
+        "requested_start_line": {
+          "title": "Requested Start Line",
+          "type": "integer"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/$defs/CaptureSliceSegment"
+          },
+          "title": "Segments",
+          "type": "array"
+        },
+        "start_line": {
+          "title": "Start Line",
+          "type": "integer"
+        },
+        "total_lines": {
+          "title": "Total Lines",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capture_id",
+        "label",
+        "requested_start_line",
+        "requested_end_line",
+        "start_line",
+        "end_line",
+        "total_lines",
+        "content",
+        "content_bytes",
+        "segments"
+      ],
+      "title": "CaptureSlicePayload",
+      "type": "object"
+    }
+  },
+  "get_capture_summary": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "CaptureSummaryDiff": {
+          "additionalProperties": true,
+          "properties": {
+            "file_map": {
+              "title": "File Map",
+              "type": "string"
+            },
+            "file_map_truncated": {
+              "title": "File Map Truncated",
+              "type": "boolean"
+            },
+            "omitted_file_count": {
+              "title": "Omitted File Count",
+              "type": "integer"
+            },
+            "stats": {
+              "title": "Stats",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stats",
+            "file_map",
+            "file_map_truncated",
+            "omitted_file_count"
+          ],
+          "title": "CaptureSummaryDiff",
+          "type": "object"
+        },
+        "CaptureSummaryPreviews": {
+          "additionalProperties": true,
+          "properties": {
+            "head": {
+              "title": "Head",
+              "type": "string"
+            },
+            "tail": {
+              "title": "Tail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "head",
+            "tail"
+          ],
+          "title": "CaptureSummaryPreviews",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "properties": {
+        "byte_size": {
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "capture_id": {
+          "title": "Capture Id",
+          "type": "string"
+        },
+        "content_type": {
+          "title": "Content Type",
+          "type": "string"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureSummaryDiff"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duration Ms"
+        },
+        "errors": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Errors",
+          "type": "array"
+        },
+        "estimated_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Estimated Tokens"
+        },
+        "evicted_captures": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ]
+          },
+          "title": "Evicted Captures",
+          "type": "array"
+        },
+        "evicted_captures_omitted": {
+          "title": "Evicted Captures Omitted",
+          "type": "integer"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exit Code"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "label_truncated": {
+          "title": "Label Truncated",
+          "type": "boolean"
+        },
+        "original_byte_size": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Original Byte Size"
+        },
+        "original_estimated_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Original Estimated Tokens"
+        },
+        "partial": {
+          "title": "Partial",
+          "type": "boolean"
+        },
+        "previews": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureSummaryPreviews"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "retrieval": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Retrieval",
+          "type": "object"
+        },
+        "schema_version": {
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "signals": {
+          "additionalProperties": true,
+          "title": "Signals",
+          "type": "object"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "captured",
+            "success",
+            "failed",
+            "timed_out"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "structured_metrics": {
+          "additionalProperties": true,
+          "title": "Structured Metrics",
+          "type": "object"
+        },
+        "timed_out": {
+          "title": "Timed Out",
+          "type": "boolean"
+        },
+        "timestamp": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Timestamp"
+        },
+        "total_lines": {
+          "title": "Total Lines",
+          "type": "integer"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "warnings": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "capture_id",
+        "label",
+        "label_truncated",
+        "source",
+        "status",
+        "partial",
+        "content_type",
+        "timestamp",
+        "duration_ms",
+        "exit_code",
+        "timed_out",
+        "total_lines",
+        "byte_size",
+        "original_byte_size",
+        "estimated_tokens",
+        "original_estimated_tokens",
+        "truncated",
+        "signals",
+        "errors",
+        "warnings",
+        "structured_metrics",
+        "evicted_captures",
+        "evicted_captures_omitted",
+        "retrieval"
+      ],
+      "title": "CaptureSummaryPayload",
+      "type": "object"
+    }
+  },
+  "get_execution": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionPhase": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_results": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempt Results"
+            },
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempts"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason"
+            },
+            "blocked_reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason Code"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cwd"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Events"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "max_output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Output Bytes"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output Bytes"
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Result"
+            },
+            "side_effects": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "unsafe"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side Effects"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "structured_metrics": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Structured Metrics"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timeout Seconds"
+            },
+            "unsafe_side_effects": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unsafe Side Effects"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "title": "ExecutionPhase",
+          "type": "object"
+        },
+        "ExecutionPublic": {
+          "additionalProperties": true,
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases"
+          ],
+          "title": "ExecutionPublic",
+          "type": "object"
+        },
+        "ExecutionRecordDiagnostic": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "read_only": {
+              "const": true,
+              "title": "Read Only",
+              "type": "boolean"
+            },
+            "reason_code": {
+              "title": "Reason Code",
+              "type": "string"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "record_preview": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Record Preview"
+            },
+            "record_preview_redacted": {
+              "title": "Record Preview Redacted",
+              "type": "boolean"
+            },
+            "record_preview_sanitized": {
+              "title": "Record Preview Sanitized",
+              "type": "boolean"
+            },
+            "record_preview_truncated": {
+              "title": "Record Preview Truncated",
+              "type": "boolean"
+            },
+            "schema_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Schema Version"
+            },
+            "status": {
+              "enum": [
+                "invalid_record",
+                "unsupported_record"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "read_only",
+            "reason_code",
+            "message",
+            "record_bytes",
+            "record_preview_sanitized",
+            "record_preview_redacted",
+            "record_preview_truncated",
+            "error"
+          ],
+          "title": "ExecutionRecordDiagnostic",
+          "type": "object"
+        },
+        "ExecutionResume": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_limit_reached": {
+              "title": "Attempt Limit Reached",
+              "type": "boolean"
+            },
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Blocked Reason"
+            },
+            "next_phase": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Next Phase"
+            },
+            "policy": {
+              "enum": [
+                "safe",
+                "allow-unsafe"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "retry_required": {
+              "title": "Retry Required",
+              "type": "boolean"
+            },
+            "unsafe_confirmation_required": {
+              "title": "Unsafe Confirmation Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "available",
+            "retry_required",
+            "unsafe_confirmation_required",
+            "attempt_limit_reached",
+            "next_phase",
+            "policy",
+            "blocked_reason"
+          ],
+          "title": "ExecutionResume",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublic"
+        },
+        {
+          "$ref": "#/$defs/ExecutionRecordDiagnostic"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "get_execution_capacity": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionCapacity": {
+          "additionalProperties": true,
+          "properties": {
+            "accounted_bytes": {
+              "title": "Accounted Bytes",
+              "type": "integer"
+            },
+            "active_record_count": {
+              "title": "Active Record Count",
+              "type": "integer"
+            },
+            "active_reserved_bytes": {
+              "title": "Active Reserved Bytes",
+              "type": "integer"
+            },
+            "available_bytes": {
+              "title": "Available Bytes",
+              "type": "integer"
+            },
+            "background_execution_active": {
+              "title": "Background Execution Active",
+              "type": "integer"
+            },
+            "background_execution_limit": {
+              "title": "Background Execution Limit",
+              "type": "integer"
+            },
+            "background_execution_queued": {
+              "title": "Background Execution Queued",
+              "type": "integer"
+            },
+            "capacity_confident": {
+              "title": "Capacity Confident",
+              "type": "boolean"
+            },
+            "checkpoint_reserve_bytes": {
+              "title": "Checkpoint Reserve Bytes",
+              "type": "integer"
+            },
+            "committed_bytes": {
+              "title": "Committed Bytes",
+              "type": "integer"
+            },
+            "fence_pending_record_count": {
+              "title": "Fence Pending Record Count",
+              "type": "integer"
+            },
+            "filesystem": {
+              "$ref": "#/$defs/ExecutionFilesystemCapacity"
+            },
+            "invalid_record_count": {
+              "title": "Invalid Record Count",
+              "type": "integer"
+            },
+            "invalid_reservation_count": {
+              "title": "Invalid Reservation Count",
+              "type": "integer"
+            },
+            "other_file_bytes": {
+              "title": "Other File Bytes",
+              "type": "integer"
+            },
+            "other_file_count": {
+              "title": "Other File Count",
+              "type": "integer"
+            },
+            "paired_record_count": {
+              "title": "Paired Record Count",
+              "type": "integer"
+            },
+            "quota_bytes": {
+              "title": "Quota Bytes",
+              "type": "integer"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "record_count": {
+              "title": "Record Count",
+              "type": "integer"
+            },
+            "record_storage_limit_bytes": {
+              "title": "Record Storage Limit Bytes",
+              "type": "integer"
+            },
+            "stale_reserved_bytes": {
+              "title": "Stale Reserved Bytes",
+              "type": "integer"
+            },
+            "state_directory": {
+              "title": "State Directory",
+              "type": "string"
+            },
+            "state_directory_exists": {
+              "title": "State Directory Exists",
+              "type": "boolean"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary_bytes": {
+              "title": "Summary Bytes",
+              "type": "integer"
+            },
+            "summary_count": {
+              "title": "Summary Count",
+              "type": "integer"
+            },
+            "symlink_count": {
+              "title": "Symlink Count",
+              "type": "integer"
+            },
+            "temporary_file_bytes": {
+              "title": "Temporary File Bytes",
+              "type": "integer"
+            },
+            "uncertain_lock_count": {
+              "title": "Uncertain Lock Count",
+              "type": "integer"
+            },
+            "unpaired_record_count": {
+              "title": "Unpaired Record Count",
+              "type": "integer"
+            },
+            "unpaired_summary_count": {
+              "title": "Unpaired Summary Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "status",
+            "state_directory",
+            "state_directory_exists",
+            "quota_bytes",
+            "checkpoint_reserve_bytes",
+            "record_storage_limit_bytes",
+            "record_count",
+            "summary_count",
+            "paired_record_count",
+            "unpaired_record_count",
+            "unpaired_summary_count",
+            "record_bytes",
+            "summary_bytes",
+            "committed_bytes",
+            "temporary_file_bytes",
+            "accounted_bytes",
+            "active_reserved_bytes",
+            "stale_reserved_bytes",
+            "available_bytes",
+            "capacity_confident",
+            "active_record_count",
+            "fence_pending_record_count",
+            "invalid_record_count",
+            "invalid_reservation_count",
+            "uncertain_lock_count",
+            "other_file_count",
+            "other_file_bytes",
+            "symlink_count",
+            "filesystem",
+            "background_execution_limit",
+            "background_execution_active",
+            "background_execution_queued"
+          ],
+          "title": "ExecutionCapacity",
+          "type": "object"
+        },
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionFilesystemCapacity": {
+          "additionalProperties": true,
+          "properties": {
+            "free_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Free Bytes"
+            },
+            "total_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Total Bytes"
+            }
+          },
+          "required": [
+            "total_bytes",
+            "free_bytes"
+          ],
+          "title": "ExecutionFilesystemCapacity",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionCapacity"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "get_execution_output": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionOutput": {
+          "additionalProperties": true,
+          "properties": {
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "max_bytes": {
+              "title": "Max Bytes",
+              "type": "integer"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionOutputPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "execution_status",
+            "partial",
+            "max_bytes",
+            "phases"
+          ],
+          "title": "ExecutionOutput",
+          "type": "object"
+        },
+        "ExecutionOutputCompact": {
+          "additionalProperties": true,
+          "description": "Successful summary returned when a full output response cannot fit.",
+          "properties": {
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionOutputPhaseSummary"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "response_truncated": {
+              "const": true,
+              "title": "Response Truncated",
+              "type": "boolean"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "execution_status",
+            "partial",
+            "response_truncated",
+            "phases"
+          ],
+          "title": "ExecutionOutputCompact",
+          "type": "object"
+        },
+        "ExecutionOutputPhase": {
+          "additionalProperties": true,
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "next_offset": {
+              "title": "Next Offset",
+              "type": "integer"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "output": {
+              "title": "Output",
+              "type": "string"
+            },
+            "output_byte_size": {
+              "title": "Output Byte Size",
+              "type": "integer"
+            },
+            "result": {
+              "additionalProperties": true,
+              "title": "Result",
+              "type": "object"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "truncated": {
+              "title": "Truncated",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "output",
+            "output_byte_size",
+            "offset",
+            "next_offset",
+            "truncated",
+            "result"
+          ],
+          "title": "ExecutionOutputPhase",
+          "type": "object"
+        },
+        "ExecutionOutputPhaseSummary": {
+          "additionalProperties": true,
+          "description": "Phase identity retained by the compact oversized-output fallback.",
+          "properties": {
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempts"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "title": "ExecutionOutputPhaseSummary",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionOutput"
+        },
+        {
+          "$ref": "#/$defs/ExecutionOutputCompact"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "list_captures": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "CaptureListEntry": {
+          "additionalProperties": true,
+          "properties": {
+            "byte_size": {
+              "title": "Byte Size",
+              "type": "integer"
+            },
+            "capture_id": {
+              "title": "Capture Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "label_truncated": {
+              "title": "Label Truncated",
+              "type": "boolean"
+            },
+            "timestamp": {
+              "title": "Timestamp",
+              "type": "string"
+            },
+            "total_lines": {
+              "title": "Total Lines",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "capture_id",
+            "label",
+            "label_truncated",
+            "total_lines",
+            "byte_size",
+            "timestamp"
+          ],
+          "title": "CaptureListEntry",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "properties": {
+        "capture_count": {
+          "title": "Capture Count",
+          "type": "integer"
+        },
+        "captures": {
+          "items": {
+            "$ref": "#/$defs/CaptureListEntry"
+          },
+          "title": "Captures",
+          "type": "array"
+        },
+        "page_count": {
+          "title": "Page Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "captures",
+        "capture_count",
+        "page_count"
+      ],
+      "title": "CaptureListPayload",
+      "type": "object"
+    }
+  },
+  "list_executions": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionList": {
+          "additionalProperties": true,
+          "properties": {
+            "executions": {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutionPublic"
+                  },
+                  {
+                    "$ref": "#/$defs/ExecutionRecordDiagnostic"
+                  },
+                  {
+                    "$ref": "#/$defs/ExecutionListFileDiagnostic"
+                  },
+                  {
+                    "$ref": "#/$defs/ExecutionListSummary"
+                  }
+                ]
+              },
+              "title": "Executions",
+              "type": "array"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "omitted_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Omitted Count"
+            },
+            "response_truncated": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Response Truncated"
+            },
+            "returned_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Returned Count"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "limit",
+            "offset",
+            "executions"
+          ],
+          "title": "ExecutionList",
+          "type": "object"
+        },
+        "ExecutionListFileDiagnostic": {
+          "additionalProperties": true,
+          "description": "Malformed listing entry identified by its durable record filename.",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "execution_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Execution Id"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "read_only": {
+              "const": true,
+              "title": "Read Only",
+              "type": "boolean"
+            },
+            "reason_code": {
+              "title": "Reason Code",
+              "type": "string"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "record_file_id": {
+              "title": "Record File Id",
+              "type": "string"
+            },
+            "record_preview": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Record Preview"
+            },
+            "record_preview_redacted": {
+              "title": "Record Preview Redacted",
+              "type": "boolean"
+            },
+            "record_preview_sanitized": {
+              "title": "Record Preview Sanitized",
+              "type": "boolean"
+            },
+            "record_preview_truncated": {
+              "title": "Record Preview Truncated",
+              "type": "boolean"
+            },
+            "schema_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Schema Version"
+            },
+            "status": {
+              "const": "invalid_record",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "record_file_id",
+            "read_only",
+            "reason_code",
+            "message",
+            "record_bytes",
+            "record_preview_sanitized",
+            "record_preview_redacted",
+            "record_preview_truncated",
+            "error"
+          ],
+          "title": "ExecutionListFileDiagnostic",
+          "type": "object"
+        },
+        "ExecutionListSummary": {
+          "additionalProperties": true,
+          "description": "Compact item retained when a list response exceeds its byte budget.",
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Completed Phase Count"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExecutionError"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Execution In Progress"
+            },
+            "execution_status": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "running",
+                    "completed",
+                    "partial",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Execution Status"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "partial": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Partial"
+            },
+            "phase_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Phase Count"
+            },
+            "read_only": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Read Only"
+            },
+            "reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason Code"
+            },
+            "schema_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Schema Version"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "invalid_record",
+                "unsupported_record"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Updated At"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id"
+          ],
+          "title": "ExecutionListSummary",
+          "type": "object"
+        },
+        "ExecutionPhase": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_results": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempt Results"
+            },
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempts"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason"
+            },
+            "blocked_reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason Code"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cwd"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Events"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "max_output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Output Bytes"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output Bytes"
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Result"
+            },
+            "side_effects": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "unsafe"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side Effects"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "structured_metrics": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Structured Metrics"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timeout Seconds"
+            },
+            "unsafe_side_effects": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unsafe Side Effects"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "title": "ExecutionPhase",
+          "type": "object"
+        },
+        "ExecutionPublic": {
+          "additionalProperties": true,
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases"
+          ],
+          "title": "ExecutionPublic",
+          "type": "object"
+        },
+        "ExecutionRecordDiagnostic": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "read_only": {
+              "const": true,
+              "title": "Read Only",
+              "type": "boolean"
+            },
+            "reason_code": {
+              "title": "Reason Code",
+              "type": "string"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "record_preview": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Record Preview"
+            },
+            "record_preview_redacted": {
+              "title": "Record Preview Redacted",
+              "type": "boolean"
+            },
+            "record_preview_sanitized": {
+              "title": "Record Preview Sanitized",
+              "type": "boolean"
+            },
+            "record_preview_truncated": {
+              "title": "Record Preview Truncated",
+              "type": "boolean"
+            },
+            "schema_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Schema Version"
+            },
+            "status": {
+              "enum": [
+                "invalid_record",
+                "unsupported_record"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "execution_id",
+            "read_only",
+            "reason_code",
+            "message",
+            "record_bytes",
+            "record_preview_sanitized",
+            "record_preview_redacted",
+            "record_preview_truncated",
+            "error"
+          ],
+          "title": "ExecutionRecordDiagnostic",
+          "type": "object"
+        },
+        "ExecutionResume": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_limit_reached": {
+              "title": "Attempt Limit Reached",
+              "type": "boolean"
+            },
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Blocked Reason"
+            },
+            "next_phase": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Next Phase"
+            },
+            "policy": {
+              "enum": [
+                "safe",
+                "allow-unsafe"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "retry_required": {
+              "title": "Retry Required",
+              "type": "boolean"
+            },
+            "unsafe_confirmation_required": {
+              "title": "Unsafe Confirmation Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "available",
+            "retry_required",
+            "unsafe_confirmation_required",
+            "attempt_limit_reached",
+            "next_phase",
+            "policy",
+            "blocked_reason"
+          ],
+          "title": "ExecutionResume",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionList"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "resume_execution": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionPhase": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_results": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempt Results"
+            },
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempts"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason"
+            },
+            "blocked_reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason Code"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cwd"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Events"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "max_output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Output Bytes"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output Bytes"
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Result"
+            },
+            "side_effects": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "unsafe"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side Effects"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "structured_metrics": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Structured Metrics"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timeout Seconds"
+            },
+            "unsafe_side_effects": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unsafe Side Effects"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "title": "ExecutionPhase",
+          "type": "object"
+        },
+        "ExecutionPublic": {
+          "additionalProperties": true,
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases"
+          ],
+          "title": "ExecutionPublic",
+          "type": "object"
+        },
+        "ExecutionResume": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_limit_reached": {
+              "title": "Attempt Limit Reached",
+              "type": "boolean"
+            },
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Blocked Reason"
+            },
+            "next_phase": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Next Phase"
+            },
+            "policy": {
+              "enum": [
+                "safe",
+                "allow-unsafe"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "retry_required": {
+              "title": "Retry Required",
+              "type": "boolean"
+            },
+            "unsafe_confirmation_required": {
+              "title": "Unsafe Confirmation Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "available",
+            "retry_required",
+            "unsafe_confirmation_required",
+            "attempt_limit_reached",
+            "next_phase",
+            "policy",
+            "blocked_reason"
+          ],
+          "title": "ExecutionResume",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublic"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "retire_executions": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionRemovalError": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "title": "Error",
+              "type": "string"
+            },
+            "execution_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Execution Id"
+            }
+          },
+          "required": [
+            "execution_id",
+            "error"
+          ],
+          "title": "ExecutionRemovalError",
+          "type": "object"
+        },
+        "ExecutionRetirement": {
+          "additionalProperties": true,
+          "properties": {
+            "archive_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Bytes"
+            },
+            "archive_is_durable": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Is Durable"
+            },
+            "archive_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Path"
+            },
+            "archive_required_for_retirement": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Archive Required For Retirement"
+            },
+            "blocked_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Count"
+            },
+            "dry_run": {
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "eligible_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible Count"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/ExecutionRetirementItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "removal_errors": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/ExecutionRemovalError"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Removal Errors"
+            },
+            "retired": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/ExecutionRetirementItem"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retired"
+            },
+            "retired_count": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retired Count"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "partial",
+                "refused"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "dry_run",
+            "items",
+            "projected_reclaimed_bytes"
+          ],
+          "title": "ExecutionRetirement",
+          "type": "object"
+        },
+        "ExecutionRetirementItem": {
+          "additionalProperties": true,
+          "properties": {
+            "eligible": {
+              "title": "Eligible",
+              "type": "boolean"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Execution Status"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "projected_reclaimed_bytes": {
+              "title": "Projected Reclaimed Bytes",
+              "type": "integer"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "record_bytes": {
+              "title": "Record Bytes",
+              "type": "integer"
+            },
+            "summary_bytes": {
+              "title": "Summary Bytes",
+              "type": "integer"
+            },
+            "updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Updated At"
+            }
+          },
+          "required": [
+            "execution_id",
+            "eligible",
+            "record_bytes",
+            "summary_bytes",
+            "projected_reclaimed_bytes"
+          ],
+          "title": "ExecutionRetirementItem",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionRetirement"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  },
+  "search_capture": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "SearchMatch": {
+          "additionalProperties": true,
+          "properties": {
+            "chunk_id": {
+              "title": "Chunk Id",
+              "type": "integer"
+            },
+            "chunk_index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "title": "Chunk Index"
+            },
+            "context": {
+              "title": "Context",
+              "type": "string"
+            },
+            "context_end_line": {
+              "title": "Context End Line",
+              "type": "integer"
+            },
+            "context_range": {
+              "title": "Context Range",
+              "type": "string"
+            },
+            "context_start_line": {
+              "title": "Context Start Line",
+              "type": "integer"
+            },
+            "context_truncated": {
+              "title": "Context Truncated",
+              "type": "boolean"
+            },
+            "matched_range": {
+              "title": "Matched Range",
+              "type": "string"
+            },
+            "score": {
+              "title": "Score",
+              "type": "number"
+            },
+            "snippet": {
+              "title": "Snippet",
+              "type": "string"
+            },
+            "snippet_truncated": {
+              "title": "Snippet Truncated",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "chunk_id",
+            "chunk_index",
+            "score",
+            "matched_range",
+            "context_range",
+            "context_start_line",
+            "context_end_line",
+            "snippet",
+            "snippet_truncated",
+            "context",
+            "context_truncated"
+          ],
+          "title": "SearchMatch",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "properties": {
+        "available_match_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Available Match Count"
+        },
+        "capture_id": {
+          "title": "Capture Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "label_truncated": {
+          "title": "Label Truncated",
+          "type": "boolean"
+        },
+        "match_count": {
+          "title": "Match Count",
+          "type": "integer"
+        },
+        "matches": {
+          "items": {
+            "$ref": "#/$defs/SearchMatch"
+          },
+          "title": "Matches",
+          "type": "array"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "mode": {
+          "enum": [
+            "hybrid",
+            "bm25",
+            "semantic"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "semantic_coverage": {
+          "enum": [
+            "complete",
+            "unavailable",
+            "pending",
+            "not-requested"
+          ],
+          "title": "Semantic Coverage",
+          "type": "string"
+        },
+        "semantic_fallback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Fallback"
+        },
+        "semantic_index_state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Index State"
+        },
+        "semantic_wait_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semantic Wait Seconds"
+        },
+        "total_lines": {
+          "title": "Total Lines",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capture_id",
+        "label",
+        "label_truncated",
+        "total_lines",
+        "mode",
+        "query",
+        "semantic_coverage",
+        "matches",
+        "match_count"
+      ],
+      "title": "SearchPayload",
+      "type": "object"
+    }
+  },
+  "start_execution": {
+    "payload_schema_version": 1,
+    "schema": {
+      "$defs": {
+        "ExecutionError": {
+          "additionalProperties": true,
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "details": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Details"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ExecutionError",
+          "type": "object"
+        },
+        "ExecutionFailure": {
+          "additionalProperties": true,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/ExecutionError"
+            },
+            "status": {
+              "const": "error",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "title": "ExecutionFailure",
+          "type": "object"
+        },
+        "ExecutionPhase": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_results": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempt Results"
+            },
+            "attempts": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Attempts"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason"
+            },
+            "blocked_reason_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Blocked Reason Code"
+            },
+            "cwd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cwd"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Error"
+            },
+            "events": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Events"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Idempotency Key"
+            },
+            "max_output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Output Bytes"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "output_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output Bytes"
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Result"
+            },
+            "side_effects": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "unsafe"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Side Effects"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "started",
+                "completed",
+                "failed",
+                "interrupted",
+                "timed_out"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "structured_metrics": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Structured Metrics"
+            },
+            "timeout_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timeout Seconds"
+            },
+            "unsafe_side_effects": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unsafe Side Effects"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "title": "ExecutionPhase",
+          "type": "object"
+        },
+        "ExecutionPublic": {
+          "additionalProperties": true,
+          "properties": {
+            "background_error": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Background Error"
+            },
+            "cancellation_requested": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cancellation Requested"
+            },
+            "completed_phase_count": {
+              "title": "Completed Phase Count",
+              "type": "integer"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "execution_id": {
+              "title": "Execution Id",
+              "type": "string"
+            },
+            "execution_in_progress": {
+              "title": "Execution In Progress",
+              "type": "boolean"
+            },
+            "execution_status": {
+              "enum": [
+                "pending",
+                "running",
+                "completed",
+                "partial",
+                "interrupted"
+              ],
+              "title": "Execution Status",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "phase_count": {
+              "title": "Phase Count",
+              "type": "integer"
+            },
+            "phases": {
+              "items": {
+                "$ref": "#/$defs/ExecutionPhase"
+              },
+              "title": "Phases",
+              "type": "array"
+            },
+            "resume": {
+              "$ref": "#/$defs/ExecutionResume"
+            },
+            "schema_version": {
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "status": {
+              "const": "ok",
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "schema_version",
+            "execution_id",
+            "label",
+            "execution_status",
+            "execution_in_progress",
+            "partial",
+            "summary",
+            "created_at",
+            "updated_at",
+            "resume",
+            "completed_phase_count",
+            "phase_count",
+            "phases"
+          ],
+          "title": "ExecutionPublic",
+          "type": "object"
+        },
+        "ExecutionResume": {
+          "additionalProperties": true,
+          "properties": {
+            "attempt_limit_reached": {
+              "title": "Attempt Limit Reached",
+              "type": "boolean"
+            },
+            "available": {
+              "title": "Available",
+              "type": "boolean"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Blocked Reason"
+            },
+            "next_phase": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Next Phase"
+            },
+            "policy": {
+              "enum": [
+                "safe",
+                "allow-unsafe"
+              ],
+              "title": "Policy",
+              "type": "string"
+            },
+            "retry_required": {
+              "title": "Retry Required",
+              "type": "boolean"
+            },
+            "unsafe_confirmation_required": {
+              "title": "Unsafe Confirmation Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "available",
+            "retry_required",
+            "unsafe_confirmation_required",
+            "attempt_limit_reached",
+            "next_phase",
+            "policy",
+            "blocked_reason"
+          ],
+          "title": "ExecutionResume",
+          "type": "object"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPublic"
+        },
+        {
+          "$ref": "#/$defs/ExecutionFailure"
+        }
+      ]
+    }
+  }
+}
