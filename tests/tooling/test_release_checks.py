@@ -73,7 +73,8 @@ class TestReleaseChecks(unittest.TestCase):
             core.write_text(
                 '[project]\nname="ephemeral-buffer-mcp-core"\nversion="1.2.3"\n'
                 'dependencies=["mcp>=2.3.0,<3", "urllib3>=2.8.0"]\n'
-                '[project.optional-dependencies]\nsemantic=["filelock>=4.2.1,<5", '
+                '[project.optional-dependencies]\nsemantic=["filelock<3.20.4; python_version < \'3.11\'", '
+                '"filelock>=4.2.1,<5; python_version >= \'3.11\'", '
                 '"huggingface-hub>=0.20,<2", "numpy>=1.24.0", '
                 '"onnxruntime>=1.17,<1.24; python_version < \'3.11\'", '
                 '"onnxruntime>=1.17,<2; python_version >= \'3.11\'", '
@@ -105,7 +106,8 @@ class TestReleaseChecks(unittest.TestCase):
                 "version": "1.2.3",
                 "core_dependencies": ["mcp>=2.3.0,<3", "urllib3>=2.8.0"],
                 "semantic_extra": [
-                    "filelock>=4.2.1,<5",
+                    "filelock<3.20.4; python_version < '3.11'",
+                    "filelock>=4.2.1,<5; python_version >= '3.11'",
                     "huggingface-hub>=0.20,<2",
                     "numpy>=1.24.0",
                     "onnxruntime>=1.17,<1.24; python_version < '3.11'",
