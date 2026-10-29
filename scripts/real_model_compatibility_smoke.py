@@ -29,7 +29,7 @@ EMBEDDING_INPUTS = (
 )
 CAPTURE_TEXT = "\n".join(EMBEDDING_INPUTS)
 PACKAGE_DISTRIBUTIONS = {
-    "ephemeral-buffer-mcp": "ephemeral-buffer-mcp",
+    "ephemeral-buffer-mcp-core": "ephemeral-buffer-mcp-core",
     "mcp": "mcp",
     "filelock": "filelock",
     "numpy": "numpy",

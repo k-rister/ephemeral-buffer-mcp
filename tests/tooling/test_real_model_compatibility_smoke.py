@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import numpy as np
 
@@ -56,6 +56,24 @@ class TestRealModelCompatibilitySmoke(unittest.TestCase):
         self.assertEqual(smoke.MODEL_NAME, config.DEFAULT_EMBEDDING_MODEL)
         self.assertEqual(smoke.MODEL_ID, config.BGE_SMALL_HF_REPO)
         self.assertEqual(smoke.MODEL_REVISION, embedding_backend._BGE_SMALL_REVISION)
+
+    def test_report_version_uses_core_distribution_and_ignores_full_package(self):
+        def version(distribution):
+            versions = {
+                "ephemeral-buffer-mcp-core": "0.11.0",
+                "ephemeral-buffer-mcp": "0.10.0",
+            }
+            if distribution in versions:
+                return versions[distribution]
+            raise smoke.importlib.metadata.PackageNotFoundError(distribution)
+
+        with patch.object(smoke.importlib.metadata, "version", side_effect=version) as lookup:
+            packages = smoke._new_report("package-version-test")["packages"]
+
+        self.assertEqual(packages["ephemeral-buffer-mcp-core"], "0.11.0")
+        self.assertNotIn("ephemeral-buffer-mcp", packages)
+        lookup.assert_any_call("ephemeral-buffer-mcp-core")
+        self.assertNotIn(call("ephemeral-buffer-mcp"), lookup.call_args_list)
 
     def test_embedding_validation_checks_shape_finiteness_and_normalization(self):
         vectors = np.zeros((3, smoke.EXPECTED_EMBEDDING_DIMENSIONS), dtype=np.float32)
