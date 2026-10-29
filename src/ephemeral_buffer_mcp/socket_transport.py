@@ -2,9 +2,38 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
+import logging
+import os
+import socket
+import stat
+import sys
+import tempfile
+import threading
+import uuid
+from contextlib import contextmanager
+from typing import Any, Optional
 
-from .server import *  # noqa: F403
+from .admission import (
+    MAX_ACTIVE_SOCKET_CLIENTS,
+    MAX_QUEUED_SOCKET_CLIENTS,
+    admission_gate,
+)
+from .logging_utils import log_event
+from .response_limits import SUMMARY_LABEL_MAX_BYTES
+from .server import (
+    DEFAULT_SERVICES,
+    LOGGER,
+    METRICS,
+    SETTINGS,
+    SOCKET_JSON_MAX_EXPANSION,
+    _run_admitted_thread,
+    _run_admitted_tool_call,
+    engine,
+    socket_isolation_configured,
+    socket_isolation_required,
+)
 from .tools import load_tool_handlers
 from .tools.registry import get_socket_tool_registration
 from .socket_protocol import (
@@ -15,6 +44,11 @@ from .socket_protocol import (
     encode_frame,
     encode_socket_response,
 )
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no Unix socket backend.
+    fcntl = None
 
 load_tool_handlers()
 

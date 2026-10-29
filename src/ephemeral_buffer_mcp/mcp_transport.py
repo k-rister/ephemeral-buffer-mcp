@@ -6,6 +6,7 @@ import importlib
 import inspect
 import json
 import logging
+import threading
 import uuid
 import weakref
 from collections import OrderedDict
@@ -17,7 +18,18 @@ from mcp.server import CacheHint, MCPServer
 from mcp.server.context import ServerRequestContext
 from mcp.types import CallToolResult, TextContent
 
-from .server import *  # noqa: F403
+from .admission import admission_gate
+from .server import (
+    DEFAULT_SERVICES,
+    ServiceContext,
+    _activate_service_context,
+    _active_metrics,
+    _run_admitted_thread,
+    _run_admitted_tool_call,
+    _write_metrics_snapshot,
+    socket_isolation_configured,
+    socket_isolation_required,
+)
 from .mcp_response import (
     ToolErrorEnvelope,
     ToolResponseEnvelope,
@@ -32,6 +44,10 @@ from .mcpserver_adapter import (
 )
 from .tools import load_tool_handlers
 from .response_formatting import bounded_summary_text, truncate_utf8_with_marker
+from .response_limits import (
+    MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
+    MCP_TOOL_RESPONSE_MAX_BYTES,
+)
 from .tools.registry import (
     TOOL_CATEGORIES,
     get_tool_categories,
@@ -166,7 +182,7 @@ def _legacy_tool_envelope(
             registration = None
         if registration is not None:
             legacy_error_code = registration.legacy_error_code
-    data: Dict[str, Any] = {}
+    data: dict[str, Any] = {}
     error = None
     status = "ok"
     try:
