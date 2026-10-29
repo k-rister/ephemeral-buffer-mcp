@@ -35,6 +35,7 @@ from ephemeral_buffer_mcp.socket_protocol import (
     encode_socket_request,
 )
 import ephemeral_buffer_mcp.config as config
+import ephemeral_buffer_mcp.admission as admission
 from ephemeral_buffer_mcp.config import load_settings
 from ephemeral_buffer_mcp.schema_versions import (
     CAPTURE_SUMMARY_SCHEMA_VERSION,
@@ -1888,6 +1889,8 @@ class TestServerTools(unittest.TestCase):
 
         self.assertIn("Captures:", result)
         self.assertIn("Foreground work:", result)
+        self.assertIn("Tool capacity (process-wide):", result)
+        self.assertIn("Socket capacity (process-wide):", result)
         self.assertIn("rejected=", result)
         self.assertIn("Capture removals by reason: {", result)
         self.assertIn("Deferred storage:", result)
@@ -1949,7 +1952,9 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Session ID configured: yes", result)
         self.assertIn("Execution state directory:", result)
         self.assertIn("Execution state durability:", result)
-        self.assertIn("Startup settings snapshot:", result)
+        self.assertIn("Context startup settings snapshot:", result)
+        self.assertIn("Effective engine settings:", result)
+        self.assertIn("Process-wide admission limits:", result)
         self.assertNotIn("diagnostic-session", result)
         self.assertIn("Captures: 1/", result)
         self.assertIn("Embedding model:", result)
@@ -1957,6 +1962,215 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Semantic index budget adjustment:", result)
         self.assertNotIn("secret command output", result)
         self.assertNotIn("private-label", result)
+
+    def test_runtime_diagnostics_separates_context_engine_and_process_limits(self):
+        context_settings = load_settings(
+            {
+                "EPHEMERAL_MAX_CAPTURES": "2",
+                "EPHEMERAL_MAX_ACTIVE_TOOL_WORK": "1",
+                "EPHEMERAL_EMBEDDING_MODEL": "context-model",
+            },
+            warn_on_legacy_state_transition=False,
+        )
+        process_settings = load_settings(
+            {
+                "EPHEMERAL_MAX_ACTIVE_TOOL_WORK": "5",
+                "EPHEMERAL_MAX_QUEUED_TOOL_WORK": "7",
+                "EPHEMERAL_MAX_ACTIVE_SOCKET_CLIENTS": "3",
+                "EPHEMERAL_MAX_QUEUED_SOCKET_CLIENTS": "4",
+            },
+            warn_on_legacy_state_transition=False,
+        )
+        context = server.create_service_context(
+            context_settings,
+            engine_options={
+                "max_captures": 3,
+                "embedding_warmup": False,
+                "semantic_prefetch": False,
+            },
+        )
+        process_limits = {
+            "mcp": 5,
+            "socket": 3,
+            "diagnostics": admission.MAX_ACTIVE_DIAGNOSTIC_WORK,
+        }
+        try:
+            with patch.object(
+                diagnostics_tools, "startup_settings", return_value=process_settings
+            ), patch.object(admission, "MAX_ACTIVE_TOOL_WORK", 5), patch.object(
+                admission, "MAX_QUEUED_TOOL_WORK", 7
+            ), patch.object(admission, "MAX_ACTIVE_SOCKET_CLIENTS", 3), patch.object(
+                admission, "MAX_QUEUED_SOCKET_CLIENTS", 4
+            ), patch.dict(admission.PROCESS_ADMISSION_ARBITER._limits, process_limits):
+                with server._activate_service_context(context):
+                    result = server.get_runtime_diagnostics()
+
+            def section_json(prefix):
+                line = next(line for line in result.splitlines() if line.startswith(prefix))
+                return json.loads(line[len(prefix):])
+
+            context_snapshot = section_json("Context startup settings snapshot: ")
+            engine_settings = section_json("Effective engine settings: ")
+            admission_limits = section_json("Process-wide admission limits: ")
+
+            context_values = context_snapshot["settings"]
+            self.assertEqual(context_values["max_captures"]["value"], 2)
+            self.assertEqual(context_values["max_active_tool_work"]["value"], 1)
+            self.assertEqual(engine_settings["max_captures"]["value"], 3)
+            self.assertEqual(
+                engine_settings["max_captures"]["origin"],
+                {"kind": "engine_options", "option": "max_captures"},
+            )
+            self.assertEqual(engine_settings["embedding_model"]["value"], "context-model")
+            self.assertEqual(
+                engine_settings["embedding_model"]["origin"]["kind"],
+                "context setting",
+            )
+            self.assertEqual(
+                engine_settings["embedding_model"]["origin"]["source"], "environment"
+            )
+            self.assertEqual(admission_limits["max_active_tool_work"]["value"], 5)
+            self.assertEqual(admission_limits["max_active_tool_work"]["scope"], "process-wide")
+            self.assertEqual(
+                admission_limits["max_active_tool_work"]["origin"]["source"],
+                "environment",
+            )
+            self.assertEqual(admission_limits["max_queued_tool_work"]["value"], 7)
+            self.assertEqual(admission_limits["max_queued_tool_work"]["scope"], "per event loop")
+            self.assertIn(
+                "Context admission settings do not change the process-wide admission gate limits.",
+                result,
+            )
+        finally:
+            context.close()
+
+    def test_runtime_diagnostics_uses_context_origins_without_engine_overrides(self):
+        settings = load_settings({}, warn_on_legacy_state_transition=False)
+        context = server.create_service_context(
+            settings,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        try:
+            with server._activate_service_context(context):
+                result = server.get_runtime_diagnostics()
+            line = next(
+                line for line in result.splitlines()
+                if line.startswith("Effective engine settings: ")
+            )
+            engine_settings = json.loads(line.split(": ", 1)[1])
+            self.assertEqual(engine_settings["max_captures"]["value"], 256)
+            self.assertEqual(
+                engine_settings["max_captures"]["origin"]["kind"], "context setting"
+            )
+            self.assertEqual(engine_settings["max_captures"]["origin"]["source"], "default")
+            self.assertEqual(engine_settings["embedding_warmup_enabled"]["value"], False)
+            self.assertEqual(
+                engine_settings["embedding_warmup_enabled"]["origin"]["kind"],
+                "engine_options",
+            )
+        finally:
+            context.close()
+
+    def test_runtime_diagnostics_marks_supplied_engine_origins_unknown(self):
+        settings = load_settings(
+            {"EPHEMERAL_MAX_CAPTURES": "5"},
+            warn_on_legacy_state_transition=False,
+        )
+        supplied_engine = server.EphemeralEngine(
+            settings=settings,
+            max_captures=7,
+            embedding_warmup=False,
+            semantic_prefetch=False,
+        )
+        context = server.ServiceContext(settings, engine=supplied_engine)
+        try:
+            with server._activate_service_context(context):
+                result = server.get_runtime_diagnostics()
+            line = next(
+                line for line in result.splitlines()
+                if line.startswith("Effective engine settings: ")
+            )
+            engine_settings = json.loads(line.split(": ", 1)[1])
+            self.assertEqual(engine_settings["max_captures"]["value"], 7)
+            self.assertEqual(
+                engine_settings["max_captures"]["origin"],
+                {"kind": "unknown", "reason": "engine supplied directly"},
+            )
+        finally:
+            context.close()
+
+    def test_runtime_diagnostics_marks_contextvar_engine_origin_unknown(self):
+        settings = load_settings({}, warn_on_legacy_state_transition=False)
+        context = server.create_service_context(
+            settings,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        external_engine = server.EphemeralEngine(
+            settings=settings,
+            max_captures=9,
+            embedding_warmup=False,
+            semantic_prefetch=False,
+        )
+        token = server._ENGINE_OVERRIDE.set(external_engine)
+        try:
+            with server._activate_service_context(context):
+                result = server.get_runtime_diagnostics()
+            line = next(
+                line for line in result.splitlines()
+                if line.startswith("Effective engine settings: ")
+            )
+            engine_settings = json.loads(line.split(": ", 1)[1])
+            self.assertEqual(engine_settings["max_captures"]["value"], 9)
+            self.assertEqual(
+                engine_settings["max_captures"]["origin"],
+                {"kind": "unknown", "reason": "active engine is externally supplied"},
+            )
+        finally:
+            server._ENGINE_OVERRIDE.reset(token)
+            external_engine.shutdown()
+            context.close()
+
+    def test_runtime_diagnostics_reports_runtime_index_budget_origin(self):
+        settings = load_settings({}, warn_on_legacy_state_transition=False)
+        context = server.create_service_context(
+            settings,
+            engine_options={"embedding_warmup": False, "semantic_prefetch": False},
+        )
+        try:
+            with patch.dict(
+                os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "1"}, clear=False
+            ), server._activate_service_context(context):
+                server.set_semantic_index_budget(6)
+                result = server.get_runtime_diagnostics()
+            line = next(
+                line for line in result.splitlines()
+                if line.startswith("Effective engine settings: ")
+            )
+            engine_settings = json.loads(line.split(": ", 1)[1])
+            self.assertEqual(engine_settings["max_indexed_chunks"]["value"], 6)
+            self.assertEqual(
+                engine_settings["max_indexed_chunks"]["origin"],
+                {
+                    "kind": "runtime adjustment",
+                    "operation": "set_semantic_index_budget",
+                },
+            )
+        finally:
+            context.close()
+
+    def test_diagnostics_scalar_omits_non_scalar_option_objects(self):
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(None), None)
+        self.assertEqual(diagnostics_tools._diagnostic_scalar("value"), "value")
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(3), 3)
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(False), False)
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(1.5), 1.5)
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(float("inf")), "inf")
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(float("-inf")), "-inf")
+        self.assertEqual(diagnostics_tools._diagnostic_scalar(float("nan")), "nan")
+        self.assertEqual(
+            diagnostics_tools._diagnostic_scalar(object()),
+            "unavailable (non-scalar value omitted)",
+        )
 
     def test_runtime_diagnostics_exposes_mcpserver_observability_limitations(self):
         with patch.object(
@@ -2018,7 +2232,7 @@ class TestServerTools(unittest.TestCase):
             self.assertEqual(
                 server.set_semantic_index_budget(4),
                 "Error: runtime semantic-index budget adjustment is disabled; set "
-                "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
+                "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 for this adjustment request to enable it.",
             )
         with patch.dict(os.environ, {"EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET": "1"}, clear=False):
             result = json.loads(server.set_semantic_index_budget(4))
@@ -2044,7 +2258,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(
             direct,
             "Error: runtime semantic-index budget adjustment is disabled; set "
-            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
+            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 for this adjustment request to enable it.",
         )
         self.assertTrue(mcp_response.is_error)
         mcp_error = json.loads(mcp_response.content[0].text)
@@ -2053,7 +2267,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(
             mcp_error["error"]["message"],
             "runtime semantic-index budget adjustment is disabled; set "
-            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it.",
+            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 for this adjustment request to enable it.",
         )
         self.assertIsInstance(mcp_error["error"]["details"]["call_id"], str)
 

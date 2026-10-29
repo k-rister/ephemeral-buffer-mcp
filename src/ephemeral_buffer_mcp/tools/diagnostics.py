@@ -3,6 +3,7 @@
 import importlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -11,10 +12,13 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Optional
 
+from ..admission import MAX_ACTIVE_DIAGNOSTIC_WORK
+from ..config import startup_settings
 from ..logging_utils import get_logger
 from ._context import (
     active_engine as _active_engine,
     active_metrics as _active_metrics,
+    active_service_context as _active_service_context,
     active_settings as _active_settings,
     metrics_snapshot as _metrics_snapshot,
     server_started_at as _server_started_at,
@@ -23,6 +27,89 @@ from .instrumentation import _instrument_tool
 from .registry import register_tool
 
 LOGGER = get_logger("server")
+
+
+_ENGINE_DIAGNOSTIC_FIELDS = (
+    "max_captures",
+    "max_buffer_bytes",
+    "max_indexed_chunks",
+    "embedding_model",
+    "embedding_cache_dir",
+    "embedding_threads",
+    "embedding_batch_size",
+    "embedding_max_batch_tokens",
+    "embedding_cpu_mem_arena_enabled",
+    "embedding_warmup_enabled",
+    "semantic_max_index_input_bytes",
+    "semantic_prefetch_enabled",
+    "semantic_prefetch_workers",
+    "semantic_chunk_lines",
+    "semantic_chunk_bytes",
+    "semantic_chunk_overlap",
+    "semantic_wait_seconds",
+)
+
+
+def _diagnostic_scalar(value):
+    """Keep diagnostic JSON limited to known scalar configuration values."""
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if type(value) is float:
+        if math.isfinite(value):
+            return value
+        return "inf" if value > 0 else "-inf" if value < 0 else "nan"
+    return "unavailable (non-scalar value omitted)"
+
+
+def _effective_engine_settings(stats, context, engine):
+    if engine is context.engine:
+        origins = context._engine_setting_origins
+    else:
+        origins = {
+            field: {"kind": "unknown", "reason": "active engine is externally supplied"}
+            for field in _ENGINE_DIAGNOSTIC_FIELDS
+        }
+
+    adjustment = stats.get("last_index_budget_adjustment", {})
+    if adjustment.get("status") not in (None, "startup"):
+        origins = dict(origins)
+        origins["max_indexed_chunks"] = {
+            "kind": "runtime adjustment",
+            "operation": "set_semantic_index_budget",
+        }
+
+    return {
+        name: {"value": _diagnostic_scalar(stats.get(name)), "origin": origins[name]}
+        for name in _ENGINE_DIAGNOSTIC_FIELDS
+    }
+
+
+def _process_admission_limits(stats):
+    settings = startup_settings()
+    limits = {}
+    for setting_name, stat_name, scope in (
+        ("max_active_tool_work", "admission_max_active_tool_work", "process-wide"),
+        ("max_queued_tool_work", "admission_max_queued_tool_work", "per event loop"),
+        ("max_active_socket_clients", "admission_max_active_socket_clients", "process-wide"),
+        ("max_queued_socket_clients", "admission_max_queued_socket_clients", "per event loop"),
+    ):
+        setting = getattr(settings, setting_name)
+        limits[setting_name] = {
+            "value": _diagnostic_scalar(stats.get(stat_name)),
+            "scope": scope,
+            "origin": {
+                "kind": "process startup setting",
+                "setting": setting.name,
+                "source": setting.source,
+                "status": setting.status,
+            },
+        }
+    limits["max_active_diagnostic_work"] = {
+        "value": _diagnostic_scalar(MAX_ACTIVE_DIAGNOSTIC_WORK),
+        "scope": "process-wide",
+        "origin": {"kind": "process constant", "name": "MAX_ACTIVE_DIAGNOSTIC_WORK"},
+    }
+    return limits
 
 
 def _runtime_package_version() -> str:
@@ -126,11 +213,11 @@ def get_buffer_stats() -> str:
         f"Foreground work: {stats.get('admission_active', 0)} active, "
         f"{stats.get('admission_queued', 0)} queued, "
         f"{stats.get('admission_rejected', 0)} rejected\n"
-        f"Tool capacity: {stats.get('admission_max_active_tool_work', 0)} active, "
-        f"{stats.get('admission_max_queued_tool_work', 0)} queued; reserved stats slot: "
-        f"{stats.get('admission_max_active_diagnostic_work', 0)}\n"
-        f"Socket capacity: {stats.get('admission_max_active_socket_clients', 0)} active, "
-        f"{stats.get('admission_max_queued_socket_clients', 0)} queued\n"
+        f"Tool capacity (process-wide): {stats.get('admission_max_active_tool_work', 0)} active; "
+        f"{stats.get('admission_max_queued_tool_work', 0)} queued per event loop; reserved stats slot: "
+        f"{stats.get('admission_max_active_diagnostic_work', 0)} process-wide\n"
+        f"Socket capacity (process-wide): {stats.get('admission_max_active_socket_clients', 0)} active; "
+        f"{stats.get('admission_max_queued_socket_clients', 0)} queued per event loop\n"
         f"Foreground work by type: active={admission_active_by_type}, "
         f"queued={admission_queued_by_type}, rejected={admission_rejected_by_type}\n"
         f"Capture removals by reason: {json.dumps(capture_removal_counts, sort_keys=True)}\n"
@@ -178,6 +265,8 @@ def get_runtime_diagnostics() -> str:
     stats = _active_engine().get_buffer_stats()
     installed_version = _runtime_package_version()
     settings = _active_settings()
+    context = _active_service_context()
+    active_engine = _active_engine()
     identity = settings.identity
     socket_mode = {
         "environment:EPHEMERAL_SOCKET_PATH": "explicit path",
@@ -228,7 +317,14 @@ def get_runtime_diagnostics() -> str:
             if identity.legacy_state_transition
             else []
         ),
-        f"Startup settings snapshot: {json.dumps(settings.diagnostics(), sort_keys=True)}",
+        f"Context startup settings snapshot: {json.dumps(settings.diagnostics(), sort_keys=True)}",
+        "Context admission settings do not change the process-wide admission gate limits.",
+        "Effective engine settings: "
+        + json.dumps(
+            _effective_engine_settings(stats, context, active_engine), sort_keys=True
+        ),
+        "Process-wide admission limits: "
+        + json.dumps(_process_admission_limits(stats), sort_keys=True),
         f"Captures: {stats['capture_count']}/{stats['max_captures']}",
         f"Content bytes: {stats['total_bytes']:,}/{stats['max_buffer_bytes']:,}",
         f"Embedding model: {stats['embedding_model']} ({'loaded' if stats['embedding_model_loaded'] else 'not loaded'})",

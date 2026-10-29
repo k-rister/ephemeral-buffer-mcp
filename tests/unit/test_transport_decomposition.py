@@ -122,6 +122,7 @@ class TestTransportDecomposition(unittest.TestCase):
             "_active_engine",
             "_active_execution_manager",
             "_active_metrics",
+            "_active_service_context",
             "_active_settings",
             "_metrics_snapshot",
             "_request_cancel_event",

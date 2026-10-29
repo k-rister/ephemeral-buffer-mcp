@@ -6,6 +6,7 @@ from ..server import (
     _active_engine,
     _active_execution_manager,
     _active_metrics,
+    _active_service_context,
     _active_settings,
     _metrics_snapshot,
     _request_cancel_event,
@@ -24,6 +25,10 @@ def active_execution_manager():
 
 def active_metrics():
     return _active_metrics()
+
+
+def active_service_context():
+    return _active_service_context()
 
 
 def active_settings():

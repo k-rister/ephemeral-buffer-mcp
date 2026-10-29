@@ -490,10 +490,13 @@ def max_indexed_chunks() -> int:
 
 
 def runtime_index_budget_adjustment_enabled() -> bool:
-    """Read the deliberately mutable gate once per adjustment request."""
+    """Re-read the environment permission for each budget adjustment request."""
     return _read_bool_setting(
         "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET", False, os.environ,
-        sampling_policy="each MCP request",
+        sampling_policy=(
+            "each semantic-index budget adjustment request; environment value is re-read; "
+            "diagnostics report the startup snapshot"
+        ),
     ).value
 
 
@@ -736,7 +739,8 @@ def load_settings(
         runtime_index_budget_adjustment_enabled=_read_bool_setting(
             "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET", False, values,
             sampling_policy=(
-                "each MCP request; environment value is re-read; reported value is from startup"
+                "each semantic-index budget adjustment request; environment value is re-read; "
+                "diagnostics report the startup snapshot"
             ),
         ),
     )

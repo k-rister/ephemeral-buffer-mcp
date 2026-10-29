@@ -22,7 +22,7 @@ def set_semantic_index_budget(
     if not runtime_index_budget_adjustment_enabled():
         message = (
             "runtime semantic-index budget adjustment is disabled; set "
-            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 at server startup to enable it."
+            "EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1 for this adjustment request to enable it."
         )
         if __invocation_mode == "mcp":
             return _execution_error_json("index_budget_disabled", message)

@@ -799,8 +799,10 @@ embedding readiness, process memory, and the typed startup settings snapshot.
 The snapshot reports accepted values, their environment/default/derived
 origins, validation status, and fallback behavior. Invalid numeric and
 boolean settings warn and use their defaults; empty optional values remain
-unset. The runtime semantic-index budget permission is sampled for each
-adjustment request; other settings are fixed at process startup. Diagnostics
+unset. The runtime semantic-index budget permission is re-read from the
+environment for each adjustment request; diagnostics report the context
+startup snapshot. Other process settings are fixed at process startup, while
+embedded contexts keep their own settings snapshot. Diagnostics
 include a short session fingerprint instead of the raw session ID. The report
 also indicates when file logging is not configured or when its configured
 path could not be opened. Use
