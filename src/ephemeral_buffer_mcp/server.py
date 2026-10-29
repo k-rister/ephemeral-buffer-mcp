@@ -263,6 +263,73 @@ METRICS = LocalMetrics(enabled=SETTINGS.metrics_enabled.value)
 _UNSET = object()
 
 
+# Map the engine's diagnostic field names to their context setting and
+# constructor option names. Only these scalar configuration fields are
+# reported; arbitrary engine_options values are never retained for diagnostics.
+_ENGINE_SETTING_ORIGIN_FIELDS = (
+    ("max_captures", "max_captures", "max_captures", False),
+    ("max_buffer_bytes", "max_buffer_bytes", "max_buffer_bytes", False),
+    ("max_indexed_chunks", "max_indexed_chunks", "max_indexed_chunks", False),
+    ("embedding_model", "embedding_model_name", "embedding_model_name", True),
+    ("embedding_cache_dir", "embedding_cache_dir", "embedding_cache_path", True),
+    ("embedding_threads", "embedding_threads", "embedding_threads", False),
+    ("embedding_batch_size", "embedding_batch_size", "embedding_batch_size", False),
+    (
+        "embedding_max_batch_tokens",
+        "embedding_max_batch_tokens",
+        "embedding_max_batch_tokens",
+        False,
+    ),
+    (
+        "embedding_cpu_mem_arena_enabled",
+        "embedding_cpu_mem_arena_enabled",
+        "embedding_cpu_mem_arena_enabled",
+        False,
+    ),
+    ("embedding_warmup_enabled", "embedding_warmup_enabled", "embedding_warmup", False),
+    (
+        "semantic_max_index_input_bytes",
+        "semantic_max_index_input_bytes",
+        "semantic_max_index_input_bytes",
+        False,
+    ),
+    ("semantic_prefetch_enabled", "semantic_prefetch_enabled", "semantic_prefetch", False),
+    (
+        "semantic_prefetch_workers",
+        "semantic_prefetch_workers",
+        "semantic_prefetch_workers",
+        False,
+    ),
+    ("semantic_chunk_lines", "semantic_chunk_lines", "semantic_chunk_lines", False),
+    ("semantic_chunk_bytes", "semantic_chunk_bytes", "semantic_chunk_bytes", False),
+    ("semantic_chunk_overlap", "semantic_chunk_overlap", "semantic_chunk_overlap", False),
+    ("semantic_wait_seconds", "semantic_wait_seconds", "semantic_wait_seconds", False),
+)
+
+
+def _engine_setting_origins(settings, engine_options, supplied_engine):
+    """Return safe provenance metadata for effective engine settings."""
+    origins = {}
+    options = engine_options or {}
+    for field, setting_name, option_name, truthy_only in _ENGINE_SETTING_ORIGIN_FIELDS:
+        setting = getattr(settings, setting_name)
+        if supplied_engine:
+            origin = {"kind": "unknown", "reason": "engine supplied directly"}
+        elif option_name in options and options[option_name] is not None and (
+            not truthy_only or bool(options[option_name])
+        ):
+            origin = {"kind": "engine_options", "option": option_name}
+        else:
+            origin = {
+                "kind": "context setting",
+                "setting": setting.name,
+                "source": setting.source,
+                "status": setting.status,
+            }
+        origins[field] = origin
+    return origins
+
+
 class ServiceContext:
     """Own the mutable resources for one embedded or server service instance."""
 
@@ -289,10 +356,14 @@ class ServiceContext:
             settings = dataclasses.replace(settings, metrics_file=metrics_file_setting)
         self.settings = settings
         self.metrics = metrics or LocalMetrics(enabled=settings.metrics_enabled.value)
-        self.engine = engine or EphemeralEngine(
+        supplied_engine = engine is not None
+        self.engine = engine if supplied_engine else EphemeralEngine(
             settings=settings,
             metrics=self.metrics,
             **(engine_options or {}),
+        )
+        self._engine_setting_origins = _engine_setting_origins(
+            settings, engine_options, supplied_engine
         )
         self._execution_manager: PhaseExecutionManager | None = None
         self._execution_manager_lock = threading.Lock()

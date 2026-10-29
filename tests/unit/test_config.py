@@ -387,7 +387,8 @@ class TestConfigSettings(unittest.TestCase):
         diagnostics = settings.diagnostics()
         self.assertEqual(
             diagnostics["settings"]["runtime_index_budget_adjustment_enabled"]["sampling_policy"],
-            "each MCP request; environment value is re-read; reported value is from startup",
+            "each semantic-index budget adjustment request; environment value is re-read; "
+            "diagnostics report the startup snapshot",
         )
 
     def test_setting_diagnostics_encode_nonfinite_float_values(self):

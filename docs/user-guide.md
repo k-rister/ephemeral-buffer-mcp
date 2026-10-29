@@ -183,6 +183,14 @@ finally:
     context.close()
 ```
 
+Pass `engine_options` to `create_service_context()` for engine-specific
+overrides, such as `engine_options={"max_captures": 128, "semantic_prefetch": False}`.
+These values configure that context's engine.
+Admission limits are process-scoped: context settings can report different
+admission values, but the process gate uses the settings resolved when the
+server process starts. `get_runtime_diagnostics()` labels the context snapshot,
+effective engine values and origins, and process admission limits separately.
+
 `context.start()` starts optional embedding warm-up. With the default
 process-private execution identity, creating a context does not create the
 execution-state directory; durable execution creates it on first use. Pass a
@@ -279,14 +287,21 @@ Use absolute paths for explicit socket and state directories in manually
 configured MCP clients; the supplied shell launchers normalize them before
 starting child processes.
 
-EB parses its supported startup settings once per process. Invalid numeric and
-boolean values are reported to stderr and fall back to the documented default;
-empty optional values remain unset. `get_runtime_diagnostics()` includes the
-effective paths, identity sources, durability mode, and a typed settings
-snapshot with value, origin, validation status, and invalid-value behavior. It
-reports a short session fingerprint instead of the raw session ID. The runtime
-semantic-index budget permission is sampled for each adjustment request; other
-settings use their startup snapshot.
+EB resolves process settings once at process startup; an embedded service
+context keeps its own settings snapshot from context creation. Invalid numeric
+and boolean values are reported to stderr and fall back to the documented
+default; empty optional values remain unset. `get_runtime_diagnostics()` includes the
+effective paths, identity sources, durability mode, and a typed context
+settings snapshot with value, origin, validation status, and invalid-value
+behavior. It reports context startup settings separately from effective engine
+settings and process-wide admission limits. Context admission values do not
+change the process-wide gate. Effective engine settings identify context
+setting origins or an `engine_options` override; a directly supplied engine is
+marked with an unknown origin. Process admission origins come from process
+startup settings, and queue capacities are per event loop. The report uses a
+short session fingerprint instead of the raw session ID. The semantic-index
+budget permission is re-read from the environment for every adjustment
+request, while diagnostics show the context startup snapshot.
 
 ### Configure other coding agents
 
@@ -697,8 +712,8 @@ room for a new capture when possible. A capture that exceeds the entire index
 budget is rejected rather than partially indexed, so accepted captures remain
 fully searchable and cannot produce silent semantic false negatives. The
 optional `set_semantic_index_budget` tool changes this limit for the current
-session only and is disabled unless `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1` is
-set at startup. Decreases use the same deterministic LRU order and may evict
+session only and is enabled when `EPHEMERAL_ALLOW_RUNTIME_INDEX_BUDGET=1` is
+present for the adjustment request. Decreases use the same deterministic LRU order and may evict
 multiple captures; deployment defaults are not changed or persisted.
 `execute_and_capture` retains the beginning and end of oversized command
 output. Its truncation marker reports the retained head and tail sizes as
