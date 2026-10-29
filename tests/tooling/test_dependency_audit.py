@@ -5,13 +5,56 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.dependency_audit import DEFAULT_EXCEPTIONS, load_exceptions, validate_report
+from scripts.dependency_audit import (
+    DEFAULT_EXCEPTIONS,
+    exceptions_for_python,
+    load_exceptions,
+    validate_report,
+)
 from scripts.pillow_compatibility_watch import pillow_status
 
 
 class TestDependencyAudit(unittest.TestCase):
-    def test_empty_exception_policy_is_valid(self):
-        self.assertEqual(load_exceptions(DEFAULT_EXCEPTIONS), [])
+    def test_filelock_exception_is_limited_to_python_310(self):
+        exceptions = load_exceptions(DEFAULT_EXCEPTIONS)
+
+        self.assertEqual(len(exceptions), 1)
+        self.assertEqual(exceptions[0]["package"], "filelock")
+        self.assertEqual(exceptions[0]["version"], "3.20.3")
+        self.assertEqual(
+            set(exceptions[0]["vulnerability_ids"]),
+            {"CVE-2026-112909", "CVE-2026-112910"},
+        )
+        self.assertEqual(exceptions_for_python(exceptions, "3.10"), exceptions)
+        self.assertEqual(exceptions_for_python(exceptions, "3.12"), [])
+
+        report = {
+            "dependencies": [
+                {
+                    "name": "filelock",
+                    "version": "3.20.3",
+                    "vulns": [
+                        {"id": "CVE-2026-112909"},
+                        {"id": "CVE-2026-112910"},
+                    ],
+                }
+            ]
+        }
+        errors, matched = validate_report(
+            report, exceptions_for_python(exceptions, "3.10")
+        )
+        self.assertEqual(errors, [])
+        self.assertIn("filelock==3.20.3", matched[0])
+
+    def test_unscoped_exceptions_apply_to_every_python_version(self):
+        exception = {
+            "package": "example-package",
+            "version": "1.0.0",
+            "vulnerability_ids": ["GHSA-example"],
+            "issue": "https://example.com/issue/1",
+        }
+
+        self.assertEqual(exceptions_for_python([exception], "3.10"), [exception])
 
     def test_unapproved_advisory_fails_when_policy_is_empty(self):
         report = {
@@ -105,6 +148,29 @@ class TestDependencyAudit(unittest.TestCase):
             policy.write_text(json.dumps({"exceptions": None}), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "must contain an 'exceptions' list"):
+                load_exceptions(policy)
+
+    def test_exception_policy_rejects_malformed_python_version_scopes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "exceptions": [
+                            {
+                                "package": "example-package",
+                                "version": "1.0.0",
+                                "vulnerability_ids": ["GHSA-example"],
+                                "issue": "https://example.com/issue/1",
+                                "python_version": "3",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "major.minor Python version"):
                 load_exceptions(policy)
 
 

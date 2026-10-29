@@ -40,6 +40,15 @@ def load_exceptions(path: Path) -> list[dict[str, Any]]:
         seen_packages.add(normalized_package)
         if not isinstance(version, str) or not version.strip():
             raise ValueError(f"Exception for {package} must pin an exact version")
+        python_version = exception.get("python_version")
+        if python_version is not None and (
+            not isinstance(python_version, str)
+            or len(python_version.split(".")) != 2
+            or any(not part.isdecimal() for part in python_version.split("."))
+        ):
+            raise ValueError(
+                f"Exception for {package} must use a major.minor Python version"
+            )
         if (
             not isinstance(vulnerability_ids, list)
             or not vulnerability_ids
@@ -52,6 +61,17 @@ def load_exceptions(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"Exception for {package} must link a tracking issue")
 
     return exceptions
+
+
+def exceptions_for_python(
+    exceptions: list[dict[str, Any]], python_version: str
+) -> list[dict[str, Any]]:
+    """Return global exceptions and exceptions scoped to this Python version."""
+    return [
+        exception
+        for exception in exceptions
+        if exception.get("python_version") in (None, python_version)
+    ]
 
 
 def validate_report(
@@ -178,7 +198,9 @@ def run_audit(requirements: Path, exceptions_path: Path = DEFAULT_EXCEPTIONS) ->
             print(result.stderr.strip(), file=sys.stderr)
         return 2
 
-    errors, matched = validate_report(report, exceptions)
+    current_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+    active_exceptions = exceptions_for_python(exceptions, current_python)
+    errors, matched = validate_report(report, active_exceptions)
     if result.stderr.strip():
         print(result.stderr.strip(), file=sys.stderr)
     if errors:

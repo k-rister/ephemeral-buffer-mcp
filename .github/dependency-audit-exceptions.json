@@ -1,3 +1,15 @@
 {
-  "exceptions": []
+  "exceptions": [
+    {
+      "package": "filelock",
+      "version": "3.20.3",
+      "python_version": "3.10",
+      "vulnerability_ids": [
+        "CVE-2026-112909",
+        "CVE-2026-112910"
+      ],
+      "issue": "https://github.com/k-rister/ephemeral-buffer-mcp/pull/507",
+      "reason": "The available patched filelock release requires Python 3.11 or newer; revisit Python 3.10 support and remove this exception."
+    }
+  ]
 }
