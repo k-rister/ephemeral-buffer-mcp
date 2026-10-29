@@ -87,7 +87,7 @@ def validate_distribution_metadata(
         raise ReleaseCheckError("core distribution must contain only the base runtime dependencies")
     semantic_extra = core.get("optional-dependencies", {}).get("semantic", [])
     expected_semantic_extra = {
-        "filelock<3.20.4",
+        "filelock>=4.2.1,<5",
         "huggingface-hub>=0.20,<2",
         "numpy>=1.24.0",
         "onnxruntime>=1.17,<1.24; python_version < '3.11'",
