@@ -10,8 +10,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Keep Python 3.10 support with its ONNX Runtime wheel-compatible version cap,
   retain the BGE default and legacy FastEmbed cache environment variable, and
   remove Pillow from semantic installs.
-- Pin the BGE model snapshot and constrain FileLock below the affected releases;
-  remove the Pillow audit exception and require a clean audit with no exceptions.
+- Pin the BGE model snapshot, require patched `filelock>=4.2.1,<5`, remove the
+  Pillow audit exception, and require a clean dependency audit with no exceptions.
 - Require setuptools 77 or newer to build the full and lexical distributions
   with SPDX license metadata.
 - Preserve direct helper text and successful response shapes while returning
