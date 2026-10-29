@@ -271,15 +271,10 @@ def search_capture(
     mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic
     (embedding based). capture_id defaults to latest; top_k defaults to 5
     (maximum 20), and context_lines defaults to 3 (maximum 100). Use
-    get_capture_slice for complete or omitted content. Hybrid results may be
-    marked semantic pending or unavailable. For hybrid and semantic modes,
-    semantic_coverage='complete' means indexing finished for the eligible
-    semantic chunks; it does not guarantee every source token was embedded. A
-    single line larger than the semantic byte cap remains whole in its own
-    chunk, but its representation may be truncated by the tokenizer at the
-    model's token limit. BM25 and get_capture_slice retain access to the full
-    captured line. The lexical-only distribution returns a
-    semantic_backend_unavailable error for hybrid and semantic modes.
+    get_capture_slice for complete or omitted content.
+    `semantic_coverage: complete` means indexed, not every source token was
+    embedded. Oversized lines stay whole but the tokenizer may truncate them
+    at the model's token limit.
     """
     return search_capture_result(query, mode, capture_id, top_k, context_lines).text or ""
 
