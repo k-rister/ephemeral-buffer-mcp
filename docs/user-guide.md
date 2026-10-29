@@ -482,15 +482,18 @@ in buffer stats and runtime diagnostics.
 Lexical and semantic search index different chunk grids. BM25 keeps four-line
 sliding windows with two-line overlap so exact line ranges stay tight. Semantic
 embeddings use separate windows packed from consecutive lines, closed at eight
-lines or 1,024 UTF-8 bytes, whichever comes first, with no overlap. That keeps
-every window inside the model's token limit and, because embedding cost tracks
-total tokens, roughly halves the work by not embedding the overlap twice. Hybrid
-ranking fuses the two grids in line space: each semantic window boosts lexical
-hits whose first line it contains. If semantic windows overlap, a lexical hit
-receives only the boost from the highest-ranked matching window. A semantic
-window appears on its own only when no lexical hit belongs to it. Each match
-reports `chunk_index` as `lexical` or `semantic` alongside its line range. Tune
-the windows when output has very long or very short lines:
+lines or 1,024 UTF-8 bytes, whichever comes first, with no overlap. These caps
+pack ordinary windows; a single line longer than the byte cap remains whole in
+its own semantic chunk and can exceed that cap. The tokenizer may then truncate
+the chunk to the model's token limit, so its embedding may not represent the
+whole line. BM25 and `get_capture_slice` retain access to the full captured
+line. For ordinary lines, omitting overlap avoids embedding the repeated text
+twice. Hybrid ranking fuses the two grids in line space: each semantic window
+boosts lexical hits whose first line it contains. If semantic windows overlap,
+a lexical hit receives only the boost from the highest-ranked matching window.
+A semantic window appears on its own only when no lexical hit belongs to it.
+Each match reports `chunk_index` as `lexical` or `semantic` alongside its line
+range. Tune the windows when output has very long or very short lines:
 
 ```bash
 export EPHEMERAL_SEMANTIC_CHUNK_LINES=8
@@ -537,9 +540,11 @@ When the budget expires, hybrid search returns the BM25 results immediately
 with `semantic_coverage` set to `pending` (the tool response says
 `semantic pending (lexical only)`), and indexing continues in the background
 so repeating the search returns full hybrid ranking. Every other hybrid
-response reports `semantic_coverage` as `complete`, or `unavailable` when the
-semantic backend failed or the semantic-input budget was exceeded and
-`semantic_fallback` names the exception class;
+response reports `semantic_coverage` as `complete`, meaning indexing finished
+for the eligible semantic chunks; it does not guarantee every source token was
+included in an embedding. It is `unavailable` when the semantic backend failed
+or the semantic-input budget was exceeded, and `semantic_fallback` names the
+exception class;
 BM25 results and exact line ranges are identical either way. The default of
 `10` seconds kept a 2,048-line capture fully hybrid in the
 release-preparation Linux run (about 4.0 seconds to index), while 8,192- and
