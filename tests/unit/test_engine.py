@@ -3752,6 +3752,11 @@ class TestEmbeddingStartup(unittest.TestCase):
         wide = ["x" * 15, "y" * 10, "z" * 40, "w"]
         chunks = engine._semantic_index.semantic_chunk_lines(wide)
         self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 1), (2, 2), (3, 3), (4, 4)])
+        self.assertEqual(chunks[2].text, wide[2])
+        self.assertGreater(
+            len(chunks[2].text.encode("utf-8")),
+            engine._semantic_index.config.semantic_chunk_bytes,
+        )
 
         overlapping = self._new_engine(max_captures=1, semantic_chunk_lines=4, semantic_chunk_overlap=2)
         chunks = overlapping._semantic_index.semantic_chunk_lines(lines)
