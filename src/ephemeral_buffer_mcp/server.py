@@ -110,11 +110,6 @@ from .admission import (
     admission_gate,
 )
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows has no Unix socket backend.
-    fcntl = None
-
 SOCKET_PATH = SETTINGS.identity.socket_path
 SOCKET_PAYLOAD_OVERHEAD = 64 * 1024
 SOCKET_CLIENT_READ_TIMEOUT_SECONDS = SETTINGS.socket_timeout_seconds.value
@@ -731,69 +726,73 @@ def _require_socket_ready():
     return module._require_socket_ready()
 
 
+_LEGACY_MODULE_ALIASES = {
+    "mcp": ".mcp_transport",
+    "MCP_TOOL_LIST_CACHE_HINTS": ".mcp_transport",
+    "MCP_TOOL_LIST_CACHE_TTL_MS": ".mcp_transport",
+    "handle_socket_client": ".socket_transport",
+    "ExecutionPhaseInput": ".tools.execution",
+    "cancel_execution": ".tools.execution",
+    "get_execution": ".tools.execution",
+    "get_execution_capacity": ".tools.execution",
+    "get_execution_output": ".tools.execution",
+    "list_executions": ".tools.execution",
+    "preflight_command": ".tools.execution",
+    "resume_execution": ".tools.execution",
+    "retire_executions": ".tools.execution",
+    "start_execution": ".tools.execution",
+    "subprocess": ".tools.execution",
+    "_consolidated_jsonl": ".tools.capture",
+    "capture_file": ".tools.capture",
+    "capture_text": ".tools.capture",
+    "consolidate_captures": ".tools.capture",
+    "execute_and_capture": ".tools.capture",
+    "search_capture": ".tools.search",
+    "search_capture_result": ".tools.search",
+    "clear_captures": ".tools.retrieval",
+    "get_capture_slice": ".tools.retrieval",
+    "get_capture_slice_result": ".tools.retrieval",
+    "get_capture_summary": ".tools.retrieval",
+    "list_captures": ".tools.retrieval",
+    "get_buffer_stats": ".tools.diagnostics",
+    "get_runtime_diagnostics": ".tools.diagnostics",
+    "get_usage_metrics": ".tools.diagnostics",
+    "set_semantic_index_budget": ".tools.configuration",
+}
+
+
 def __getattr__(name: str):
-    """Resolve legacy internal names from their owning domain module."""
-    if name.startswith("__"):
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    if name == "mcp" or name.startswith(
-        (
-            "_MCP",
-            "_mcp",
-            "_REGISTERED_MCP_",
-            "MCP_TOOL_LIST_",
-            "MCP_TOOL_CATEGORY_",
-            "_register_mcpserver",
-            "_call_tool_result",
-            "_compact_tool_text",
-            "_legacy_tool_envelope",
-            "_fit_tool_envelope",
-        )
-    ):
-        module = import_module(".mcp_transport", __package__)
+    """Resolve only the legacy aliases still used within the repository."""
+    if name in {
+        "_MCP_TOOL_REGISTRATIONS",
+        "_REGISTERED_MCP_TOOL_NAMES",
+        "_REGISTERED_MCP_TOOL_CATEGORIES",
+        "MCP_TOOL_CATEGORY_NAMES",
+    }:
+        module = import_module(".tools", __package__)
+        registrations = module.load_tool_handlers()
         if name == "_MCP_TOOL_REGISTRATIONS":
             return [
                 (item.function, item.name, item.category, item.structured_result_factory)
-                for item in module.load_tool_handlers()
+                for item in registrations
             ]
         if name == "_REGISTERED_MCP_TOOL_NAMES":
-            return [item.name for item in module.load_tool_handlers()]
+            return [item.name for item in registrations]
         if name == "_REGISTERED_MCP_TOOL_CATEGORIES":
-            return {item.name: item.category for item in module.load_tool_handlers()}
-        if name == "MCP_TOOL_CATEGORY_NAMES":
-            return tuple(module.TOOL_CATEGORIES)
-        if hasattr(module, name):
-            return getattr(module, name)
-    if name.startswith(
-        (
-            "SOCKET_",
-            "_SOCKET_",
-            "socket_",
-            "_socket_",
-            "start_socket",
-            "run_socket",
-            "handle_socket",
-            "_read_socket",
-            "_write_socket",
-            "_require_socket",
-            "_unlink_socket",
-            "_bind_socket",
-            "_connect_socket",
-            "_verify_bound_socket",
-        )
-    ):
-        module = import_module(".socket_transport", __package__)
-        if hasattr(module, name):
-            return getattr(module, name)
-    from .tools import load_tool_handlers
-    load_tool_handlers()
-    for module_name in ("execution", "capture", "search", "retrieval", "diagnostics", "configuration"):
-        module = import_module(f".tools.{module_name}", __package__)
-        if hasattr(module, name):
-            return getattr(module, name)
+            return {item.name: item.category for item in registrations}
+        return tuple(module.TOOL_CATEGORIES)
+    module_name = _LEGACY_MODULE_ALIASES.get(name)
+    if module_name is not None:
+        # Keep tool registration order stable even when a legacy domain alias
+        # is requested before either transport has loaded the handlers.
+        from .tools import load_tool_handlers
+        load_tool_handlers()
+        module = import_module(module_name, __package__)
+        return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = [name for name in globals() if not name.startswith("__")]
+__all__ = ["create_mcp_server", "create_service_context"]
 
 
 def _run_server():

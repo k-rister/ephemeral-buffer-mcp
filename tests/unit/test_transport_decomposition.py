@@ -2,6 +2,7 @@
 
 import asyncio
 import ast
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,75 @@ from ephemeral_buffer_mcp.tools.payloads import (
 
 
 class TestTransportDecomposition(unittest.TestCase):
+    def test_transports_use_explicit_imports(self):
+        package_root = Path(__file__).parents[2] / "src" / "ephemeral_buffer_mcp"
+        for name in ("mcp_transport.py", "socket_transport.py"):
+            with self.subTest(transport=name):
+                tree = ast.parse((package_root / name).read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ImportFrom):
+                        self.assertNotIn("*", [alias.name for alias in node.names])
+
+    def test_server_exports_only_the_supported_embedding_api(self):
+        self.assertEqual(
+            server.__all__, ["create_mcp_server", "create_service_context"]
+        )
+
+    def test_legacy_server_aliases_resolve_to_their_owners(self):
+        aliases = {
+            "mcp_transport": (
+                "mcp", "MCP_TOOL_LIST_CACHE_HINTS", "MCP_TOOL_LIST_CACHE_TTL_MS",
+            ),
+            "socket_transport": ("handle_socket_client",),
+            "tools.execution": (
+                "ExecutionPhaseInput", "cancel_execution", "get_execution",
+                "get_execution_capacity", "get_execution_output", "list_executions",
+                "preflight_command", "resume_execution", "retire_executions",
+                "start_execution", "subprocess",
+            ),
+            "tools.capture": (
+                "_consolidated_jsonl", "capture_file", "capture_text",
+                "consolidate_captures", "execute_and_capture",
+            ),
+            "tools.search": ("search_capture", "search_capture_result"),
+            "tools.retrieval": (
+                "clear_captures", "get_capture_slice", "get_capture_slice_result",
+                "get_capture_summary", "list_captures",
+            ),
+            "tools.diagnostics": (
+                "get_buffer_stats", "get_runtime_diagnostics", "get_usage_metrics",
+            ),
+            "tools.configuration": ("set_semantic_index_budget",),
+        }
+        for module_name, names in aliases.items():
+            module = import_module(f".{module_name}", server.__package__)
+            for name in names:
+                with self.subTest(alias=name):
+                    self.assertIs(getattr(server, name), getattr(module, name))
+
+    def test_unknown_server_names_do_not_load_or_search_modules(self):
+        names = (
+            "__unknown__", "missing_legacy_name", "_MCP_unknown", "_mcp_unknown",
+            "_REGISTERED_MCP_UNKNOWN", "MCP_TOOL_LIST_UNKNOWN",
+            "MCP_TOOL_CATEGORY_UNKNOWN", "_register_mcpserver_unknown",
+            "_call_tool_result_unknown", "_compact_tool_text_unknown",
+            "_legacy_tool_envelope_unknown", "_fit_tool_envelope_unknown",
+            "SOCKET_UNKNOWN", "_SOCKET_UNKNOWN", "socket_unknown", "_socket_unknown",
+            "start_socket_unknown", "run_socket_unknown", "handle_socket_unknown",
+            "_read_socket_unknown", "_write_socket_unknown", "_require_socket_unknown",
+            "_unlink_socket_unknown", "_bind_socket_unknown", "_connect_socket_unknown",
+            "_verify_bound_socket_unknown",
+            # These exist in the owning modules but are not compatibility aliases.
+            "_mcp_metrics_scope_key", "_read_socket_payload", "_render_search_text",
+            "BaseModel",
+        )
+        with patch.object(server, "import_module") as importer:
+            for name in names:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(AttributeError, name):
+                        getattr(server, name)
+        importer.assert_not_called()
+
     def test_mcp_response_byte_metrics_ignore_non_text_content(self):
         record_bytes = Mock()
         metrics = SimpleNamespace(record_bytes=record_bytes)
@@ -76,6 +146,13 @@ class TestTransportDecomposition(unittest.TestCase):
         self.assertEqual(context_imports, expected_context_accessors)
 
     def test_legacy_server_mcp_lookups_resolve_from_transport_registry(self):
+        self.assertEqual(
+            server._MCP_TOOL_REGISTRATIONS,
+            [
+                (item.function, item.name, item.category, item.structured_result_factory)
+                for item in get_tool_registrations()
+            ],
+        )
         self.assertEqual(server._REGISTERED_MCP_TOOL_NAMES, get_tool_names())
         self.assertEqual(server._REGISTERED_MCP_TOOL_CATEGORIES, get_tool_categories())
         self.assertEqual(server.MCP_TOOL_CATEGORY_NAMES, tuple(TOOL_CATEGORIES))
@@ -194,7 +271,31 @@ class TestTransportDecomposition(unittest.TestCase):
                 sys.executable,
                 "-c",
                 (
-                    "import sys; import ephemeral_buffer_mcp.server; "
+                    "import sys; from ephemeral_buffer_mcp.server import *; "
+                    "assert create_mcp_server; assert create_service_context; "
+                    "assert not any(name == 'mcp' or name.startswith('mcp.') "
+                    "for name in sys.modules); "
+                    "assert 'ephemeral_buffer_mcp.mcp_transport' not in sys.modules; "
+                    "assert 'ephemeral_buffer_mcp.socket_transport' not in sys.modules"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "EPHEMERAL_DISABLE_SOCKET_SERVER": "1"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_legacy_tool_lookup_preserves_registration_order_without_loading_sdk(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import ephemeral_buffer_mcp.server as server; "
+                    "assert server.capture_text; "
+                    "from ephemeral_buffer_mcp.tools.registry import get_tool_names; "
+                    "assert get_tool_names()[0] == 'preflight_command'; "
                     "assert not any(name == 'mcp' or name.startswith('mcp.') "
                     "for name in sys.modules); "
                     "assert 'ephemeral_buffer_mcp.mcp_transport' not in sys.modules; "
