@@ -76,6 +76,44 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("  workflow_dispatch:\n", source)
         self.assertIn("  schedule:\n", source)
 
+    def test_real_model_compatibility_lanes_are_schedule_and_manual_only(self):
+        source = CI_WORKFLOW.read_text()
+        job = source.split("  real-model-compatibility:\n", 1)[1].split("\n  benchmark:", 1)[0]
+
+        self.assertIn(
+            "if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'",
+            job,
+        )
+        self.assertNotIn("pull_request", job.split("    env:\n", 1)[0])
+        for lane, python_version, dependency_set in (
+            ("py312-hashed-runtime", '"3.12"', "hashed-runtime"),
+            ("py310-constrained", '"3.10"', "constrained"),
+            ("py312-floating", '"3.12"', "floating"),
+        ):
+            with self.subTest(lane=lane):
+                self.assertRegex(
+                    job,
+                    re.compile(
+                        rf"(?m)^          - lane: {re.escape(lane)}\n"
+                        rf"            python-version: {re.escape(python_version)}\n"
+                        rf"            dependency-set: {re.escape(dependency_set)}$"
+                    ),
+                )
+
+        self.assertIn("python -m pip install --require-hashes -r requirements-lock-py312.txt", job)
+        self.assertIn(
+            "python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1 twine",
+            job,
+        )
+        self.assertRegex(
+            job,
+            re.compile(r"(?s)floating\)\s+python -m pip install -r requirements\.txt\s+;;"),
+        )
+        self.assertIn("--ensure-failure-report", job)
+        self.assertIn("if: always()", job)
+        self.assertIn("actions/upload-artifact", job)
+        self.assertIn("benchmark-embedding-${{ runner.os }}-python-", job)
+
     def test_ci_compiles_and_executes_resumable_execution_paths(self):
         source = CI_WORKFLOW.read_text()
 

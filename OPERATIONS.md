@@ -1329,7 +1329,10 @@ version number.
 Changes to `main` must come through a pull request. The required checks are
 `test (3.10)` and `test (3.12)`, and linear history is required. Reviews are
 not currently required. The concurrency benchmark is optional and runs only
-on its weekly schedule or through manual workflow dispatch. All GitHub Actions
+on its weekly schedule or through manual workflow dispatch. The real-model
+compatibility smoke uses the same schedule and manual dispatch, exercises its
+three dependency lanes, and uploads a JSON diagnostic report for each lane.
+Both jobs stay outside the required pull-request checks. All GitHub Actions
 are pinned to full commit SHAs; when updating an action, resolve the intended
 release tag to its commit, retain the version comment beside the pin, and let
 the required CI checks validate the change.

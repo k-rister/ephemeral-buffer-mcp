@@ -106,7 +106,7 @@ jobs:
             tests.benchmarks.test_benchmark_semantic_index tests.benchmarks.test_benchmark_semantic_memory tests.benchmarks.test_benchmark_warmup \
             tests.benchmarks.test_benchmark_relevance tests.benchmarks.test_benchmark_agent_ab tests.benchmarks.test_benchmark_agent_ab_fixtures \
             tests.benchmarks.test_benchmark_agent_ab_repository_fixture tests.benchmarks.test_benchmark_agent_ab_baseline \
-            tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_dependabot_config tests.tooling.test_release_checks tests.tooling.test_dependency_audit tests.tooling.test_release_benchmark_timeout \
+            tests.benchmarks.test_run_codex_agent_ab tests.tooling.test_dependabot_config tests.tooling.test_release_checks tests.tooling.test_dependency_audit tests.tooling.test_release_benchmark_timeout tests.tooling.test_real_model_compatibility_smoke \
             tests.benchmarks.test_benchmark_admission tests.benchmarks.test_workload_results \
             tests.benchmarks.test_compare_workload_results tests.benchmarks.test_list_workload_results tests.tooling.test_ci_workflow \
             tests.unit.test_mcpserver_adapter tests.unit.test_semantic_index tests.unit.test_engine tests.unit.test_embedding_backend tests.unit.test_capture_utils tests.unit.test_config \
@@ -234,6 +234,99 @@ jobs:
 
       - name: Check adapter and MCP behavior
         run: ./scripts/with-test-env.sh python -m unittest -v tests.unit.test_mcpserver_adapter tests.unit.test_server tests.unit.test_execution_server
+
+  real-model-compatibility:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: py312-hashed-runtime
+            python-version: "3.12"
+            dependency-set: hashed-runtime
+          - lane: py310-constrained
+            python-version: "3.10"
+            dependency-set: constrained
+          - lane: py312-floating
+            python-version: "3.12"
+            dependency-set: floating
+    env:
+      EPHEMERAL_EMBEDDING_CACHE_DIR: /tmp/embedding_cache
+      EPHEMERAL_TEST_EMBEDDINGS: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
+            requirements-lock-py312.txt
+
+      - name: Cache embedding model
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: /tmp/embedding_cache
+          key: benchmark-embedding-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'src/ephemeral_buffer_mcp/embedding_backend.py') }}
+
+      - name: Install dependencies
+        id: install-dependencies
+        run: |
+          case "${{ matrix.dependency-set }}" in
+            hashed-runtime)
+              python -m pip install --require-hashes -r requirements-lock-py312.txt
+              ;;
+            constrained)
+              python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1 twine
+              ;;
+            floating)
+              python -m pip install -r requirements.txt
+              ;;
+            *)
+              echo "Unknown dependency set: ${{ matrix.dependency-set }}" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Install project in editable mode
+        id: install-project
+        run: python -m pip install --no-deps -e .
+
+      - name: Run real-model compatibility smoke
+        id: real-model-smoke
+        run: >-
+          python scripts/real_model_compatibility_smoke.py
+          --lane "${{ matrix.lane }}"
+          --report "real-model-compatibility-${{ matrix.lane }}.json"
+
+      - name: Ensure a diagnostic report exists
+        if: always()
+        env:
+          LANE: ${{ matrix.lane }}
+          DEPENDENCY_INSTALL_OUTCOME: ${{ steps.install-dependencies.outcome }}
+          PROJECT_INSTALL_OUTCOME: ${{ steps.install-project.outcome }}
+          SMOKE_OUTCOME: ${{ steps.real-model-smoke.outcome }}
+        run: |
+          python scripts/real_model_compatibility_smoke.py \
+            --ensure-failure-report \
+            --lane "$LANE" \
+            --report "real-model-compatibility-$LANE.json" \
+            --failure-details "dependency install=$DEPENDENCY_INSTALL_OUTCOME; project install=$PROJECT_INSTALL_OUTCOME; smoke=$SMOKE_OUTCOME"
+
+      - name: Upload real-model compatibility report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: real-model-compatibility-${{ matrix.lane }}
+          retention-days: 90
+          path: real-model-compatibility-${{ matrix.lane }}.json
+          if-no-files-found: error
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
