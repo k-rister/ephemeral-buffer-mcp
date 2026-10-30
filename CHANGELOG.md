@@ -2,7 +2,7 @@
 
 Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
-## Unreleased
+## 0.12.0 - 2026-10-30
 
 - Breaking: Replace FastEmbed with a text-only ONNX Runtime backend and limit
   `EPHEMERAL_EMBEDDING_MODEL` to the BGE-small fp32 model and its catalogue
