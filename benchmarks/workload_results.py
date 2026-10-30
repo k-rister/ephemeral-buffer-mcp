@@ -63,6 +63,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tomllib
 from importlib import metadata as _metadata
 from pathlib import Path
 from typing import Any, Iterable, TextIO
@@ -152,9 +153,6 @@ _SENSITIVE_KEYS = frozenset({"token", "key"})
 _SENSITIVE_SUFFIXES = ("_token", "_key")
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-# PEP 621 version line; a regex keeps this module free of tomllib, which
-# Python 3.10 lacks.
-_PYPROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 LABEL_TYPES = (str, int, float, bool, type(None))
 
 
@@ -488,11 +486,15 @@ def run(
 def _project_version() -> str | None:
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     try:
-        match = _PYPROJECT_VERSION.search(pyproject.read_text(encoding="utf-8"))
+        with pyproject.open("rb") as stream:
+            project = tomllib.load(stream).get("project", {})
+        version = project.get("version") if isinstance(project, dict) else None
     except OSError:
-        match = None
-    if match:
-        return match.group(1)
+        version = None
+    except tomllib.TOMLDecodeError:
+        version = None
+    if isinstance(version, str) and version:
+        return version
     try:
         return _metadata.version(PROJECT_NAME)
     except _metadata.PackageNotFoundError:

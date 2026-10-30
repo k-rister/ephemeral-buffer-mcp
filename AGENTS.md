@@ -29,8 +29,8 @@ MCP client, or operating environment.
 
 ## Local validation
 
-Create the supported development environment with the committed Python 3.12
-development lock:
+The supported Python versions are 3.11 and 3.12. Create the development
+environment with the committed Python 3.12 lock:
 
 ```bash
 python3.12 -m venv .venv

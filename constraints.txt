@@ -1,13 +1,10 @@
 # Tested direct dependency constraints for CI and release validation.
 # Keep requirements.txt flexible for downstream users; update these pins only
-# after the focused and end-to-end test suites pass on both CI Python versions.
+# after the focused and end-to-end test suites pass on Python 3.11 and 3.12.
 mcp==2.3.0
-filelock==3.20.3; python_version < "3.11"
-filelock==4.2.1; python_version >= "3.11"
+filelock==4.2.1
 huggingface-hub==1.30.0
-numpy==2.2.6; python_version < "3.11"
-numpy==2.5.2; python_version >= "3.11"
-onnxruntime==1.23.2; python_version < "3.11"
-onnxruntime==1.29.0; python_version >= "3.11"
+numpy==2.2.6
+onnxruntime==1.23.2
 tokenizers==0.23.2
 urllib3==2.8.0

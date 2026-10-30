@@ -7,7 +7,7 @@ name = "ephemeral-buffer-mcp-core"
 version = "0.11.0"
 description = "Shared runtime core for the Ephemeral Buffer MCP server"
 readme = "CORE_README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [
     { name = "Karl Rister", email = "krister@redhat.com" }
@@ -16,7 +16,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
@@ -28,12 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 semantic = [
-    "filelock<3.20.4; python_version < '3.11'",
-    "filelock>=4.2.1,<5; python_version >= '3.11'",
+    "filelock>=4.2.1,<5",
     "huggingface-hub>=0.20,<2",
     "numpy>=1.24.0",
-    "onnxruntime>=1.17,<1.24; python_version < '3.11'",
-    "onnxruntime>=1.17,<2; python_version >= '3.11'",
+    "onnxruntime>=1.17,<2",
     "tokenizers>=0.15,<1",
 ]
 

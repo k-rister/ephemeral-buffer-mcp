@@ -191,16 +191,28 @@ class TestBuildAndValidate(unittest.TestCase):
 
         self.assertEqual(result["environment"], environment_desc)
 
-    def test_project_version_falls_back_to_metadata_then_none(self):
-        with patch.object(wr.Path, "read_text", side_effect=OSError("missing")):
+    def test_project_version_uses_toml_then_falls_back_to_metadata(self):
+        with patch.object(
+            wr.Path, "open", return_value=io.BytesIO(b'[project]\nversion = "7.7.7"\n')
+        ):
+            self.assertEqual(wr._project_version(), "7.7.7")
+
+        with patch.object(wr.Path, "open", side_effect=OSError("missing")):
             with patch.object(wr._metadata, "version", return_value="9.9.9"):
                 self.assertEqual(wr._project_version(), "9.9.9")
             with patch.object(wr._metadata, "version", side_effect=wr._metadata.PackageNotFoundError("x")):
                 self.assertIsNone(wr._project_version())
-        with patch.object(wr.Path, "read_text", return_value="[project]\nname = 'x'\n"), patch.object(
+        with patch.object(
+            wr.Path, "open", return_value=io.BytesIO(b'[project]\nname = "x"\n')
+        ), patch.object(
             wr._metadata, "version", return_value="8.8.8"
         ):
             self.assertEqual(wr._project_version(), "8.8.8")
+
+        with patch.object(wr.Path, "open", return_value=io.BytesIO(b"[project")), patch.object(
+            wr._metadata, "version", return_value="6.6.6"
+        ):
+            self.assertEqual(wr._project_version(), "6.6.6")
 
     def test_source_revision_handles_missing_git_and_failures(self):
         completed = subprocess.CompletedProcess(["git"], 0, stdout="abc123\n", stderr="")

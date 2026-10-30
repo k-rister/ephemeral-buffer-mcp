@@ -7,14 +7,13 @@ name = "ephemeral-buffer-mcp"
 version = "0.11.0"
 description = "Full-featured Ephemeral Buffer MCP server with hybrid search"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "Karl Rister", email = "krister@redhat.com" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",

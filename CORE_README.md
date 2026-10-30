@@ -1,5 +1,7 @@
 # Ephemeral Buffer MCP Core
 
+Requires Python 3.11 or newer.
+
 This package contains the shared runtime used by the full-featured and
 lexical-only Ephemeral Buffer MCP distributions. Most users should install
 `ephemeral-buffer-mcp`, which includes semantic and hybrid search. To request a
