@@ -19,7 +19,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "ephemeral-buffer-mcp-core[semantic]==0.11.0",
+    "ephemeral-buffer-mcp-core[semantic]==0.12.0",
 ]
 
 [project.urls]
