@@ -85,7 +85,7 @@ reinstall the core package after the full distribution so its files are restored
 On macOS and Linux:
 
 ```bash
-.venv/bin/python -m pip install --force-reinstall --no-deps "ephemeral-buffer-mcp-core==0.11.0"
+.venv/bin/python -m pip install --force-reinstall --no-deps "ephemeral-buffer-mcp-core==0.12.0"
 .venv/bin/ephbuf --help
 test -x .venv/bin/codex-ephemeral
 ```
