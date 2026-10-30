@@ -87,7 +87,7 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertNotIn("pull_request", job.split("    env:\n", 1)[0])
         for lane, python_version, dependency_set in (
             ("py312-hashed-runtime", '"3.12"', "hashed-runtime"),
-            ("py310-constrained", '"3.10"', "constrained"),
+            ("py311-constrained", '"3.11"', "constrained"),
             ("py312-floating", '"3.12"', "floating"),
         ):
             with self.subTest(lane=lane):
@@ -102,7 +102,7 @@ class TestCiWorkflow(unittest.TestCase):
 
         self.assertIn("python -m pip install --require-hashes -r requirements-lock-py312.txt", job)
         self.assertIn(
-            "python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit tomli==2.4.1 twine",
+            "python -m pip install -r requirements.txt -c constraints.txt coverage build pip-audit twine",
             job,
         )
         self.assertRegex(
@@ -113,6 +113,13 @@ class TestCiWorkflow(unittest.TestCase):
         self.assertIn("if: always()", job)
         self.assertIn("actions/upload-artifact", job)
         self.assertIn("benchmark-embedding-${{ runner.os }}-python-", job)
+
+    def test_required_ci_matrix_uses_python_311_and_312(self):
+        source = CI_WORKFLOW.read_text()
+        test_job = source.split("  test:\n", 1)[1].split("\n  mcp-sdk-compatibility:", 1)[0]
+
+        self.assertIn('python-version: ["3.11", "3.12"]', test_job)
+        self.assertNotIn('"3.10"', source)
 
     def test_ci_compiles_and_executes_resumable_execution_paths(self):
         source = CI_WORKFLOW.read_text()

@@ -15,36 +15,12 @@ from scripts.pillow_compatibility_watch import pillow_status
 
 
 class TestDependencyAudit(unittest.TestCase):
-    def test_filelock_exception_is_limited_to_python_310(self):
+    def test_exception_policy_is_empty_for_supported_python_versions(self):
         exceptions = load_exceptions(DEFAULT_EXCEPTIONS)
 
-        self.assertEqual(len(exceptions), 1)
-        self.assertEqual(exceptions[0]["package"], "filelock")
-        self.assertEqual(exceptions[0]["version"], "3.20.3")
-        self.assertEqual(
-            set(exceptions[0]["vulnerability_ids"]),
-            {"CVE-2026-112909", "CVE-2026-112910"},
-        )
-        self.assertEqual(exceptions_for_python(exceptions, "3.10"), exceptions)
+        self.assertEqual(exceptions, [])
+        self.assertEqual(exceptions_for_python(exceptions, "3.11"), [])
         self.assertEqual(exceptions_for_python(exceptions, "3.12"), [])
-
-        report = {
-            "dependencies": [
-                {
-                    "name": "filelock",
-                    "version": "3.20.3",
-                    "vulns": [
-                        {"id": "CVE-2026-112909"},
-                        {"id": "CVE-2026-112910"},
-                    ],
-                }
-            ]
-        }
-        errors, matched = validate_report(
-            report, exceptions_for_python(exceptions, "3.10")
-        )
-        self.assertEqual(errors, [])
-        self.assertIn("filelock==3.20.3", matched[0])
 
     def test_unscoped_exceptions_apply_to_every_python_version(self):
         exception = {
@@ -54,7 +30,7 @@ class TestDependencyAudit(unittest.TestCase):
             "issue": "https://example.com/issue/1",
         }
 
-        self.assertEqual(exceptions_for_python([exception], "3.10"), [exception])
+        self.assertEqual(exceptions_for_python([exception], "3.11"), [exception])
 
     def test_unapproved_advisory_fails_when_policy_is_empty(self):
         report = {

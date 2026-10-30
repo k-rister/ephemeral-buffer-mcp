@@ -6,12 +6,8 @@ import datetime
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 uses the backport installed by build tooling.
-    import tomli as tomllib
 
 
 class ReleaseCheckError(ValueError):
@@ -80,6 +76,14 @@ def validate_distribution_metadata(
                 f"{expected_names[kind]} version {project.get('version')!r} "
                 f"does not match release version {version!r}"
             )
+        if project.get("requires-python") != ">=3.11":
+            raise ReleaseCheckError(
+                f"{expected_names[kind]} must require Python >=3.11"
+            )
+        if "Programming Language :: Python :: 3.10" in project.get("classifiers", []):
+            raise ReleaseCheckError(
+                f"{expected_names[kind]} must not advertise Python 3.10 support"
+            )
 
     core_dependency = f"ephemeral-buffer-mcp-core=={version}"
     semantic_core_dependency = f"ephemeral-buffer-mcp-core[semantic]=={version}"
@@ -87,12 +91,10 @@ def validate_distribution_metadata(
         raise ReleaseCheckError("core distribution must contain only the base runtime dependencies")
     semantic_extra = core.get("optional-dependencies", {}).get("semantic", [])
     expected_semantic_extra = {
-        "filelock<3.20.4; python_version < '3.11'",
-        "filelock>=4.2.1,<5; python_version >= '3.11'",
+        "filelock>=4.2.1,<5",
         "huggingface-hub>=0.20,<2",
         "numpy>=1.24.0",
-        "onnxruntime>=1.17,<1.24; python_version < '3.11'",
-        "onnxruntime>=1.17,<2; python_version >= '3.11'",
+        "onnxruntime>=1.17,<2",
         "tokenizers>=0.15,<1",
     }
     if set(semantic_extra) != expected_semantic_extra:

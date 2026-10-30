@@ -6,7 +6,7 @@ This guide covers installation, client setup, command capture, and privacy contr
 
 ### Requirements
 
-- Python 3.10 or newer
+- Python 3.11 or newer
 - MCP Python SDK (`mcp`) 2.3.0 or newer within the 2.x series
 - A supported MCP client if you want to use the server from an AI coding assistant
 - Network access on first use if the full install needs to download its embedding model
@@ -459,9 +459,6 @@ bound it with
 interactive coding agent, and check both settings on the deployment host with
 `benchmark_semantic_index.py`. `get_buffer_stats` reports the active thread
 setting.
-
-Python 3.10 uses ONNX Runtime below 1.24 because newer releases do not publish
-Python 3.10 wheels. Python 3.11 and newer can use later ONNX Runtime releases.
 
 ```bash
 export EPHEMERAL_EMBEDDING_THREADS=4

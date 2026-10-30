@@ -66,30 +66,38 @@ class TestReleaseChecks(unittest.TestCase):
             package_version(REPOSITORY_ROOT / "pyproject.toml"),
         )
 
+        for project_path in (
+            REPOSITORY_ROOT / "pyproject.toml",
+            REPOSITORY_ROOT / "packaging" / "full" / "pyproject.toml",
+            REPOSITORY_ROOT / "packaging" / "lexical" / "pyproject.toml",
+        ):
+            with project_path.open("rb") as stream:
+                project = release_checks.tomllib.load(stream)["project"]
+            self.assertEqual(project["requires-python"], ">=3.11")
+            self.assertNotIn("Programming Language :: Python :: 3.10", project["classifiers"])
+
     def test_distribution_set_rejects_version_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
             core = temporary / "core.toml"
             core.write_text(
-                '[project]\nname="ephemeral-buffer-mcp-core"\nversion="1.2.3"\n'
+                '[project]\nname="ephemeral-buffer-mcp-core"\nversion="1.2.3"\nrequires-python=">=3.11"\n'
                 'dependencies=["mcp>=2.3.0,<3", "urllib3>=2.8.0"]\n'
-                '[project.optional-dependencies]\nsemantic=["filelock<3.20.4; python_version < \'3.11\'", '
-                '"filelock>=4.2.1,<5; python_version >= \'3.11\'", '
+                '[project.optional-dependencies]\nsemantic=["filelock>=4.2.1,<5", '
                 '"huggingface-hub>=0.20,<2", "numpy>=1.24.0", '
-                '"onnxruntime>=1.17,<1.24; python_version < \'3.11\'", '
-                '"onnxruntime>=1.17,<2; python_version >= \'3.11\'", '
+                '"onnxruntime>=1.17,<2", '
                 '"tokenizers>=0.15,<1"]\n',
                 encoding="utf-8",
             )
             full = temporary / "full.toml"
             full.write_text(
-                '[project]\nname="ephemeral-buffer-mcp"\nversion="1.2.3"\n'
+                '[project]\nname="ephemeral-buffer-mcp"\nversion="1.2.3"\nrequires-python=">=3.11"\n'
                 'dependencies=["ephemeral-buffer-mcp-core[semantic]==1.2.3"]\n',
                 encoding="utf-8",
             )
             lexical = temporary / "lexical.toml"
             lexical.write_text(
-                '[project]\nname="ephemeral-buffer-mcp-lexical"\nversion="1.2.2"\n'
+                '[project]\nname="ephemeral-buffer-mcp-lexical"\nversion="1.2.2"\nrequires-python=">=3.11"\n'
                 'dependencies=["ephemeral-buffer-mcp-core==1.2.3"]\n',
                 encoding="utf-8",
             )
@@ -104,14 +112,18 @@ class TestReleaseChecks(unittest.TestCase):
                 "full_name": "ephemeral-buffer-mcp",
                 "lexical_name": "ephemeral-buffer-mcp-lexical",
                 "version": "1.2.3",
+                "requires_python": ">=3.11",
+                "classifiers": [
+                    "Programming Language :: Python :: 3",
+                    "Programming Language :: Python :: 3.11",
+                    "Programming Language :: Python :: 3.12",
+                ],
                 "core_dependencies": ["mcp>=2.3.0,<3", "urllib3>=2.8.0"],
                 "semantic_extra": [
-                    "filelock<3.20.4; python_version < '3.11'",
-                    "filelock>=4.2.1,<5; python_version >= '3.11'",
+                    "filelock>=4.2.1,<5",
                     "huggingface-hub>=0.20,<2",
                     "numpy>=1.24.0",
-                    "onnxruntime>=1.17,<1.24; python_version < '3.11'",
-                    "onnxruntime>=1.17,<2; python_version >= '3.11'",
+                    "onnxruntime>=1.17,<2",
                     "tokenizers>=0.15,<1",
                 ],
                 "full_dependencies": ["ephemeral-buffer-mcp-core[semantic]==1.2.3"],
@@ -122,6 +134,8 @@ class TestReleaseChecks(unittest.TestCase):
             core.write_text(
                 f'[project]\nname="{values["core_name"]}"\n'
                 f'version="{values["version"]}"\n'
+                f'requires-python="{values["requires_python"]}"\n'
+                f'classifiers={json.dumps(values["classifiers"])}\n'
                 f'dependencies={json.dumps(values["core_dependencies"])}\n'
                 "[project.optional-dependencies]\n"
                 f'semantic={json.dumps(values["semantic_extra"])}\n',
@@ -131,6 +145,8 @@ class TestReleaseChecks(unittest.TestCase):
             full.write_text(
                 f'[project]\nname="{values["full_name"]}"\n'
                 f'version="{values["version"]}"\n'
+                f'requires-python="{values["requires_python"]}"\n'
+                f'classifiers={json.dumps(values["classifiers"])}\n'
                 f'dependencies={json.dumps(values["full_dependencies"])}\n',
                 encoding="utf-8",
             )
@@ -138,6 +154,8 @@ class TestReleaseChecks(unittest.TestCase):
             lexical.write_text(
                 f'[project]\nname="{values["lexical_name"]}"\n'
                 f'version="{values["version"]}"\n'
+                f'requires-python="{values["requires_python"]}"\n'
+                f'classifiers={json.dumps(values["classifiers"])}\n'
                 f'dependencies={json.dumps(values["lexical_dependencies"])}\n',
                 encoding="utf-8",
             )
@@ -147,6 +165,11 @@ class TestReleaseChecks(unittest.TestCase):
             ({"core_name": "wrong-core-name"}, "core distribution must be named"),
             ({"full_name": "wrong-full-name"}, "full distribution must be named"),
             ({"lexical_name": "wrong-lexical-name"}, "lexical distribution must be named"),
+            ({"requires_python": ">=3.10"}, "must require Python >=3.11"),
+            (
+                {"classifiers": ["Programming Language :: Python :: 3.10"]},
+                "must not advertise Python 3.10 support",
+            ),
             ({"core_dependencies": []}, "only the base runtime dependencies"),
             ({"semantic_extra": []}, "must declare the supported ONNX runtime stack"),
             ({"full_dependencies": []}, "matching semantic core"),
@@ -170,20 +193,6 @@ class TestReleaseChecks(unittest.TestCase):
 
     def test_changelog_parser_skips_non_heading_lines(self):
         changelog_version("# Changelog\n\n## 1.2.3 - 2026-09-06", "1.2.3")
-
-    def test_python_310_tomli_fallback_imports(self):
-        source = REPOSITORY_ROOT / "scripts" / "release_checks.py"
-        original_import = __import__
-
-        def block_tomllib(name, *args, **kwargs):
-            if name == "tomllib":
-                raise ModuleNotFoundError("tomllib unavailable")
-            return original_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=block_tomllib):
-            namespace = runpy.run_path(str(source), run_name="release_checks_fallback")
-
-        self.assertEqual(namespace["tomllib"].__name__, "tomli")
 
     def test_tag_version_requires_semver(self):
         self.assertEqual(tag_version("v1.2.3"), "1.2.3")

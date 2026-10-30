@@ -19,15 +19,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Set up Python 3.10
+      - name: Set up Python 3.11
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Prepare Python 3.10 audit environment
+      - name: Prepare Python 3.11 audit environment
         run: |
-          python -m venv /tmp/pillow-watch-py310
-          /tmp/pillow-watch-py310/bin/python -m pip install --upgrade pip-audit
+          python -m venv /tmp/pillow-watch-py311
+          /tmp/pillow-watch-py311/bin/python -m pip install --upgrade pip-audit
 
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -43,7 +43,7 @@ jobs:
         id: probe
         run: |
           python scripts/pillow_compatibility_watch.py \
-            --python /tmp/pillow-watch-py310/bin/python \
+            --python /tmp/pillow-watch-py311/bin/python \
             --python /tmp/pillow-watch-py312/bin/python \
             --requirements requirements.txt \
             --github-output "$GITHUB_OUTPUT"
@@ -64,11 +64,12 @@ jobs:
           if [ "$already_notified" != "true" ]; then
             cat > /tmp/pillow-watch-comment.md <<'EOF'
           <!-- pillow-compatibility-watch:resolved -->
-          The weekly resolver check found Pillow absent or free of reported advisories in the current unpinned requirements on Python 3.10 and 3.12.
+          The weekly resolver check found Pillow absent or free of reported advisories in the current unpinned requirements on Python 3.11 and 3.12.
 
           The semantic runtime now uses text-only ONNX dependencies and does not require Pillow. Please review the supported install sets and close this blocker when the pinned locks are confirmed clean. This check only reports the unpinned requirements.
 
           — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: updated the automated dependency watch for the text-only embedding runtime.
+          — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: moved the dependency watch from Python 3.10 to Python 3.11.
           EOF
             gh issue comment 468 --body-file /tmp/pillow-watch-comment.md
           fi

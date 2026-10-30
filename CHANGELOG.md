@@ -7,11 +7,12 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Breaking: Replace FastEmbed with a text-only ONNX Runtime backend and limit
   `EPHEMERAL_EMBEDDING_MODEL` to the BGE-small fp32 model and its catalogue
   alias; other FastEmbed catalogue entries and Hugging Face IDs are unsupported.
-- Keep Python 3.10 support with its ONNX Runtime wheel-compatible version cap,
-  retain the BGE default and legacy FastEmbed cache environment variable, and
-  remove Pillow from semantic installs.
-- Pin the BGE model snapshot, remove the Pillow audit exception, and retain a
-  narrowly scoped FileLock audit exception for Python 3.10 while support is reviewed.
+- Breaking: Drop Python 3.10 support and require Python 3.11 or newer across the
+  core, full, and lexical distributions.
+- Retain the BGE default and legacy FastEmbed cache environment variable, remove
+  Pillow from semantic installs, pin the BGE model snapshot, and remove the
+  Pillow audit exception while using the patched FileLock release without a
+  Python-version-specific exception.
 - Require setuptools 77 or newer to build the full and lexical distributions
   with SPDX license metadata.
 - Preserve direct helper text and successful response shapes while returning
@@ -69,6 +70,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: modeled completed execution retirements and budgeted search payload versions
 
 — AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: typed blocked execution recovery metadata and preserved cumulative execution-list omissions
+
+— AI-signed: Codex | model: GPT-6 | effort: not specified | contribution: raised the supported minimum Python version to 3.11 and removed version-specific dependency and audit paths
 
 ## 0.11.0 - 2026-10-18
 
