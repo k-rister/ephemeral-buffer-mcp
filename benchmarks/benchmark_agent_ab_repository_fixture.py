@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 FIXTURE_VERSION = 4
+RUBRIC_VERSION = 4
 PROFILE = "repository-shaped-v1"
 
 TASKS = {
@@ -71,6 +72,7 @@ FILES = {
 def build_manifest() -> dict[str, Any]:
     return {
         "fixture_version": FIXTURE_VERSION,
+        "rubric_version": RUBRIC_VERSION,
         "profile": PROFILE,
         "privacy": "synthetic deterministic content only; no user prompts, logs, captures, or repository data",
         "tasks": TASKS,

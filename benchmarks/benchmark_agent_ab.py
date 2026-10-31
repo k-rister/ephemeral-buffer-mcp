@@ -6,17 +6,41 @@ import json
 import math
 import random
 import statistics
+from functools import lru_cache
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
 import benchmarks.workload_results as wr
+from benchmarks.agent_ab_statistics import (
+    bootstrap_discordance_upper,
+    exact_mcnemar_pvalue,
+    holm_adjust,
+    newcombe_paired_score_interval,
+    normal_approximate_repetitions,
+    select_simulated_repetitions,
+    simulate_paired_mcnemar_power,
+)
 
 
-SCHEMA_VERSION = 1
-SUMMARY_SCHEMA_VERSION = 4
-RECORDS_SCHEMA_VERSION = 9
+SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 5
+RECORDS_SCHEMA_VERSION = 10
 TASK_FIXTURE_VERSION = 4
+TASK_RUBRIC_VERSION = 4
 MODES = ("control", "mcp")
+DEFAULT_AGENT_AB_SEED = 20260909
+DEFAULT_DESIGN_SEED = 20261031
+DEFAULT_POWER_SIMULATIONS = 1000
+DEFAULT_ALPHA = 0.05
+DEFAULT_EFFECT = 0.10
+DEFAULT_TARGET_POWER = 0.80
+DEFAULT_PRACTICAL_EFFECT = 0.10
+STAGE_PERCENTAGES = (50, 75, 100)
+STAGE_ALPHA_SPENDING = (0.005, 0.015, 0.030)
+FINAL_LOOK_ALPHA = STAGE_ALPHA_SPENDING[-1]
+SCENARIO_EFFECTS = (0.05, 0.10, 0.20)
+SCENARIO_POWERS = (0.80, 0.90)
 EXPOSURE_STATES = (
     "criterion_hit",
     "response_without_criterion_hit",
@@ -115,14 +139,296 @@ PAIRED_MEASUREMENTS = {
 }
 
 
-def build_schedule(repetitions: int = 5, seed: int = 20260909) -> dict[str, Any]:
-    """Build a deterministic counterbalanced task/mode schedule."""
+def stage_repetitions(repetitions: int) -> list[dict[str, int | float]]:
+    """Return the preplanned 50%, 75%, and 100% cumulative looks."""
     if repetitions < 1:
+        raise ValueError("repetitions must be positive")
+    values = []
+    prior = 0
+    cumulative_alpha = 0.0
+    for percentage, alpha in zip(STAGE_PERCENTAGES, STAGE_ALPHA_SPENDING):
+        count = max(prior, math.ceil(repetitions * percentage / 100))
+        cumulative_alpha += alpha
+        if count == prior and values:
+            values[-1]["percent"] = percentage
+            values[-1]["alpha_spending"] = float(values[-1]["alpha_spending"]) + alpha
+            values[-1]["cumulative_alpha"] = cumulative_alpha
+            continue
+        values.append({
+            "percent": percentage,
+            "repetitions": count,
+            "alpha_spending": alpha,
+            "cumulative_alpha": cumulative_alpha,
+        })
+        prior = count
+    return values
+
+
+def _bootstrap_model_inputs(
+    payload: dict[str, Any] | None,
+    schedule: dict[str, Any] | None,
+    *,
+    seed: int,
+) -> tuple[dict[str, dict[str, Any]], str, bool]:
+    """Build task-specific paired-model inputs from current-rubric records."""
+    defaults = {
+        task["id"]: {
+            "baseline_success_rate": 0.5,
+            "discordance_rate": None,
+            "matched_repetitions": 0,
+            "source": "maximum-discordance-stress-model",
+            "planning_assumption": "baseline success 0.5; use the maximum feasible discordance for each target effect",
+        }
+        for task in TASKS
+    }
+    if payload is None and schedule is None:
+        return defaults, "conservative-maximum-discordance", True
+    if payload is None or schedule is None:
+        raise ValueError("power pilot payload and schedule must be supplied together")
+    if (
+        payload.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or payload.get("task_rubric_version") != TASK_RUBRIC_VERSION
+        or schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or schedule.get("task_rubric_version", TASK_RUBRIC_VERSION) != TASK_RUBRIC_VERSION
+        or payload.get("records_schema_version", 1) < 6
+    ):
+        raise ValueError("power pilot records must contain current fixture-v4/rubric-v4 paired task-success outcomes")
+    records = validate_records(payload, schedule)
+    grouped: dict[tuple[int, str], dict[str, dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault((record["repetition"], record["task_id"]), {})[record["mode"]] = record
+    results = {}
+    insufficient = False
+    for task_index, task in enumerate(TASKS):
+        task_pairs = [
+            (pair["control"]["task_success"], pair["mcp"]["task_success"])
+            for (_, task_id), pair in grouped.items()
+            if task_id == task["id"] and set(pair) == set(MODES)
+        ]
+        if not task_pairs:
+            insufficient = True
+            results[task["id"]] = defaults[task["id"]]
+            continue
+        bootstrap = bootstrap_discordance_upper(
+            task_pairs,
+            simulations=5000,
+            seed=seed + task_index,
+            quantile=0.95,
+        )
+        if len(task_pairs) < 20:
+            insufficient = True
+        results[task["id"]] = {
+            **bootstrap,
+            "discordance_rate": bootstrap["discordance_upper_bootstrap"],
+            "source": "paired-records-bootstrap-95th-percentile",
+        }
+    return results, "paired-records-bootstrap", insufficient
+
+
+def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
+    """Use the largest feasible discordance supported by pilot/bootstrap data."""
+    p0 = float(model.get("baseline_success_rate", 0.5))
+    observed_upper = model.get("discordance_rate")
+    if observed_upper is None:
+        return 1.0 - abs(effect)
+    upper = float(observed_upper)
+    feasible_caps = []
+    for signed_effect in (abs(effect), -abs(effect)):
+        cap = min(
+            2.0 * (1.0 - p0) - signed_effect,
+            2.0 * p0 + signed_effect,
+        )
+        if cap >= abs(effect):
+            feasible_caps.append(cap)
+    if not feasible_caps:
+        return 1.0 - abs(effect)
+    return max(abs(effect), min(upper, max(feasible_caps), 1.0))
+
+
+def _pilot_cost_profile(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Estimate scale from current records without guessing token semantics."""
+    if payload is None:
+        return {
+            "mean_duration_seconds_per_invocation": None,
+            "mean_input_tokens_per_invocation": None,
+            "mean_output_tokens_per_invocation": None,
+            "runtime_note": "unavailable without current-protocol timing records",
+            "token_estimates_note": "unavailable until provider usage semantics are calibrated",
+        }
+    runs = payload.get("runs", [])
+    durations = [
+        float(record["duration_seconds"])
+        for record in runs
+        if isinstance(record, dict)
+        and _is_nonnegative_finite_number(record.get("duration_seconds"))
+    ]
+    usage = payload.get("usage_interpretation", {})
+    means: dict[str, float | None] = {}
+    for field in ("input_tokens", "output_tokens"):
+        declared = isinstance(usage, dict) and usage.get(field) == "per-invocation-total"
+        values = [
+            float(record[field])
+            for record in runs
+            if isinstance(record, dict) and _is_nonnegative_finite_number(record.get(field))
+        ]
+        means[field] = statistics.mean(values) if declared and values and len(values) == len(runs) else None
+    return {
+        "mean_duration_seconds_per_invocation": statistics.mean(durations) if durations else None,
+        "mean_input_tokens_per_invocation": means["input_tokens"],
+        "mean_output_tokens_per_invocation": means["output_tokens"],
+        "runtime_note": "mean duration from supplied current-protocol records" if durations else "unavailable without current-protocol timing records",
+        "token_estimates_note": (
+            "provider usage declared per-invocation-total"
+            if all(value is not None for value in means.values())
+            else "unavailable until provider usage semantics are calibrated"
+        ),
+    }
+
+
+def build_power_design(
+    pilot_payload: dict[str, Any] | None = None,
+    pilot_schedule: dict[str, Any] | None = None,
+    *,
+    seed: int = DEFAULT_DESIGN_SEED,
+    simulations: int = DEFAULT_POWER_SIMULATIONS,
+) -> dict[str, Any]:
+    """Create a reproducible paired-McNemar design and scenario cost table."""
+    model_inputs, evidence_source, pilot_required = _bootstrap_model_inputs(
+        pilot_payload, pilot_schedule, seed=seed
+    )
+    cost_profile = _pilot_cost_profile(pilot_payload)
+    task_ids = [task["id"] for task in TASKS]
+    default_discordance = [
+        _scenario_discordance(model_inputs[task_id], DEFAULT_EFFECT)
+        for task_id in task_ids
+    ]
+    selected = select_simulated_repetitions(
+        effect=DEFAULT_EFFECT,
+        target_power=DEFAULT_TARGET_POWER,
+        discordance_rates=default_discordance,
+        simulations=simulations,
+        family_alpha=FINAL_LOOK_ALPHA,
+        seed=seed,
+    )
+    scenarios = []
+    for effect_index, effect in enumerate(SCENARIO_EFFECTS):
+        discordance_rates = [
+            _scenario_discordance(model_inputs[task_id], effect)
+            for task_id in task_ids
+        ]
+        for power_index, target_power in enumerate(SCENARIO_POWERS):
+            scenario_seed = seed + 100 + effect_index * len(SCENARIO_POWERS) + power_index
+            if effect == DEFAULT_EFFECT and target_power == DEFAULT_TARGET_POWER:
+                repetitions = selected["repetitions"]
+                simulated = selected["power_simulation"]
+            else:
+                repetitions = normal_approximate_repetitions(
+                    effect=effect,
+                    target_power=target_power,
+                    discordance_rates=discordance_rates,
+                    family_alpha=FINAL_LOOK_ALPHA,
+                )
+                # The exact paired test and Holm correction verify each scenario.
+                # Increase in 2% steps until the lower Monte Carlo bound clears target.
+                while True:
+                    simulated = simulate_paired_mcnemar_power(
+                        repetitions=repetitions,
+                        effect=effect,
+                        discordance_rates=discordance_rates,
+                        simulations=simulations,
+                        alpha=FINAL_LOOK_ALPHA,
+                        seed=scenario_seed + repetitions,
+                    )
+                    if min(simulated["power_lower_95_by_task"]) >= target_power:
+                        break
+                    repetitions += max(1, math.ceil(repetitions * 0.02))
+            variance = max(
+                discordance - effect * effect for discordance in discordance_rates
+            )
+            expected_ci = 1.96 * math.sqrt(variance / repetitions)
+            adjusted_z = NormalDist().inv_cdf(1.0 - FINAL_LOOK_ALPHA / (2.0 * len(task_ids)))
+            adjusted_ci = adjusted_z * math.sqrt(variance / repetitions)
+            invocations = repetitions * len(task_ids) * len(MODES)
+            scenarios.append({
+                "effect_pp": round(effect * 100),
+                "target_power": target_power,
+                "family_alpha": DEFAULT_ALPHA,
+                "final_look_alpha": FINAL_LOOK_ALPHA,
+                "task_count": len(task_ids),
+                "discordance_rates": dict(zip(task_ids, discordance_rates)),
+                "repetitions_per_task_and_mode": repetitions,
+                "simulated_power_by_task": dict(zip(task_ids, simulated["power_by_task"])),
+                "power_lower_95_by_task": dict(zip(task_ids, simulated["power_lower_95_by_task"])),
+                "expected_paired_score_ci95_half_width_pp": expected_ci * 100,
+                "holm_first_step_adjusted_ci_half_width_pp": adjusted_ci * 100,
+                "invocations_per_variant": invocations,
+                "estimated_runtime_seconds_per_variant": (
+                    cost_profile["mean_duration_seconds_per_invocation"] * invocations
+                    if cost_profile["mean_duration_seconds_per_invocation"] is not None else None
+                ),
+                "estimated_input_tokens_per_variant": (
+                    cost_profile["mean_input_tokens_per_invocation"] * invocations
+                    if cost_profile["mean_input_tokens_per_invocation"] is not None else None
+                ),
+                "estimated_output_tokens_per_variant": (
+                    cost_profile["mean_output_tokens_per_invocation"] * invocations
+                    if cost_profile["mean_output_tokens_per_invocation"] is not None else None
+                ),
+                "token_estimates_note": cost_profile["token_estimates_note"],
+            })
+    return {
+        "schema_version": 1,
+        "method": "seeded paired binary simulation; exact two-sided McNemar tests; Holm familywise correction",
+        "effect_target": DEFAULT_EFFECT,
+        "power_target": DEFAULT_TARGET_POWER,
+        "family_alpha": DEFAULT_ALPHA,
+        "task_count": len(task_ids),
+        "pilot_evidence_source": evidence_source,
+        "pilot_required": pilot_required,
+        "pilot_minimum_repetitions_per_task": 20,
+        "bootstrap_method": "resample matched current-rubric pairs 5000 times; use the 95th percentile discordance rate",
+        "paired_model_by_task": model_inputs,
+        "simulation_seed": seed,
+        "power_simulations": simulations,
+        "power_confidence_rule": "per-task 95% Wilson lower bound must meet target at the final-look Holm alpha allocation",
+        "final_look_alpha": FINAL_LOOK_ALPHA,
+        "selected_repetitions": selected["repetitions"],
+        "selected_power_by_task": dict(zip(task_ids, selected["power_simulation"]["power_by_task"])),
+        "selected_power_lower_95_by_task": dict(zip(task_ids, selected["power_simulation"]["power_lower_95_by_task"])),
+        "selected_power_rule": selected["selection_rule"],
+        "stage_percentages": list(STAGE_PERCENTAGES),
+        "stage_alpha_spending": list(STAGE_ALPHA_SPENDING),
+        "scenario_matrix": scenarios,
+        "cost_basis": "one invocation for each task, mode, and repetition; costs are per variant",
+        "runtime_note": cost_profile["runtime_note"],
+        "token_estimates_note": cost_profile["token_estimates_note"],
+    }
+
+
+@lru_cache(maxsize=1)
+def _default_power_design() -> dict[str, Any]:
+    """Cache the default design so smoke schedules do not resimulate it."""
+    return build_power_design()
+
+
+def build_schedule(
+    repetitions: int | None = None,
+    seed: int = DEFAULT_AGENT_AB_SEED,
+    *,
+    design: dict[str, Any] | None = None,
+    model_config: str | None = None,
+    repository_fixture: str | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic counterbalanced task/mode schedule."""
+    is_explicit = repetitions is not None
+    power_design = design if design is not None else _default_power_design()
+    selected_repetitions = repetitions if repetitions is not None else power_design["selected_repetitions"]
+    if selected_repetitions < 1:
         raise ValueError("repetitions must be positive")
     rng = random.Random(seed)
     schedule = []
     sequence = 1
-    for repetition in range(1, repetitions + 1):
+    for repetition in range(1, selected_repetitions + 1):
         task_order = [task["id"] for task in TASKS]
         rng.shuffle(task_order)
         for task_id in task_order:
@@ -140,8 +446,30 @@ def build_schedule(repetitions: int = 5, seed: int = 20260909) -> dict[str, Any]
         "schema_version": SCHEMA_VERSION,
         "benchmark": "agent-ab",
         "task_fixture_version": TASK_FIXTURE_VERSION,
+        "task_rubric_version": TASK_RUBRIC_VERSION,
         "seed": seed,
-        "repetitions": repetitions,
+        "repetitions": selected_repetitions,
+        "selected_design_repetitions": power_design["selected_repetitions"],
+        "repetitions_explicit": is_explicit,
+        "requested_repetitions": repetitions,
+        "run_label": (
+            "exploratory"
+            if is_explicit and selected_repetitions < power_design["selected_repetitions"]
+            else "evidence-ready-schedule"
+        ),
+        "stage_schedule": (
+            stage_repetitions(selected_repetitions)
+            if not is_explicit
+            else [{
+                "percent": 100,
+                "repetitions": selected_repetitions,
+                "alpha_spending": DEFAULT_ALPHA,
+                "cumulative_alpha": DEFAULT_ALPHA,
+            }]
+        ),
+        "model_config": model_config,
+        "repository_fixture": repository_fixture,
+        "statistical_design": power_design,
         "modes": list(MODES),
         "tasks": list(TASKS),
         "schedule": schedule,
@@ -188,16 +516,30 @@ def _is_nonnegative_finite_number(value: Any) -> bool:
     return isinstance(value, float) and math.isfinite(value) and value >= 0
 
 
-def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[dict[str, Any]]:
+def validate_records(
+    payload: dict[str, Any],
+    schedule: dict[str, Any],
+    *,
+    allow_staged_prefix: bool = False,
+) -> list[dict[str, Any]]:
     """Validate balanced metadata-only agent records against a schedule."""
-    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("benchmark") != "agent-ab":
+    if payload.get("schema_version") not in (1, SCHEMA_VERSION) or payload.get("benchmark") != "agent-ab":
         raise ValueError("records schema or benchmark name is invalid")
     if payload.get("task_fixture_version") != schedule.get("task_fixture_version"):
         raise ValueError("records task_fixture_version does not match schedule")
+    payload_rubric = payload.get("task_rubric_version")
+    schedule_rubric = schedule.get("task_rubric_version")
+    if payload_rubric is not None and schedule_rubric is not None and payload_rubric != schedule_rubric:
+        raise ValueError("records task_rubric_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, 4, 5, 6, 7, 8, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
+    if records_schema_version >= 10 and (
+        payload_rubric != TASK_RUBRIC_VERSION
+        or schedule_rubric != TASK_RUBRIC_VERSION
+    ):
+        raise ValueError("current records require matching fixture-v4/rubric-v4 metadata")
     run_keys = (
         RUN_KEYS
         if records_schema_version == 1
@@ -319,7 +661,17 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         actual[key] = record
     missing = sorted(set(expected) - set(actual))
     if missing:
-        raise ValueError(f"records are missing scheduled runs: {missing[0]}")
+        if not allow_staged_prefix or not actual:
+            raise ValueError(f"records are missing scheduled runs: {missing[0]}")
+        completed_repetitions = sorted({record["repetition"] for record in actual.values()})
+        last_repetition = completed_repetitions[-1]
+        if completed_repetitions != list(range(1, last_repetition + 1)):
+            raise ValueError("staged records must contain a contiguous repetition prefix")
+        expected_prefix = {
+            key for key, item in expected.items() if item["repetition"] <= last_repetition
+        }
+        if set(actual) != expected_prefix:
+            raise ValueError("staged records must contain every matched run through the latest repetition")
     return list(actual.values())
 
 
@@ -409,9 +761,226 @@ def _usage_accounting(records: list[dict[str, Any]], field: str) -> dict[str, An
     }
 
 
+def validate_schedule_extension(
+    previous_schedule: dict[str, Any],
+    extended_schedule: dict[str, Any],
+) -> None:
+    """Require an extension to preserve the seed, rubric, and full old prefix."""
+    stable_fields = (
+        "benchmark",
+        "seed",
+        "task_fixture_version",
+        "task_rubric_version",
+        "tasks",
+        "modes",
+        "model_config",
+        "repository_fixture",
+        "selected_design_repetitions",
+        "repetitions_explicit",
+        "statistical_design",
+    )
+    for field in stable_fields:
+        if previous_schedule.get(field) != extended_schedule.get(field):
+            raise ValueError(f"schedule extension changed {field}")
+    if (
+        not previous_schedule.get("repetitions_explicit", True)
+        and previous_schedule.get("stage_schedule") != extended_schedule.get("stage_schedule")
+    ):
+        raise ValueError("schedule extension changed stage_schedule")
+    previous_items = previous_schedule.get("schedule")
+    extended_items = extended_schedule.get("schedule")
+    if not isinstance(previous_items, list) or not isinstance(extended_items, list):
+        raise ValueError("schedule extension requires schedule item lists")
+    if len(extended_items) < len(previous_items) or extended_items[:len(previous_items)] != previous_items:
+        raise ValueError("schedule extension must preserve the previous schedule as an exact prefix")
+    if extended_schedule.get("repetitions", 0) < previous_schedule.get("repetitions", 0):
+        raise ValueError("schedule extension cannot reduce planned repetitions")
+
+
+def _statistical_adequacy(
+    runs: list[dict[str, Any]],
+    schedule: dict[str, Any],
+    records_schema_version: int,
+    records_rubric_version: int | None,
+) -> dict[str, Any]:
+    """Summarize paired binary evidence and staged stopping decisions."""
+    design = schedule.get("statistical_design")
+    if records_schema_version < 6 or not isinstance(design, dict):
+        return {
+            "status": "unknown",
+            "adequacy_known": False,
+            "continue": False,
+            "reason": (
+                "legacy records lack paired objective outcomes"
+                if records_schema_version < 6
+                else "summary predates the statistical design metadata"
+            ),
+            "tasks": {},
+        }
+    if (
+        schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or schedule.get("task_rubric_version") != TASK_RUBRIC_VERSION
+        or records_rubric_version != TASK_RUBRIC_VERSION
+    ):
+        return {
+            "status": "unknown",
+            "adequacy_known": False,
+            "continue": False,
+            "reason": "statistical evidence cannot be pooled across fixture or rubric versions",
+            "tasks": {},
+        }
+
+    grouped: dict[tuple[int, str], dict[str, dict[str, Any]]] = {}
+    for record in runs:
+        grouped.setdefault((record["repetition"], record["task_id"]), {})[record["mode"]] = record
+    pairs_by_task: dict[str, list[dict[str, Any]]] = {task["id"]: [] for task in TASKS}
+    for (_, task_id), pair in grouped.items():
+        if task_id in pairs_by_task and set(pair) == set(MODES):
+            pairs_by_task[task_id].append(pair)
+    counts = {task_id: len(pairs) for task_id, pairs in pairs_by_task.items()}
+    completed = min(counts.values(), default=0)
+    planned = int(schedule.get("repetitions", 0))
+    target = int(schedule.get("selected_design_repetitions", design.get("selected_repetitions", planned)))
+    explicit = bool(schedule.get("repetitions_explicit", False))
+    exploratory_override = explicit and planned < target
+    looks = schedule.get("stage_schedule", [])
+    look = next(
+        (item for item in reversed(looks) if completed >= item.get("repetitions", 0)),
+        None,
+    )
+    if look is None and looks:
+        look = looks[0]
+    alpha_increment = float(look.get("alpha_spending", DEFAULT_ALPHA)) if look else DEFAULT_ALPHA
+    cumulative_alpha = float(look.get("cumulative_alpha", alpha_increment)) if look else DEFAULT_ALPHA
+    alpha = alpha_increment
+    simultaneous_confidence = 1.0 - alpha / max(1, len(pairs_by_task))
+    p_values: list[float | None] = []
+    interim: dict[str, dict[str, Any]] = {}
+    for task in TASKS:
+        task_id = task["id"]
+        pairs = sorted(pairs_by_task[task_id], key=lambda pair: pair["mcp"]["repetition"])
+        if not pairs:
+            p_values.append(None)
+            interim[task_id] = {
+                "matched_repetitions": 0,
+                "status": "unknown",
+                "paired_score_interval": None,
+                "exact_mcnemar_p": None,
+            }
+            continue
+        both_successes = sum(
+            pair["control"]["task_success"] and pair["mcp"]["task_success"]
+            for pair in pairs
+        )
+        mcp_only = sum(
+            pair["mcp"]["task_success"] and not pair["control"]["task_success"]
+            for pair in pairs
+        )
+        control_only = sum(
+            pair["control"]["task_success"] and not pair["mcp"]["task_success"]
+            for pair in pairs
+        )
+        interval = newcombe_paired_score_interval(
+            both_successes=both_successes,
+            mcp_only_successes=mcp_only,
+            control_only_successes=control_only,
+            count=len(pairs),
+            confidence=simultaneous_confidence,
+        )
+        p_value = exact_mcnemar_pvalue(mcp_only, control_only)
+        p_values.append(p_value)
+        interim[task_id] = {
+            "matched_repetitions": len(pairs),
+            "control_successes": both_successes + control_only,
+            "mcp_successes": both_successes + mcp_only,
+            "both_successes": both_successes,
+            "mcp_only_successes": mcp_only,
+            "control_only_successes": control_only,
+            "difference": (mcp_only - control_only) / len(pairs),
+            "paired_score_interval": interval,
+            "exact_mcnemar_p": p_value,
+            "interval_confidence_simultaneous": simultaneous_confidence,
+        }
+    adjusted = holm_adjust(p_values)
+    task_results = {}
+    at_cap = completed >= planned and planned >= target
+    for task, adjusted_p in zip(TASKS, adjusted):
+        task_id = task["id"]
+        result = interim[task_id]
+        interval = result.get("paired_score_interval")
+        interval_excludes_zero = (
+            isinstance(interval, dict)
+            and (interval["lower"] > 0.0 or interval["upper"] < 0.0)
+        )
+        direction_established = (
+            adjusted_p is not None
+            and adjusted_p <= alpha
+            and result.get("difference") is not None
+            and result["difference"] != 0
+            and interval_excludes_zero
+        )
+        equivalent = (
+            isinstance(interval, dict)
+            and interval["lower"] >= -DEFAULT_PRACTICAL_EFFECT
+            and interval["upper"] <= DEFAULT_PRACTICAL_EFFECT
+        )
+        if exploratory_override:
+            task_status = "exploratory"
+        elif direction_established:
+            task_status = "direction_established"
+        elif equivalent:
+            task_status = "within_practical_range"
+        elif at_cap:
+            task_status = "powered_but_inconclusive"
+        else:
+            task_status = "collect_more"
+        task_results[task_id] = {
+            **result,
+            "holm_adjusted_p": adjusted_p,
+            "direction_established": direction_established,
+            "within_practical_range": equivalent,
+            "status": task_status,
+            "target_repetitions": target,
+            "adequate_repetitions": result["matched_repetitions"] >= target,
+        }
+
+    if exploratory_override:
+        status = "exploratory"
+        should_continue = False
+    elif all(item["status"] in {"direction_established", "within_practical_range"} for item in task_results.values()):
+        status = "evidence_ready"
+        should_continue = False
+    elif at_cap:
+        status = "powered_but_inconclusive"
+        should_continue = False
+    else:
+        status = "collecting"
+        should_continue = True
+    return {
+        "status": status,
+        "adequacy_known": True,
+        "continue": should_continue,
+        "planned_repetitions": planned,
+        "selected_design_repetitions": target,
+        "completed_matched_repetitions_by_task": counts,
+        "extension_stage": look,
+        "look_alpha_spending": alpha_increment,
+        "look_cumulative_alpha": cumulative_alpha,
+        "family_alpha": DEFAULT_ALPHA,
+        "multiplicity_method": "Holm exact McNemar p-values across tasks",
+        "interval_method": "Newcombe 1998 method 10 paired score interval with Bonferroni simultaneous confidence",
+        "practical_effect_range": [-DEFAULT_PRACTICAL_EFFECT, DEFAULT_PRACTICAL_EFFECT],
+        "tasks": task_results,
+    }
+
+
 def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict[str, Any]:
     """Return aggregate and paired outcome summaries without raw agent data."""
-    runs = validate_records(payload, schedule)
+    runs = validate_records(
+        payload,
+        schedule,
+        allow_staged_prefix=not schedule.get("repetitions_explicit", True),
+    )
     records_schema_version = payload.get("records_schema_version", 1)
     by_mode = {}
     for mode in MODES:
@@ -656,13 +1225,25 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     elif paired["task_success"]["mean"] < 0 or paired["signal_retrieved"]["mean"] < 0:
         recommendations.insert(1, "MCP reduced at least one paired task outcome; inspect failures and routing choices before enabling broader use.")
 
+    adequacy = _statistical_adequacy(
+        runs,
+        schedule,
+        records_schema_version,
+        payload.get("task_rubric_version"),
+    )
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "benchmark": "agent-ab",
         "records_schema_version": max(payload.get("records_schema_version", 1), 1),
         "task_fixture_version": schedule["task_fixture_version"],
+        "task_rubric_version": schedule.get("task_rubric_version"),
         "seed": schedule["seed"],
         "repetitions": schedule["repetitions"],
+        "planned_repetitions": schedule["repetitions"],
+        "completed_repetitions_by_task": adequacy.get("completed_matched_repetitions_by_task", {}),
+        "extension_stage": adequacy.get("extension_stage"),
+        "statistical_design": schedule.get("statistical_design"),
+        "statistical_adequacy": adequacy,
         "protocol": payload["protocol"],
         "mode_summaries": by_mode,
         "paired_deltas_mcp_minus_control": paired,
@@ -741,6 +1322,7 @@ def summary_workload_result(summary: dict[str, Any]) -> dict[str, Any]:
         parameters={
             "seed": summary["seed"],
             "repetitions": summary["repetitions"],
+            "task_rubric_version": summary.get("task_rubric_version"),
             "protocol": summary["protocol"],
         },
         runs=runs,
@@ -814,6 +1396,7 @@ def records_workload_result(
         parameters={
             "seed": schedule["seed"],
             "repetitions": schedule["repetitions"],
+            "task_rubric_version": schedule.get("task_rubric_version"),
             "protocol": payload["protocol"],
         },
         runs=runs,
@@ -824,8 +1407,12 @@ def records_workload_result(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schedule-output", type=Path, help="Write a deterministic run schedule")
-    parser.add_argument("--repetitions", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=20260909)
+    parser.add_argument("--repetitions", type=int, help="Explicit smoke/evaluation override; omitted selects the powered A/B design")
+    parser.add_argument("--seed", type=int, default=DEFAULT_AGENT_AB_SEED)
+    parser.add_argument("--model-config", help="Model identifier used to validate resumable stages")
+    parser.add_argument("--repository-fixture", help="Fixture profile used to validate resumable stages")
+    parser.add_argument("--pilot-records", type=Path, help="Current fixture-v4/rubric-v4 records used to bootstrap paired outcomes")
+    parser.add_argument("--pilot-schedule", type=Path, help="Schedule for --pilot-records when not embedded")
     parser.add_argument("--records", type=Path, help="Analyze an external metadata-only records envelope")
     parser.add_argument("--schedule", type=Path, help="Schedule JSON when it is not embedded in records")
     parser.add_argument("--output", type=Path, help="Write an aggregate summary JSON")
@@ -836,10 +1423,37 @@ def main() -> None:
     if args.schedule_output and (args.result or args.experiment or args.metadata or args.redact):
         parser.error("--result, --experiment, --metadata, and --redact require --records")
     if args.schedule_output:
-        schedule = build_schedule(args.repetitions, args.seed)
+        pilot_payload = _read_json(args.pilot_records) if args.pilot_records else None
+        pilot_schedule = (
+            _read_json(args.pilot_schedule)
+            if args.pilot_schedule
+            else pilot_payload.get("schedule") if pilot_payload else None
+        )
+        if args.pilot_schedule and not args.pilot_records:
+            parser.error("--pilot-schedule requires --pilot-records")
+        if pilot_payload:
+            pilot_protocol = pilot_payload.get("protocol", {})
+            if args.model_config and pilot_protocol.get("model_config") != args.model_config:
+                parser.error("pilot records model_config must match --model-config")
+            if args.repository_fixture and pilot_protocol.get("repository_fixture") != args.repository_fixture:
+                parser.error("pilot records repository_fixture must match --repository-fixture")
+        design = build_power_design(pilot_payload, pilot_schedule) if pilot_payload else _default_power_design()
+        schedule = build_schedule(
+            args.repetitions,
+            args.seed,
+            design=design,
+            model_config=args.model_config,
+            repository_fixture=args.repository_fixture,
+        )
         args.schedule_output.parent.mkdir(parents=True, exist_ok=True)
         args.schedule_output.write_text(json.dumps(schedule, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps(schedule, indent=2, sort_keys=True))
+        print(json.dumps({
+            "schedule": str(args.schedule_output),
+            "repetitions": schedule["repetitions"],
+            "selected_design_repetitions": schedule["selected_design_repetitions"],
+            "run_label": schedule["run_label"],
+            "pilot_required": design["pilot_required"],
+        }, sort_keys=True))
         return
 
     payload = _read_json(args.records)

@@ -43,6 +43,29 @@ def _paired_delta(item: Any) -> str:
     return f"{item['mean'] * 100:+.1f} pp ± {item['ci95_half_width'] * 100:.1f}"
 
 
+def _display_number(value: Any, digits: int = 1) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.{digits}f}"
+    return "n/a"
+
+
+def _display_ci(interval: Any) -> str:
+    if not isinstance(interval, dict):
+        return "n/a"
+    return f"[{interval['lower'] * 100:+.1f}, {interval['upper'] * 100:+.1f}] pp"
+
+
+def _display_status(value: Any) -> str:
+    labels = {
+        "evidence_ready": "evidence-ready",
+        "powered_but_inconclusive": "powered-but-inconclusive",
+        "direction_established": "direction established",
+        "within_practical_range": "within practical range",
+        "collect_more": "collect more",
+    }
+    return labels.get(value, value.replace("_", " ") if isinstance(value, str) else "unknown")
+
+
 def _task_ids(summary: dict[str, Any]) -> set[str]:
     task_ids: set[str] = set()
     for mode_summary in summary.get("task_success_by_mode", {}).values():
@@ -70,28 +93,120 @@ def _response_state_outcome(outcomes: dict[str, Any], state: str) -> Any:
 
 def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str:
     """Render task success, criterion outcomes, and response/outcome cross-tabs."""
-    lines = ["", "## Agent A/B task success", ""]
+    lines = ["", "## Agent A/B statistical design", ""]
     lines.append(
-        "Counts are objective task successes over scheduled runs. Paired deltas are "
+        "Task-success planning uses matched binary outcomes, exact two-sided "
+        "McNemar tests, and Holm correction across tasks. The schedule reports "
+        "the 5/10/20-point and 80%/90% scenario matrix, paired score-interval "
+        "precision, and projected invocation costs. Runtime and provider token "
+        "totals are shown only when current-protocol measurements are interpretable."
+    )
+    lines.extend((
+        "",
+        "| Revision | Run evidence label | Design repetitions | Stage | Pilot evidence |",
+        "|---|---|---:|---|---|",
+    ))
+    for revision, summary in summaries:
+        design = summary.get("statistical_design")
+        adequacy = summary.get("statistical_adequacy")
+        if not isinstance(design, dict):
+            lines.append(f"| {revision} | unknown (legacy summary) | n/a | n/a | n/a |")
+            continue
+        status = adequacy.get("status", "unknown") if isinstance(adequacy, dict) else "unknown"
+        stage = adequacy.get("extension_stage") if isinstance(adequacy, dict) else None
+        stage_label = (
+            f"{stage.get('percent')}% ({stage.get('repetitions')} reps)"
+            if isinstance(stage, dict) else "n/a"
+        )
+        evidence = design.get("pilot_evidence_source", "unknown")
+        if design.get("pilot_required"):
+            evidence = f"{evidence}; 20/task pilot required"
+        lines.append(
+            f"| {revision} | {_display_status(status)} | "
+            f"{design.get('selected_repetitions', 'n/a')} | {stage_label} | {evidence} |"
+        )
+
+    lines.extend((
+        "",
+        "| Revision | Difference target | Target power | Simulated minimum power (95% lower bound) | Repetitions/task/mode | Paired score CI half-width (pp) | Invocations/variant | Runtime/variant (s) | Input tokens/variant | Output tokens/variant |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ))
+    for revision, summary in summaries:
+        design = summary.get("statistical_design")
+        scenarios = design.get("scenario_matrix", []) if isinstance(design, dict) else []
+        if not scenarios:
+            lines.append(f"| {revision} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+            continue
+        for scenario in scenarios:
+            powers = scenario.get("simulated_power_by_task", {})
+            lower_bounds = scenario.get("power_lower_95_by_task", {})
+            simulated_power = (
+                f"{min(powers.values()) * 100:.1f}% (LB {min(lower_bounds.values()) * 100:.1f}%)"
+                if powers and lower_bounds else "n/a"
+            )
+            lines.append(
+                f"| {revision} | {scenario.get('effect_pp', 'n/a')} pp | "
+                f"{_display_number(scenario.get('target_power') * 100 if isinstance(scenario.get('target_power'), (int, float)) else None)}% | "
+                f"{simulated_power} | "
+                f"{scenario.get('repetitions_per_task_and_mode', 'n/a')} | "
+                f"{_display_number(scenario.get('expected_paired_score_ci95_half_width_pp'))} | "
+                f"{scenario.get('invocations_per_variant', 'n/a')} | "
+                f"{_display_number(scenario.get('estimated_runtime_seconds_per_variant'))} | "
+                f"{_display_number(scenario.get('estimated_input_tokens_per_variant'), 0)} | "
+                f"{_display_number(scenario.get('estimated_output_tokens_per_variant'), 0)} |"
+            )
+    missing_runtime = any(
+        scenario.get("estimated_runtime_seconds_per_variant") is None
+        for _, summary in summaries
+        for scenario in (summary.get("statistical_design") or {}).get("scenario_matrix", [])
+    )
+    missing_tokens = any(
+        scenario.get("estimated_input_tokens_per_variant") is None
+        or scenario.get("estimated_output_tokens_per_variant") is None
+        for _, summary in summaries
+        for scenario in (summary.get("statistical_design") or {}).get("scenario_matrix", [])
+    )
+    notes = []
+    if missing_runtime:
+        notes.append("`n/a` runtime projections mean current-protocol timing data is unavailable.")
+    if missing_tokens:
+        notes.append("Provider token estimates remain unavailable until usage semantics are interpretable.")
+    if notes:
+        lines.extend(("", " ".join(notes)))
+
+    lines.extend(("", "## Agent A/B task success", ""))
+    lines.append(
+        "Counts are objective task successes over completed runs. Paired deltas are "
         "within-task MCP minus control percentage points with a 95% confidence "
         "interval half-width. `n/a` means the summary predates that metric."
     )
-    lines.extend(("", "| Revision | Task | Control success | MCP success | MCP − control (pp ± 95% CI half-width) |", "|---|---|---:|---:|---:|"))
+    lines.extend((
+        "",
+        "| Revision | Task | Control success | MCP success | MCP − control (pp ± 95% CI half-width) | Evidence status | Adjusted paired interval | Holm p |",
+        "|---|---|---:|---:|---:|---|---:|---:|",
+    ))
 
     for revision, summary in summaries:
         by_mode = summary.get("task_success_by_mode", {})
         paired = summary.get("paired_task_success_deltas_mcp_minus_control", {}).get("tasks", {})
+        adequacy = summary.get("statistical_adequacy", {})
+        adequacy_tasks = adequacy.get("tasks", {}) if isinstance(adequacy, dict) else {}
         task_ids = sorted(_task_ids(summary))
         if not task_ids:
-            lines.append(f"| {revision} | task-level data unavailable | n/a | n/a | n/a |")
+            lines.append(f"| {revision} | task-level data unavailable | n/a | n/a | n/a | unknown (legacy summary) | n/a | n/a |")
             continue
         for task_id in task_ids:
             control = by_mode.get("control", {}).get("tasks", {}).get(task_id)
             mcp = by_mode.get("mcp", {}).get("tasks", {}).get(task_id)
             delta = paired.get(task_id)
+            evidence = adequacy_tasks.get(task_id, {})
+            interval = evidence.get("paired_score_interval") if isinstance(evidence, dict) else None
+            adjusted_p = evidence.get("holm_adjusted_p") if isinstance(evidence, dict) else None
+            task_status = evidence.get("status", "unknown") if isinstance(evidence, dict) else "unknown"
             lines.append(
                 f"| {revision} | {task_id} | {_fraction(control, 'successes')} "
-                f"| {_fraction(mcp, 'successes')} | {_paired_delta(delta)} |"
+                f"| {_fraction(mcp, 'successes')} | {_paired_delta(delta)} | "
+                f"{_display_status(task_status)} | {_display_ci(interval)} | {_display_number(adjusted_p, 3)} |"
             )
 
     lines.extend(("", "## Agent A/B criterion results", ""))

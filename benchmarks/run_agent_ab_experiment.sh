@@ -8,7 +8,7 @@ cd "$project_dir"
 export PYTHONPATH="$project_dir/src:$project_dir${PYTHONPATH:+:$PYTHONPATH}"
 python_bin="${PYTHON_BIN:-$project_dir/.venv/bin/python}"
 model="${AGENT_AB_MODEL:-gpt-5.6-luna}"
-repetitions="${AGENT_AB_REPETITIONS:-5}"
+repetitions="${AGENT_AB_REPETITIONS:-}"
 seed="${AGENT_AB_SEED:-20260909}"
 timeout_seconds="${AGENT_AB_TIMEOUT_SECONDS:-900}"
 fixture_profile="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
@@ -53,7 +53,7 @@ mkdir -p "$run_dir"
 experiment_args=(
     --metadata "model=$model"
     --metadata "task_type=$fixture_profile"
-    --metadata "workload_size=$repetitions"
+    --metadata "workload_size=${repetitions:-powered-default}"
     --metadata "environment=$([[ "$test_embeddings" == "1" ]] && echo test-embeddings || echo onnx)"
     --metadata "started_at=$started_at"
 )
@@ -74,35 +74,61 @@ else
         --manifest-output "$run_dir/tasks.json"
 fi
 
-"$python_bin" -m benchmarks.benchmark_agent_ab \
-    --schedule-output "$run_dir/schedule.json" \
-    --repetitions "$repetitions" \
+schedule_args=(
+    --schedule-output "$run_dir/schedule.json"
     --seed "$seed"
+    --model-config "$model"
+    --repository-fixture "$fixture_profile"
+)
+if [[ -n "$repetitions" ]]; then
+    schedule_args+=(--repetitions "$repetitions")
+fi
+if [[ -n "${AGENT_AB_PILOT_RECORDS:-}" ]]; then
+    schedule_args+=(--pilot-records "$AGENT_AB_PILOT_RECORDS")
+    if [[ -n "${AGENT_AB_PILOT_SCHEDULE:-}" ]]; then
+        schedule_args+=(--pilot-schedule "$AGENT_AB_PILOT_SCHEDULE")
+    fi
+fi
+"$python_bin" -m benchmarks.benchmark_agent_ab "${schedule_args[@]}"
 
-EPHEMERAL_TEST_EMBEDDINGS="$test_embeddings" CODEX_HOME="$CODEX_HOME" \
-"$python_bin" -m benchmarks.run_codex_agent_ab \
-    --schedule "$run_dir/schedule.json" \
-    --tasks "$run_dir/tasks.json" \
-    --repository "$run_dir/fixture" \
-    --repository-fixture "$fixture_profile" \
-    --model "$model" \
-    --mcp-module ephemeral_buffer_mcp.server \
-    --mcp-python-path "$project_dir/src" \
-    --mcp-python "$python_bin" \
-    --allow-mcp-approvals \
-    --require-mcp-calls \
-    --sandbox read-only \
-    --timeout "$timeout_seconds" \
-    --diagnostic-log-dir "$run_dir/lifecycle" \
-    --output "$run_dir/records.json" \
-    --result "$run_dir/records.result.json" \
-    "${experiment_args[@]}"
+mapfile -t stage_repetitions < <(
+    "$python_bin" -c 'import json,sys; print("\n".join(str(item["repetitions"]) for item in json.load(open(sys.argv[1], encoding="utf-8"))["stage_schedule"]))' \
+        "$run_dir/schedule.json"
+)
+resume_args=()
+for stage_count in "${stage_repetitions[@]}"; do
+    EPHEMERAL_TEST_EMBEDDINGS="$test_embeddings" CODEX_HOME="$CODEX_HOME" \
+    "$python_bin" -m benchmarks.run_codex_agent_ab \
+        --schedule "$run_dir/schedule.json" \
+        --tasks "$run_dir/tasks.json" \
+        --repository "$run_dir/fixture" \
+        --repository-fixture "$fixture_profile" \
+        --model "$model" \
+        --mcp-module ephemeral_buffer_mcp.server \
+        --mcp-python-path "$project_dir/src" \
+        --mcp-python "$python_bin" \
+        --allow-mcp-approvals \
+        --require-mcp-calls \
+        --sandbox read-only \
+        --timeout "$timeout_seconds" \
+        --max-repetitions "$stage_count" \
+        --diagnostic-log-dir "$run_dir/lifecycle" \
+        --output "$run_dir/records.json" \
+        --result "$run_dir/records.result.json" \
+        "${resume_args[@]}" \
+        "${experiment_args[@]}"
 
-"$python_bin" -m benchmarks.benchmark_agent_ab \
-    --records "$run_dir/records.json" \
-    --output "$run_dir/summary.json" \
-    --result "$run_dir/summary.result.json" \
-    "${experiment_args[@]}"
+    "$python_bin" -m benchmarks.benchmark_agent_ab \
+        --records "$run_dir/records.json" \
+        --output "$run_dir/summary.json" \
+        --result "$run_dir/summary.result.json" \
+        "${experiment_args[@]}"
+    continue_stage="$("$python_bin" -c 'import json,sys; print("1" if json.load(open(sys.argv[1], encoding="utf-8")).get("statistical_adequacy", {}).get("continue") else "0")' "$run_dir/summary.json")"
+    if [[ "$continue_stage" != "1" ]]; then
+        break
+    fi
+    resume_args=(--resume)
+done
 
 echo "Run complete:"
 echo "  records: $run_dir/records.json"

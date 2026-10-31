@@ -11,7 +11,11 @@ samples=5
 semantic_samples=3
 repetitions=5
 agent_ab_repetitions=""
+agent_ab_pilot_records=""
+agent_ab_pilot_schedule=""
 agent_ab_only=0
+repetitions_explicit=0
+agent_ab_repetitions_explicit=0
 seed=20261006
 agent_timeout=900
 benchmark_timeout=3600
@@ -27,7 +31,9 @@ Options:
   --samples N                Latency, prefetch, routing, and warm-up samples (default: 5)
   --semantic-samples N       Semantic-index samples per size (default: 3)
   --repetitions N            Effectiveness repetitions (default: 5)
-  --agent-ab-repetitions N   Agent A/B repetitions (default: --repetitions)
+  --agent-ab-repetitions N   Agent A/B repetitions (default: powered A/B design; an explicit --repetitions also applies)
+  --agent-ab-pilot-records PATH Current fixture/rubric-v4 paired pilot records
+  --agent-ab-pilot-schedule PATH Schedule for pilot records when not embedded
   --agent-ab-only            Skip non-agent benchmarks and comparisons
   --seed N                   Shared synthetic workload seed (default: 20261006)
   --agent-timeout SECONDS    Per-task Codex timeout (default: 900)
@@ -46,8 +52,10 @@ while (($#)); do
         --output-dir) output_dir="${2:?missing value for --output-dir}"; shift 2 ;;
         --samples) samples="${2:?missing value for --samples}"; shift 2 ;;
         --semantic-samples) semantic_samples="${2:?missing value for --semantic-samples}"; shift 2 ;;
-        --repetitions) repetitions="${2:?missing value for --repetitions}"; shift 2 ;;
-        --agent-ab-repetitions) agent_ab_repetitions="${2:?missing value for --agent-ab-repetitions}"; shift 2 ;;
+        --repetitions) repetitions="${2:?missing value for --repetitions}"; repetitions_explicit=1; shift 2 ;;
+        --agent-ab-repetitions) agent_ab_repetitions="${2:?missing value for --agent-ab-repetitions}"; agent_ab_repetitions_explicit=1; shift 2 ;;
+        --agent-ab-pilot-records) agent_ab_pilot_records="${2:?missing value for --agent-ab-pilot-records}"; shift 2 ;;
+        --agent-ab-pilot-schedule) agent_ab_pilot_schedule="${2:?missing value for --agent-ab-pilot-schedule}"; shift 2 ;;
         --agent-ab-only) agent_ab_only=1; shift ;;
         --seed) seed="${2:?missing value for --seed}"; shift 2 ;;
         --agent-timeout) agent_timeout="${2:?missing value for --agent-timeout}"; shift 2 ;;
@@ -62,10 +70,18 @@ if [[ -z "$baseline_ref" || -z "$model" || "$model" == "your-fixed-model" ]]; th
     usage >&2
     exit 2
 fi
-if [[ -z "$agent_ab_repetitions" ]]; then
+if [[ -n "$agent_ab_pilot_schedule" && -z "$agent_ab_pilot_records" ]]; then
+    echo "--agent-ab-pilot-schedule requires --agent-ab-pilot-records" >&2
+    exit 2
+fi
+if ((agent_ab_repetitions_explicit == 0 && repetitions_explicit == 1)); then
     agent_ab_repetitions="$repetitions"
 fi
-for count in "$samples" "$semantic_samples" "$repetitions" "$agent_ab_repetitions" "$agent_timeout" "$benchmark_timeout"; do
+counts=("$samples" "$semantic_samples" "$repetitions" "$agent_timeout" "$benchmark_timeout")
+if [[ -n "$agent_ab_repetitions" ]]; then
+    counts+=("$agent_ab_repetitions")
+fi
+for count in "${counts[@]}"; do
     if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then
         echo "sample counts, repetitions, and timeouts must be positive integers" >&2
         exit 2
@@ -339,41 +355,80 @@ schedule="$output_dir/agent-ab/schedule.json"
 mkdir -p "$output_dir/agent-ab"
 run_tool create-agent-ab-v2-fixture "$repo_dir" 0 benchmark_agent_ab_fixtures.py \
     --fixture-output "$fixture_dir" --manifest-output "$tasks"
-run_tool create-agent-ab-v2-schedule "$repo_dir" 0 benchmark_agent_ab.py \
-    --schedule-output "$schedule" --repetitions "$agent_ab_repetitions" --seed "$seed"
-
-for revision in baseline candidate; do
-    if [[ "$revision" == baseline ]]; then
-        server_dir="$worktree"
-        server_revision="$baseline_revision"
-    else
-        server_dir="$repo_dir"
-        server_revision="$candidate_revision"
+schedule_args=(
+    --schedule-output "$schedule"
+    --seed "$seed"
+    --model-config "$model"
+    --repository-fixture synthetic-eb-heavy-v2
+)
+if [[ -n "$agent_ab_repetitions" ]]; then
+    schedule_args+=(--repetitions "$agent_ab_repetitions")
+fi
+if [[ -n "$agent_ab_pilot_records" ]]; then
+    schedule_args+=(--pilot-records "$agent_ab_pilot_records")
+    if [[ -n "$agent_ab_pilot_schedule" ]]; then
+        schedule_args+=(--pilot-schedule "$agent_ab_pilot_schedule")
     fi
-    ab_dir="$output_dir/agent-ab/$revision"
-    mkdir -p "$ab_dir"
-    agent_metadata=(--metadata "variant=$revision" --metadata "server_revision=$server_revision")
-    if [[ -f "$server_dir/src/ephemeral_buffer_mcp/server.py" ]]; then
-        server_args=(--mcp-module ephemeral_buffer_mcp.server \
-            --mcp-python-path "$server_dir/src" --mcp-python-path "$server_dir")
-    else
-        server_args=(--mcp-module server --mcp-server-script "$server_dir/server.py")
+fi
+run_tool create-agent-ab-v2-schedule "$repo_dir" 0 benchmark_agent_ab.py "${schedule_args[@]}"
+if [[ ! -f "$schedule" ]]; then
+    skip agent-ab-stages "agent A/B schedule was not created"
+    agent_ab_repetitions="${agent_ab_repetitions:-0}"
+else
+agent_ab_repetitions="$("$python_bin" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["repetitions"])' "$schedule")"
+mapfile -t agent_ab_stage_repetitions < <(
+    "$python_bin" -c 'import json,sys; print("\n".join(str(item["repetitions"]) for item in json.load(open(sys.argv[1], encoding="utf-8"))["stage_schedule"]))' \
+        "$schedule"
+)
+baseline_resume_args=()
+candidate_resume_args=()
+stage_index=0
+for stage_count in "${agent_ab_stage_repetitions[@]}"; do
+    stage_index=$((stage_index + 1))
+    for revision in baseline candidate; do
+        if [[ "$revision" == baseline ]]; then
+            server_dir="$worktree"
+            server_revision="$baseline_revision"
+            resume_args=("${baseline_resume_args[@]}")
+        else
+            server_dir="$repo_dir"
+            server_revision="$candidate_revision"
+            resume_args=("${candidate_resume_args[@]}")
+        fi
+        ab_dir="$output_dir/agent-ab/$revision"
+        mkdir -p "$ab_dir"
+        agent_metadata=(--metadata "variant=$revision" --metadata "server_revision=$server_revision")
+        if [[ -f "$server_dir/src/ephemeral_buffer_mcp/server.py" ]]; then
+            server_args=(--mcp-module ephemeral_buffer_mcp.server \
+                --mcp-python-path "$server_dir/src" --mcp-python-path "$server_dir")
+        else
+            server_args=(--mcp-module server --mcp-server-script "$server_dir/server.py")
+        fi
+        run_tool "agent-ab-$revision-stage-$stage_index" "$repo_dir" 1 run_codex_agent_ab.py \
+            --schedule "$schedule" --tasks "$tasks" --repository "$fixture_dir" \
+            --repository-fixture synthetic-eb-heavy-v2 --model "$model" \
+            "${server_args[@]}" --mcp-python "$python_bin" \
+            --allow-mcp-approvals --require-mcp-calls --sandbox read-only --timeout "$agent_timeout" \
+            --max-repetitions "$stage_count" --diagnostic-log-dir "$ab_dir/lifecycle" \
+            --output "$ab_dir/records.json" --result "$ab_dir/records.result.json" \
+            "${resume_args[@]}" "${agent_metadata[@]}"
+        if [[ -f "$ab_dir/records.json" ]]; then
+            run_tool "summarize-agent-ab-$revision-stage-$stage_index" "$repo_dir" 0 benchmark_agent_ab.py \
+                --records "$ab_dir/records.json" --output "$ab_dir/summary.json" \
+                --result "$ab_dir/summary.result.json" "${agent_metadata[@]}"
+        else
+            skip "summarize-agent-ab-$revision-stage-$stage_index" "agent runner did not create records"
+        fi
+    done
+    should_continue="$("$python_bin" -c 'import json,sys; paths=sys.argv[1:]; print("1" if any(json.load(open(p, encoding="utf-8")).get("statistical_adequacy", {}).get("continue") for p in paths if p) else "0")' \
+        "$output_dir/agent-ab/baseline/summary.json" "$output_dir/agent-ab/candidate/summary.json")"
+    if [[ "$should_continue" != "1" ]]; then
+        break
     fi
-    run_tool "agent-ab-$revision" "$repo_dir" 1 run_codex_agent_ab.py \
-        --schedule "$schedule" --tasks "$tasks" --repository "$fixture_dir" \
-        --repository-fixture synthetic-eb-heavy-v2 --model "$model" \
-        "${server_args[@]}" --mcp-python "$python_bin" \
-        --allow-mcp-approvals --require-mcp-calls --sandbox read-only --timeout "$agent_timeout" \
-        --diagnostic-log-dir "$ab_dir/lifecycle" --output "$ab_dir/records.json" \
-        --result "$ab_dir/records.result.json" "${agent_metadata[@]}"
-    if [[ -f "$ab_dir/records.json" ]]; then
-        run_tool "summarize-agent-ab-$revision" "$repo_dir" 0 benchmark_agent_ab.py \
-            --records "$ab_dir/records.json" --output "$ab_dir/summary.json" \
-            --result "$ab_dir/summary.result.json" "${agent_metadata[@]}"
-    else
-        skip "summarize-agent-ab-$revision" "agent runner did not create records"
-    fi
+    baseline_resume_args=(--resume)
+    candidate_resume_args=(--resume)
 done
+fi
 
 if [[ -f "$output_dir/agent-ab/baseline/summary.result.json" && -f "$output_dir/agent-ab/candidate/summary.result.json" ]]; then
     compare_result agent-ab \

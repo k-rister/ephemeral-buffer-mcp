@@ -929,7 +929,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 9)
+        self.assertEqual(payload["records_schema_version"], 10)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")
@@ -940,6 +940,66 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(payload["protocol"]["embedding_mode"], "onnx")
         self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5-fp32")
         self.assertEqual(payload["protocol"]["embedding_cache"], "default")
+
+    def test_resume_extends_staged_run_without_rerunning_matched_pairs(self):
+        stage_design = {"selected_repetitions": 2}
+        first_schedule = build_schedule(repetitions=None, seed=53, design=stage_design)
+        extended_schedule = build_schedule(repetitions=None, seed=53, design=stage_design)
+        manifest = {
+            task["id"]: {
+                "prompt": task["id"],
+                "signal_marker": "ok",
+                "success_criteria": {
+                    "description": "report the signal and a deterministic result",
+                    "required_phrases": ["ok", "expected answer"],
+                },
+            }
+            for task in first_schedule["tasks"]
+        }
+        result = subprocess_result(stdout=json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "ok is the expected answer"},
+        }) + "\n")
+        with tempfile.TemporaryDirectory() as directory:
+            records_path = Path(directory) / "records.json"
+            args = argparse.Namespace(
+                repository=".", repository_fixture="fixture", environment="test", model="gpt-5.6-luna",
+                codex="codex", mcp_python="python", mcp_module="server", mcp_server_script=None,
+                sandbox="read-only", timeout=10, allow_mcp_approvals=False,
+                dry_run=False, output=records_path, max_repetitions=1, resume=False,
+            )
+            with patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=result) as runner, patch.dict(
+                os.environ,
+                {
+                    "EPHEMERAL_TEST_EMBEDDINGS": "",
+                    "EPHEMERAL_EMBEDDING_CACHE_DIR": "",
+                    "EPHEMERAL_FASTEMBED_CACHE_DIR": "",
+                    "EPHEMERAL_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5-fp32",
+                },
+                clear=False,
+            ):
+                first_payload = run_schedule(first_schedule, manifest, args)
+                records_path.write_text(json.dumps(first_payload), encoding="utf-8")
+                args.max_repetitions = 2
+                args.resume = True
+                extended_payload = run_schedule(extended_schedule, manifest, args)
+                records_path.write_text(json.dumps(extended_payload), encoding="utf-8")
+                args.max_repetitions = 1
+                with self.assertRaisesRegex(ValueError, "below completed records"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.max_repetitions = 2
+                args.model = "different-model"
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+
+        self.assertEqual(len(first_payload["runs"]), 8)
+        self.assertEqual(len(extended_payload["runs"]), 16)
+        self.assertEqual(runner.call_count, 16)
+        keys = {
+            (item["repetition"], item["task_id"], item["mode"])
+            for item in extended_payload["runs"]
+        }
+        self.assertEqual(len(keys), 16)
 
 
 def subprocess_result(**kwargs):
