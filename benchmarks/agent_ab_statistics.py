@@ -271,7 +271,7 @@ def bootstrap_discordance_upper(
     simulations: int = 5000,
     seed: int = 20261031,
     quantile: float = 0.95,
-) -> dict[str, float | int | str]:
+) -> dict[str, Any]:
     """Bootstrap matched binary pairs and return a conservative discordance rate."""
     if not pairs:
         raise ValueError("at least one matched pair is required")
@@ -279,7 +279,9 @@ def bootstrap_discordance_upper(
         raise ValueError("bootstrap simulations and quantile are invalid")
     rng = random.Random(seed)
     count = len(pairs)
-    baseline_rate = sum(control for control, _ in pairs) / count
+    baseline_successes = sum(control for control, _ in pairs)
+    baseline_rate = baseline_successes / count
+    baseline_interval = _wilson_interval(baseline_successes, count, quantile)
     observed_discordances = sum(control != mcp for control, mcp in pairs)
     observed_discordance = observed_discordances / count
     bootstrap_rates = []
@@ -303,6 +305,12 @@ def bootstrap_discordance_upper(
     return {
         "matched_repetitions": count,
         "baseline_success_rate": baseline_rate,
+        "baseline_success_rate_interval": {
+            "confidence": quantile,
+            "lower": baseline_interval[0],
+            "upper": baseline_interval[1],
+            "method": "wilson-score",
+        },
         "observed_discordance_rate": observed_discordance,
         "discordance_upper_bootstrap": bootstrap_upper,
         "discordance_upper_estimate": upper_estimate,

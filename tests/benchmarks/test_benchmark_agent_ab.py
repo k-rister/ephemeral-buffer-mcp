@@ -139,6 +139,9 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_default_schedule_uses_powered_design_and_three_looks(self):
         schedule = build_schedule(seed=20261031)
         design = schedule["statistical_design"]
+        self.assertEqual(design["schema_version"], 2)
+        self.assertIn("Wilson", design["baseline_interval_method"])
+        self.assertIn("95% joint coverage", design["pilot_parameter_confidence_rule"])
         selected = next(
             scenario for scenario in design["scenario_matrix"]
             if scenario["effect_pp"] == 10 and scenario["target_power"] == 0.8
@@ -236,6 +239,10 @@ class TestAgentAbBenchmark(unittest.TestCase):
             pilot["paired_model_by_task"]["targeted-inspection"]["discordance_upper_method"],
             "paired-bootstrap-percentile",
         )
+        self.assertEqual(
+            pilot["paired_model_by_task"]["targeted-inspection"]["baseline_success_rate_interval"]["confidence"],
+            0.975,
+        )
 
     def test_zero_discordance_pilot_uses_exact_upper_bound_for_power_design(self):
         schedule, payload = _scored_records_payload(repetitions=20)
@@ -245,14 +252,40 @@ class TestAgentAbBenchmark(unittest.TestCase):
             record["criterion_passes"] = [shared_success, shared_success]
 
         design = build_power_design(payload, schedule, simulations=100, seed=83)
-        expected = 1.0 - 0.05 ** (1.0 / 20)
+        expected = 1.0 - 0.025 ** (1.0 / 20)
         for model in design["paired_model_by_task"].values():
             self.assertEqual(model["observed_discordance_rate"], 0.0)
             self.assertEqual(model["discordance_upper_bootstrap"], 0.0)
             self.assertAlmostEqual(model["discordance_rate"], expected)
             self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(model, 0.1), expected)
             self.assertEqual(model["discordance_upper_method"], "one-sided-clopper-pearson")
-            self.assertEqual(model["source"], "paired-records-zero-discordance-exact-upper-bound")
+            self.assertEqual(model["source"], "paired-records-zero-discordance-clopper-pearson-97.5%-upper-bound")
+            self.assertEqual(model["baseline_success_rate_interval"]["confidence"], 0.975)
+
+    def test_near_boundary_baseline_does_not_clip_pilot_discordance_upper(self):
+        schedule, payload = _scored_records_payload(repetitions=20)
+        for record in payload["runs"]:
+            mcp_only_success = record["mode"] == "mcp" and record["repetition"] <= 2
+            record["task_success"] = mcp_only_success
+            record["criterion_passes"] = [mcp_only_success, mcp_only_success]
+
+        design = build_power_design(payload, schedule, simulations=100, seed=89)
+        default_scenario = next(
+            scenario for scenario in design["scenario_matrix"]
+            if scenario["effect_pp"] == 10 and scenario["target_power"] == 0.8
+        )
+        for model in design["paired_model_by_task"].values():
+            self.assertEqual(model["baseline_success_rate"], 0.0)
+            self.assertEqual(model["observed_discordance_rate"], 0.1)
+            self.assertGreater(model["discordance_rate"], 0.1)
+            self.assertGreater(model["baseline_success_rate_interval"]["upper"], 0.05)
+            self.assertAlmostEqual(
+                benchmark_agent_ab._scenario_discordance(model, 0.1),
+                model["discordance_rate"],
+            )
+        self.assertTrue(all(
+            rate > 0.1 for rate in default_scenario["discordance_rates"].values()
+        ))
 
     def test_adequate_pilot_tasks_keep_bootstrap_when_another_task_is_small(self):
         schedule, payload = _scored_records_payload(repetitions=20)

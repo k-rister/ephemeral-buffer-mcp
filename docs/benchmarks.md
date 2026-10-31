@@ -369,16 +369,18 @@ stress case selects **1,006 repetitions per task and mode** for the default
 with a 95% Wilson lower bound of 80.0%. It is a planning model, not an empirical
 estimate for a particular model configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
-For tasks with at least 20 matched pairs, the scheduler bootstraps paired
-outcomes and uses the 95th percentile of discordance. If no discordant pairs
-were observed, the bootstrap percentile is zero by construction; the scheduler
-uses the one-sided exact 95% Clopper-Pearson upper bound,
-`1 - 0.05^(1/n)`, where `n` is the number of matched pairs. An under-sampled
-task instead uses the 50% baseline and maximum-feasible-discordance fallback;
-the design remains marked as requiring a fuller pilot. The model and
-repository fixture are derived from the pilot protocol, and optional identity
-flags must match it. Generated schedules bind those identities for runner
-validation.
+For tasks with at least 20 matched pairs, the scheduler uses a 97.5% two-sided
+Wilson interval for baseline success and a 97.5% upper discordance bound from
+the paired bootstrap. If no discordant pairs were observed, the bootstrap
+percentile is zero by construction; the scheduler uses the one-sided exact
+97.5% Clopper-Pearson upper bound, `1 - 0.025^(1/n)`, where `n` is the number
+of matched pairs. It maximizes the feasible discordance cap across the baseline
+interval for both effect directions. Bonferroni combination targets nominal
+95% joint coverage for these pilot parameter bounds. An under-sampled task
+instead uses the 50% baseline and maximum-feasible-discordance fallback; the
+design remains marked as requiring a fuller pilot. The model and repository
+fixture are derived from the pilot protocol, and optional identity flags must
+match it. Generated schedules bind those identities for runner validation.
 Fixture and rubric versions must match v4; historical rubric results are never
 pooled.
 
@@ -610,6 +612,9 @@ design. An explicit `--repetitions N` also sets the A/B count when
 `--agent-ab-repetitions` is omitted; either explicit override can still request
 a short exploratory run. Baseline and candidate records extend in matched
 stages, and completed pairs are skipped when the runner resumes.
+Keep the generated schedule unchanged across stages; an in-progress run using
+an earlier statistical design must finish with that schedule or restart under
+the current design.
 
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
 
