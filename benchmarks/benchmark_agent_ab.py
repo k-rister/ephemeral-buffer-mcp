@@ -234,15 +234,15 @@ def _bootstrap_model_inputs(
             task_pairs,
             simulations=5000,
             seed=seed + task_index,
-            quantile=0.95,
+            quantile=0.975,
         )
         results[task["id"]] = {
             **bootstrap,
             "discordance_rate": bootstrap["discordance_upper_estimate"],
             "source": (
-                "paired-records-zero-discordance-exact-upper-bound"
+                "paired-records-zero-discordance-clopper-pearson-97.5%-upper-bound"
                 if bootstrap["discordance_upper_method"] == "one-sided-clopper-pearson"
-                else "paired-records-bootstrap-95th-percentile"
+                else "paired-records-bootstrap-97.5th-percentile"
             ),
         }
     evidence_source = (
@@ -256,15 +256,27 @@ def _bootstrap_model_inputs(
 def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
     """Use the largest feasible discordance supported by pilot/bootstrap data."""
     p0 = float(model.get("baseline_success_rate", 0.5))
+    baseline_interval = model.get("baseline_success_rate_interval")
+    if isinstance(baseline_interval, dict):
+        baseline_lower = float(baseline_interval["lower"])
+        baseline_upper = float(baseline_interval["upper"])
+        if not 0.0 <= baseline_lower <= baseline_upper <= 1.0:
+            raise ValueError("baseline success interval must be ordered probabilities")
+    else:
+        baseline_lower = baseline_upper = p0
     observed_upper = model.get("discordance_rate")
     if observed_upper is None:
         return 1.0 - abs(effect)
     upper = float(observed_upper)
     feasible_caps = []
     for signed_effect in (abs(effect), -abs(effect)):
+        # The feasible cap is a tent-shaped function of baseline success. Its
+        # maximum over the confidence interval is at the vertex or nearest end.
+        vertex = (1.0 - signed_effect) / 2.0
+        plausible_baseline = min(max(vertex, baseline_lower), baseline_upper)
         cap = min(
-            2.0 * (1.0 - p0) - signed_effect,
-            2.0 * p0 + signed_effect,
+            2.0 * (1.0 - plausible_baseline) - signed_effect,
+            2.0 * plausible_baseline + signed_effect,
         )
         if cap >= abs(effect):
             feasible_caps.append(cap)
@@ -405,7 +417,7 @@ def build_power_design(
                 "token_estimates_note": cost_profile["token_estimates_note"],
             })
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "method": "seeded paired binary simulation; exact two-sided McNemar tests; Holm familywise correction",
         "effect_target": DEFAULT_EFFECT,
         "power_target": DEFAULT_TARGET_POWER,
@@ -414,10 +426,15 @@ def build_power_design(
         "pilot_evidence_source": evidence_source,
         "pilot_required": pilot_required,
         "pilot_minimum_repetitions_per_task": 20,
+        "baseline_interval_method": "97.5% two-sided Wilson score interval for control success",
         "bootstrap_method": (
-            "resample matched current-rubric pairs 5000 times and use the 95th percentile "
-            "discordance rate; when none are observed, use the one-sided exact 95% "
+            "resample matched current-rubric pairs 5000 times and use the 97.5th percentile "
+            "discordance rate; when none are observed, use the one-sided exact 97.5% "
             "Clopper-Pearson upper bound"
+        ),
+        "pilot_parameter_confidence_rule": (
+            "Bonferroni combination of nominal 97.5% baseline and discordance bounds targets "
+            "95% joint coverage"
         ),
         "paired_model_by_task": model_inputs,
         "simulation_seed": seed,
