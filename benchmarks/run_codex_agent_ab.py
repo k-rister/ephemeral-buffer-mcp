@@ -31,6 +31,7 @@ from .benchmark_agent_ab import (
     TASK_RUBRIC_VERSION,
     TASKS,
     _read_json,
+    _stage_repetition_counts,
     records_workload_result,
     validate_records,
     validate_schedule_extension,
@@ -1029,9 +1030,13 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         ),
     }
 
-    cap = getattr(args, "max_repetitions", None) or schedule.get("repetitions")
+    requested_cap = getattr(args, "max_repetitions", None)
+    cap = schedule.get("repetitions") if requested_cap is None else requested_cap
     if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1 or cap > schedule.get("repetitions", 0):
         raise ValueError("max_repetitions must be within the planned schedule")
+    planned_looks = _stage_repetition_counts(schedule) or [schedule.get("repetitions")]
+    if cap not in planned_looks:
+        raise ValueError("max_repetitions must match a planned stage look")
     existing_payload = None
     runs = []
     if getattr(args, "resume", False):

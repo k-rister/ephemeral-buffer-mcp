@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+from functools import lru_cache
 from statistics import NormalDist
 from typing import Any, Sequence
 
@@ -91,6 +92,7 @@ def newcombe_paired_score_interval(
     }
 
 
+@lru_cache(maxsize=200_000)
 def exact_mcnemar_pvalue(mcp_only_successes: int, control_only_successes: int) -> float:
     """Two-sided exact McNemar p-value using the conditional binomial test."""
     if min(mcp_only_successes, control_only_successes) < 0:
@@ -377,46 +379,70 @@ def select_simulated_repetitions(
     """
     if simulations < 100:
         raise ValueError("at least 100 simulations are required for design selection")
-    low = 0
-    high = normal_approximate_repetitions(
-        effect=effect,
-        target_power=target_power,
-        discordance_rates=discordance_rates,
-        family_alpha=family_alpha,
-    )
+    if not 0.0 < abs(effect) <= 1.0:
+        raise ValueError("effect must be nonzero and between minus one and one")
+    if not 0.0 < target_power < 1.0:
+        raise ValueError("target power must be between zero and one")
+    if not discordance_rates:
+        raise ValueError("at least one task discordance rate is required")
+    for rate in discordance_rates:
+        if not 0.0 <= rate <= 1.0 or rate + 1e-12 < abs(effect):
+            raise ValueError("discordance rates must be at least the absolute effect and at most one")
+    if not 0.0 < family_alpha < 1.0:
+        raise ValueError("family alpha must be between zero and one")
 
-    def evaluate(repetitions: int) -> dict[str, Any]:
-        return simulate_paired_mcnemar_power(
-            repetitions=repetitions,
-            effect=effect,
-            discordance_rates=discordance_rates,
-            simulations=simulations,
-            alpha=family_alpha,
-            seed=seed + repetitions,
-        )
+    # Extend the same simulated paired outcomes by one repetition at a time.
+    # Every integer candidate is evaluated, so Monte Carlo noise cannot make a
+    # binary search skip a smaller candidate that meets the declared rule.
+    rng = random.Random(seed)
+    task_count = len(discordance_rates)
+    mcp_only_counts = [[0] * task_count for _ in range(simulations)]
+    control_only_counts = [[0] * task_count for _ in range(simulations)]
+    for repetitions in range(1, 100001):
+        rejected_counts = [0] * task_count
+        any_rejected_count = 0
+        for simulation in range(simulations):
+            p_values = []
+            for task_index, discordance in enumerate(discordance_rates):
+                draw = rng.random()
+                if draw < (discordance + effect) / 2.0:
+                    mcp_only_counts[simulation][task_index] += 1
+                elif draw < discordance:
+                    control_only_counts[simulation][task_index] += 1
+                p_values.append(exact_mcnemar_pvalue(
+                    mcp_only_counts[simulation][task_index],
+                    control_only_counts[simulation][task_index],
+                ))
+            rejections = _holm_rejections(p_values, family_alpha)
+            any_rejected_count += int(any(rejections))
+            for task_index, rejected in enumerate(rejections):
+                rejected_counts[task_index] += int(rejected)
 
-    result = evaluate(high)
-    while min(result["power_lower_95_by_task"]) < target_power:
-        low = high
-        high = max(high + 1, math.ceil(high * 1.12))
-        result = evaluate(high)
-        if high > 100000:
-            raise ValueError("power target requires more than 100000 repetitions")
-
-    while high - low > 1:
-        middle = (low + high) // 2
-        middle_result = evaluate(middle)
-        if min(middle_result["power_lower_95_by_task"]) >= target_power:
-            high = middle
-            result = middle_result
-        else:
-            low = middle
-    result = evaluate(high)
-    return {
-        "repetitions": high,
-        "target_power": target_power,
-        "selected_power": min(result["power_by_task"]),
-        "selected_power_lower_95": min(result["power_lower_95_by_task"]),
-        "power_simulation": result,
-        "selection_rule": "smallest common repetition count whose per-task 95% Wilson power lower bound meets target after exact McNemar plus Holm",
-    }
+        powers = [count / simulations for count in rejected_counts]
+        intervals = [_wilson_interval(count, simulations, 0.95) for count in rejected_counts]
+        lower_bounds = [interval[0] for interval in intervals]
+        if min(lower_bounds) >= target_power:
+            result = {
+                "repetitions": repetitions,
+                "effect": effect,
+                "discordance_rates": list(discordance_rates),
+                "simulations": simulations,
+                "seed": seed,
+                "alpha": family_alpha,
+                "power_by_task": powers,
+                "power_lower_95_by_task": lower_bounds,
+                "power_upper_95_by_task": [interval[1] for interval in intervals],
+                "familywise_rejection_rate": any_rejected_count / simulations,
+            }
+            return {
+                "repetitions": repetitions,
+                "target_power": target_power,
+                "selected_power": min(powers),
+                "selected_power_lower_95": min(lower_bounds),
+                "power_simulation": result,
+                "selection_rule": (
+                    "first common repetition count in the seeded ascending scan whose per-task "
+                    "95% Wilson power lower bound meets target after exact McNemar plus Holm"
+                ),
+            }
+    raise ValueError("power target requires more than 100000 repetitions")

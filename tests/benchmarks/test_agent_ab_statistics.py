@@ -1,6 +1,7 @@
 """Tests for paired binary A/B evidence calculations."""
 
 import unittest
+from unittest.mock import patch
 
 from benchmarks.agent_ab_statistics import (
     bootstrap_discordance_upper,
@@ -76,6 +77,32 @@ class TestAgentAbStatistics(unittest.TestCase):
         )
         self.assertGreater(design["repetitions"], 0)
         self.assertGreaterEqual(design["selected_power_lower_95"], 0.8)
+
+    def test_repetition_search_returns_first_qualifying_candidate(self):
+        calls = 0
+
+        def nonmonotonic_rejections(_p_values, _alpha):
+            nonlocal calls
+            candidate = calls // 100 + 1
+            calls += 1
+            # Candidate 2 qualifies, candidate 3 would fail, and candidate 4
+            # would qualify again. The search must stop at the first pass.
+            return [candidate == 2 or candidate == 4] * 2
+
+        with patch(
+            "benchmarks.agent_ab_statistics._holm_rejections",
+            side_effect=nonmonotonic_rejections,
+        ):
+            design = select_simulated_repetitions(
+                effect=0.1,
+                target_power=0.8,
+                discordance_rates=[0.5, 0.5],
+                simulations=100,
+                seed=7,
+            )
+        self.assertEqual(design["repetitions"], 2)
+        self.assertEqual(calls, 200)
+        self.assertIn("ascending scan", design["selection_rule"])
 
     def test_paired_score_interval_has_simulated_coverage(self):
         coverage = simulate_paired_interval_coverage(

@@ -354,17 +354,19 @@ absolute 10 percentage-point task-success difference with 80% power. Its
 outcome model is paired binary data: each repetition runs the same task in both
 modes, then exact two-sided McNemar tests are adjusted across the four tasks
 with Holm's procedure. The design search simulates complete matched pairs and
-selects the smallest common repetition count whose per-task 95% Wilson lower
-power bound reaches 80%. Paired binary power depends on discordance, because
-concordant pairs do not contribute to McNemar's test ([paired binary sample
-size methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
+checks each integer repetition count in ascending order, selecting the first
+count whose per-task 95% Wilson lower power bound reaches 80%. Paired outcomes
+are nested from one seeded simulation stream; the search does not assume noisy
+power estimates are monotonic. Paired binary power depends on discordance,
+because concordant pairs do not contribute to McNemar's test ([paired binary
+sample size methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
 
 No raw current fixture-v4/rubric-v4 pilot records are checked in. Until a pilot
 is supplied, the reproducible fallback model assumes 50% baseline success and
 the maximum feasible discordance for the requested effect. This conservative
-stress case selects **983 repetitions per task and mode** for the default
-10-point/80% design. At that size, the smallest simulated task power is 83.0%
-with a 95% Wilson lower bound of 80.5%. It is a planning model, not an empirical
+stress case selects **1,006 repetitions per task and mode** for the default
+10-point/80% design. At that size, the smallest simulated task power is 82.5%
+with a 95% Wilson lower bound of 80.0%. It is a planning model, not an empirical
 estimate for a particular model configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
 For tasks with at least 20 matched pairs, the scheduler bootstraps paired
@@ -389,7 +391,7 @@ paired binary differences ([Newcombe 1998](https://www.site.uottawa.ca/~nat/Cour
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 5 pp | 80% | 4,684 | 2.8 pp | 37,472 | n/a | n/a | n/a |
 | 5 pp | 90% | 5,930 | 2.5 pp | 47,440 | n/a | n/a | n/a |
-| 10 pp | 80% | **983** | 5.9 pp | **7,864** | n/a | n/a | n/a |
+| 10 pp | 80% | **1,006** | 5.8 pp | **8,048** | n/a | n/a | n/a |
 | 10 pp | 90% | 1,393 | 5.0 pp | 11,144 | n/a | n/a | n/a |
 | 20 pp | 80% | 235 | 11.1 pp | 1,880 | n/a | n/a | n/a |
 | 20 pp | 90% | 298 | 9.9 pp | 2,384 | n/a | n/a | n/a |
@@ -632,7 +634,7 @@ deterministic noisy signals. It is still synthetic and privacy-safe; it does
 not contain a production repository or user data.
 
 Run the staged powered Codex A/B evaluation with the repository script. The
-default is 983 repetitions per task and mode under the conservative model above.
+default is 1,006 repetitions per task and mode under the conservative model above.
 The script looks at 50%, 75%, and 100% of that design, applying Holm correction
 within tasks at local alpha-spending increments of 0.005, 0.015, and 0.030
 (cumulative family alpha 0.005, 0.020, and 0.050). It continues while adjusted
@@ -640,6 +642,9 @@ intervals neither establish a direction nor fit inside the ±10-point practical
 range. At the cap, unresolved outcomes are
 reported as **powered but inconclusive**. A short explicit
 `AGENT_AB_REPETITIONS` value runs once and is labeled **exploratory**. Set
+`--max-repetitions` only to one of the schedule's planned look counts; arbitrary
+interim caps are rejected so an alpha allocation cannot be reused. A zero cap
+is invalid. Set
 `CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
 records, and lifecycle logs remain under a unique temporary directory (normally
 `/tmp`) by default:
