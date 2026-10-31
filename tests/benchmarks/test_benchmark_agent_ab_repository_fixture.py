@@ -11,6 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from benchmarks.benchmark_agent_ab import TASK_FIXTURE_VERSION
 from benchmarks.benchmark_agent_ab_repository_fixture import PROFILE, build_manifest, create_fixture
 from tests.paths import REPOSITORY_ROOT
 
@@ -18,6 +19,7 @@ from tests.paths import REPOSITORY_ROOT
 class TestRepositoryFixture(unittest.TestCase):
     def test_manifest_describes_repository_workflows(self):
         manifest = build_manifest()
+        self.assertEqual(manifest["fixture_version"], TASK_FIXTURE_VERSION)
         self.assertEqual(manifest["profile"], PROFILE)
         self.assertIn("synthetic", manifest["privacy"])
         self.assertEqual(len(manifest["tasks"]), 4)
@@ -25,8 +27,21 @@ class TestRepositoryFixture(unittest.TestCase):
         for task in manifest["tasks"].values():
             criteria = task["success_criteria"]
             self.assertTrue(criteria["description"])
-            self.assertGreaterEqual(len(criteria["required_phrases"]), 2)
+            self.assertGreaterEqual(
+                len(criteria["required_phrases"])
+                + len(criteria.get("required_line_numbers", [])),
+                2,
+            )
             self.assertIn(task["signal_marker"], criteria["required_phrases"])
+        targeted = manifest["tasks"]["targeted-inspection"]["success_criteria"]
+        self.assertEqual(
+            targeted["required_phrases"],
+            ["TARGETED_SIGNAL", "src/packet_parser/parser.py"],
+        )
+        self.assertEqual(targeted["required_line_numbers"], [12])
+        build = manifest["tasks"]["build-log-search"]["success_criteria"]
+        self.assertEqual(build["required_phrases"], ["BUILD_FAILURE_SIGNAL", "src/parser.c"])
+        self.assertEqual(build["required_line_numbers"], [917])
 
     def test_fixture_has_layout_and_deterministic_workflow_output(self):
         with tempfile.TemporaryDirectory() as directory:

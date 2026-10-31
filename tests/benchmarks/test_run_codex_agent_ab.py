@@ -15,10 +15,13 @@ import benchmarks.run_codex_agent_ab as run_codex_agent_ab
 import benchmarks.workload_results as wr
 from benchmarks.benchmark_agent_ab import TASK_FIXTURE_VERSION, build_schedule, records_workload_result
 from benchmarks.benchmark_agent_ab_fixtures import build_manifest
+from benchmarks.benchmark_agent_ab_repository_fixture import build_manifest as build_repository_manifest
 from benchmarks.run_codex_agent_ab import (
     _data_path_bytes,
     _event_metrics,
+    _criterion_text_hits,
     _load_manifest,
+    _mcp_result_criterion_exposure,
     _run_codex_process,
     _signal_retrieved,
     _run_one,
@@ -29,6 +32,138 @@ from benchmarks.run_codex_agent_ab import (
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_current_fixture_manifests_are_accepted_by_runner(self):
+        builders = (
+            ("synthetic", build_manifest, 32),
+            ("repository", build_repository_manifest, 12),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for name, builder, targeted_line in builders:
+                with self.subTest(fixture=name):
+                    payload = builder()
+                    self.assertEqual(payload["fixture_version"], TASK_FIXTURE_VERSION)
+                    path = Path(directory) / f"{name}-manifest.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+                    manifest = _load_manifest(path)
+
+                    self.assertEqual(set(manifest), set(payload["tasks"]))
+                    self.assertEqual(
+                        manifest["targeted-inspection"]["success_criteria"]["required_line_numbers"],
+                        [targeted_line],
+                    )
+
+    def test_mcp_exposure_counts_model_readable_text_not_structured_payloads(self):
+        output = "\n".join(json.dumps(event) for event in (
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "tool": "ephemeral-buffer.search_capture",
+                    "status": "completed",
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "Matched line 32 — TARGETED_SIGNAL",
+                        }],
+                        "structuredContent": {
+                            "data": {"matches": [{"snippet": "private assertion"}]},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "tool": "ephemeral-buffer.get_capture_slice",
+                    "status": "completed",
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "Capture slice, line 32: private assertion",
+                        }],
+                        "structuredContent": {
+                            "data": {"content": "TARGETED_SIGNAL"},
+                        },
+                    },
+                },
+            },
+        ))
+
+        exposure, counts = _mcp_result_criterion_exposure(output, {
+            "required_phrases": ["TARGETED_SIGNAL", "private assertion"],
+            "required_line_numbers": [32],
+        })
+
+        self.assertEqual(exposure["search_capture"], [True, False, True])
+        self.assertEqual(exposure["get_capture_slice"], [False, True, True])
+        self.assertEqual(counts, {"search_capture": 1, "get_capture_slice": 1})
+
+    def test_line_number_criteria_accept_paths_and_ranges(self):
+        for reference in ("src/parser.c:917", "parser.c:917", "src/README:917"):
+            with self.subTest(reference=reference):
+                self.assertEqual(
+                    _criterion_text_hits(
+                        f"TARGETED_SIGNAL appears at {reference}",
+                        ["TARGETED_SIGNAL"],
+                        [917],
+                    ),
+                    [True, True],
+                )
+        self.assertEqual(
+            _criterion_text_hits(
+                "TARGETED_SIGNAL is covered in lines 32-35",
+                ["TARGETED_SIGNAL"],
+                [34],
+            ),
+            [True, True],
+        )
+        self.assertEqual(
+            _criterion_text_hits(
+                "TARGETED_SIGNAL is covered in lines 32-35 and src/parser.c:1917",
+                ["TARGETED_SIGNAL"],
+                [917],
+            ),
+            [True, False],
+        )
+        self.assertEqual(
+            _criterion_text_hits(
+                "TARGETED_SIGNAL appears in parser.c; logged at 2026-10-30T16:32:00",
+                ["TARGETED_SIGNAL"],
+                [32],
+            ),
+            [True, False],
+        )
+
+    def test_mcp_exposure_does_not_count_timestamp_as_line_evidence(self):
+        output = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "tool": "ephemeral-buffer.search_capture",
+                "status": "completed",
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "TARGETED_SIGNAL appears in parser.c; "
+                            "logged at 2026-10-30T16:32:00"
+                        ),
+                    }],
+                },
+            },
+        })
+
+        exposure, counts = _mcp_result_criterion_exposure(output, {
+            "required_phrases": ["TARGETED_SIGNAL"],
+            "required_line_numbers": [32],
+        })
+
+        self.assertEqual(exposure["search_capture"], [True, False])
+        self.assertEqual(exposure["get_capture_slice"], [False, False])
+        self.assertEqual(counts, {"search_capture": 1, "get_capture_slice": 0})
+
     def test_data_path_bytes_reads_content_free_snapshot(self):
         from benchmarks.benchmark_agent_ab import DATA_PATH_BYTE_FIELDS
 
@@ -569,20 +704,27 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(output["tool_calls"], 0)
         self.assertEqual(output["output_bytes_proxy"], len((completed.stdout + stderr).encode()))
 
-    def test_mcp_approval_mode_uses_automatic_review_and_isolated_write_sandbox(self):
+    def test_matched_approval_mode_uses_write_sandbox_for_both_arms(self):
         from benchmarks.run_codex_agent_ab import _codex_command
 
-        command = _codex_command(
+        mcp_command = _codex_command(
             codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
             allow_mcp_approvals=True, sandbox="read-only", timeout=10,
             mcp_env={"EPHEMERAL_TEST_EMBEDDINGS": "1"},
         )
-        self.assertIn("--approve-for-me", command)
-        self.assertNotIn("--ask-for-approval", command)
-        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+        control_command = _codex_command(
+            codex="codex", model="gpt-5.6-luna", mode="control", fixture=Path("/tmp/fixture"),
+            mcp_python="python", mcp_module="server", mcp_server_script=None,
+            allow_mcp_approvals=True, sandbox="read-only", timeout=10,
+        )
+        for command in (control_command, mcp_command):
+            self.assertIn("--approve-for-me", command)
+            self.assertNotIn("--ask-for-approval", command)
+            self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+        self.assertFalse(any(value.startswith("mcp_servers.") for value in control_command))
 
-        env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
+        env_config = next(item for item in mcp_command if item.startswith("mcp_servers.ephemeral-buffer.env="))
         self.assertIn('EPHEMERAL_TEST_EMBEDDINGS="1"', env_config)
 
     def test_mcp_forwards_embedding_model_and_cache_configuration(self):
@@ -710,7 +852,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 8)
+        self.assertEqual(payload["records_schema_version"], 9)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")

@@ -13,13 +13,13 @@ import benchmarks.workload_results as wr
 
 
 SCHEMA_VERSION = 1
-SUMMARY_SCHEMA_VERSION = 3
-RECORDS_SCHEMA_VERSION = 8
-TASK_FIXTURE_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 4
+RECORDS_SCHEMA_VERSION = 9
+TASK_FIXTURE_VERSION = 3
 MODES = ("control", "mcp")
 EXPOSURE_STATES = (
-    "phrase_hit",
-    "response_without_phrase_hit",
+    "criterion_hit",
+    "response_without_criterion_hit",
     "no_successful_response",
 )
 TASKS = (
@@ -69,6 +69,7 @@ RUN_KEYS_V8 = RUN_KEYS_V7 | {
     "search_capture_responses",
     "get_capture_slice_responses",
 }
+RUN_KEYS_V9 = RUN_KEYS_V8
 METRICS = (
     "completed",
     "task_success",
@@ -195,7 +196,7 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         raise ValueError("records task_fixture_version does not match schedule")
     _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, 4, 5, 6, 7, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in (1, 2, 3, 4, 5, 6, 7, 8, RECORDS_SCHEMA_VERSION):
         raise ValueError("records schema version is unsupported")
     run_keys = (
         RUN_KEYS
@@ -213,6 +214,8 @@ def validate_records(payload: dict[str, Any], schedule: dict[str, Any]) -> list[
         else RUN_KEYS_V7
         if records_schema_version == 7
         else RUN_KEYS_V8
+        if records_schema_version == 8
+        else RUN_KEYS_V9
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
@@ -578,9 +581,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
                     }
                     for record in task_records:
                         if record[hit_field][index]:
-                            state = "phrase_hit"
+                            state = "criterion_hit"
                         elif record[response_count_field] > 0:
-                            state = "response_without_phrase_hit"
+                            state = "response_without_criterion_hit"
                         else:
                             state = "no_successful_response"
                         outcome = outcomes_by_state[state]

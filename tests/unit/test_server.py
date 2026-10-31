@@ -82,6 +82,7 @@ os.environ.setdefault("EPHEMERAL_DISABLE_SOCKET_SERVER", "1")
 import ephemeral_buffer_mcp.server as server
 import ephemeral_buffer_mcp.socket_transport as socket_transport
 import ephemeral_buffer_mcp.mcp_transport as mcp_transport
+from ephemeral_buffer_mcp.mcp_response import _query_marker_line
 import ephemeral_buffer_mcp.tools.capture as capture_tools
 import ephemeral_buffer_mcp.tools.configuration as configuration_tools
 import ephemeral_buffer_mcp.tools.formatting as formatting_tools
@@ -1191,6 +1192,8 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("already-collected text", capture_text_doc)
         self.assertIn("Resolve symlinks", capture_file_doc)
         self.assertIn("expected to finish within the MCP client's", execute_doc)
+        self.assertIn("preserve requested signals", execute_doc)
+        self.assertIn("line numbers", execute_doc)
         self.assertIn("duration may approach or exceed that window", execute_doc)
         self.assertIn("duration independently of output size", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
@@ -1518,6 +1521,22 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(summary["capture_status"], "captured")
         self.assertTrue(summary["cleanup_confirmed"])
         run.assert_called_once()
+
+    def test_execute_includes_bounded_previews_for_log_output(self):
+        output = "first diagnostic\nsecond diagnostic\nAssertionError: expected ready"
+        with patch.object(
+            capture_tools,
+            "run_command_bounded",
+            return_value=BoundedCommandResult(
+                output, 1, False, len(output), False, cleanup_confirmed=True
+            ),
+        ):
+            result = json.loads(
+                server.execute_and_capture("pytest tests", content_type="log")
+            )
+
+        self.assertEqual(result["previews"]["head"], result["previews"]["tail"])
+        self.assertIn("AssertionError: expected ready", result["previews"]["tail"])
 
     def test_execute_reports_command_and_capture_outcomes_separately(self):
         cases = (
@@ -3299,7 +3318,8 @@ class TestServerTools(unittest.TestCase):
                 len(json.dumps(compact_capture_summary, separators=(",", ":")).encode("utf-8")) / 4
             )
             detailed_proxy = math.ceil(len(detailed.encode("utf-8")) / 4)
-            self.assertLess(compact_proxy, detailed_proxy, name)
+            # Inline previews carry useful evidence, at a small token cost.
+            self.assertLessEqual(compact_proxy, detailed_proxy + 32, name)
             reductions[name] = detailed_proxy - compact_proxy
 
         self.assertEqual(set(reductions), set(cases))
@@ -3821,8 +3841,9 @@ class TestServerTools(unittest.TestCase):
             expected_match["matched_range"],
         )
         self.assertIn("matched_ranges=", search_response.content[0].text)
+        self.assertIn("Matched lines 1-2", search_response.content[0].text)
         self.assertIn("get_capture_slice", search_response.content[0].text)
-        self.assertNotIn(expected_match["snippet"], search_response.content[0].text)
+        self.assertIn(expected_match["snippet"], search_response.content[0].text)
         self.assertLessEqual(
             len(search_response.model_dump_json(by_alias=True).encode("utf-8")),
             server.MCP_TOOL_RESPONSE_MAX_BYTES,
@@ -3863,8 +3884,8 @@ class TestServerTools(unittest.TestCase):
             {"line", "byte_offset", "byte_length", "line_complete", "separator_after"},
         )
         self.assertEqual(slice_response.structured_content["data"]["content"], "needle αβ\nsecond line")
-        self.assertIn("content=structuredContent.data.content", slice_response.content[0].text)
-        self.assertNotIn("needle αβ", slice_response.content[0].text)
+        self.assertIn("Capture slice, lines 1-2:", slice_response.content[0].text)
+        self.assertIn("needle αβ\nsecond line", slice_response.content[0].text)
         self.assertLessEqual(
             len(slice_response.model_dump_json(by_alias=True).encode("utf-8")),
             8192,
@@ -3926,7 +3947,8 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("truncated=true", summary)
         self.assertIn('next_cursor="opaque-cursor"', summary)
         self.assertIn('matched_ranges=["L2-L4"]', summary)
-        self.assertNotIn("large payload", summary)
+        self.assertIn("Matched lines 2-4", summary)
+        self.assertIn("large payload", summary)
 
         captures_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
             status="ok",
@@ -3950,6 +3972,81 @@ class TestServerTools(unittest.TestCase):
         ))
         self.assertIn("Cleared capture", clear_summary)
         self.assertIn("cap-123", clear_summary)
+
+    def test_query_marker_line_skips_missing_and_unusable_source_lines(self):
+        snippet = "header without a source line\nnot a line number | TARGETED_SIGNAL"
+
+        self.assertIsNone(_query_marker_line(None, snippet))
+        self.assertIsNone(_query_marker_line("TARGETED_SIGNAL", snippet))
+
+    def test_query_marker_line_matches_whole_identifiers(self):
+        snippet = (
+            "  31 | obsolete_TARGETED_SIGNAL_V2 is context\n"
+            "  32 | TARGETED_SIGNAL is the actual match"
+        )
+
+        self.assertEqual(_query_marker_line("TARGETED_SIGNAL", snippet), 32)
+        self.assertIsNone(
+            _query_marker_line("TARGETED_SIGNAL", "  31 | obsolete_TARGETED_SIGNAL_V2")
+        )
+
+    def test_compact_tool_text_includes_bounded_evidence_with_line_labels(self):
+        search_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={
+                "query": "TARGETED_SIGNAL",
+                "matches": [{
+                    "matched_range": "L29-L35",
+                    "snippet": "  31 | preceding line\n>    32 | TARGETED_SIGNAL is on this source line\n  33 | following line",
+                }],
+            },
+        ))
+        self.assertIn("Matched line 32", search_summary)
+        self.assertIn("Matched text (verbatim):", search_summary)
+        self.assertIn("TARGETED_SIGNAL is on this source line", search_summary)
+
+        slice_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={
+                "start_line": 32,
+                "end_line": 32,
+                "content": "expected status=ready, got status=stalled",
+            },
+        ))
+        self.assertIn("Capture slice, line 32:", slice_summary)
+        self.assertIn("expected status=ready, got status=stalled", slice_summary)
+
+        preview_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"previews": {"head": None, "tail": "  32 | final assertion"}},
+        ))
+        self.assertIn("Tail preview:\n  32 | final assertion", preview_summary)
+        self.assertNotIn("Head preview", preview_summary)
+
+        malformed_matches = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"matches": [None, {"matched_range": None, "snippet": None}]},
+        ))
+        self.assertIn("Use get_capture_slice", malformed_matches)
+        self.assertNotIn("Match #", malformed_matches)
+
+        unlabelled_slice = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"start_line": "32", "end_line": 32, "content": "content"},
+        ))
+        self.assertIn("Capture slice:\ncontent", unlabelled_slice)
+        empty_slice = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"content": ""},
+        ))
+        self.assertIn("content=structuredContent.data.content", empty_slice)
+
+        long_slice = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={"start_line": 32, "end_line": 32, "content": "x" * 5000},
+        ))
+        self.assertIn("[capture slice excerpt truncated]", long_slice)
+        self.assertLessEqual(len(long_slice.encode("utf-8")), 4600)
 
     def test_compact_mcp_results_reduce_bytes_and_legacy_mode_preserves_text(self):
         content = "\n".join(

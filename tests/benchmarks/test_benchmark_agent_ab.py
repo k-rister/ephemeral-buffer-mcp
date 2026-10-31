@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import benchmarks.benchmark_agent_ab as benchmark_agent_ab
 import benchmarks.workload_results as wr
-from benchmarks.render_agent_ab_report import append_agent_ab_report
+from benchmarks.render_agent_ab_report import append_agent_ab_report, render_agent_ab_sections
 from benchmarks.benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
     RECORDS_SCHEMA_VERSION,
@@ -174,7 +174,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
-        self.assertEqual(summary["schema_version"], 3)
+        self.assertEqual(summary["schema_version"], 4)
         task_success = summary["task_success_by_mode"]
         self.assertEqual(
             task_success["mcp"]["tasks"]["targeted-inspection"],
@@ -248,18 +248,19 @@ class TestAgentAbBenchmark(unittest.TestCase):
         second["get_capture_slice_responses"] = 1
 
         summary = summarize_records(payload, schedule)
-        self.assertEqual(summary["records_schema_version"], 8)
+        self.assertEqual(summary["records_schema_version"], RECORDS_SCHEMA_VERSION)
         search_criteria = summary["criterion_exposure_summaries_by_mode"]["mcp"]["sources"]["search_capture"]["tasks"]["targeted-inspection"]
         criterion_one_states = search_criteria[0]["answer_outcomes_by_response_state"]
-        self.assertEqual(criterion_one_states["phrase_hit"]["failed"], 1)
-        self.assertEqual(criterion_one_states["phrase_hit"]["passed"], 0)
-        self.assertEqual(criterion_one_states["response_without_phrase_hit"]["passed"], 1)
+        self.assertEqual(criterion_one_states["criterion_hit"]["failed"], 1)
+        self.assertEqual(criterion_one_states["criterion_hit"]["passed"], 0)
+        self.assertEqual(criterion_one_states["response_without_criterion_hit"]["passed"], 1)
         self.assertEqual(criterion_one_states["no_successful_response"]["count"], 0)
+        self.assertNotIn("phrase_hit", criterion_one_states)
 
         slice_criteria = summary["criterion_exposure_summaries_by_mode"]["mcp"]["sources"]["get_capture_slice"]["tasks"]["targeted-inspection"]
         criterion_one_slice = slice_criteria[0]["answer_outcomes_by_response_state"]
         self.assertEqual(criterion_one_slice["no_successful_response"]["failed"], 1)
-        self.assertEqual(criterion_one_slice["response_without_phrase_hit"]["passed"], 1)
+        self.assertEqual(criterion_one_slice["response_without_criterion_hit"]["passed"], 1)
         self.assertNotIn("TARGETED_SIGNAL", json.dumps(summary))
         self.assertNotIn("line 32", json.dumps(summary))
 
@@ -304,14 +305,39 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
         self.assertIn("## Agent A/B task success", report)
         self.assertIn("## MCP response exposure and answer outcomes", report)
-        self.assertIn("`phrase_hit` means", report)
-        self.assertIn("response_without_phrase_hit", report)
+        self.assertIn("`criterion_hit` means", report)
+        self.assertIn("response_without_criterion_hit", report)
         self.assertIn("no_successful_response", report)
         self.assertIn("| baseline | task-level data unavailable | n/a | n/a | n/a |", report)
         self.assertIn("| baseline | task-level data unavailable | n/a | unavailable | n/a | n/a | n/a |", report)
         self.assertIn("| candidate | targeted-inspection | 0/2 | 1/2 | +50.0 pp", report)
         self.assertNotIn("TARGETED_SIGNAL", report)
         self.assertNotIn("line 32", report)
+
+    def test_agent_ab_report_reads_legacy_v3_exposure_state_names(self):
+        summary = {
+            "schema_version": 3,
+            "criterion_summaries_by_mode": {
+                "mcp": {"tasks": {"targeted-inspection": [{"passed": 1, "count": 1}]}},
+            },
+            "criterion_exposure_summaries_by_mode": {
+                "mcp": {"sources": {"search_capture": {"tasks": {
+                    "targeted-inspection": [{
+                        "answer_outcomes_by_response_state": {
+                            "phrase_hit": {"passed": 1, "failed": 0, "count": 1},
+                            "response_without_phrase_hit": {"passed": 0, "failed": 1, "count": 1},
+                            "no_successful_response": {"passed": 0, "failed": 0, "count": 0},
+                        },
+                    }],
+                }}}},
+            },
+        }
+
+        report = render_agent_ab_sections([("legacy", summary)])
+
+        self.assertIn("| Criterion hit (pass/fail) | Response without criterion hit (pass/fail) |", report)
+        self.assertIn("| legacy | targeted-inspection | 1 | search_capture | 1/0 | 0/1 | 0/0 |", report)
+        self.assertNotIn("phrase_hit", report)
 
     def test_legacy_v6_records_keep_criterion_results_unavailable(self):
         schedule, payload = _legacy_v6_records_payload()
