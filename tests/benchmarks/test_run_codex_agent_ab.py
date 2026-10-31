@@ -1009,10 +1009,21 @@ class TestCodexAgentRunner(unittest.TestCase):
                 clear=False,
             ):
                 first_payload = run_schedule(first_schedule, manifest, args)
+                first_result = records_workload_result(
+                    first_payload,
+                    producer="run_codex_agent_ab.py",
+                )
+                self.assertEqual(len(first_result["runs"]), len(first_payload["runs"]))
+                self.assertEqual(first_result["workload"]["parameters"]["repetitions"], 2)
                 records_path.write_text(json.dumps(first_payload), encoding="utf-8")
                 args.max_repetitions = 2
                 args.resume = True
                 extended_payload = run_schedule(extended_schedule, manifest, args)
+                extended_result = records_workload_result(
+                    extended_payload,
+                    producer="run_codex_agent_ab.py",
+                )
+                self.assertEqual(len(extended_result["runs"]), len(extended_payload["runs"]))
                 records_path.write_text(json.dumps(extended_payload), encoding="utf-8")
                 args.max_repetitions = 1
                 with self.assertRaisesRegex(ValueError, "below completed records"):
