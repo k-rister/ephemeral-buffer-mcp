@@ -367,10 +367,14 @@ stress case selects **983 repetitions per task and mode** for the default
 with a 95% Wilson lower bound of 80.5%. It is a planning model, not an empirical
 estimate for a particular model configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
-The scheduler bootstraps matched pairs and uses the 95th percentile of each
-task's discordance rate. Fewer than 20 matched repetitions for any task keeps the
-design marked as requiring a fuller pilot. Fixture and rubric versions must
-match v4; historical rubric results are never pooled.
+For tasks with at least 20 matched pairs, the scheduler bootstraps paired
+outcomes and uses the 95th percentile of discordance. An under-sampled task
+instead uses the 50% baseline and maximum-feasible-discordance fallback; the
+design remains marked as requiring a fuller pilot. The model and repository
+fixture are derived from the pilot protocol, and optional identity flags must
+match it. Generated schedules bind those identities for runner validation.
+Fixture and rubric versions must match v4; historical rubric results are never
+pooled.
 
 The scenario table is generated from the same paired model and seed. Its power
 targets use the final look's local alpha allocation (0.030); the three local

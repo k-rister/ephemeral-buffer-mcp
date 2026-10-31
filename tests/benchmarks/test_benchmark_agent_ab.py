@@ -204,21 +204,102 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_power_design_bootstraps_paired_pilot_and_marks_small_samples(self):
         small_schedule, small_payload = _scored_records_payload(repetitions=2)
+        for record in small_payload["runs"]:
+            record["task_success"] = False
+            record["criterion_passes"] = [False, False]
         small_design = build_power_design(small_payload, small_schedule, simulations=100, seed=73)
-        self.assertEqual(small_design["pilot_evidence_source"], "paired-records-bootstrap")
+        conservative_design = build_power_design(seed=73, simulations=100)
+        self.assertEqual(
+            small_design["pilot_evidence_source"],
+            "paired-records-bootstrap-with-conservative-fallback",
+        )
         self.assertTrue(small_design["pilot_required"])
+        self.assertEqual(small_design["selected_repetitions"], conservative_design["selected_repetitions"])
         self.assertEqual(
             small_design["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
             2,
         )
+        small_task_model = small_design["paired_model_by_task"]["targeted-inspection"]
+        self.assertIsNone(small_task_model["discordance_rate"])
+        self.assertEqual(small_task_model["source"], "under-20-pair-conservative-maximum-discordance")
+        self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(small_task_model, 0.1), 0.9)
 
         pilot_schedule, pilot_payload = _scored_records_payload(repetitions=20)
         pilot = build_power_design(pilot_payload, pilot_schedule, simulations=100, seed=73)
+        self.assertEqual(pilot["pilot_evidence_source"], "paired-records-bootstrap")
         self.assertFalse(pilot["pilot_required"])
         self.assertEqual(
             pilot["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
             20,
         )
+
+    def test_adequate_pilot_tasks_keep_bootstrap_when_another_task_is_small(self):
+        schedule, payload = _scored_records_payload(repetitions=20)
+        task_id = "targeted-inspection"
+        schedule["schedule"] = [
+            item for item in schedule["schedule"]
+            if item["task_id"] != task_id or item["repetition"] <= 2
+        ]
+        payload["runs"] = [
+            record for record in payload["runs"]
+            if record["task_id"] != task_id or record["repetition"] <= 2
+        ]
+
+        design = build_power_design(payload, schedule, simulations=100, seed=79)
+        models = design["paired_model_by_task"]
+        self.assertTrue(design["pilot_required"])
+        self.assertEqual(models[task_id]["matched_repetitions"], 2)
+        self.assertIsNone(models[task_id]["discordance_rate"])
+        self.assertEqual(models["noisy-test-failure"]["matched_repetitions"], 20)
+        self.assertIsNotNone(models["noisy-test-failure"]["discordance_rate"])
+
+    def test_pilot_identity_is_derived_and_explicit_mismatches_are_rejected(self):
+        schedule, payload = _scored_records_payload(repetitions=20)
+        resolved = benchmark_agent_ab._resolve_pilot_identity(
+            payload,
+            schedule,
+            model_config=None,
+            repository_fixture=None,
+        )
+        self.assertEqual(resolved, ("test-model", "synthetic-repo-v1"))
+        self.assertEqual(
+            benchmark_agent_ab._resolve_pilot_identity(
+                payload,
+                schedule,
+                model_config="test-model",
+                repository_fixture="synthetic-repo-v1",
+            ),
+            resolved,
+        )
+        with self.assertRaisesRegex(ValueError, "model_config"):
+            benchmark_agent_ab._resolve_pilot_identity(
+                payload,
+                schedule,
+                model_config="different-model",
+                repository_fixture=None,
+            )
+        with self.assertRaisesRegex(ValueError, "repository_fixture"):
+            benchmark_agent_ab._resolve_pilot_identity(
+                payload,
+                schedule,
+                model_config=None,
+                repository_fixture="different-fixture",
+            )
+        with self.assertRaisesRegex(ValueError, "repository_fixture.*does not match pilot records protocol"):
+            benchmark_agent_ab._resolve_pilot_identity(
+                payload,
+                dict(schedule, repository_fixture="different-fixture"),
+                model_config=None,
+                repository_fixture=None,
+            )
+        missing_identity = dict(payload, protocol={**payload["protocol"], "model_config": ""})
+        with self.assertRaisesRegex(ValueError, "pilot protocol field model_config"):
+            benchmark_agent_ab._resolve_pilot_identity(
+                missing_identity,
+                schedule,
+                model_config="test-model",
+                repository_fixture=None,
+            )
 
     def test_direction_requires_holm_significance_and_simultaneous_interval(self):
         design = {"selected_repetitions": 12}
@@ -776,6 +857,28 @@ class TestAgentAbWorkloadResults(unittest.TestCase):
         self.assertEqual(mcp["measurements"]["wall_time_seconds"]["value"], 1.5)
         self.assertNotIn("details", result)
         self.assertNotIn("prompt_bytes", mcp["measurements"])
+
+    def test_schedule_generation_derives_identity_from_pilot_protocol(self):
+        _, payload = _scored_records_payload(repetitions=20)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pilot_path = root / "pilot.json"
+            output_path = root / "schedule.json"
+            pilot_path.write_text(json.dumps(payload), encoding="utf-8")
+            argv = [
+                "benchmark_agent_ab.py",
+                "--schedule-output", str(output_path),
+                "--pilot-records", str(pilot_path),
+            ]
+            with patch("benchmarks.benchmark_agent_ab.build_power_design", return_value={
+                "selected_repetitions": 12,
+                "pilot_required": False,
+            }), patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO):
+                benchmark_agent_ab.main()
+            generated = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(generated["model_config"], "test-model")
+        self.assertEqual(generated["repository_fixture"], "synthetic-repo-v1")
 
     def test_main_result_flag_requires_records_mode(self):
         schedule, payload = _records_payload()

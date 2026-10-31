@@ -1001,6 +1001,26 @@ class TestCodexAgentRunner(unittest.TestCase):
         }
         self.assertEqual(len(keys), 16)
 
+    def test_runner_rejects_model_or_fixture_different_from_bound_schedule(self):
+        schedule = build_schedule(
+            repetitions=1,
+            seed=61,
+            model_config="pilot-model",
+            repository_fixture="pilot-fixture",
+        )
+        with self.assertRaisesRegex(ValueError, "schedule model_config"):
+            run_schedule(
+                schedule,
+                {},
+                argparse.Namespace(model="other-model", repository_fixture="pilot-fixture"),
+            )
+        with self.assertRaisesRegex(ValueError, "schedule repository_fixture"):
+            run_schedule(
+                schedule,
+                {},
+                argparse.Namespace(model="pilot-model", repository_fixture="other-fixture"),
+            )
+
 
 def subprocess_result(**kwargs):
     return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": "", **kwargs})()
