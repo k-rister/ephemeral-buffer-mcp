@@ -17,9 +17,7 @@ from benchmarks.agent_ab_statistics import (
     exact_mcnemar_pvalue,
     holm_adjust,
     newcombe_paired_score_interval,
-    normal_approximate_repetitions,
     select_simulated_repetitions,
-    simulate_paired_mcnemar_power,
 )
 
 
@@ -239,16 +237,12 @@ def _bootstrap_model_inputs(
         results[task["id"]] = {
             **bootstrap,
             "discordance_rate": bootstrap["discordance_upper_estimate"],
-            "source": (
-                "paired-records-zero-discordance-clopper-pearson-97.5%-upper-bound"
-                if bootstrap["discordance_upper_method"] == "one-sided-clopper-pearson"
-                else "paired-records-bootstrap-97.5th-percentile"
-            ),
+            "source": "paired-records-exact-clopper-pearson-97.5%-upper-bound",
         }
     evidence_source = (
-        "paired-records-bootstrap-with-conservative-fallback"
+        "paired-records-exact-bounds-with-conservative-fallback"
         if insufficient
-        else "paired-records-bootstrap"
+        else "paired-records-exact-bounds"
     )
     return results, evidence_source, insufficient
 
@@ -359,29 +353,20 @@ def build_power_design(
         for power_index, target_power in enumerate(SCENARIO_POWERS):
             scenario_seed = seed + 100 + effect_index * len(SCENARIO_POWERS) + power_index
             if effect == DEFAULT_EFFECT and target_power == DEFAULT_TARGET_POWER:
-                repetitions = selected["repetitions"]
+                selected_scenario = selected
+                repetitions = selected_scenario["repetitions"]
                 simulated = selected["power_simulation"]
             else:
-                repetitions = normal_approximate_repetitions(
+                selected_scenario = select_simulated_repetitions(
                     effect=effect,
                     target_power=target_power,
                     discordance_rates=discordance_rates,
+                    simulations=simulations,
                     family_alpha=FINAL_LOOK_ALPHA,
+                    seed=scenario_seed,
                 )
-                # The exact paired test and Holm correction verify each scenario.
-                # Increase in 2% steps until the lower Monte Carlo bound clears target.
-                while True:
-                    simulated = simulate_paired_mcnemar_power(
-                        repetitions=repetitions,
-                        effect=effect,
-                        discordance_rates=discordance_rates,
-                        simulations=simulations,
-                        alpha=FINAL_LOOK_ALPHA,
-                        seed=scenario_seed + repetitions,
-                    )
-                    if min(simulated["power_lower_95_by_task"]) >= target_power:
-                        break
-                    repetitions += max(1, math.ceil(repetitions * 0.02))
+                repetitions = selected_scenario["repetitions"]
+                simulated = selected_scenario["power_simulation"]
             variance = max(
                 discordance - effect * effect for discordance in discordance_rates
             )
@@ -398,7 +383,10 @@ def build_power_design(
                 "discordance_rates": dict(zip(task_ids, discordance_rates)),
                 "repetitions_per_task_and_mode": repetitions,
                 "simulated_power_by_task": dict(zip(task_ids, simulated["power_by_task"])),
-                "power_lower_95_by_task": dict(zip(task_ids, simulated["power_lower_95_by_task"])),
+                "power_lower_bound_by_task": dict(zip(task_ids, simulated["power_lower_bound_by_task"])),
+                "power_lower_confidence_by_task": dict(zip(task_ids, simulated["power_lower_confidence_by_task"])),
+                "power_validation_attempt": selected_scenario["validation_attempt"],
+                "power_validation_alpha_spending": selected_scenario["validation_alpha_spending"],
                 "expected_paired_score_ci95_half_width_pp": expected_ci * 100,
                 "holm_first_step_adjusted_ci_half_width_pp": adjusted_ci * 100,
                 "invocations_per_variant": invocations,
@@ -417,7 +405,7 @@ def build_power_design(
                 "token_estimates_note": cost_profile["token_estimates_note"],
             })
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "method": "seeded paired binary simulation; exact two-sided McNemar tests; Holm familywise correction",
         "effect_target": DEFAULT_EFFECT,
         "power_target": DEFAULT_TARGET_POWER,
@@ -426,24 +414,30 @@ def build_power_design(
         "pilot_evidence_source": evidence_source,
         "pilot_required": pilot_required,
         "pilot_minimum_repetitions_per_task": 20,
-        "baseline_interval_method": "97.5% two-sided Wilson score interval for control success",
+        "baseline_interval_method": "97.5% two-sided exact Clopper-Pearson interval for control success",
         "bootstrap_method": (
-            "resample matched current-rubric pairs 5000 times and use the 97.5th percentile "
-            "discordance rate; when none are observed, use the one-sided exact 97.5% "
-            "Clopper-Pearson upper bound"
+            "resample matched current-rubric pairs 5000 times for a diagnostic percentile; "
+            "sizing uses a one-sided exact 97.5% Clopper-Pearson upper bound"
         ),
         "pilot_parameter_confidence_rule": (
-            "Bonferroni combination of nominal 97.5% baseline and discordance bounds targets "
+            "Bonferroni combination of exact 97.5% baseline and discordance bounds gives at least "
             "95% joint coverage"
         ),
         "paired_model_by_task": model_inputs,
         "simulation_seed": seed,
         "power_simulations": simulations,
-        "power_confidence_rule": "per-task 95% Wilson lower bound must meet target at the final-look Holm alpha allocation",
+        "power_confidence_rule": (
+            "independent exact one-sided Clopper-Pearson lower bounds meet target; "
+            "validation alpha 0.05/[attempt*(attempt+1)] is split across tasks"
+        ),
         "final_look_alpha": FINAL_LOOK_ALPHA,
         "selected_repetitions": selected["repetitions"],
         "selected_power_by_task": dict(zip(task_ids, selected["power_simulation"]["power_by_task"])),
-        "selected_power_lower_95_by_task": dict(zip(task_ids, selected["power_simulation"]["power_lower_95_by_task"])),
+        "selected_power_lower_bound_by_task": dict(zip(task_ids, selected["power_simulation"]["power_lower_bound_by_task"])),
+        "selected_power_confidence_by_task": dict(zip(task_ids, selected["power_simulation"]["power_lower_confidence_by_task"])),
+        "selected_validation_attempt": selected["validation_attempt"],
+        "selected_validation_alpha_spending": selected["validation_alpha_spending"],
+        "selected_discovery_candidate_repetitions": selected["discovery_candidate_repetitions"],
         "selected_power_rule": selected["selection_rule"],
         "stage_percentages": list(STAGE_PERCENTAGES),
         "stage_alpha_spending": list(STAGE_ALPHA_SPENDING),

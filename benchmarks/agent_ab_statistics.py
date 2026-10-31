@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 from functools import lru_cache
@@ -23,6 +24,116 @@ def _wilson_interval(successes: int, count: int, confidence: float) -> tuple[flo
         proportion * (1.0 - proportion) / count + z * z / (4.0 * count * count)
     ) / denominator
     return (max(0.0, center - half_width), min(1.0, center + half_width))
+
+
+def _binomial_cdf(successes: int, count: int, probability: float) -> float:
+    """Evaluate a binomial CDF by summing outward from the nearer tail."""
+    if successes < 0:
+        return 0.0
+    if successes >= count:
+        return 1.0
+    if probability <= 0.0:
+        return 1.0
+    if probability >= 1.0:
+        return 0.0
+
+    def log_mass(value: int) -> float:
+        return (
+            math.lgamma(count + 1)
+            - math.lgamma(value + 1)
+            - math.lgamma(count - value + 1)
+            + value * math.log(probability)
+            + (count - value) * math.log1p(-probability)
+        )
+
+    mode = int((count + 1) * probability)
+    if successes < mode:
+        term = math.exp(log_mass(successes))
+        total = term
+        for value in range(successes, 0, -1):
+            term *= value * (1.0 - probability) / ((count - value + 1) * probability)
+            total += term
+        return min(1.0, total)
+
+    first_upper = successes + 1
+    term = math.exp(log_mass(first_upper))
+    upper_tail = term
+    for value in range(first_upper, count):
+        term *= (count - value) * probability / ((value + 1) * (1.0 - probability))
+        upper_tail += term
+    return max(0.0, 1.0 - upper_tail)
+
+
+def clopper_pearson_upper_bound(successes: int, count: int, confidence: float) -> float:
+    """Return a one-sided exact binomial upper confidence bound."""
+    if (
+        isinstance(successes, bool)
+        or not isinstance(successes, int)
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or not 0 <= successes <= count
+    ):
+        raise ValueError("binomial successes and count must be valid integers")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between zero and one")
+    if successes == count:
+        return 1.0
+    alpha = 1.0 - confidence
+    if successes == 0:
+        return -math.expm1(math.log(alpha) / count)
+
+    lower = successes / count
+    upper = 1.0
+    for _ in range(64):
+        middle = (lower + upper) / 2.0
+        if _binomial_cdf(successes, count, middle) > alpha:
+            lower = middle
+        else:
+            upper = middle
+    return upper
+
+
+def clopper_pearson_lower_bound(successes: int, count: int, confidence: float) -> float:
+    """Return a one-sided exact binomial lower confidence bound."""
+    if (
+        isinstance(successes, bool)
+        or not isinstance(successes, int)
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or not 0 <= successes <= count
+    ):
+        raise ValueError("binomial successes and count must be valid integers")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between zero and one")
+    if successes == 0:
+        return 0.0
+    alpha = 1.0 - confidence
+    target_cdf = 1.0 - alpha
+    lower = 0.0
+    upper = successes / count
+    for _ in range(64):
+        middle = (lower + upper) / 2.0
+        if _binomial_cdf(successes - 1, count, middle) > target_cdf:
+            lower = middle
+        else:
+            upper = middle
+    return lower
+
+
+def clopper_pearson_interval(
+    successes: int,
+    count: int,
+    confidence: float,
+) -> tuple[float, float]:
+    """Return a two-sided exact Clopper-Pearson binomial interval."""
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between zero and one")
+    tail_confidence = 1.0 - (1.0 - confidence) / 2.0
+    lower = clopper_pearson_lower_bound(successes, count, tail_confidence)
+    upper = clopper_pearson_upper_bound(successes, count, tail_confidence)
+    return lower, upper
 
 
 def newcombe_paired_score_interval(
@@ -144,6 +255,12 @@ def _holm_rejections(p_values: Sequence[float], alpha: float) -> list[bool]:
     return rejected
 
 
+def _derive_validation_seed(seed: int, attempt: int) -> int:
+    """Create a reproducible, domain-separated validation seed."""
+    label = f"agent-ab-power-validation:{seed}:{attempt}".encode("ascii")
+    return int.from_bytes(hashlib.sha256(label).digest()[:8], "big")
+
+
 def simulate_paired_mcnemar_power(
     *,
     repetitions: int,
@@ -206,6 +323,7 @@ def simulate_paired_mcnemar_power(
         "power_by_task": powers,
         "power_lower_95_by_task": [interval[0] for interval in intervals],
         "power_upper_95_by_task": [interval[1] for interval in intervals],
+        "rejection_counts_by_task": rejected_counts,
         "familywise_rejection_rate": any_rejected_count / simulations,
     }
 
@@ -281,7 +399,7 @@ def bootstrap_discordance_upper(
     count = len(pairs)
     baseline_successes = sum(control for control, _ in pairs)
     baseline_rate = baseline_successes / count
-    baseline_interval = _wilson_interval(baseline_successes, count, quantile)
+    baseline_interval = clopper_pearson_interval(baseline_successes, count, quantile)
     observed_discordances = sum(control != mcp for control, mcp in pairs)
     observed_discordance = observed_discordances / count
     bootstrap_rates = []
@@ -294,14 +412,10 @@ def bootstrap_discordance_upper(
     bootstrap_rates.sort()
     index = min(simulations - 1, math.ceil(quantile * simulations) - 1)
     bootstrap_upper = bootstrap_rates[index]
-    if observed_discordances == 0:
-        # The ordinary bootstrap is degenerate at zero in this case. Use the
-        # one-sided exact binomial bound at the same confidence level instead.
-        upper_estimate = -math.expm1(math.log1p(-quantile) / count)
-        upper_method = "one-sided-clopper-pearson"
-    else:
-        upper_estimate = bootstrap_upper
-        upper_method = "paired-bootstrap-percentile"
+    # Use the exact binomial bound for sizing. A bootstrap percentile can
+    # undercover with small discordant counts and is retained only as a diagnostic.
+    upper_estimate = clopper_pearson_upper_bound(observed_discordances, count, quantile)
+    upper_method = "one-sided-clopper-pearson"
     return {
         "matched_repetitions": count,
         "baseline_success_rate": baseline_rate,
@@ -309,7 +423,7 @@ def bootstrap_discordance_upper(
             "confidence": quantile,
             "lower": baseline_interval[0],
             "upper": baseline_interval[1],
-            "method": "wilson-score",
+            "method": "clopper-pearson",
         },
         "observed_discordance_rate": observed_discordance,
         "discordance_upper_bootstrap": bootstrap_upper,
@@ -391,11 +505,11 @@ def select_simulated_repetitions(
     family_alpha: float = 0.05,
     seed: int = 20261031,
 ) -> dict[str, Any]:
-    """Select the smallest simulated common size meeting power for every task.
+    """Propose a starting size, then certify it with independent simulations.
 
-    The lower 95% Wilson bound on each simulated marginal power must reach the
-    requested target. Candidate sizes use the exact conditional McNemar test
-    and apply Holm across all tasks in every simulated family.
+    A normal approximation proposes the starting size. Final power bounds use
+    independent exact binomial lower bounds, with error spent across tasks and
+    retries.
     """
     if simulations < 100:
         raise ValueError("at least 100 simulations are required for design selection")
@@ -411,58 +525,69 @@ def select_simulated_repetitions(
     if not 0.0 < family_alpha < 1.0:
         raise ValueError("family alpha must be between zero and one")
 
-    # Extend the same simulated paired outcomes by one repetition at a time.
-    # Every integer candidate is evaluated, so Monte Carlo noise cannot make a
-    # binary search skip a smaller candidate that meets the declared rule.
-    rng = random.Random(seed)
+    # A normal approximation is only a starting candidate. It makes discovery
+    # inexpensive; no evidence claim uses its result or its assumed variance.
     task_count = len(discordance_rates)
-    mcp_only_counts = [[0] * task_count for _ in range(simulations)]
-    control_only_counts = [[0] * task_count for _ in range(simulations)]
-    for repetitions in range(1, 100001):
-        rejected_counts = [0] * task_count
-        any_rejected_count = 0
-        for simulation in range(simulations):
-            p_values = []
-            for task_index, discordance in enumerate(discordance_rates):
-                draw = rng.random()
-                if draw < (discordance + effect) / 2.0:
-                    mcp_only_counts[simulation][task_index] += 1
-                elif draw < discordance:
-                    control_only_counts[simulation][task_index] += 1
-                p_values.append(exact_mcnemar_pvalue(
-                    mcp_only_counts[simulation][task_index],
-                    control_only_counts[simulation][task_index],
-                ))
-            rejections = _holm_rejections(p_values, family_alpha)
-            any_rejected_count += int(any(rejections))
-            for task_index, rejected in enumerate(rejections):
-                rejected_counts[task_index] += int(rejected)
+    discovery_candidate = normal_approximate_repetitions(
+        effect=effect,
+        target_power=target_power,
+        discordance_rates=discordance_rates,
+        family_alpha=family_alpha,
+        task_count=task_count,
+    )
+    if discovery_candidate > 100000:
+        raise ValueError("power target requires more than 100000 repetitions")
 
-        powers = [count / simulations for count in rejected_counts]
-        intervals = [_wilson_interval(count, simulations, 0.95) for count in rejected_counts]
-        lower_bounds = [interval[0] for interval in intervals]
+    # A candidate and every retry are validated on independent streams. The
+    # per-attempt error budgets sum to 0.05; each is split across all tasks.
+    candidate = discovery_candidate
+    attempt = 1
+    while True:
+        attempt_alpha = 0.05 / (attempt * (attempt + 1))
+        per_task_alpha = attempt_alpha / task_count
+        confidence = 1.0 - per_task_alpha
+        validation_seed = _derive_validation_seed(seed, attempt)
+        validation = simulate_paired_mcnemar_power(
+            repetitions=candidate,
+            effect=effect,
+            discordance_rates=discordance_rates,
+            simulations=simulations,
+            alpha=family_alpha,
+            seed=validation_seed,
+        )
+        lower_bounds = [
+            clopper_pearson_lower_bound(count, simulations, confidence)
+            for count in validation["rejection_counts_by_task"]
+        ]
+        confidence_by_task = [confidence] * task_count
         if min(lower_bounds) >= target_power:
-            result = {
-                "repetitions": repetitions,
-                "effect": effect,
-                "discordance_rates": list(discordance_rates),
-                "simulations": simulations,
-                "seed": seed,
-                "alpha": family_alpha,
-                "power_by_task": powers,
-                "power_lower_95_by_task": lower_bounds,
-                "power_upper_95_by_task": [interval[1] for interval in intervals],
-                "familywise_rejection_rate": any_rejected_count / simulations,
-            }
+            validation.pop("power_lower_95_by_task", None)
+            validation.pop("power_upper_95_by_task", None)
+            validation.update({
+                "power_lower_bound_by_task": lower_bounds,
+                "power_lower_confidence_by_task": confidence_by_task,
+                "power_bound_method": "one-sided-clopper-pearson",
+                "validation_attempt": attempt,
+                "validation_alpha_spending": attempt_alpha,
+                "discovery_seed": seed,
+            })
             return {
-                "repetitions": repetitions,
+                "repetitions": candidate,
                 "target_power": target_power,
-                "selected_power": min(powers),
-                "selected_power_lower_95": min(lower_bounds),
-                "power_simulation": result,
+                "selected_power": min(validation["power_by_task"]),
+                "selected_power_lower_bound": min(lower_bounds),
+                "selected_power_lower_bound_by_task": lower_bounds,
+                "selected_power_confidence_by_task": confidence_by_task,
+                "validation_attempt": attempt,
+                "validation_alpha_spending": attempt_alpha,
+                "discovery_candidate_repetitions": discovery_candidate,
+                "power_simulation": validation,
                 "selection_rule": (
-                    "first common repetition count in the seeded ascending scan whose per-task "
-                    "95% Wilson power lower bound meets target after exact McNemar plus Holm"
+                    "independently validated with one-sided exact Clopper-Pearson lower bounds; "
+                    "alpha 0.05/[attempt*(attempt+1)] is split across tasks"
                 ),
             }
-    raise ValueError("power target requires more than 100000 repetitions")
+        if candidate >= 100000:
+            raise ValueError("power target could not be independently validated within 100000 repetitions")
+        candidate = min(100000, max(candidate + 1, math.ceil(candidate * 1.05)))
+        attempt += 1

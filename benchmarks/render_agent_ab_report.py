@@ -128,7 +128,7 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
 
     lines.extend((
         "",
-        "| Revision | Difference target | Target power | Simulated minimum power (95% lower bound) | Repetitions/task/mode | Paired score CI half-width (pp) | Invocations/variant | Runtime/variant (s) | Input tokens/variant | Output tokens/variant |",
+        "| Revision | Difference target | Target power | Validated minimum power (adjusted lower bound) | Repetitions/task/mode | Paired score CI half-width (pp) | Invocations/variant | Runtime/variant (s) | Input tokens/variant | Output tokens/variant |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ))
     for revision, summary in summaries:
@@ -139,7 +139,7 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
             continue
         for scenario in scenarios:
             powers = scenario.get("simulated_power_by_task", {})
-            lower_bounds = scenario.get("power_lower_95_by_task", {})
+            lower_bounds = scenario.get("power_lower_bound_by_task", {})
             simulated_power = (
                 f"{min(powers.values()) * 100:.1f}% (LB {min(lower_bounds.values()) * 100:.1f}%)"
                 if powers and lower_bounds else "n/a"
