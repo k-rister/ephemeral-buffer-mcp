@@ -338,6 +338,19 @@ class TestAgentAbBenchmark(unittest.TestCase):
             for task in final_look["statistical_adequacy"]["tasks"].values()
         ))
 
+    def test_staged_summary_rejects_unplanned_or_undefined_looks(self):
+        design = {"selected_repetitions": 12}
+        schedule, payload = _scored_records_payload(repetitions=None, design=design)
+        payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 7]
+        with self.assertRaisesRegex(ValueError, "planned stage look"):
+            summarize_records(payload, schedule)
+
+        payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 6]
+        schedule_without_looks = dict(schedule)
+        schedule_without_looks.pop("stage_schedule")
+        with self.assertRaisesRegex(ValueError, "planned stage look"):
+            validate_records(payload, schedule_without_looks, allow_staged_prefix=True)
+
     def test_schedule_is_reproducible_and_balanced(self):
         first = build_schedule(repetitions=3, seed=17)
         self.assertEqual(first, build_schedule(repetitions=3, seed=17))

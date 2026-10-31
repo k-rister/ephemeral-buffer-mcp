@@ -32,6 +32,36 @@ from benchmarks.run_codex_agent_ab import (
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_runner_rejects_zero_and_unplanned_repetition_caps_before_invocation(self):
+        schedule = build_schedule(repetitions=None, seed=47, design={"selected_repetitions": 4})
+        manifest = {
+            task["id"]: {
+                "prompt": task["id"],
+                "signal_marker": "ok",
+                "success_criteria": {
+                    "description": "report the signal and a deterministic result",
+                    "required_phrases": ["ok", "expected answer"],
+                },
+            }
+            for task in schedule["tasks"]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            args = argparse.Namespace(
+                repository=".", repository_fixture="fixture", environment="test", model="gpt-5.6-luna",
+                codex="codex", mcp_python="python", mcp_module="server", mcp_server_script=None,
+                sandbox="read-only", timeout=10, allow_mcp_approvals=False,
+                dry_run=False, output=Path(directory) / "records.json", max_repetitions=0, resume=False,
+            )
+            with patch("benchmarks.run_codex_agent_ab._run_codex_process") as runner:
+                with self.assertRaisesRegex(ValueError, "max_repetitions"):
+                    run_schedule(schedule, manifest, args)
+                runner.assert_not_called()
+
+                args.max_repetitions = 1
+                with self.assertRaisesRegex(ValueError, "planned stage look"):
+                    run_schedule(schedule, manifest, args)
+                runner.assert_not_called()
+
     def test_source_locations_bind_lines_to_files_in_answers_and_exposure(self):
         criteria = {
             "required_phrases": ["SIGNAL", "src/parser.c"],

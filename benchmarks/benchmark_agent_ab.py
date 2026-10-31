@@ -563,6 +563,24 @@ def _run_key(record: dict[str, Any]) -> tuple[int, str, str]:
     return (int(record["repetition"]), record["task_id"], record["mode"])
 
 
+def _stage_repetition_counts(schedule: dict[str, Any]) -> list[int]:
+    """Return valid, strictly increasing repetition counts for planned looks."""
+    looks = schedule.get("stage_schedule")
+    if not isinstance(looks, list) or not looks:
+        return []
+    counts = []
+    for look in looks:
+        if not isinstance(look, dict):
+            raise ValueError("schedule stage_schedule entries must be objects")
+        count = look.get("repetitions")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("schedule stage repetitions must be positive integers")
+        if counts and count <= counts[-1]:
+            raise ValueError("schedule stage repetitions must be strictly increasing")
+        counts.append(count)
+    return counts
+
+
 def _is_nonnegative_finite_number(value: Any) -> bool:
     if isinstance(value, bool):
         return False
@@ -722,6 +740,8 @@ def validate_records(
         last_repetition = completed_repetitions[-1]
         if completed_repetitions != list(range(1, last_repetition + 1)):
             raise ValueError("staged records must contain a contiguous repetition prefix")
+        if last_repetition not in _stage_repetition_counts(schedule):
+            raise ValueError("staged records must end at a planned stage look")
         expected_prefix = {
             key for key, item in expected.items() if item["repetition"] <= last_repetition
         }
