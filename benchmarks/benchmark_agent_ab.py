@@ -238,8 +238,12 @@ def _bootstrap_model_inputs(
         )
         results[task["id"]] = {
             **bootstrap,
-            "discordance_rate": bootstrap["discordance_upper_bootstrap"],
-            "source": "paired-records-bootstrap-95th-percentile",
+            "discordance_rate": bootstrap["discordance_upper_estimate"],
+            "source": (
+                "paired-records-zero-discordance-exact-upper-bound"
+                if bootstrap["discordance_upper_method"] == "one-sided-clopper-pearson"
+                else "paired-records-bootstrap-95th-percentile"
+            ),
         }
     evidence_source = (
         "paired-records-bootstrap-with-conservative-fallback"
@@ -410,7 +414,11 @@ def build_power_design(
         "pilot_evidence_source": evidence_source,
         "pilot_required": pilot_required,
         "pilot_minimum_repetitions_per_task": 20,
-        "bootstrap_method": "resample matched current-rubric pairs 5000 times; use the 95th percentile discordance rate",
+        "bootstrap_method": (
+            "resample matched current-rubric pairs 5000 times and use the 95th percentile "
+            "discordance rate; when none are observed, use the one-sided exact 95% "
+            "Clopper-Pearson upper bound"
+        ),
         "paired_model_by_task": model_inputs,
         "simulation_seed": seed,
         "power_simulations": simulations,

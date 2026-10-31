@@ -370,11 +370,15 @@ with a 95% Wilson lower bound of 80.0%. It is a planning model, not an empirical
 estimate for a particular model configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
 For tasks with at least 20 matched pairs, the scheduler bootstraps paired
-outcomes and uses the 95th percentile of discordance. An under-sampled task
-instead uses the 50% baseline and maximum-feasible-discordance fallback; the
-design remains marked as requiring a fuller pilot. The model and repository
-fixture are derived from the pilot protocol, and optional identity flags must
-match it. Generated schedules bind those identities for runner validation.
+outcomes and uses the 95th percentile of discordance. If no discordant pairs
+were observed, the bootstrap percentile is zero by construction; the scheduler
+uses the one-sided exact 95% Clopper-Pearson upper bound,
+`1 - 0.05^(1/n)`, where `n` is the number of matched pairs. An under-sampled
+task instead uses the 50% baseline and maximum-feasible-discordance fallback;
+the design remains marked as requiring a fuller pilot. The model and
+repository fixture are derived from the pilot protocol, and optional identity
+flags must match it. Generated schedules bind those identities for runner
+validation.
 Fixture and rubric versions must match v4; historical rubric results are never
 pooled.
 

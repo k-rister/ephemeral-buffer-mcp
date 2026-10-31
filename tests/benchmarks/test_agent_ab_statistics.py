@@ -123,6 +123,17 @@ class TestAgentAbStatistics(unittest.TestCase):
         self.assertEqual(first["matched_repetitions"], 40)
         self.assertAlmostEqual(first["baseline_success_rate"], 0.5)
         self.assertGreaterEqual(first["discordance_upper_bootstrap"], 0.5)
+        self.assertEqual(first["discordance_upper_method"], "paired-bootstrap-percentile")
+        self.assertEqual(first["discordance_upper_estimate"], first["discordance_upper_bootstrap"])
+
+    def test_zero_discordance_uses_one_sided_exact_upper_bound(self):
+        pairs = [(True, True)] * 10 + [(False, False)] * 10
+        result = bootstrap_discordance_upper(pairs, simulations=1000, seed=19)
+        expected = 1.0 - 0.05 ** (1.0 / len(pairs))
+        self.assertEqual(result["observed_discordance_rate"], 0.0)
+        self.assertEqual(result["discordance_upper_bootstrap"], 0.0)
+        self.assertAlmostEqual(result["discordance_upper_estimate"], expected)
+        self.assertEqual(result["discordance_upper_method"], "one-sided-clopper-pearson")
 
 
 if __name__ == "__main__":
