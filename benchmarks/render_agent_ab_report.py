@@ -9,10 +9,14 @@ from typing import Any
 
 SOURCES = ("search_capture", "get_capture_slice")
 RESPONSE_STATES = (
-    "phrase_hit",
-    "response_without_phrase_hit",
+    "criterion_hit",
+    "response_without_criterion_hit",
     "no_successful_response",
 )
+LEGACY_RESPONSE_STATES = {
+    "criterion_hit": "phrase_hit",
+    "response_without_criterion_hit": "response_without_phrase_hit",
+}
 
 
 def _read_summary(revision: str, path: Path) -> tuple[str, dict[str, Any]] | None:
@@ -55,6 +59,15 @@ def _task_ids(summary: dict[str, Any]) -> set[str]:
     return task_ids
 
 
+def _response_state_outcome(outcomes: dict[str, Any], state: str) -> Any:
+    """Read current state names and the phrase-only names from schema v3."""
+    outcome = outcomes.get(state)
+    if isinstance(outcome, dict):
+        return outcome
+    legacy_state = LEGACY_RESPONSE_STATES.get(state)
+    return outcomes.get(legacy_state) if legacy_state is not None else None
+
+
 def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str:
     """Render task success, criterion outcomes, and response/outcome cross-tabs."""
     lines = ["", "## Agent A/B task success", ""]
@@ -84,9 +97,10 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
     lines.extend(("", "## Agent A/B criterion results", ""))
     lines.append(
         "Answer columns show passing runs over scheduled runs. Search and slice hit "
-        "columns show MCP runs where the criterion phrase matched in at least one "
+        "columns show MCP runs where a criterion matched in at least one "
         "successful response over scheduled MCP runs. Matching case-folds text, "
-        "normalizes whitespace, and checks phrase boundaries. Response totals/runs "
+        "normalizes whitespace, checks phrase boundaries, and accepts explicit "
+        "line-number references. Response totals/runs "
         "show successful responses and runs with at least one response. Response text "
         "is not stored."
     )
@@ -141,17 +155,16 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
     lines.extend(("", "## MCP response exposure and answer outcomes", ""))
     lines.append(
         "Each cell is `answer pass/answer fail` for runs in that response state. "
-        "`phrase_hit` means a criterion phrase matched in a successful response using "
-        "case-folded, whitespace-normalized text and phrase boundaries. "
-        "`response_without_phrase_hit` means one or more successful responses were "
-        "returned without a phrase match. `no_successful_response` means the "
+        "`criterion_hit` means a criterion matched in a successful response. "
+        "`response_without_criterion_hit` means one or more successful responses were "
+        "returned without a criterion match. `no_successful_response` means the "
         "run returned zero successful responses from that tool; it does not establish "
-        "whether the tool was called. Phrase absence does not establish semantic "
+        "whether the tool was called. Criterion absence does not establish semantic "
         "irrelevance, and these cross-tabs show association rather than causation."
     )
     lines.extend((
         "",
-        "| Revision | Task | Criterion | Source | Phrase hit (pass/fail) | Response without phrase hit (pass/fail) | No successful response (pass/fail) |",
+        "| Revision | Task | Criterion | Source | Criterion hit (pass/fail) | Response without criterion hit (pass/fail) | No successful response (pass/fail) |",
         "|---|---|---:|---|---:|---:|---:|",
     ))
     for revision, summary in summaries:
@@ -181,7 +194,7 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
                     )
                     values = []
                     for state in RESPONSE_STATES:
-                        outcome = cross_tab.get(state)
+                        outcome = _response_state_outcome(cross_tab, state)
                         values.append(
                             f"{outcome.get('passed', 0)}/{outcome.get('failed', 0)}"
                             if isinstance(outcome, dict) else "n/a"

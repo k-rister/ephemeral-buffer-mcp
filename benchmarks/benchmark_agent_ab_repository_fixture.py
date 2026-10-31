@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-FIXTURE_VERSION = 2
+FIXTURE_VERSION = 3
 PROFILE = "repository-shaped-v1"
 
 TASKS = {
@@ -17,7 +17,8 @@ TASKS = {
         "signal_marker": "TARGETED_SIGNAL",
         "success_criteria": {
             "description": "Final response contains TARGETED_SIGNAL and the correct source line number.",
-            "required_phrases": ["TARGETED_SIGNAL", "src/packet_parser/parser.py:12"],
+            "required_phrases": ["TARGETED_SIGNAL", "src/packet_parser/parser.py"],
+            "required_line_numbers": [12],
         },
     },
     "noisy-test-failure": {
@@ -41,7 +42,8 @@ TASKS = {
         "signal_marker": "BUILD_FAILURE_SIGNAL",
         "success_criteria": {
             "description": "Final response contains BUILD_FAILURE_SIGNAL, src/parser.c, and line 917.",
-            "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c:917"],
+            "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
+            "required_line_numbers": [917],
         },
     },
     "follow-up-context": {

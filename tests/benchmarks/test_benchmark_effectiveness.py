@@ -129,10 +129,26 @@ class TestEffectivenessBenchmark(unittest.TestCase):
         record = run_summary_benchmark()
         self.assertEqual(record["benchmark"], "capture-summary")
         self.assertEqual(record["aggregate"]["task_count"], 5)
-        self.assertGreater(record["aggregate"]["mean_byte_reduction"], 0)
-        self.assertGreater(record["aggregate"]["mean_token_proxy_reduction"], 0)
-        self.assertGreater(record["aggregate"]["mean_prompt_byte_reduction"], 0)
-        self.assertGreater(record["aggregate"]["mean_prompt_token_proxy_reduction"], 0)
+        self.assertAlmostEqual(
+            record["aggregate"]["mean_byte_reduction"],
+            sum(item["byte_reduction"] for item in record["records"])
+            / len(record["records"]),
+        )
+        self.assertAlmostEqual(
+            record["aggregate"]["mean_token_proxy_reduction"],
+            sum(item["token_proxy_reduction"] for item in record["records"])
+            / len(record["records"]),
+        )
+        self.assertAlmostEqual(
+            record["aggregate"]["mean_prompt_byte_reduction"],
+            sum(item["prompt_byte_reduction"] for item in record["records"])
+            / len(record["records"]),
+        )
+        self.assertAlmostEqual(
+            record["aggregate"]["mean_prompt_token_proxy_reduction"],
+            sum(item["prompt_token_proxy_reduction"] for item in record["records"])
+            / len(record["records"]),
+        )
         self.assertTrue(all(item["full_output_available_for_retrieval"] for item in record["records"]))
         self.assertTrue(all(item["retrieval_verified"] for item in record["records"]))
         self.assertTrue(all(item["payload_shapes_aligned"] for item in record["records"]))

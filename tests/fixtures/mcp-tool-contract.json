@@ -162,6 +162,11 @@
           "title": "Label",
           "type": "string"
         },
+        "max_captures": {
+          "default": 25,
+          "title": "Max Captures",
+          "type": "integer"
+        },
         "max_bytes": {
           "anyOf": [
             {
@@ -173,11 +178,6 @@
           ],
           "default": null,
           "title": "Max Bytes"
-        },
-        "max_captures": {
-          "default": 25,
-          "title": "Max Captures",
-          "type": "integer"
         }
       },
       "title": "consolidate_capturesArguments",
@@ -186,7 +186,7 @@
   },
   {
     "name": "execute_and_capture",
-    "description": "Run a command, index bounded output, and return a compact JSON\n    summary with status, duration, sizes, token estimates, truncation, signals,\n    and optional metrics.\n\n    Use for commands expected to finish within the MCP client's tool-call window\n    when output benefits from bounded capture and later search. Use\n    start_execution when duration may approach or exceed that window, even for a\n    single phase; use direct execution for small targeted inspections. Choose by\n    duration independently of output size; this routing guidance is advisory.\n\n    Verify the command, intended repository, and working directory. Omitted cwd\n    inherits the server process directory; symlinks and shell expansion may\n    target another path. Output bounds do not validate command intent, path\n    identity, or filesystem safety.\n\n    An omitted label is derived from the command. content_type accepts auto\n    (default), diff, log, or text. max_output_bytes defaults to the configured\n    buffer limit and cannot exceed it. timeout_seconds bounds runtime; timeout\n    retains collected output and returns exit code 124. structured_metrics accepts\n    JSON-compatible named metrics.\n    ",
+    "description": "Run a command and return compact JSON with status, duration, sizes, token\n    estimates, truncation, signals, previews, and optional metrics. Log previews\n    show bounded head/tail lines. Check them first; preserve requested signals,\n    test names, line numbers, and assertion text verbatim. Search for missing\n    details and slice only if evidence is absent or truncated.\n\n    Use for commands expected to finish within the MCP client's tool-call window.\n    Use start_execution when duration may approach or exceed that window; use\n    direct execution for short targeted inspections. Choose by duration independently of output size.\n\n    Verify command, repository, and working directory. Omitted cwd inherits the server process directory.\n    Symlinks or shell expansion can target another path; output limits do not ensure filesystem safety.\n\n    Labels default to the command. content_type accepts auto, diff, log, or text.\n    max_output_bytes cannot exceed the buffer limit. Timeout retains output and\n    returns exit code 124. structured_metrics accepts JSON-compatible named metrics.\n    ",
     "inputSchema": {
       "properties": {
         "command": {
@@ -387,20 +387,6 @@
           "title": "Execution Id",
           "type": "string"
         },
-        "max_bytes": {
-          "default": 8192,
-          "maximum": 8192,
-          "minimum": 512,
-          "title": "Max Bytes",
-          "type": "integer"
-        },
-        "offset": {
-          "default": 0,
-          "description": "UTF-8 byte offset when paging one phase",
-          "minimum": 0,
-          "title": "Offset",
-          "type": "integer"
-        },
         "phase_name": {
           "anyOf": [
             {
@@ -414,6 +400,20 @@
           ],
           "default": null,
           "title": "Phase Name"
+        },
+        "offset": {
+          "default": 0,
+          "description": "UTF-8 byte offset when paging one phase",
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 8192,
+          "maximum": 8192,
+          "minimum": 512,
+          "title": "Max Bytes",
+          "type": "integer"
         }
       },
       "required": [
@@ -540,11 +540,6 @@
     "description": "Resume at the first incomplete phase.\n\n    When invoked through MCP, remaining phases run in the background and the\n    call returns promptly. Direct Python calls run resumed phases synchronously\n    and return after the run completes or encounters a stopping condition.\n\n    Use get_execution for progress; caller disconnection detaches. Completed\n    phases are skipped, and safe interrupted phases resume normally. Failed or\n    timed-out phases require retry_failed=True. Unsafe retries also require\n    confirm_unsafe=True unless the execution used the allow-unsafe policy.\n    ",
     "inputSchema": {
       "properties": {
-        "confirm_unsafe": {
-          "default": false,
-          "title": "Confirm Unsafe",
-          "type": "boolean"
-        },
         "execution_id": {
           "maxUtf8Bytes": 256,
           "minLength": 1,
@@ -554,6 +549,11 @@
         "retry_failed": {
           "default": false,
           "title": "Retry Failed",
+          "type": "boolean"
+        },
+        "confirm_unsafe": {
+          "default": false,
+          "title": "Confirm Unsafe",
           "type": "boolean"
         }
       },
@@ -569,6 +569,15 @@
     "description": "Preview selected durable records or archive and retire them.\n\n    A dry run is read-only and reports eligibility and projected space reclaimed.\n    Actual retirement requires an archive path outside the state directory; the\n    archived bundle is durably written before the source record pair is removed.\n    Active and fence-pending executions are never retired.\n    ",
     "inputSchema": {
       "properties": {
+        "execution_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Execution Ids",
+          "type": "array"
+        },
         "archive_path": {
           "anyOf": [
             {
@@ -586,15 +595,6 @@
           "default": true,
           "title": "Dry Run",
           "type": "boolean"
-        },
-        "execution_ids": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 20,
-          "minItems": 1,
-          "title": "Execution Ids",
-          "type": "array"
         }
       },
       "required": [
@@ -676,6 +676,12 @@
           "additionalProperties": false,
           "description": "Schema contract for one phase exposed through the MCP tool.",
           "properties": {
+            "name": {
+              "maxUtf8Bytes": 256,
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            },
             "command": {
               "maxUtf8Bytes": 16384,
               "minLength": 1,
@@ -696,19 +702,18 @@
               "maxUtf8Bytes": 4096,
               "title": "Cwd"
             },
-            "idempotency_key": {
+            "timeout_seconds": {
               "anyOf": [
                 {
-                  "minLength": 1,
-                  "type": "string"
+                  "exclusiveMinimum": 0,
+                  "type": "number"
                 },
                 {
                   "type": "null"
                 }
               ],
               "default": null,
-              "maxUtf8Bytes": 256,
-              "title": "Idempotency Key"
+              "title": "Timeout Seconds"
             },
             "max_output_bytes": {
               "anyOf": [
@@ -723,11 +728,11 @@
               "default": null,
               "title": "Max Output Bytes"
             },
-            "name": {
-              "maxUtf8Bytes": 256,
-              "minLength": 1,
-              "title": "Name",
-              "type": "string"
+            "structured_metrics": {
+              "additionalProperties": true,
+              "maxJsonBytes": 16384,
+              "title": "Structured Metrics",
+              "type": "object"
             },
             "side_effects": {
               "default": "none",
@@ -737,25 +742,6 @@
               ],
               "title": "Side Effects",
               "type": "string"
-            },
-            "structured_metrics": {
-              "additionalProperties": true,
-              "maxJsonBytes": 16384,
-              "title": "Structured Metrics",
-              "type": "object"
-            },
-            "timeout_seconds": {
-              "anyOf": [
-                {
-                  "exclusiveMinimum": 0,
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Timeout Seconds"
             },
             "unsafe_side_effects": {
               "anyOf": [
@@ -768,6 +754,20 @@
               ],
               "default": null,
               "title": "Unsafe Side Effects"
+            },
+            "idempotency_key": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "maxUtf8Bytes": 256,
+              "title": "Idempotency Key"
             }
           },
           "required": [
@@ -779,18 +779,14 @@
         }
       },
       "properties": {
-        "cwd": {
-          "anyOf": [
-            {
-              "maxUtf8Bytes": 4096,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Cwd"
+        "phases": {
+          "items": {
+            "$ref": "#/$defs/ExecutionPhaseInput"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Phases",
+          "type": "array"
         },
         "execution_id": {
           "anyOf": [
@@ -812,28 +808,6 @@
           "title": "Label",
           "type": "string"
         },
-        "max_output_bytes": {
-          "anyOf": [
-            {
-              "minimum": 512,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Output Bytes"
-        },
-        "phases": {
-          "items": {
-            "$ref": "#/$defs/ExecutionPhaseInput"
-          },
-          "maxItems": 64,
-          "minItems": 1,
-          "title": "Phases",
-          "type": "array"
-        },
         "resume_policy": {
           "default": "safe",
           "enum": [
@@ -842,6 +816,19 @@
           ],
           "title": "Resume Policy",
           "type": "string"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "maxUtf8Bytes": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
         },
         "timeout_seconds": {
           "anyOf": [
@@ -855,6 +842,19 @@
           ],
           "default": null,
           "title": "Timeout Seconds"
+        },
+        "max_output_bytes": {
+          "anyOf": [
+            {
+              "minimum": 512,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Output Bytes"
         }
       },
       "required": [

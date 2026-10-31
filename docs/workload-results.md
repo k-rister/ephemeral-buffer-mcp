@@ -369,3 +369,139 @@ listing tool's `--redact KEY` masks a value in its output without changing the
 file. Metadata that should not be recorded at all is simply not passed; the
 result format is still not a privacy exemption, so review documents before
 sharing them as with any other benchmark output.
+
+## EB effectiveness comparisons (2026-10-30)
+
+The agent-level comparison uses four synthetic tasks, `gpt-6-luna`, the
+`synthetic-eb-heavy-v2` fixture, a fresh fixture copy per invocation, and five
+repetitions per task and mode. Task fixture version 3 scores the targeted
+inspection answer's line number as a typed criterion, accepting formats such
+as `line 32`, `line number: 32`, and `L32`.
+
+`control` runs without the EB MCP server; `mcp` makes the server available and
+lets the agent choose whether to use it. The current protocol applies the same
+Codex automatic-review policy and `workspace-write` sandbox to both arms, so
+MCP availability is the only configured difference. Embeddings use the
+deterministic test backend. Records contain task-scoped pass/fail metadata,
+not prompts, criterion text, tool responses, or transcripts. The fixture is
+synthetic and small; these results do not establish performance on other
+models or representative agent work.
+
+### Matched-sandbox results
+
+The response guidance was adjusted in stages after earlier batches showed that
+log evidence was retrieved but not always carried into the final answer. Each
+seed has 20 paired runs per mode.
+
+| Seed and EB response behavior | Control | EB available | Difference |
+| --- | ---: | ---: | ---: |
+| 20261039, before log previews | 17/20 (85%) | 15/20 (75%) | -10 pp |
+| 20261040–41, previews only | 36/40 (90%) | 35/40 (87.5%) | -2.5 pp |
+| 20261042, previews plus test/assertion quoting guidance | 19/20 (95%) | 18/20 (90%) | -5 pp |
+| **20261043–45, previews plus guidance to preserve requested evidence verbatim** | **48/60 (80%)** | **56/60 (93.3%)** | **+13.3 pp** |
+
+For the latest guidance, the paired 95% t interval is approximately +2.2 to
++24.5 pp. There were 10 pairs where EB succeeded and control failed, 48 ties,
+and 2 pairs where control succeeded and EB failed; the exact two-sided paired
+sign test gives `p ≈ 0.039`. This supports an objective success gain on this
+fixture and model. It does not establish generalization beyond this synthetic
+task set.
+
+| Task | Control, seeds 43–45 | EB available, seeds 43–45 | Difference |
+| --- | ---: | ---: | ---: |
+| Build log search | 15/15 (100%) | 15/15 (100%) | 0 pp |
+| Follow-up context | 15/15 (100%) | 15/15 (100%) | 0 pp |
+| Noisy test failure | 10/15 (66.7%) | 14/15 (93.3%) | +26.7 pp |
+| Targeted inspection | 8/15 (53.3%) | 12/15 (80%) | +26.7 pp |
+| **Overall** | **48/60 (80%)** | **56/60 (93.3%)** | **+13.3 pp** |
+
+Criterion-level outcomes for the same runs were:
+
+| Task criteria | Control | EB available |
+| --- | ---: | ---: |
+| Build: marker, source file, line | 15/15 each | 15/15 each |
+| Follow-up: test name, marker | 15/15 each | 15/15 each |
+| Noisy test: failed test, marker, assertion | 14/15, 15/15, 11/15 | 15/15, 15/15, 14/15 |
+| Targeted inspection: marker, correct line | 14/15, 9/15 | 15/15, 12/15 |
+
+The runner recorded 100% invocation completion and signal retrieval in both
+arms. Secondary per-run means for seeds 43–45 were:
+
+| Measure | Control | EB available | Paired mean difference (approx. 95% CI) |
+| --- | ---: | ---: | ---: |
+| Wall time | 16.25 s | 18.81 s | +2.55 s [+0.64, +4.47] |
+| Total tool calls | 2.93 | 3.27 | +0.33 [-0.09, +0.76] |
+| MCP tool calls | 0 | 2.88 | +2.88 |
+| Context-bytes proxy | 4.43 KB | 12.87 KB | +8.44 KB [+5.90, +10.98] |
+| Provider-reported input tokens | 96.8K | 146.2K | +49.4K [+37.3K, +61.5K] |
+| Provider-reported output tokens | 1,171 | 800 | -371 [-506, -236] |
+| Peak RSS | 440.8 MB | 455.7 MB | +14.9 MB [+9.5, +20.3] |
+
+The context-bytes measure is an observable prompt/event proxy, not the model's
+internal context size. Codex emitted one usage sample per run, so token totals
+are provider-reported snapshots rather than verified sums. EB averaged 31.8KB
+of captured command input per run. The latest results improve objective task
+success on all four tasks, with higher context, input-token, wall-time, and
+memory costs.
+
+### Earlier v3 runs with unmatched sandbox policy
+
+Seeds `20261037` and `20261038` used the same v3 rubric but gave the control
+arm a read-only sandbox and the MCP arm automatic review plus `workspace-write`.
+They are retained as historical data and excluded from the matched estimate.
+
+| Seed | Control | EB available | Difference |
+| ---: | ---: | ---: | ---: |
+| 20261037 | 16/20 (80%) | 15/20 (75%) | -5 pp |
+| 20261038 | 18/20 (90%) | 15/20 (75%) | -15 pp |
+
+### Earlier runs with literal line-phrase scoring
+
+Seeds `20261033` through `20261036` used fixture version 2 and required the
+literal phrase `line 32`. Keep these historical scores separate from the v3
+matched-sandbox runs above; raw answers were not retained, so they cannot be
+rescored under the typed line-number rubric.
+
+| Seed | Control | EB available | Difference |
+| ---: | ---: | ---: | ---: |
+| 20261033 | 17/20 (85%) | 20/20 (100%) | +15 pp |
+| 20261034 | 16/20 (80%) | 15/20 (75%) | -5 pp |
+| 20261035 | 20/20 (100%) | 16/20 (80%) | -20 pp |
+| 20261036 | 19/20 (95%) | 16/20 (80%) | -15 pp |
+| **Pooled** | **72/80 (90%)** | **67/80 (83.8%)** | **-6.3 pp** |
+
+The pooled paired difference for those v2 batches was -6.3 pp, with an
+approximate 95% interval from -15.8 to +3.3 pp. Their task totals were:
+
+| Task, fixture v2 rubric | Control | EB available |
+| --- | ---: | ---: |
+| Build log search | 20/20 | 20/20 |
+| Follow-up context | 20/20 | 20/20 |
+| Noisy test failure | 14/20 | 15/20 |
+| Targeted inspection | 18/20 | 12/20 |
+
+The latest matched v3 estimate is 13.3 pp above control, with a paired 95%
+interval from +2.2 to +24.5 pp. This meets the objective on the current
+synthetic suite. Run privacy-reviewed representative tasks before treating the
+result as a general performance guarantee.
+
+An earlier seed-`20261031` attempt is excluded because it omitted
+`--allow-mcp-approvals` and used a different approval/sandbox policy.
+
+Other effectiveness checks provide narrower evidence and are not substitutes
+for the agent-level no-EB comparison:
+
+| Check | Result |
+| --- | --- |
+| Direct output workflow, five repetitions per synthetic scenario | All four scenarios succeeded 5/5 with and without EB. Mean bytes examined changed from 11,047 to 3,664 for large build output (-66.8%); 6,909 to 3,655 for failure logs (-47.1%); 4,525 to 5,275 for review diffs (+16.6%); and 7,734 to 3,652 for timeout logs (-52.8%). Mean reduction across scenarios was 37.5%. |
+| Search relevance, four queries | BM25 Hit@1, Hit@K, and MRR were each 0.75; hybrid and semantic were each 1.00. All matched their fixture baseline within the 5-point tolerance. |
+| Summary-first capture, five tasks | Mean byte reduction 67.7%; prompt-byte reduction 58.2%; prompt-token-proxy reduction 58.1%; overall token-proxy reduction 67.6%. |
+| Consolidated vs sequential retrieval, five repetitions | Both succeeded 5/5. Consolidation reduced overview bytes 96.1% and retrieval bytes 6.6%, while mean local time rose from 20.34ms to 53.92ms (2.65x). |
+
+The first row's local MCP call cost is measured against microsecond-scale
+in-process baseline operations, so its relative overhead is large even though
+the absolute MCP timings were about 2.8-5.2ms. These synthetic checks measure
+retrieval and output handling; only the agent comparison measures objective
+task success with EB available versus disabled. Detailed run records and
+captures remain local to the benchmark host; this section records aggregate
+results only.

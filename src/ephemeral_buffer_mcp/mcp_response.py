@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any, Dict, Literal, Optional
 
@@ -10,6 +11,42 @@ from pydantic import BaseModel, Field
 
 from .response_formatting import bounded_summary_text
 from .schema_versions import TOOL_RESPONSE_SCHEMA_VERSION
+
+
+COMPACT_MATCH_LIMIT = 5
+COMPACT_MATCH_SNIPPET_MAX_BYTES = 1024
+COMPACT_PREVIEW_MAX_BYTES = 1024
+COMPACT_SLICE_CONTENT_MAX_BYTES = 4096
+_QUERY_MARKER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+(?![A-Za-z0-9_])")
+
+
+def _query_marker_line(query: Any, snippet: str) -> Optional[int]:
+    """Find the numbered source line containing an identifier from the query."""
+    if not isinstance(query, str) or not query:
+        return None
+    markers = [marker.casefold() for marker in _QUERY_MARKER_RE.findall(query)]
+    if not markers:
+        return None
+    for line in snippet.splitlines():
+        prefix, separator, content = line.partition("|")
+        if not separator:
+            continue
+        line_number = next(
+            (token for token in reversed(prefix.split()) if token.isdigit()),
+            None,
+        )
+        if line_number is None:
+            continue
+        if any(
+            re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(marker)}(?![A-Za-z0-9_])",
+                content,
+                flags=re.IGNORECASE,
+            )
+            for marker in markers
+        ):
+            return int(line_number)
+    return None
 
 
 class ToolErrorEnvelope(BaseModel):
@@ -141,7 +178,7 @@ COMPACT_RESULT_SUMMARY_FIELDS = (
 
 
 def compact_tool_text(envelope: ToolResponseEnvelope) -> str:
-    """Render concise MCP text without repeating structured payload fields."""
+    """Render bounded metadata and evidence for text-only MCP clients."""
     parts = [f"status={envelope.status}"]
     if envelope.error is not None:
         parts.append(f"error_code={envelope.error.code}")
@@ -175,15 +212,90 @@ def compact_tool_text(envelope: ToolResponseEnvelope) -> str:
     if isinstance(matches, list) and matches:
         ranges = [
             str(match["matched_range"])
-            for match in matches[:5]
+            for match in matches[:COMPACT_MATCH_LIMIT]
             if isinstance(match, dict) and match.get("matched_range") is not None
         ]
         if ranges:
             parts.append(f"matched_ranges={json.dumps(ranges, ensure_ascii=False)}")
-        parts.append("match_details=structuredContent.data.matches")
-        parts.append("Use get_capture_slice for full content.")
+        for index, match in enumerate(matches[:COMPACT_MATCH_LIMIT], start=1):
+            if not isinstance(match, dict):
+                continue
+            matched_range = match.get("matched_range")
+            location = ""
+            if isinstance(matched_range, str):
+                bounds = matched_range.removeprefix("L").split("-L", maxsplit=1)
+                if len(bounds) == 2 and all(bound.isdigit() for bound in bounds):
+                    start_line, end_line = bounds
+                    location = (
+                        f"Matched line {start_line}"
+                        if start_line == end_line
+                        else f"Matched lines {start_line}-{end_line}"
+                    )
+            snippet = match.get("snippet")
+            if isinstance(snippet, str) and snippet:
+                snippet, _ = bounded_summary_text(
+                    snippet,
+                    COMPACT_MATCH_SNIPPET_MAX_BYTES,
+                    "... [match excerpt truncated]",
+                )
+            marker_line = (
+                _query_marker_line(data.get("query"), snippet)
+                if isinstance(snippet, str)
+                else None
+            )
+            if marker_line is not None:
+                location = f"Matched line {marker_line}"
+            if location or isinstance(snippet, str):
+                heading = f"Match #{index}"
+                if location:
+                    heading += f" — {location}"
+                if isinstance(matched_range, str):
+                    heading += f" ({matched_range})"
+                detail = heading
+                if isinstance(snippet, str) and snippet:
+                    detail += f"\nMatched text (verbatim):\n{snippet}"
+                parts.append(detail)
+        parts.append(
+            "Use get_capture_slice only if the relevant line is truncated or missing from the excerpt."
+        )
     elif "content" in data:
-        parts.append("content=structuredContent.data.content")
+        content = data.get("content")
+        if isinstance(content, str) and content:
+            content, _ = bounded_summary_text(
+                content,
+                COMPACT_SLICE_CONTENT_MAX_BYTES,
+                "... [capture slice excerpt truncated]",
+            )
+            start_line = data.get("start_line")
+            end_line = data.get("end_line")
+            if (
+                isinstance(start_line, int)
+                and not isinstance(start_line, bool)
+                and isinstance(end_line, int)
+                and not isinstance(end_line, bool)
+            ):
+                location = (
+                    f"line {start_line}"
+                    if start_line == end_line
+                    else f"lines {start_line}-{end_line}"
+                )
+                heading = f"Capture slice, {location}:"
+            else:
+                heading = "Capture slice:"
+            parts.append(f"{heading}\n{content}")
+        else:
+            parts.append("content=structuredContent.data.content")
+    elif isinstance(data.get("previews"), dict):
+        previews = data["previews"]
+        for name in ("head", "tail"):
+            preview = previews.get(name)
+            if isinstance(preview, str) and preview:
+                preview, _ = bounded_summary_text(
+                    preview,
+                    COMPACT_PREVIEW_MAX_BYTES,
+                    "... [preview excerpt truncated] ...",
+                )
+                parts.append(f"{name.capitalize()} preview:\n{preview}")
     elif isinstance(data.get("captures"), list):
         capture_ids = [
             capture["capture_id"]

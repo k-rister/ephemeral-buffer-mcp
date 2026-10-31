@@ -5,13 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from benchmarks.benchmark_agent_ab import TASK_FIXTURE_VERSION
 from benchmarks.benchmark_agent_ab_fixtures import FIXTURE_VERSION, build_manifest, create_fixture
 
 
 class TestAgentAbFixtures(unittest.TestCase):
     def test_manifest_has_balanced_tasks_and_success_criteria(self):
         manifest = build_manifest()
-        self.assertEqual(manifest["fixture_version"], FIXTURE_VERSION)
+        self.assertEqual(FIXTURE_VERSION, TASK_FIXTURE_VERSION)
+        self.assertEqual(manifest["fixture_version"], TASK_FIXTURE_VERSION)
         self.assertIn("synthetic", manifest["privacy"])
         self.assertEqual(len(manifest["tasks"]), 4)
         for task in manifest["tasks"].values():
@@ -19,12 +21,28 @@ class TestAgentAbFixtures(unittest.TestCase):
             self.assertTrue(task["signal_marker"])
             criteria = task["success_criteria"]
             self.assertTrue(criteria["description"])
-            self.assertGreaterEqual(len(criteria["required_phrases"]), 2)
+            self.assertGreaterEqual(
+                len(criteria["required_phrases"])
+                + len(criteria.get("required_line_numbers", [])),
+                2,
+            )
             self.assertIn(task["signal_marker"], criteria["required_phrases"])
             self.assertTrue(task["output_profile"])
         self.assertEqual(
+            manifest["tasks"]["targeted-inspection"]["success_criteria"]["required_phrases"],
+            ["TARGETED_SIGNAL"],
+        )
+        self.assertEqual(
+            manifest["tasks"]["targeted-inspection"]["success_criteria"]["required_line_numbers"],
+            [32],
+        )
+        self.assertEqual(
             manifest["tasks"]["build-log-search"]["success_criteria"]["required_phrases"],
-            ["BUILD_FAILURE_SIGNAL", "src/parser.c", "917"],
+            ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
+        )
+        self.assertEqual(
+            manifest["tasks"]["build-log-search"]["success_criteria"]["required_line_numbers"],
+            [917],
         )
 
     def test_create_fixture_is_deterministic_and_contains_no_logs(self):

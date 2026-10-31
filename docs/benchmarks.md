@@ -372,19 +372,25 @@ review.
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
 run, isolates control and MCP configuration, and writes metadata-only records.
-Create a private task manifest (do not commit it) with fixture version 2, a
-prompt, signal marker, and objective success criteria for each scheduled task:
+Create a private task manifest (do not commit it) with fixture version 3, a
+prompt, signal marker, and objective success criteria for each scheduled task.
+Use `required_phrases` for exact names and descriptions, and
+`required_line_numbers` when the task asks for a source line. A line criterion
+accepts explicit forms such as `line 32`, `line number: 32`, `L32`,
+`src/parser.c:32`, and ranges such as `lines 32-35` that contain the required
+line:
 
 ```json
 {
-  "fixture_version": 2,
+  "fixture_version": 3,
   "tasks": {
     "targeted-inspection": {
       "prompt": "Inspect the fixture and report the marker and line number.",
       "signal_marker": "TARGETED_SIGNAL",
       "success_criteria": {
         "description": "Report the signal and its correct output line.",
-        "required_phrases": ["TARGETED_SIGNAL", "line 32"]
+        "required_phrases": ["TARGETED_SIGNAL"],
+        "required_line_numbers": [32]
       }
     },
     "noisy-test-failure": {
@@ -404,7 +410,8 @@ prompt, signal marker, and objective success criteria for each scheduled task:
       "signal_marker": "BUILD_FAILURE_SIGNAL",
       "success_criteria": {
         "description": "Report the marker and its source location.",
-        "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c:917"]
+        "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
+        "required_line_numbers": [917]
       }
     },
     "follow-up-context": {
@@ -434,34 +441,36 @@ Run the adapter from the repository checkout:
 ```
 
 The runner requires a locally authenticated `codex` CLI. It uses
-`codex exec --json --ephemeral`, uses a read-only sandbox by default. `context_bytes_proxy` is an observable prompt/event-envelope
-proxy because the CLI does not expose the model's internal context size.
+`codex exec --json --ephemeral` with a read-only sandbox by default.
+`context_bytes_proxy` is an observable prompt/event-envelope proxy because the
+CLI does not expose the model's internal context size.
 When the fixture does not contain the application package, select the source
 checkout's server module and add its `src` directory, for example
 `--mcp-module ephemeral_buffer_mcp.server --mcp-python-path /path/to/checkout/src`.
-For MCP experiments where the client must be allowed to call the configured
-server, add `--allow-mcp-approvals`. This uses Codex automatic review with a
-`workspace-write` sandbox, and should only be used with a disposable,
-privacy-reviewed fixture. Control runs continue to use the read-only sandbox
-without MCP approval routing; the records protocol identifies the selected
-policy. Add `--require-mcp-calls` when the MCP arm must exercise at least one
-MCP tool; runs that bypass MCP are marked with reason `mcp_not_used`. A zero
+For a matched MCP comparison where the client must call the configured server,
+add `--allow-mcp-approvals`. It applies Codex automatic review and the same
+`workspace-write` sandbox to both arms; only the MCP arm receives the server.
+Use it with a disposable, privacy-reviewed fixture. The records protocol
+identifies the matched policy. Add `--require-mcp-calls` when the MCP arm must
+exercise at least one MCP tool; runs that bypass MCP are marked with reason
+`mcp_not_used`. A zero
 exit records invocation completion, while objective task success is scored
-separately from all required answer phrases. Explicit refusals do not pass
+separately from all required answer criteria. Explicit refusals do not pass
 task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 8. Version 7 added `criterion_passes`, ordered
-booleans for the task's required answer phrases. Summary indexes are one-based
-and scoped to the task ID and fixture version. Phrase text and final answers
-are not stored. Empty or refused answers fail every phrase; objective `task_success`
-also requires an eligible invocation and all criteria to pass. The `completed`
+Runner records use version 9. Version 7 added `criterion_passes`, ordered
+booleans for the task's required answer criteria, including literal phrases and
+typed line numbers. Summary indexes are one-based and scoped to the task ID and
+fixture version. Criterion text and final answers are not stored. Empty or
+refused answers fail every criterion; objective `task_success` also requires
+an eligible invocation and all criteria to pass. The `completed`
 invocation flag remains separate. Records include exit code, failure reason,
 MCP-specific tool-call count, provider-reported input/output token counts, and
 every provider usage sample when Codex emits them. They break the observable
 context proxy into prompt and output byte components. Version-1 through
-version-7 records remain readable. Criterion scores are unavailable for
+version-8 records remain readable. Criterion scores are unavailable for
 versions 1 through 6; task-success and affirmative retrieval scores are
 unavailable for versions 1 through 5. Missing values are not inferred from
 invocation status or marker-only scoring. Missing provider metrics are
@@ -475,22 +484,30 @@ include per-criterion pass counts/rates by mode and paired MCP-minus-control
 deltas, without exposing criterion or answer text. Version 8 adds ordered
 `criterion_search_response_hits` and `criterion_slice_response_hits` vectors
 for MCP runs, plus counts of successful `search_capture` and
-`get_capture_slice` responses. Each boolean says whether that criterion's
-phrase appeared in any response from the named tool during that run; control
-vectors are null because no MCP response exists. Summary exposure rates are
-scoped by task and criterion index. Versions 1 through 7 report these exposure
-metrics as unavailable. The runner reads response text in memory to score it,
-then retains only booleans and counts; it does not write tool-response text to
-the records or summary. Aggregate summary schema version 2 includes source-
-specific successful-response counts and per-task exposure rates.
-Summary schema version 3 adds per-task objective task-success rates by mode and
+`get_capture_slice` responses. Version 8 criterion-hit vectors searched both
+readable text and structured payloads, which may include data that a client
+does not pass to the model. Version 9 keeps the same fields but counts phrase
+and line-number hits only in the MCP result's readable text content; this is
+the evidence the model can consume through `TextContent`. Control vectors are null because no
+MCP response exists. Summary exposure rates are scoped by task and criterion
+index. Versions 1 through 7 report these exposure metrics as unavailable. The
+runner reads response text in memory to score it, then retains only booleans
+and counts; it does not write tool-response text to the records or summary.
+Aggregate summary schema version 2 includes source-specific successful-response
+counts and per-task exposure rates.
+Summary schema version 3 added per-task objective task-success rates by mode and
 paired MCP-minus-control deltas with 95% confidence intervals. It cross-tabulates
-criterion answer pass/fail against phrase-hit, successful-response-without-hit,
+criterion answer pass/fail against criterion-hit, successful-response-without-hit,
 and no-successful-response states for each MCP source. Phrase matching uses
-case-folded text, normalized whitespace, and phrase boundaries. No successful
-response does not prove that a tool was not called, and no phrase match does not
-prove that semantically useful evidence was absent. Older summaries show these
-new fields as unavailable.
+case-folded text, normalized whitespace, and phrase boundaries; line-number
+criteria accept explicit labels, path-and-line references, and ranges containing
+the required line. Summary schema version 4 uses generic `criterion_hit` and
+`response_without_criterion_hit` state names so the cross-tabs also describe
+typed line-number criteria. The report renderer continues to read version 3
+phrase-only state names. No successful response does not prove that a tool was
+called, and no criterion
+match does not prove that semantically useful evidence was absent. Older
+summaries show these new fields as unavailable.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.
@@ -512,9 +529,10 @@ The wrapper creates one counterbalanced schedule and reuses it for control and
 MCP runs on both revisions, passing the same model to every run. The bundle
 report includes per-task success counts and paired MCP-minus-control deltas,
 per-criterion final-answer counts and paired deltas, and source-specific MCP
-response exposure cross-tabs against answer pass/fail. `phrase_hit` means a
-case-folded, whitespace-normalized criterion phrase matched with phrase
-boundaries; phrase absence does not establish semantic irrelevance.
+response exposure cross-tabs against answer pass/fail. `criterion_hit` means
+the criterion matched in a successful response; `response_without_criterion_hit`
+means a successful response was returned without a criterion match. Criterion
+absence does not establish semantic irrelevance.
 `--agent-ab-only` skips the other benchmark sections;
 `--agent-ab-repetitions` defaults to `--repetitions` when omitted.
 

@@ -330,6 +330,7 @@ async def _run_summary_benchmark() -> Dict[str, Any]:
                     "command_status",
                     "capture_status",
                     "cleanup_confirmed",
+                    "previews",
                 }
             }
             detailed_core = {

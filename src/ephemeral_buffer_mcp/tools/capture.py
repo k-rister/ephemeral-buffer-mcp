@@ -378,26 +378,22 @@ def execute_and_capture(
     timeout_seconds: Optional[float] = None,
     structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Run a command, index bounded output, and return a compact JSON
-    summary with status, duration, sizes, token estimates, truncation, signals,
-    and optional metrics.
+    """Run a command and return compact JSON with status, duration, sizes, token
+    estimates, truncation, signals, previews, and optional metrics. Log previews
+    show bounded head/tail lines. Check them first; preserve requested signals,
+    test names, line numbers, and assertion text verbatim. Search for missing
+    details and slice only if evidence is absent or truncated.
 
-    Use for commands expected to finish within the MCP client's tool-call window
-    when output benefits from bounded capture and later search. Use
-    start_execution when duration may approach or exceed that window, even for a
-    single phase; use direct execution for small targeted inspections. Choose by
-    duration independently of output size; this routing guidance is advisory.
+    Use for commands expected to finish within the MCP client's tool-call window.
+    Use start_execution when duration may approach or exceed that window; use
+    direct execution for short targeted inspections. Choose by duration independently of output size.
 
-    Verify the command, intended repository, and working directory. Omitted cwd
-    inherits the server process directory; symlinks and shell expansion may
-    target another path. Output bounds do not validate command intent, path
-    identity, or filesystem safety.
+    Verify command, repository, and working directory. Omitted cwd inherits the server process directory.
+    Symlinks or shell expansion can target another path; output limits do not ensure filesystem safety.
 
-    An omitted label is derived from the command. content_type accepts auto
-    (default), diff, log, or text. max_output_bytes defaults to the configured
-    buffer limit and cannot exceed it. timeout_seconds bounds runtime; timeout
-    retains collected output and returns exit code 124. structured_metrics accepts
-    JSON-compatible named metrics.
+    Labels default to the command. content_type accepts auto, diff, log, or text.
+    max_output_bytes cannot exceed the buffer limit. Timeout retains output and
+    returns exit code 124. structured_metrics accepts JSON-compatible named metrics.
     """
     content_type_error = _content_type_error(content_type)
     if content_type_error:
@@ -446,6 +442,7 @@ def execute_and_capture(
         try:
             _capture, summary = active_engine.ingest_with_summary(
                 output,
+                include_previews=True,
                 label=f"cmd: {label}",
                 content_type=content_type,
                 truncated=truncated,
@@ -477,7 +474,10 @@ def execute_and_capture(
                 sort_keys=True,
                 separators=(",", ":"),
             )
-        payload = summary_payload(summary)
+        payload = summary_payload(
+            summary,
+            include_previews=summary.get("content_type") == "log",
+        )
         bounded_command, command_truncated = _bounded_command(command)
         payload["command"] = bounded_command
         payload["command_truncated"] = command_truncated

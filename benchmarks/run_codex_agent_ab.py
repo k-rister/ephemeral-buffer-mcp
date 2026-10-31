@@ -38,6 +38,9 @@ from .benchmark_agent_ab import (
 DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_TIMEOUT = 900
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
+_PATH_LINE_REFERENCE_RE = re.compile(
+    r"(?<!\w)(?:[\w.-]*[\\/][\w./\\-]*|[\w-]+(?:\.[A-Za-z][\w-]*)+):(\d+)(?!\d)"
+)
 
 
 def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
@@ -65,19 +68,32 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
             raise ValueError(f"task {task_id} requires structured success_criteria")
         description = criteria.get("description")
         required_phrases = criteria.get("required_phrases")
+        required_line_numbers = criteria.get("required_line_numbers", [])
         if not isinstance(description, str) or not description.strip():
             raise ValueError(f"task {task_id} success_criteria requires a description")
         if (
             not isinstance(required_phrases, list)
-            or len(required_phrases) < 2
             or any(not isinstance(value, str) or not value.strip() for value in required_phrases)
         ):
             raise ValueError(
-                f"task {task_id} success_criteria requires at least two non-empty required_phrases"
+                f"task {task_id} success_criteria requires non-empty required_phrases"
+            )
+        if not isinstance(required_line_numbers, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in required_line_numbers
+        ):
+            raise ValueError(
+                f"task {task_id} success_criteria required_line_numbers must be positive integers"
+            )
+        if len(required_phrases) + len(required_line_numbers) < 2:
+            raise ValueError(
+                f"task {task_id} success_criteria requires at least two answer criteria"
             )
         normalized_phrases = [" ".join(value.casefold().split()) for value in required_phrases]
         if len(normalized_phrases) != len(set(normalized_phrases)):
             raise ValueError(f"task {task_id} success_criteria contains duplicate required_phrases")
+        if len(required_line_numbers) != len(set(required_line_numbers)):
+            raise ValueError(f"task {task_id} success_criteria contains duplicate required_line_numbers")
         if marker and marker.casefold() not in normalized_phrases:
             raise ValueError(
                 f"task {task_id} success_criteria must require its signal_marker"
@@ -88,6 +104,7 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
             "success_criteria": {
                 "description": description,
                 "required_phrases": required_phrases,
+                "required_line_numbers": required_line_numbers,
             },
         }
     missing = known - set(manifest)
@@ -133,6 +150,25 @@ def _nested_result_text(value: Any) -> list[str]:
     ):
         if key in value:
             evidence.extend(_nested_result_text(value[key]))
+    return evidence
+
+
+def _nested_model_content_text(value: Any) -> list[str]:
+    """Extract only text content intended for the model from an MCP result."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [text for child in value for text in _nested_model_content_text(child)]
+    if not isinstance(value, dict):
+        return []
+
+    evidence = []
+    text = value.get("text")
+    if isinstance(text, str):
+        evidence.append(text)
+    for key in ("content", "result", "output"):
+        if key in value:
+            evidence.extend(_nested_model_content_text(value[key]))
     return evidence
 
 
@@ -270,48 +306,97 @@ def _final_answer_text(output: str) -> str:
 
 
 def _criterion_passes(answer: str, criteria: Any, marker: str = "") -> list[bool] | None:
-    """Return metadata-only phrase checks in manifest order, or None for invalid criteria."""
+    """Return metadata-only answer checks in manifest order, or None for invalid criteria."""
     if not isinstance(criteria, dict):
         return None
     required_phrases = criteria.get("required_phrases")
-    if not isinstance(required_phrases, list) or len(required_phrases) < 2:
+    required_line_numbers = criteria.get("required_line_numbers", [])
+    if not isinstance(required_phrases, list) or not isinstance(required_line_numbers, list):
         return None
     if any(not isinstance(phrase, str) or not phrase.strip() for phrase in required_phrases):
+        return None
+    if any(
+        isinstance(line_number, bool)
+        or not isinstance(line_number, int)
+        or line_number < 1
+        for line_number in required_line_numbers
+    ) or len(required_phrases) + len(required_line_numbers) < 2:
         return None
     normalized_phrases = [" ".join(phrase.casefold().split()) for phrase in required_phrases]
     if len(normalized_phrases) != len(set(normalized_phrases)):
         return None
+    if len(required_line_numbers) != len(set(required_line_numbers)):
+        return None
     if marker and marker.casefold() not in normalized_phrases:
         return None
     if not answer or _is_refusal(answer):
-        return [False] * len(normalized_phrases)
-    return _criterion_text_hits(answer, required_phrases)
+        return [False] * (len(normalized_phrases) + len(required_line_numbers))
+    return _criterion_text_hits(answer, required_phrases, required_line_numbers)
 
 
-def _criterion_text_hits(text: str, required_phrases: list[str]) -> list[bool]:
-    """Match phrases with the same case-folding, whitespace, and word-boundary rules."""
+def _criterion_text_hits(
+    text: str,
+    required_phrases: list[str],
+    required_line_numbers: list[int] | None = None,
+) -> list[bool]:
+    """Match literal phrases and explicit line-number references."""
     normalized_text = " ".join(text.casefold().split())
-    return [
+    phrase_hits = [
         re.search(
             rf"(?<!\w){re.escape(' '.join(phrase.casefold().split()))}(?!\w)",
             normalized_text,
         ) is not None
         for phrase in required_phrases
     ]
+    line_hits = []
+    for line_number in required_line_numbers or []:
+        labeled_references = re.finditer(
+            r"(?<!\w)(?:lines?(?:\s+number)?\s*[:#]?\s*|L)\s*"
+            r"(\d+)(?:\s*[-–—]\s*(?:L\s*)?(\d+))?(?!\d)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        labeled_hit = any(
+            int(match.group(1)) == line_number
+            or (
+                match.group(2) is not None
+                and min(int(match.group(1)), int(match.group(2)))
+                <= line_number
+                <= max(int(match.group(1)), int(match.group(2)))
+            )
+            for match in labeled_references
+        )
+        path_line_hit = any(
+            int(match.group(1)) == line_number
+            for match in _PATH_LINE_REFERENCE_RE.finditer(text)
+        )
+        line_hits.append(labeled_hit or path_line_hit)
+    return phrase_hits + line_hits
 
 
 def _mcp_result_criterion_exposure(
     output: str, criteria: Any
 ) -> tuple[dict[str, list[bool]], dict[str, int]]:
-    """Score phrase exposure in successful search and slice responses, retaining no text."""
+    """Score criterion exposure in model-readable MCP text, retaining no text."""
     required_phrases = criteria.get("required_phrases") if isinstance(criteria, dict) else None
+    required_line_numbers = (
+        criteria.get("required_line_numbers", []) if isinstance(criteria, dict) else None
+    )
     if not isinstance(required_phrases, list) or any(
         not isinstance(phrase, str) or not phrase.strip() for phrase in required_phrases
     ):
         raise ValueError("MCP result exposure requires valid required_phrases")
+    if not isinstance(required_line_numbers, list) or any(
+        isinstance(line_number, bool)
+        or not isinstance(line_number, int)
+        or line_number < 1
+        for line_number in required_line_numbers
+    ):
+        raise ValueError("MCP result exposure requires valid required_line_numbers")
 
     sources = ("search_capture", "get_capture_slice")
-    hits = {source: [False] * len(required_phrases) for source in sources}
+    criterion_count = len(required_phrases) + len(required_line_numbers)
+    hits = {source: [False] * criterion_count for source in sources}
     response_counts = {source: 0 for source in sources}
     for event in _event_objects(output):
         event_type = event.get("type")
@@ -367,16 +452,21 @@ def _mcp_result_criterion_exposure(
         ):
             continue
 
-        result_values = [item[key] for key in result_keys if key in item]
+        readable_result_keys = ("result", "output", "content")
+        result_values = [item[key] for key in readable_result_keys if key in item]
         if not result_values:
             continue
         response_counts[source] += 1
         result_text = "\n".join(
             text
             for value in result_values
-            for text in _nested_result_text(value)
+            for text in _nested_model_content_text(value)
         )
-        response_hits = _criterion_text_hits(result_text, required_phrases)
+        response_hits = _criterion_text_hits(
+            result_text,
+            required_phrases,
+            required_line_numbers,
+        )
         hits[source] = [prior or current for prior, current in zip(hits[source], response_hits)]
     return hits, response_counts
 
@@ -617,7 +707,7 @@ def _codex_command(
     mcp_python_path: list[str] | None = None,
 ) -> list[str]:
     command = [codex]
-    if mode == "mcp" and allow_mcp_approvals:
+    if allow_mcp_approvals:
         command.append("--approve-for-me")
     command.append("exec")
     command.extend([
@@ -628,7 +718,7 @@ def _codex_command(
         "--ignore-user-config",
         "--skip-git-repo-check",
         "--sandbox",
-        "workspace-write" if mode == "mcp" and allow_mcp_approvals else sandbox,
+        "workspace-write" if allow_mcp_approvals else sandbox,
         "--cd",
         str(fixture),
         "--config",
@@ -855,7 +945,11 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "environment": args.environment,
         "reset_policy": "fresh-copy-per-run",
         "agent_adapter": "codex-cli",
-        "approval_policy": "automatic-review-mcp" if getattr(args, "allow_mcp_approvals", False) else "read-only-sandbox",
+        "approval_policy": (
+            "automatic-review-matched-sandbox"
+            if getattr(args, "allow_mcp_approvals", False)
+            else "read-only-sandbox"
+        ),
         "mcp_usage_policy": "required" if getattr(args, "require_mcp_calls", False) else "opportunistic",
         "embedding_mode": "test" if test_embeddings else "onnx",
         "embedding_model": "deterministic-test" if test_embeddings else os.environ.get("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
@@ -902,7 +996,10 @@ def main() -> None:
     parser.add_argument(
         "--allow-mcp-approvals",
         action="store_true",
-        help="Use Codex automatic review and workspace-write isolation for MCP runs",
+        help=(
+            "Use automatic review and workspace-write isolation for both arms; "
+            "only the MCP arm receives the server"
+        ),
     )
     parser.add_argument(
         "--require-mcp-calls",

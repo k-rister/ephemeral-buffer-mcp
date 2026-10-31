@@ -14,7 +14,7 @@ sections for full workflows.
 
 | Tool | Purpose |
 | :--- | :--- |
-| `execute_and_capture(command, cwd=None, label='', content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Synchronously executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. `content_type` accepts `auto`, `diff`, `log`, or `text`; other values are rejected before the command runs. Use when expected to finish within the client's tool-call window and noisy output benefits from later search; cancellation or caller disconnection requests subprocess cleanup. |
+| `execute_and_capture(command, cwd=None, label='', content_type='auto', max_output_bytes=None, timeout_seconds=None, structured_metrics=None)` | Synchronously executes a shell command with bounded capture and returns a compact versioned JSON summary containing status, duration, sizes, approximate token counts, truncation, warnings/errors, and optional structured metrics. Log output also includes bounded head and tail previews; review them before searching, then search for earlier details or retrieve a slice only when needed evidence is missing or truncated. `content_type` accepts `auto`, `diff`, `log`, or `text`; other values are rejected before the command runs. Use when expected to finish within the client's tool-call window and noisy output benefits from later search; cancellation or caller disconnection requests subprocess cleanup. |
 | `preflight_command(command, cwd=None)` | Performs content-free path, symlink, local Git-root, and executable-resolution diagnostics without executing the requested command. |
 | `start_execution(phases, execution_id=None, label='', resume_policy='safe', cwd=None, timeout_seconds=None, max_output_bytes=None)` | Persists and starts a sequential, durably checkpointed execution, then returns its ID and current status promptly. Use when expected duration may approach or exceed the client's tool-call window, even for one command as one phase; follow with `get_execution` and `get_execution_output`. Requires Linux recovery support and has a combined capacity of eight active or queued executions. |
 | `resume_execution(execution_id, retry_failed=False, confirm_unsafe=False)` | Resumes from the first incomplete phase and returns promptly; use `get_execution` to follow progress. Retries and unsafe side effects require explicit controls. |
@@ -94,6 +94,10 @@ in `structuredContent.data`, including `exit_code`, `duration_ms`, command and
 capture statuses, timeout/cancellation state, cleanup certainty, and a bounded
 `capture_error`. The output itself is omitted because it was not retained.
 Failures before a command result exists do not include command outcome fields.
+For log output, `execute_and_capture` includes bounded head/tail previews. Check
+those first; preserve requested signals, test names, line numbers, and assertion
+text verbatim. Use search for missing details and slices only when evidence is
+absent or truncated.
 The summary uses
 `schema_version: 1` and includes `status` (`captured`, `success`, `failed`, or
 `timed_out`), `duration_ms`, retained and original byte sizes, approximate
@@ -244,13 +248,15 @@ page's `data["content"]` value to reconstruct the retained content. Cursor
 offsets count UTF-8 bytes from the start of the current line; treat the cursor
 itself as opaque and pass it back unchanged.
 
-MCP text content is compact by default: it reports status, useful IDs and
-counts, and follow-up guidance without repeating full capture content or
-search snippets already present in `structuredContent`. This policy is the
-same for every model and client. Set `EPHEMERAL_COMPACT_TOOL_RESULTS=0` on the
-server to restore legacy text output, including JSON text from capture tools,
-for clients that consume only `TextContent`. The setting does not change
-Python helper return values or the existing serialized response limits.
+MCP text content is compact by default and includes bounded evidence for clients
+that consume only `TextContent`: up to five search snippets capped at 1 KiB each,
+with an exact matched-line label and a verbatim-text heading, and up to 4 KiB
+of retrieved slice content. The response advises retrieving a slice only when
+the search excerpts do not provide enough context.
+The structured result retains its complete bounded payload. Set
+`EPHEMERAL_COMPACT_TOOL_RESULTS=0` on the server to restore legacy text output,
+including JSON text from capture tools. The setting does not change Python
+helper return values or the existing serialized response limits.
 
 Python engine callers receive a frozen `CaptureView` from `ingest`,
 `get_capture`, and `get_capture_view`. The historical `get_capture` method
