@@ -193,6 +193,12 @@ def _bootstrap_model_inputs(
         or payload.get("records_schema_version", 1) < 6
     ):
         raise ValueError("power pilot records must contain current fixture-v4/rubric-v4 paired task-success outcomes")
+    _resolve_pilot_identity(
+        payload,
+        schedule,
+        model_config=None,
+        repository_fixture=None,
+    )
     records = validate_records(payload, schedule)
     grouped: dict[tuple[int, str], dict[str, dict[str, Any]]] = {}
     for record in records:
@@ -207,7 +213,22 @@ def _bootstrap_model_inputs(
         ]
         if not task_pairs:
             insufficient = True
-            results[task["id"]] = defaults[task["id"]]
+            results[task["id"]] = {
+                **defaults[task["id"]],
+                "source": "missing-pilot-conservative-maximum-discordance",
+            }
+            continue
+        if len(task_pairs) < 20:
+            insufficient = True
+            results[task["id"]] = {
+                **defaults[task["id"]],
+                "matched_repetitions": len(task_pairs),
+                "source": "under-20-pair-conservative-maximum-discordance",
+                "planning_assumption": (
+                    "fewer than 20 matched pilot pairs; use baseline success 0.5 "
+                    "and maximum feasible discordance for each target effect"
+                ),
+            }
             continue
         bootstrap = bootstrap_discordance_upper(
             task_pairs,
@@ -215,14 +236,17 @@ def _bootstrap_model_inputs(
             seed=seed + task_index,
             quantile=0.95,
         )
-        if len(task_pairs) < 20:
-            insufficient = True
         results[task["id"]] = {
             **bootstrap,
             "discordance_rate": bootstrap["discordance_upper_bootstrap"],
             "source": "paired-records-bootstrap-95th-percentile",
         }
-    return results, "paired-records-bootstrap", insufficient
+    evidence_source = (
+        "paired-records-bootstrap-with-conservative-fallback"
+        if insufficient
+        else "paired-records-bootstrap"
+    )
+    return results, evidence_source, insufficient
 
 
 def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
@@ -475,6 +499,37 @@ def build_schedule(
         "schedule": schedule,
         "privacy": "schedule contains task IDs and categories only; no prompts, captures, commands, or user content",
     }
+
+
+def _resolve_pilot_identity(
+    pilot_payload: dict[str, Any],
+    pilot_schedule: dict[str, Any] | None,
+    *,
+    model_config: str | None,
+    repository_fixture: str | None,
+) -> tuple[str, str]:
+    """Resolve intended run identities from the pilot and reject mismatches."""
+    protocol = pilot_payload.get("protocol")
+    if not isinstance(protocol, dict):
+        raise ValueError("pilot records protocol metadata is required")
+    if pilot_schedule is not None and not isinstance(pilot_schedule, dict):
+        raise ValueError("pilot schedule metadata must be an object")
+
+    resolved = {}
+    for field, requested in (
+        ("model_config", model_config),
+        ("repository_fixture", repository_fixture),
+    ):
+        value = protocol.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"pilot protocol field {field} must be a non-empty identifier")
+        if requested is not None and requested != value:
+            raise ValueError(f"pilot records {field} does not match --{field.replace('_', '-')}")
+        scheduled = pilot_schedule.get(field) if pilot_schedule is not None else None
+        if scheduled is not None and scheduled != value:
+            raise ValueError(f"pilot schedule {field} does not match pilot records protocol")
+        resolved[field] = value
+    return resolved["model_config"], resolved["repository_fixture"]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -1427,23 +1482,33 @@ def main() -> None:
         pilot_schedule = (
             _read_json(args.pilot_schedule)
             if args.pilot_schedule
-            else pilot_payload.get("schedule") if pilot_payload else None
+            else pilot_payload.get("schedule") if pilot_payload is not None else None
         )
         if args.pilot_schedule and not args.pilot_records:
             parser.error("--pilot-schedule requires --pilot-records")
-        if pilot_payload:
-            pilot_protocol = pilot_payload.get("protocol", {})
-            if args.model_config and pilot_protocol.get("model_config") != args.model_config:
-                parser.error("pilot records model_config must match --model-config")
-            if args.repository_fixture and pilot_protocol.get("repository_fixture") != args.repository_fixture:
-                parser.error("pilot records repository_fixture must match --repository-fixture")
-        design = build_power_design(pilot_payload, pilot_schedule) if pilot_payload else _default_power_design()
+        resolved_model_config = args.model_config
+        resolved_repository_fixture = args.repository_fixture
+        if pilot_payload is not None:
+            try:
+                resolved_model_config, resolved_repository_fixture = _resolve_pilot_identity(
+                    pilot_payload,
+                    pilot_schedule,
+                    model_config=args.model_config,
+                    repository_fixture=args.repository_fixture,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+        design = (
+            build_power_design(pilot_payload, pilot_schedule)
+            if pilot_payload is not None
+            else _default_power_design()
+        )
         schedule = build_schedule(
             args.repetitions,
             args.seed,
             design=design,
-            model_config=args.model_config,
-            repository_fixture=args.repository_fixture,
+            model_config=resolved_model_config,
+            repository_fixture=resolved_repository_fixture,
         )
         args.schedule_output.parent.mkdir(parents=True, exist_ok=True)
         args.schedule_output.write_text(json.dumps(schedule, indent=2, sort_keys=True) + "\n", encoding="utf-8")
