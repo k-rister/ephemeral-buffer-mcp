@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-FIXTURE_VERSION = 3
+FIXTURE_VERSION = 4
 TASKS = {
     "targeted-inspection": {
         "category": "small-targeted-output",
@@ -54,7 +54,7 @@ TASKS = {
         "success_criteria": {
             "description": "Final response contains BUILD_FAILURE_SIGNAL, src/parser.c, and line number 917.",
             "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
-            "required_line_numbers": [917],
+            "required_source_locations": [{"path": "src/parser.c", "line": 917}],
         },
     },
     "follow-up-context": {

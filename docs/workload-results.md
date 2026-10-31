@@ -372,6 +372,10 @@ sharing them as with any other benchmark output.
 
 ## EB effectiveness comparisons (2026-10-30)
 
+These are historical fixture-version-3 results (with earlier v2 runs identified
+below). Fixture version 4 binds source lines to their expected files. These
+results have not been rescored and must not be pooled with v4 measurements.
+
 The agent-level comparison uses four synthetic tasks, `gpt-6-luna`, the
 `synthetic-eb-heavy-v2` fixture, a fresh fixture copy per invocation, and five
 repetitions per task and mode. Task fixture version 3 scores the targeted

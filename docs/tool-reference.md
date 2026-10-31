@@ -251,7 +251,11 @@ itself as opaque and pass it back unchanged.
 MCP text content is compact by default and includes bounded evidence for clients
 that consume only `TextContent`: up to five search snippets capped at 1 KiB each,
 with an exact matched-line label and a verbatim-text heading, and up to 4 KiB
-of retrieved slice content. The response advises retrieving a slice only when
+of retrieved slice content per page. Compact slice pages contain the same source
+bytes in text and structured content; follow `next_cursor` with the same range
+until it is null to retrieve the complete range. The 4 KiB limit is applied
+before constructing the cursor, including when a page ends within a long line.
+The response advises retrieving a slice only when
 the search excerpts do not provide enough context.
 The structured result retains its complete bounded payload. Set
 `EPHEMERAL_COMPACT_TOOL_RESULTS=0` on the server to restore legacy text output,

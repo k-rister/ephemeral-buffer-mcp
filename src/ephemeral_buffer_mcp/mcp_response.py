@@ -261,11 +261,8 @@ def compact_tool_text(envelope: ToolResponseEnvelope) -> str:
     elif "content" in data:
         content = data.get("content")
         if isinstance(content, str) and content:
-            content, _ = bounded_summary_text(
-                content,
-                COMPACT_SLICE_CONTENT_MAX_BYTES,
-                "... [capture slice excerpt truncated]",
-            )
+            # The retrieval handler bounds pages before assigning their cursor.
+            # Render that whole page so text-only clients never skip source bytes.
             start_line = data.get("start_line")
             end_line = data.get("end_line")
             if (
