@@ -8,6 +8,7 @@ from typing import Any
 
 
 FIXTURE_VERSION = 4
+RUBRIC_VERSION = 4
 TASKS = {
     "targeted-inspection": {
         "category": "small-targeted-output",
@@ -109,6 +110,7 @@ if __name__ == "__main__":
 def build_manifest() -> dict[str, Any]:
     return {
         "fixture_version": FIXTURE_VERSION,
+        "rubric_version": RUBRIC_VERSION,
         "privacy": "synthetic deterministic content only; no user prompts, logs, captures, or repository data",
         "tasks": TASKS,
     }

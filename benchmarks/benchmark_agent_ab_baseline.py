@@ -140,6 +140,7 @@ def build_baseline(summary: dict[str, Any], thresholds: dict[str, Any] | None = 
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK,
         "task_fixture_version": summary["task_fixture_version"],
+        "task_rubric_version": summary.get("task_rubric_version"),
         "records_schema_version": summary.get("records_schema_version", 1),
         "seed": summary["seed"],
         "repetitions": summary["repetitions"],
@@ -179,6 +180,15 @@ def compare_summary(summary: dict[str, Any], baseline: dict[str, Any]) -> dict[s
     comparisons = {}
     if summary["task_fixture_version"] != baseline.get("task_fixture_version"):
         regressions.append("task_fixture_version changed")
+    summary_rubric = summary.get("task_rubric_version")
+    baseline_rubric = baseline.get("task_rubric_version")
+    if summary_rubric != baseline_rubric:
+        regressions.append("task_rubric_version changed")
+    elif summary_rubric is None and (
+        summary.get("records_schema_version", 1) >= TASK_OUTCOME_RECORDS_SCHEMA_VERSION
+        or baseline.get("records_schema_version", 1) >= TASK_OUTCOME_RECORDS_SCHEMA_VERSION
+    ):
+        regressions.append("task_rubric_version unavailable for objective scores")
     for field in (
         "model_config", "repository_fixture", "agent_adapter",
         "embedding_mode", "embedding_model", "embedding_cache",

@@ -346,8 +346,55 @@ For an end-to-end coding-agent evaluation, generate a counterbalanced,
 privacy-safe schedule:
 ```bash
 .venv/bin/python -m benchmarks.benchmark_agent_ab \
-  --schedule-output agent-ab-schedule.json --repetitions 5 --seed 20260909
+  --schedule-output agent-ab-schedule.json --seed 20260909 \
+  --model-config gpt-6-luna --repository-fixture synthetic-eb-heavy-v2
 ```
+When `--repetitions` is omitted, the A/B scheduler selects a design for an
+absolute 10 percentage-point task-success difference with 80% power. Its
+outcome model is paired binary data: each repetition runs the same task in both
+modes, then exact two-sided McNemar tests are adjusted across the four tasks
+with Holm's procedure. The design search simulates complete matched pairs and
+selects the smallest common repetition count whose per-task 95% Wilson lower
+power bound reaches 80%. Paired binary power depends on discordance, because
+concordant pairs do not contribute to McNemar's test ([paired binary sample
+size methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
+
+No raw current fixture-v4/rubric-v4 pilot records are checked in. Until a pilot
+is supplied, the reproducible fallback model assumes 50% baseline success and
+the maximum feasible discordance for the requested effect. This conservative
+stress case selects **983 repetitions per task and mode** for the default
+10-point/80% design. At that size, the smallest simulated task power is 83.0%
+with a 95% Wilson lower bound of 80.5%. It is a planning model, not an empirical
+estimate for a particular model configuration. Current-version records can be supplied with
+`--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
+The scheduler bootstraps matched pairs and uses the 95th percentile of each
+task's discordance rate. Fewer than 20 matched repetitions for any task keeps the
+design marked as requiring a fuller pilot. Fixture and rubric versions must
+match v4; historical rubric results are never pooled.
+
+The scenario table is generated from the same paired model and seed. Its power
+targets use the final look's local alpha allocation (0.030); the three local
+allocations sum to the overall 0.05 familywise budget. Cost is
+per variant (one baseline or candidate): four tasks × two modes × repetitions.
+Release comparisons run two variants. Score-interval precision is an expected
+95% Newcombe paired score half-width; the report also shows a simultaneous
+interval adjusted across tasks. Newcombe's method-10 score interval is used for
+paired binary differences ([Newcombe 1998](https://www.site.uottawa.ca/~nat/Courses/csi5388/Newcombe.1998.pdf)).
+
+| Difference | Power | Repetitions per task and mode | Expected paired score CI half-width | Invocations per variant | Runtime | Input tokens | Output tokens |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 pp | 80% | 4,684 | 2.8 pp | 37,472 | n/a | n/a | n/a |
+| 5 pp | 90% | 5,930 | 2.5 pp | 47,440 | n/a | n/a | n/a |
+| 10 pp | 80% | **983** | 5.9 pp | **7,864** | n/a | n/a | n/a |
+| 10 pp | 90% | 1,393 | 5.0 pp | 11,144 | n/a | n/a | n/a |
+| 20 pp | 80% | 235 | 11.1 pp | 1,880 | n/a | n/a | n/a |
+| 20 pp | 90% | 298 | 9.9 pp | 2,384 | n/a | n/a | n/a |
+
+Runtime is unavailable until current-protocol timing records are available.
+Provider token projections stay unavailable until usage semantics can be
+interpreted reliably. The summary records the simulation seed, assumptions,
+power bounds, interval method, and cost basis so the matrix can be reproduced.
+
 Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
 the same model configuration, repository fixture, environment, and reset policy.
 Have an external agent adapter write a records envelope containing only the
@@ -372,7 +419,8 @@ review.
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
 run, isolates control and MCP configuration, and writes metadata-only records.
-Create a private task manifest (do not commit it) with fixture version 4, a
+Create a private task manifest (do not commit it) with fixture and rubric
+version 4, a
 prompt, signal marker, and objective success criteria for each scheduled task.
 Use `required_phrases` for exact names and descriptions, and
 `required_line_numbers` for output lines without a required source file. Use
@@ -390,6 +438,7 @@ line:
 ```json
 {
   "fixture_version": 4,
+  "rubric_version": 4,
   "tasks": {
     "targeted-inspection": {
       "prompt": "Inspect the fixture and report the marker and line number.",
@@ -513,7 +562,8 @@ criterion answer pass/fail against criterion-hit, successful-response-without-hi
 and no-successful-response states for each MCP source. Phrase matching uses
 case-folded text, normalized whitespace, and phrase boundaries; line-number
 criteria accept explicit labels, path-and-line references, and ranges containing
-the required line. Summary schema version 4 uses generic `criterion_hit` and
+the required line. Summary schema version 5 adds statistical design and
+stopping-adequacy metadata; it uses generic `criterion_hit` and
 `response_without_criterion_hit` state names so the cross-tabs also describe
 typed line-number criteria. The report renderer continues to read version 3
 phrase-only state names. No successful response does not prove that a tool was
@@ -532,7 +582,6 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
   ./scripts/collect-release-benchmarks.sh \
   --baseline-ref v0.6.3 \
   --model gpt-6-luna \
-  --agent-ab-repetitions 20 \
   --agent-ab-only \
   --seed 20261006
 ```
@@ -546,7 +595,11 @@ the criterion matched in a successful response; `response_without_criterion_hit`
 means a successful response was returned without a criterion match. Criterion
 absence does not establish semantic irrelevance.
 `--agent-ab-only` skips the other benchmark sections;
-`--agent-ab-repetitions` defaults to `--repetitions` when omitted.
+when both repetition options are omitted, the wrapper uses the powered A/B
+design. An explicit `--repetitions N` also sets the A/B count when
+`--agent-ab-repetitions` is omitted; either explicit override can still request
+a short exploratory run. Baseline and candidate records extend in matched
+stages, and completed pairs are skipped when the runner resumes.
 
 Generate the reviewed synthetic EB-heavy fixture and its task manifest with:
 
@@ -574,8 +627,16 @@ tooling. Its test and build commands inspect that layout while producing
 deterministic noisy signals. It is still synthetic and privacy-safe; it does
 not contain a production repository or user data.
 
-Repeat the complete five-repetition Codex A/B run with the repository script.
-Set `CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
+Run the staged powered Codex A/B evaluation with the repository script. The
+default is 983 repetitions per task and mode under the conservative model above.
+The script looks at 50%, 75%, and 100% of that design, applying Holm correction
+within tasks at local alpha-spending increments of 0.005, 0.015, and 0.030
+(cumulative family alpha 0.005, 0.020, and 0.050). It continues while adjusted
+intervals neither establish a direction nor fit inside the ±10-point practical
+range. At the cap, unresolved outcomes are
+reported as **powered but inconclusive**. A short explicit
+`AGENT_AB_REPETITIONS` value runs once and is labeled **exploratory**. Set
+`CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
 records, and lifecycle logs remain under a unique temporary directory (normally
 `/tmp`) by default:
 
@@ -593,6 +654,9 @@ experiment group (see "Organizing experiments"). The test embedding setting defa
 deterministic, offline runs; set it to `0` to exercise the configured ONNX
 model and measure real model startup and first-query behavior. Keep the model,
 embedding cache, and other environment settings identical across paired runs.
+To seed the design from current records, set `AGENT_AB_PILOT_RECORDS` and
+optionally `AGENT_AB_PILOT_SCHEDULE`; records must use fixture and rubric
+version 4 and the same model/configuration. Historical versions are rejected.
 The script uses the synthetic fixture by default; set
 `AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1` for the repository-shaped
 synthetic profile. Use the lower-level runner commands above for a

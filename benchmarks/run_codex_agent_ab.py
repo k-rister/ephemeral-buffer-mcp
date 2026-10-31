@@ -28,10 +28,12 @@ from .benchmark_agent_ab import (
     MODES,
     RECORDS_SCHEMA_VERSION,
     TASK_FIXTURE_VERSION,
+    TASK_RUBRIC_VERSION,
     TASKS,
     _read_json,
     records_workload_result,
     validate_records,
+    validate_schedule_extension,
 )
 
 
@@ -104,6 +106,8 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
         raise ValueError(
             f"task manifest fixture_version must be {TASK_FIXTURE_VERSION}"
         )
+    if payload.get("rubric_version") != TASK_RUBRIC_VERSION:
+        raise ValueError(f"task manifest rubric_version must be {TASK_RUBRIC_VERSION}")
     tasks = payload.get("tasks")
     if not isinstance(tasks, dict):
         raise ValueError("task manifest must contain a tasks object")
@@ -993,21 +997,16 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         raise ValueError("schedule benchmark must be agent-ab")
     if schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION:
         raise ValueError(f"schedule task_fixture_version must be {TASK_FIXTURE_VERSION}")
+    if schedule.get("task_rubric_version") != TASK_RUBRIC_VERSION:
+        raise ValueError(f"schedule task_rubric_version must be {TASK_RUBRIC_VERSION}")
+    if schedule.get("model_config") and schedule["model_config"] != args.model:
+        raise ValueError("schedule model_config does not match runner model")
+    if schedule.get("repository_fixture") and schedule["repository_fixture"] != args.repository_fixture:
+        raise ValueError("schedule repository_fixture does not match runner fixture")
     repository = Path(args.repository).resolve()
     if not repository.is_dir():
         raise ValueError(f"repository fixture is not a directory: {repository}")
-    runs = []
-    with tempfile.TemporaryDirectory(prefix="codex-agent-ab-") as temporary:
-        scratch = Path(temporary)
-        for item in schedule.get("schedule", []):
-            if item["mode"] not in MODES or item["task_id"] not in manifest:
-                raise ValueError(f"schedule item is not covered by task manifest: {item}")
-            if args.dry_run:
-                print(json.dumps({"sequence": item["sequence"], "mode": item["mode"], "task_id": item["task_id"]}))
-                continue
-            runs.append(_run_one(item, manifest[item["task_id"]], args=args, repository=repository, scratch=scratch))
-    if args.dry_run:
-        return {}
+
     test_embeddings = os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1"
     protocol = {
         "model_config": args.model,
@@ -1029,17 +1028,72 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
             or "default"
         ),
     }
+
+    cap = getattr(args, "max_repetitions", None) or schedule.get("repetitions")
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1 or cap > schedule.get("repetitions", 0):
+        raise ValueError("max_repetitions must be within the planned schedule")
+    existing_payload = None
+    runs = []
+    if getattr(args, "resume", False):
+        output_path = Path(args.output)
+        if not output_path.is_file():
+            raise ValueError("--resume requires an existing records output")
+        existing_payload = _read_json(output_path)
+        previous_schedule = existing_payload.get("schedule")
+        if not isinstance(previous_schedule, dict):
+            raise ValueError("existing records do not embed a schedule")
+        validate_schedule_extension(previous_schedule, schedule)
+        if existing_payload.get("records_schema_version") != RECORDS_SCHEMA_VERSION:
+            raise ValueError("cannot extend records written with a different records schema")
+        if existing_payload.get("task_rubric_version") != TASK_RUBRIC_VERSION:
+            raise ValueError("cannot extend records from a different or unknown rubric version")
+        if existing_payload.get("protocol") != protocol:
+            raise ValueError("cannot extend records with a different model/configuration protocol")
+        validate_records(
+            existing_payload,
+            previous_schedule,
+            allow_staged_prefix=not previous_schedule.get("repetitions_explicit", True),
+        )
+        runs.extend(existing_payload.get("runs", []))
+    existing_keys = {
+        (record["repetition"], record["task_id"], record["mode"])
+        for record in runs
+    }
+    completed_repetitions = max((record["repetition"] for record in runs), default=0)
+    if completed_repetitions > cap:
+        raise ValueError("max_repetitions cannot be below completed records")
+    with tempfile.TemporaryDirectory(prefix="codex-agent-ab-") as temporary:
+        scratch = Path(temporary)
+        for item in schedule.get("schedule", []):
+            if item["mode"] not in MODES or item["task_id"] not in manifest:
+                raise ValueError(f"schedule item is not covered by task manifest: {item}")
+            if item["repetition"] > cap:
+                continue
+            key = (item["repetition"], item["task_id"], item["mode"])
+            if key in existing_keys:
+                continue
+            if args.dry_run:
+                print(json.dumps({"sequence": item["sequence"], "mode": item["mode"], "task_id": item["task_id"]}))
+                continue
+            runs.append(_run_one(item, manifest[item["task_id"]], args=args, repository=repository, scratch=scratch))
+    if args.dry_run:
+        return {}
     payload = {
         "schema_version": schedule["schema_version"],
         "benchmark": "agent-ab",
         "records_schema_version": RECORDS_SCHEMA_VERSION,
         "task_fixture_version": schedule["task_fixture_version"],
+        "task_rubric_version": schedule["task_rubric_version"],
         "protocol": protocol,
         "schedule": schedule,
         "runs": runs,
         "privacy": "records contain metadata, task-scoped criterion pass and MCP response exposure booleans, and response counts only; prompts, criterion text, tool responses, transcripts, commands, captures, and user content are excluded",
     }
-    validate_records(payload, schedule)
+    validate_records(
+        payload,
+        schedule,
+        allow_staged_prefix=not schedule.get("repetitions_explicit", True),
+    )
     return payload
 
 
@@ -1083,6 +1137,8 @@ def main() -> None:
         type=Path,
         help="Optional directory for content-free MCP lifecycle logs",
     )
+    parser.add_argument("--max-repetitions", type=int, help="Run only the first N scheduled repetitions for a staged look")
+    parser.add_argument("--resume", action="store_true", help="Extend compatible records without rerunning completed pairs")
     parser.add_argument("--dry-run", action="store_true")
     wr.add_result_argument(parser)
     args = parser.parse_args()

@@ -259,6 +259,18 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
             shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
             (benchmarks / "__init__.py").write_text("", encoding="utf-8")
+            (benchmarks / "benchmark_agent_ab.py").write_text(
+                "import json, sys\n"
+                "if '--schedule-output' in sys.argv:\n"
+                "    path = sys.argv[sys.argv.index('--schedule-output') + 1]\n"
+                "    with open(path, 'w', encoding='utf-8') as stream:\n"
+                "        json.dump({'repetitions': 1, 'stage_schedule': [{'percent': 100, 'repetitions': 1, 'alpha_spending': 0.05}]}, stream)\n"
+                "elif '--records' in sys.argv:\n"
+                "    path = sys.argv[sys.argv.index('--output') + 1]\n"
+                "    with open(path, 'w', encoding='utf-8') as stream:\n"
+                "        json.dump({'statistical_adequacy': {'continue': False}}, stream)\n",
+                encoding="utf-8",
+            )
             (benchmarks / "benchmark_concurrency.py").write_text(
                 "import time\ntime.sleep(60)\n",
                 encoding="utf-8",

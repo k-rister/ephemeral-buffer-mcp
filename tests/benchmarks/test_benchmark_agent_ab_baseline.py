@@ -39,7 +39,8 @@ def summary_fixture():
         runs.append(record)
     payload = {
         "schema_version": 1, "benchmark": "agent-ab", "records_schema_version": RECORDS_SCHEMA_VERSION,
-        "task_fixture_version": schedule["task_fixture_version"], "protocol": {
+        "task_fixture_version": schedule["task_fixture_version"],
+        "task_rubric_version": schedule["task_rubric_version"], "protocol": {
             "model_config": "gpt-5.6-luna", "repository_fixture": "fixture-v1",
             "environment": "test", "reset_policy": "fresh-copy-per-run", "agent_adapter": "codex-cli",
             "embedding_mode": "test", "embedding_model": "deterministic-test",
@@ -140,6 +141,15 @@ class TestAgentAbBaseline(unittest.TestCase):
         result = compare_summary(changed, baseline)
         self.assertFalse(result["passed"])
         self.assertIn("protocol.embedding_mode changed", result["regressions"][0])
+
+    def test_compare_rejects_rubric_version_change(self):
+        summary = summary_fixture()
+        baseline = build_baseline(summary)
+        changed = copy.deepcopy(summary)
+        changed["task_rubric_version"] = 3
+        result = compare_summary(changed, baseline)
+        self.assertFalse(result["passed"])
+        self.assertIn("task_rubric_version changed", result["regressions"])
 
     def test_build_baseline_accepts_legacy_summary_without_embedding_metadata(self):
         summary = summary_fixture()

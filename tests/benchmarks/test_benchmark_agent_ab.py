@@ -13,16 +13,20 @@ from benchmarks.render_agent_ab_report import append_agent_ab_report, render_age
 from benchmarks.benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
     RECORDS_SCHEMA_VERSION,
+    TASK_RUBRIC_VERSION,
+    build_power_design,
     build_schedule,
     records_workload_result,
+    stage_repetitions,
     summarize_records,
     summary_workload_result,
     validate_records,
+    validate_schedule_extension,
 )
 
 
-def _records_payload():
-    schedule = build_schedule(repetitions=2, seed=17)
+def _records_payload(repetitions=2, design=None):
+    schedule = build_schedule(repetitions=repetitions, seed=17, design=design)
     runs = []
     for item in schedule["schedule"]:
         mcp = item["mode"] == "mcp"
@@ -42,6 +46,7 @@ def _records_payload():
         "schema_version": 1,
         "benchmark": "agent-ab",
         "task_fixture_version": schedule["task_fixture_version"],
+        "task_rubric_version": schedule["task_rubric_version"],
         "protocol": {
             "model_config": "test-model",
             "repository_fixture": "synthetic-repo-v1",
@@ -57,8 +62,8 @@ def _records_payload():
     }
 
 
-def _scored_records_payload():
-    schedule, payload = _records_payload()
+def _scored_records_payload(repetitions=2, design=None):
+    schedule, payload = _records_payload(repetitions=repetitions, design=design)
     payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
     for record in payload["runs"]:
         context_bytes = record.pop("context_bytes")
@@ -128,7 +133,129 @@ class TestAgentAbBenchmark(unittest.TestCase):
         payload["task_fixture_version"] = 3
         summary = summarize_records(payload, schedule)
         self.assertEqual(summary["task_fixture_version"], 3)
-        self.assertEqual(summary["records_schema_version"], 9)
+        self.assertEqual(summary["records_schema_version"], 10)
+        self.assertEqual(summary["statistical_adequacy"]["status"], "unknown")
+
+    def test_default_schedule_uses_powered_design_and_three_looks(self):
+        schedule = build_schedule(seed=20261031)
+        design = schedule["statistical_design"]
+        selected = next(
+            scenario for scenario in design["scenario_matrix"]
+            if scenario["effect_pp"] == 10 and scenario["target_power"] == 0.8
+        )
+        self.assertEqual(schedule["repetitions"], design["selected_repetitions"])
+        self.assertGreater(schedule["repetitions"], 5)
+        self.assertTrue(all(value >= 0.8 for value in selected["power_lower_95_by_task"].values()))
+        self.assertEqual(
+            [item["percent"] for item in schedule["stage_schedule"]],
+            [50, 75, 100],
+        )
+        self.assertEqual(len(design["scenario_matrix"]), 6)
+        self.assertTrue(all(item["invocations_per_variant"] > 0 for item in design["scenario_matrix"]))
+
+    def test_explicit_small_override_is_exploratory_and_stage_counts_are_cumulative(self):
+        design = {"selected_repetitions": 12}
+        schedule = build_schedule(repetitions=3, seed=4, design=design)
+        self.assertTrue(schedule["repetitions_explicit"])
+        self.assertEqual(schedule["run_label"], "exploratory")
+        self.assertEqual(schedule["stage_schedule"], [{
+            "percent": 100,
+            "repetitions": 3,
+            "alpha_spending": 0.05,
+            "cumulative_alpha": 0.05,
+        }])
+        self.assertEqual(
+            [
+                (item["percent"], item["repetitions"], item["alpha_spending"], item["cumulative_alpha"])
+                for item in stage_repetitions(12)
+            ],
+            [(50, 6, 0.005, 0.005), (75, 9, 0.015, 0.02), (100, 12, 0.03, 0.05)],
+        )
+
+    def test_schedule_extension_requires_exact_prefix_and_matching_versions(self):
+        design = {"selected_repetitions": 20}
+        original = build_schedule(repetitions=4, seed=17, design=design)
+        extended = build_schedule(repetitions=8, seed=17, design=design)
+        validate_schedule_extension(original, extended)
+        changed_seed = build_schedule(repetitions=8, seed=18, design=design)
+        with self.assertRaisesRegex(ValueError, "seed"):
+            validate_schedule_extension(original, changed_seed)
+        changed_model = build_schedule(
+            repetitions=8, seed=17, design=design, model_config="different-model"
+        )
+        with self.assertRaisesRegex(ValueError, "model_config"):
+            validate_schedule_extension(original, changed_model)
+        changed_fixture = build_schedule(
+            repetitions=8, seed=17, design=design, repository_fixture="different-fixture"
+        )
+        with self.assertRaisesRegex(ValueError, "repository_fixture"):
+            validate_schedule_extension(original, changed_fixture)
+        changed_rubric = dict(extended, task_rubric_version=TASK_RUBRIC_VERSION - 1)
+        with self.assertRaisesRegex(ValueError, "task_rubric_version"):
+            validate_schedule_extension(original, changed_rubric)
+
+    def test_power_pilot_rejects_mixed_fixture_or_rubric_versions(self):
+        schedule, payload = _scored_records_payload()
+        payload["task_rubric_version"] = TASK_RUBRIC_VERSION
+        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v4"):
+            build_power_design(dict(payload, task_fixture_version=3), schedule, simulations=100)
+        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v4"):
+            build_power_design(dict(payload, task_rubric_version=3), schedule, simulations=100)
+
+    def test_power_design_bootstraps_paired_pilot_and_marks_small_samples(self):
+        small_schedule, small_payload = _scored_records_payload(repetitions=2)
+        small_design = build_power_design(small_payload, small_schedule, simulations=100, seed=73)
+        self.assertEqual(small_design["pilot_evidence_source"], "paired-records-bootstrap")
+        self.assertTrue(small_design["pilot_required"])
+        self.assertEqual(
+            small_design["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
+            2,
+        )
+
+        pilot_schedule, pilot_payload = _scored_records_payload(repetitions=20)
+        pilot = build_power_design(pilot_payload, pilot_schedule, simulations=100, seed=73)
+        self.assertFalse(pilot["pilot_required"])
+        self.assertEqual(
+            pilot["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
+            20,
+        )
+
+    def test_direction_requires_holm_significance_and_simultaneous_interval(self):
+        design = {"selected_repetitions": 12}
+        schedule, payload = _scored_records_payload(repetitions=None, design=design)
+        for record in payload["runs"]:
+            record["task_success"] = record["mode"] == "mcp"
+            record["criterion_passes"] = [record["task_success"], record["task_success"]]
+
+        adequacy = summarize_records(payload, schedule)["statistical_adequacy"]
+        self.assertEqual(adequacy["status"], "evidence_ready")
+        self.assertEqual(adequacy["look_cumulative_alpha"], 0.05)
+        self.assertTrue(all(
+            task["status"] == "direction_established"
+            and task["holm_adjusted_p"] <= 0.05
+            and task["paired_score_interval"]["lower"] > 0.0
+            for task in adequacy["tasks"].values()
+        ))
+
+    def test_staged_summary_continues_then_reports_powered_inconclusive_at_cap(self):
+        design = {"selected_repetitions": 12}
+        schedule, payload = _scored_records_payload(repetitions=None, design=design)
+        payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 6]
+        first_look = summarize_records(payload, schedule)
+        adequacy = first_look["statistical_adequacy"]
+        self.assertEqual(adequacy["status"], "collecting")
+        self.assertTrue(adequacy["continue"])
+        self.assertEqual(adequacy["extension_stage"]["percent"], 50)
+        self.assertEqual(adequacy["look_cumulative_alpha"], 0.005)
+
+        payload["runs"] = [record for record in _scored_records_payload(repetitions=None, design=design)[1]["runs"]]
+        final_look = summarize_records(payload, schedule)
+        self.assertEqual(final_look["statistical_adequacy"]["status"], "powered_but_inconclusive")
+        self.assertFalse(final_look["statistical_adequacy"]["continue"])
+        self.assertTrue(all(
+            task["status"] == "powered_but_inconclusive"
+            for task in final_look["statistical_adequacy"]["tasks"].values()
+        ))
 
     def test_schedule_is_reproducible_and_balanced(self):
         first = build_schedule(repetitions=3, seed=17)
@@ -182,7 +309,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
-        self.assertEqual(summary["schema_version"], 4)
+        self.assertEqual(summary["schema_version"], 5)
         task_success = summary["task_success_by_mode"]
         self.assertEqual(
             task_success["mcp"]["tasks"]["targeted-inspection"],
@@ -316,9 +443,12 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertIn("`criterion_hit` means", report)
         self.assertIn("response_without_criterion_hit", report)
         self.assertIn("no_successful_response", report)
-        self.assertIn("| baseline | task-level data unavailable | n/a | n/a | n/a |", report)
+        self.assertIn("unknown (legacy summary)", report)
+        self.assertIn("| baseline | task-level data unavailable | n/a | n/a | n/a | unknown (legacy summary) | n/a | n/a |", report)
         self.assertIn("| baseline | task-level data unavailable | n/a | unavailable | n/a | n/a | n/a |", report)
         self.assertIn("| candidate | targeted-inspection | 0/2 | 1/2 | +50.0 pp", report)
+        self.assertIn("exploratory", report)
+        self.assertIn("Provider token estimates remain unavailable", report)
         self.assertNotIn("TARGETED_SIGNAL", report)
         self.assertNotIn("line 32", report)
 
@@ -346,6 +476,53 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertIn("| Criterion hit (pass/fail) | Response without criterion hit (pass/fail) |", report)
         self.assertIn("| legacy | targeted-inspection | 1 | search_capture | 1/0 | 0/1 | 0/0 |", report)
         self.assertNotIn("phrase_hit", report)
+
+    def test_agent_ab_report_labels_evidence_ready_inconclusive_and_missing_costs(self):
+        def summary(status):
+            return {
+                "statistical_design": {
+                    "selected_repetitions": 900,
+                    "pilot_evidence_source": "conservative-maximum-discordance",
+                    "pilot_required": True,
+                    "scenario_matrix": [{
+                        "effect_pp": 10,
+                        "target_power": 0.8,
+                        "repetitions_per_task_and_mode": 900,
+                        "expected_paired_score_ci95_half_width_pp": 6.2,
+                        "invocations_per_variant": 7200,
+                        "estimated_runtime_seconds_per_variant": None,
+                        "estimated_input_tokens_per_variant": None,
+                        "estimated_output_tokens_per_variant": None,
+                    }],
+                },
+                "statistical_adequacy": {
+                    "status": status,
+                    "extension_stage": {"percent": 100, "repetitions": 900},
+                    "tasks": {
+                        "example-task": {
+                            "status": status,
+                            "paired_score_interval": {"lower": -0.12, "upper": 0.17},
+                            "holm_adjusted_p": 0.31,
+                        },
+                    },
+                },
+                "task_success_by_mode": {
+                    "control": {"tasks": {"example-task": {"successes": 10, "count": 20}}},
+                    "mcp": {"tasks": {"example-task": {"successes": 12, "count": 20}}},
+                },
+                "paired_task_success_deltas_mcp_minus_control": {
+                    "tasks": {"example-task": {"available": True, "mean": 0.1, "ci95_half_width": 0.2}},
+                },
+            }
+
+        report = render_agent_ab_sections([
+            ("resolved", summary("evidence_ready")),
+            ("cap", summary("powered_but_inconclusive")),
+        ])
+        self.assertIn("evidence-ready", report)
+        self.assertIn("powered-but-inconclusive", report)
+        self.assertIn("| resolved | 10 pp | 80.0% | n/a | 900 | 6.2 | 7200 | n/a | n/a | n/a |", report)
+        self.assertIn("Provider token estimates remain unavailable", report)
 
     def test_legacy_v6_records_keep_criterion_results_unavailable(self):
         schedule, payload = _legacy_v6_records_payload()
