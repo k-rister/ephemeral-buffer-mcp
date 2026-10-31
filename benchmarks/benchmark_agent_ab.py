@@ -1413,7 +1413,11 @@ def records_workload_result(
     schedule = schedule if schedule is not None else payload["schedule"]
     records_schema_version = payload.get("records_schema_version", 1)
     runs = []
-    for record in validate_records(payload, schedule):
+    for record in validate_records(
+        payload,
+        schedule,
+        allow_staged_prefix=not schedule.get("repetitions_explicit", True),
+    ):
         failure_reason = record.get("failure_reason")
         task_success = record.get("task_success")
         invocation_completed = _invocation_completed(record, records_schema_version)

@@ -344,12 +344,23 @@ class TestAgentAbBenchmark(unittest.TestCase):
         payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 7]
         with self.assertRaisesRegex(ValueError, "planned stage look"):
             summarize_records(payload, schedule)
+        with self.assertRaisesRegex(ValueError, "planned stage look"):
+            records_workload_result(payload, schedule)
 
         payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 6]
         schedule_without_looks = dict(schedule)
         schedule_without_looks.pop("stage_schedule")
         with self.assertRaisesRegex(ValueError, "planned stage look"):
             validate_records(payload, schedule_without_looks, allow_staged_prefix=True)
+        with self.assertRaisesRegex(ValueError, "planned stage look"):
+            records_workload_result(payload, schedule_without_looks)
+
+        explicit_schedule, explicit_payload = _scored_records_payload(repetitions=2)
+        explicit_payload["runs"] = [
+            record for record in explicit_payload["runs"] if record["repetition"] == 1
+        ]
+        with self.assertRaisesRegex(ValueError, "records are missing scheduled runs"):
+            records_workload_result(explicit_payload, explicit_schedule)
 
     def test_schedule_is_reproducible_and_balanced(self):
         first = build_schedule(repetitions=3, seed=17)
