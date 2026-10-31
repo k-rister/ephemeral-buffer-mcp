@@ -1,10 +1,13 @@
 """Tests for paired binary A/B evidence calculations."""
 
 import unittest
+from math import comb
 from unittest.mock import patch
 
 from benchmarks.agent_ab_statistics import (
     bootstrap_discordance_upper,
+    clopper_pearson_lower_bound,
+    clopper_pearson_upper_bound,
     estimate_pair_probabilities,
     exact_mcnemar_pvalue,
     holm_adjust,
@@ -76,33 +79,64 @@ class TestAgentAbStatistics(unittest.TestCase):
             seed=31,
         )
         self.assertGreater(design["repetitions"], 0)
-        self.assertGreaterEqual(design["selected_power_lower_95"], 0.8)
+        self.assertGreaterEqual(design["selected_power_lower_bound"], 0.8)
+        self.assertEqual(design["power_simulation"]["power_bound_method"], "one-sided-clopper-pearson")
 
-    def test_repetition_search_returns_first_qualifying_candidate(self):
-        calls = 0
+    def test_selected_power_has_independent_validation_and_retry_alpha_spending(self):
+        validation_calls = []
 
-        def nonmonotonic_rejections(_p_values, _alpha):
-            nonlocal calls
-            candidate = calls // 100 + 1
-            calls += 1
-            # Candidate 2 qualifies, candidate 3 would fail, and candidate 4
-            # would qualify again. The search must stop at the first pass.
-            return [candidate == 2 or candidate == 4] * 2
+        def validation(**kwargs):
+            validation_calls.append(kwargs)
+            rejected = [0] if len(validation_calls) == 1 else [kwargs["simulations"]]
+            return {
+                "repetitions": kwargs["repetitions"],
+                "effect": kwargs["effect"],
+                "discordance_rates": list(kwargs["discordance_rates"]),
+                "simulations": kwargs["simulations"],
+                "seed": kwargs["seed"],
+                "alpha": kwargs["alpha"],
+                "power_by_task": [count / kwargs["simulations"] for count in rejected],
+                "rejection_counts_by_task": rejected,
+                "familywise_rejection_rate": max(rejected) / kwargs["simulations"],
+            }
 
-        with patch(
-            "benchmarks.agent_ab_statistics._holm_rejections",
-            side_effect=nonmonotonic_rejections,
+        with (
+            patch("benchmarks.agent_ab_statistics.normal_approximate_repetitions", return_value=6),
+            patch("benchmarks.agent_ab_statistics.simulate_paired_mcnemar_power", side_effect=validation),
         ):
             design = select_simulated_repetitions(
-                effect=0.1,
+                effect=1.0,
                 target_power=0.8,
-                discordance_rates=[0.5, 0.5],
+                discordance_rates=[1.0],
                 simulations=100,
                 seed=7,
             )
-        self.assertEqual(design["repetitions"], 2)
-        self.assertEqual(calls, 200)
-        self.assertIn("ascending scan", design["selection_rule"])
+        self.assertEqual(design["discovery_candidate_repetitions"], 6)
+        self.assertEqual(design["repetitions"], 7)
+        self.assertEqual([call["repetitions"] for call in validation_calls], [6, 7])
+        self.assertNotEqual(validation_calls[0]["seed"], 7)
+        self.assertNotEqual(validation_calls[0]["seed"], validation_calls[1]["seed"])
+        self.assertAlmostEqual(design["validation_alpha_spending"], 0.05 / 6)
+        self.assertEqual(design["selected_power_confidence_by_task"], [1.0 - 0.05 / 6])
+
+    def test_exact_discordance_upper_bound_has_finite_sample_coverage(self):
+        count = 20
+        true_probability = 0.2
+        coverage = sum(
+            comb(count, successes)
+            * true_probability**successes
+            * (1.0 - true_probability) ** (count - successes)
+            for successes in range(count + 1)
+            if clopper_pearson_upper_bound(successes, count, 0.975) >= true_probability
+        )
+        self.assertGreaterEqual(coverage, 0.975)
+        # The single-discordance case identified in review exceeds the true
+        # 0.20 rate, unlike the under-covering bootstrap percentile.
+        self.assertGreater(clopper_pearson_upper_bound(1, count, 0.975), true_probability)
+
+    def test_exact_power_lower_bound_inverts_binomial_tail(self):
+        lower = clopper_pearson_lower_bound(90, 100, 0.95)
+        self.assertAlmostEqual(lower, 0.8362823767, places=9)
 
     def test_paired_score_interval_has_simulated_coverage(self):
         coverage = simulate_paired_interval_coverage(
@@ -123,8 +157,9 @@ class TestAgentAbStatistics(unittest.TestCase):
         self.assertEqual(first["matched_repetitions"], 40)
         self.assertAlmostEqual(first["baseline_success_rate"], 0.5)
         self.assertGreaterEqual(first["discordance_upper_bootstrap"], 0.5)
-        self.assertEqual(first["discordance_upper_method"], "paired-bootstrap-percentile")
-        self.assertEqual(first["discordance_upper_estimate"], first["discordance_upper_bootstrap"])
+        self.assertEqual(first["discordance_upper_method"], "one-sided-clopper-pearson")
+        self.assertEqual(first["discordance_upper_estimate"], clopper_pearson_upper_bound(20, 40, 0.95))
+        self.assertGreaterEqual(first["discordance_upper_estimate"], first["discordance_upper_bootstrap"])
 
     def test_zero_discordance_uses_one_sided_exact_upper_bound(self):
         pairs = [(True, True)] * 10 + [(False, False)] * 10

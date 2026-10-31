@@ -349,58 +349,64 @@ privacy-safe schedule:
   --schedule-output agent-ab-schedule.json --seed 20260909 \
   --model-config gpt-6-luna --repository-fixture synthetic-eb-heavy-v2
 ```
-When `--repetitions` is omitted, the A/B scheduler selects a design for an
+When `--repetitions` is omitted, the A/B scheduler plans a design for an
 absolute 10 percentage-point task-success difference with 80% power. Its
 outcome model is paired binary data: each repetition runs the same task in both
 modes, then exact two-sided McNemar tests are adjusted across the four tasks
-with Holm's procedure. The design search simulates complete matched pairs and
-checks each integer repetition count in ascending order, selecting the first
-count whose per-task 95% Wilson lower power bound reaches 80%. Paired outcomes
-are nested from one seeded simulation stream; the search does not assume noisy
-power estimates are monotonic. Paired binary power depends on discordance,
-because concordant pairs do not contribute to McNemar's test ([paired binary
-sample size methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
+with Holm's procedure. A normal approximation proposes a discovery candidate;
+the scheduler validates that candidate on a separate seeded simulation stream,
+using exact one-sided Clopper-Pearson lower confidence bounds on each task's
+simulated power. Validation alpha is split
+across tasks; if a candidate fails, the next candidate grows by 5% and receives
+an independent validation stream. Retry `k` spends `0.05/[k*(k+1)]` of alpha,
+so validation error across retries sums to 0.05. The reported count is the
+first independently validated retry, not an unadjusted pointwise power
+estimate. Paired binary power depends on discordance, because concordant pairs
+do not contribute to McNemar's test ([paired binary sample size
+methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
 
 No raw current fixture-v4/rubric-v4 pilot records are checked in. Until a pilot
 is supplied, the reproducible fallback model assumes 50% baseline success and
 the maximum feasible discordance for the requested effect. This conservative
-stress case selects **1,006 repetitions per task and mode** for the default
-10-point/80% design. At that size, the smallest simulated task power is 82.5%
-with a 95% Wilson lower bound of 80.0%. It is a planning model, not an empirical
-estimate for a particular model configuration. Current-version records can be supplied with
+stress case selects a repetition count for the default 10-point/80% design;
+the current count and independently validated lower power bounds are stored in
+the generated design. It is a planning model, not an empirical estimate for a
+particular model configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
 For tasks with at least 20 matched pairs, the scheduler uses a 97.5% two-sided
-Wilson interval for baseline success and a 97.5% upper discordance bound from
-the paired bootstrap. If no discordant pairs were observed, the bootstrap
-percentile is zero by construction; the scheduler uses the one-sided exact
-97.5% Clopper-Pearson upper bound, `1 - 0.025^(1/n)`, where `n` is the number
-of matched pairs. It maximizes the feasible discordance cap across the baseline
-interval for both effect directions. Bonferroni combination targets nominal
-95% joint coverage for these pilot parameter bounds. An under-sampled task
-instead uses the 50% baseline and maximum-feasible-discordance fallback; the
-design remains marked as requiring a fuller pilot. The model and repository
-fixture are derived from the pilot protocol, and optional identity flags must
-match it. Generated schedules bind those identities for runner validation.
+Clopper-Pearson interval for baseline success and a one-sided exact 97.5%
+Clopper-Pearson upper bound for discordance. The paired bootstrap percentile is
+retained as a diagnostic only. The finite-sample bound stays nonzero when few
+or no discordances are observed. The scheduler maximizes feasible discordance
+across the baseline interval for both effect directions. Bonferroni combination
+gives at least 95% joint coverage for these pilot parameter bounds. An
+under-sampled task instead uses the 50% baseline and maximum feasible
+discordance fallback; the design remains marked as requiring a fuller pilot.
+The model and repository fixture are derived from the pilot protocol, and
+optional identity flags must match it. Generated schedules bind those
+identities for runner validation.
 Fixture and rubric versions must match v4; historical rubric results are never
 pooled.
 
-The scenario table is generated from the same paired model and seed. Its power
-targets use the final look's local alpha allocation (0.030); the three local
-allocations sum to the overall 0.05 familywise budget. Cost is
+The scenario table uses design seed `20261031` and 1,000 independent power
+validation simulations per row. Its power targets use the final look's local
+alpha allocation (0.030); the three local allocations sum to the overall 0.05
+familywise budget. Each row's listed lower bound is the minimum across tasks;
+per-task validation confidence is recorded in the generated design. Cost is
 per variant (one baseline or candidate): four tasks × two modes × repetitions.
 Release comparisons run two variants. Score-interval precision is an expected
 95% Newcombe paired score half-width; the report also shows a simultaneous
 interval adjusted across tasks. Newcombe's method-10 score interval is used for
 paired binary differences ([Newcombe 1998](https://www.site.uottawa.ca/~nat/Courses/csi5388/Newcombe.1998.pdf)).
 
-| Difference | Power | Repetitions per task and mode | Expected paired score CI half-width | Invocations per variant | Runtime | Input tokens | Output tokens |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 5 pp | 80% | 4,684 | 2.8 pp | 37,472 | n/a | n/a | n/a |
-| 5 pp | 90% | 5,930 | 2.5 pp | 47,440 | n/a | n/a | n/a |
-| 10 pp | 80% | **1,006** | 5.8 pp | **8,048** | n/a | n/a | n/a |
-| 10 pp | 90% | 1,393 | 5.0 pp | 11,144 | n/a | n/a | n/a |
-| 20 pp | 80% | 235 | 11.1 pp | 1,880 | n/a | n/a | n/a |
-| 20 pp | 90% | 298 | 9.9 pp | 2,384 | n/a | n/a | n/a |
+| Difference | Power | Repetitions/task/mode | Minimum validated power lower bound | Paired score CI half-width | Holm-adjusted CI half-width | Invocations/variant | Runtime | Input tokens | Output tokens |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 pp | 80% | 4,684 | 84.8% | 2.8 pp | 3.8 pp | 37,472 | n/a | n/a | n/a |
+| 5 pp | 90% | 5,930 | 93.1% | 2.5 pp | 3.4 pp | 47,440 | n/a | n/a | n/a |
+| 10 pp | 80% | **1,100** | 82.2% | 5.6 pp | 7.6 pp | **8,800** | n/a | n/a | n/a |
+| 10 pp | 90% | 1,393 | 92.7% | 5.0 pp | 6.8 pp | 11,144 | n/a | n/a | n/a |
+| 20 pp | 80% | 235 | 82.0% | 11.1 pp | 15.2 pp | 1,880 | n/a | n/a | n/a |
+| 20 pp | 90% | 298 | 91.3% | 9.9 pp | 13.5 pp | 2,384 | n/a | n/a | n/a |
 
 Runtime is unavailable until current-protocol timing records are available.
 Provider token projections stay unavailable until usage semantics can be
@@ -643,7 +649,7 @@ deterministic noisy signals. It is still synthetic and privacy-safe; it does
 not contain a production repository or user data.
 
 Run the staged powered Codex A/B evaluation with the repository script. The
-default is 1,006 repetitions per task and mode under the conservative model above.
+default is 1,100 repetitions per task and mode under the conservative model above.
 The script looks at 50%, 75%, and 100% of that design, applying Holm correction
 within tasks at local alpha-spending increments of 0.005, 0.015, and 0.030
 (cumulative family alpha 0.005, 0.020, and 0.050). It continues while adjusted

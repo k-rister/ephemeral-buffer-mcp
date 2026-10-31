@@ -139,8 +139,8 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_default_schedule_uses_powered_design_and_three_looks(self):
         schedule = build_schedule(seed=20261031)
         design = schedule["statistical_design"]
-        self.assertEqual(design["schema_version"], 2)
-        self.assertIn("Wilson", design["baseline_interval_method"])
+        self.assertEqual(design["schema_version"], 3)
+        self.assertIn("Clopper-Pearson", design["baseline_interval_method"])
         self.assertIn("95% joint coverage", design["pilot_parameter_confidence_rule"])
         selected = next(
             scenario for scenario in design["scenario_matrix"]
@@ -148,7 +148,18 @@ class TestAgentAbBenchmark(unittest.TestCase):
         )
         self.assertEqual(schedule["repetitions"], design["selected_repetitions"])
         self.assertGreater(schedule["repetitions"], 5)
-        self.assertTrue(all(value >= 0.8 for value in selected["power_lower_95_by_task"].values()))
+        self.assertTrue(all(value >= 0.8 for value in selected["power_lower_bound_by_task"].values()))
+        self.assertTrue(all(
+            all(
+                scenario["power_lower_bound_by_task"][task_id] >= scenario["target_power"]
+                for task_id in scenario["power_lower_bound_by_task"]
+            )
+            and all(
+                0.95 < confidence < 1.0
+                for confidence in scenario["power_lower_confidence_by_task"].values()
+            )
+            for scenario in design["scenario_matrix"]
+        ))
         self.assertEqual(
             [item["percent"] for item in schedule["stage_schedule"]],
             [50, 75, 100],
@@ -214,7 +225,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         conservative_design = build_power_design(seed=73, simulations=100)
         self.assertEqual(
             small_design["pilot_evidence_source"],
-            "paired-records-bootstrap-with-conservative-fallback",
+            "paired-records-exact-bounds-with-conservative-fallback",
         )
         self.assertTrue(small_design["pilot_required"])
         self.assertEqual(small_design["selected_repetitions"], conservative_design["selected_repetitions"])
@@ -229,7 +240,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
         pilot_schedule, pilot_payload = _scored_records_payload(repetitions=20)
         pilot = build_power_design(pilot_payload, pilot_schedule, simulations=100, seed=73)
-        self.assertEqual(pilot["pilot_evidence_source"], "paired-records-bootstrap")
+        self.assertEqual(pilot["pilot_evidence_source"], "paired-records-exact-bounds")
         self.assertFalse(pilot["pilot_required"])
         self.assertEqual(
             pilot["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
@@ -237,7 +248,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         )
         self.assertEqual(
             pilot["paired_model_by_task"]["targeted-inspection"]["discordance_upper_method"],
-            "paired-bootstrap-percentile",
+            "one-sided-clopper-pearson",
         )
         self.assertEqual(
             pilot["paired_model_by_task"]["targeted-inspection"]["baseline_success_rate_interval"]["confidence"],
@@ -259,7 +270,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
             self.assertAlmostEqual(model["discordance_rate"], expected)
             self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(model, 0.1), expected)
             self.assertEqual(model["discordance_upper_method"], "one-sided-clopper-pearson")
-            self.assertEqual(model["source"], "paired-records-zero-discordance-clopper-pearson-97.5%-upper-bound")
+            self.assertEqual(model["source"], "paired-records-exact-clopper-pearson-97.5%-upper-bound")
             self.assertEqual(model["baseline_success_rate_interval"]["confidence"], 0.975)
 
     def test_near_boundary_baseline_does_not_clip_pilot_discordance_upper(self):
@@ -646,6 +657,8 @@ class TestAgentAbBenchmark(unittest.TestCase):
                     "scenario_matrix": [{
                         "effect_pp": 10,
                         "target_power": 0.8,
+                        "simulated_power_by_task": {"example-task": 0.9},
+                        "power_lower_bound_by_task": {"example-task": 0.82},
                         "repetitions_per_task_and_mode": 900,
                         "expected_paired_score_ci95_half_width_pp": 6.2,
                         "invocations_per_variant": 7200,
@@ -680,7 +693,8 @@ class TestAgentAbBenchmark(unittest.TestCase):
         ])
         self.assertIn("evidence-ready", report)
         self.assertIn("powered-but-inconclusive", report)
-        self.assertIn("| resolved | 10 pp | 80.0% | n/a | 900 | 6.2 | 7200 | n/a | n/a | n/a |", report)
+        self.assertIn("Validated minimum power (adjusted lower bound)", report)
+        self.assertIn("| resolved | 10 pp | 80.0% | 90.0% (LB 82.0%) | 900 | 6.2 | 7200 | n/a | n/a | n/a |", report)
         self.assertIn("Provider token estimates remain unavailable", report)
 
     def test_legacy_v6_records_keep_criterion_results_unavailable(self):
