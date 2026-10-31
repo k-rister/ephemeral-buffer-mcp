@@ -271,7 +271,7 @@ def bootstrap_discordance_upper(
     simulations: int = 5000,
     seed: int = 20261031,
     quantile: float = 0.95,
-) -> dict[str, float | int]:
+) -> dict[str, float | int | str]:
     """Bootstrap matched binary pairs and return a conservative discordance rate."""
     if not pairs:
         raise ValueError("at least one matched pair is required")
@@ -280,7 +280,8 @@ def bootstrap_discordance_upper(
     rng = random.Random(seed)
     count = len(pairs)
     baseline_rate = sum(control for control, _ in pairs) / count
-    observed_discordance = sum(control != mcp for control, mcp in pairs) / count
+    observed_discordances = sum(control != mcp for control, mcp in pairs)
+    observed_discordance = observed_discordances / count
     bootstrap_rates = []
     for _ in range(simulations):
         discordant = 0
@@ -290,11 +291,22 @@ def bootstrap_discordance_upper(
         bootstrap_rates.append(discordant / count)
     bootstrap_rates.sort()
     index = min(simulations - 1, math.ceil(quantile * simulations) - 1)
+    bootstrap_upper = bootstrap_rates[index]
+    if observed_discordances == 0:
+        # The ordinary bootstrap is degenerate at zero in this case. Use the
+        # one-sided exact binomial bound at the same confidence level instead.
+        upper_estimate = -math.expm1(math.log1p(-quantile) / count)
+        upper_method = "one-sided-clopper-pearson"
+    else:
+        upper_estimate = bootstrap_upper
+        upper_method = "paired-bootstrap-percentile"
     return {
         "matched_repetitions": count,
         "baseline_success_rate": baseline_rate,
         "observed_discordance_rate": observed_discordance,
-        "discordance_upper_bootstrap": bootstrap_rates[index],
+        "discordance_upper_bootstrap": bootstrap_upper,
+        "discordance_upper_estimate": upper_estimate,
+        "discordance_upper_method": upper_method,
         "bootstrap_simulations": simulations,
         "bootstrap_seed": seed,
         "bootstrap_quantile": quantile,

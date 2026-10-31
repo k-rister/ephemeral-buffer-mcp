@@ -232,6 +232,27 @@ class TestAgentAbBenchmark(unittest.TestCase):
             pilot["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
             20,
         )
+        self.assertEqual(
+            pilot["paired_model_by_task"]["targeted-inspection"]["discordance_upper_method"],
+            "paired-bootstrap-percentile",
+        )
+
+    def test_zero_discordance_pilot_uses_exact_upper_bound_for_power_design(self):
+        schedule, payload = _scored_records_payload(repetitions=20)
+        for record in payload["runs"]:
+            shared_success = record["repetition"] <= 10
+            record["task_success"] = shared_success
+            record["criterion_passes"] = [shared_success, shared_success]
+
+        design = build_power_design(payload, schedule, simulations=100, seed=83)
+        expected = 1.0 - 0.05 ** (1.0 / 20)
+        for model in design["paired_model_by_task"].values():
+            self.assertEqual(model["observed_discordance_rate"], 0.0)
+            self.assertEqual(model["discordance_upper_bootstrap"], 0.0)
+            self.assertAlmostEqual(model["discordance_rate"], expected)
+            self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(model, 0.1), expected)
+            self.assertEqual(model["discordance_upper_method"], "one-sided-clopper-pearson")
+            self.assertEqual(model["source"], "paired-records-zero-discordance-exact-upper-bound")
 
     def test_adequate_pilot_tasks_keep_bootstrap_when_another_task_is_small(self):
         schedule, payload = _scored_records_payload(repetitions=20)
