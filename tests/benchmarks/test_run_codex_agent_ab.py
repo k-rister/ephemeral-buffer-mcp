@@ -32,6 +32,80 @@ from benchmarks.run_codex_agent_ab import (
 
 
 class TestCodexAgentRunner(unittest.TestCase):
+    def test_source_locations_bind_lines_to_files_in_answers_and_exposure(self):
+        criteria = {
+            "required_phrases": ["SIGNAL", "src/parser.c"],
+            "required_line_numbers": [32],
+            "required_source_locations": [{"path": "src/parser.c", "line": 917}],
+        }
+        valid = (
+            "src/parser.c:917", "src/parser.c#L917", "src/parser.c:917:4",
+            "src/parser.c:915-920", "src/parser.c#L915-L920",
+            "`src/parser.c`, line 917", "src/parser.c at line 917",
+            "src/parser.c on line number: 917", "line 917 of `src/parser.c`",
+            "line 917 in src/parser.c", "line 917 at src/parser.c",
+            "line 917 of src/parser.c.",
+            "src/parser.c, lines 915–920", "src/parser.c, lines 920-915",
+            "src/parser.c, L917", "src/parser.c: line **917**",
+            "[parser.c](/tmp/fixture/src/parser.c:917)",
+            "[parser.c](src/parser.c#L917)", "./src/parser.c:917",
+            "C:\\fixture\\src\\parser.c:917", "SRC/PARSER.C:917.",
+        )
+        invalid = (
+            "src/parser.c:918, README.md:917", "src/parser.c:99; line 917 of README.md",
+            "src/parser.c, README.md at line 917", "src/parser.c. Line 917",
+            "src/parser.c\nline 917", "src/parser.c; line 917",
+            "parser.c:917", "other/src/parser.c:917", "src/parser.c.bak:917",
+            "src/parser.cpp:917", "src/parser.c:1917", "src/parser.c:9170",
+            "src/parser.c logged at 2026-10-30T16:32:00", "src/parser.c:917.5",
+            "src/parser.c, lines 918-920",
+            "line 917 of src/parser.c:99", "line 917 of src/parser.c#L99",
+        )
+        for expected, references in ((True, valid), (False, invalid)):
+            for reference in references:
+                with self.subTest(reference=reference):
+                    answer = "SIGNAL line 32: " + reference
+                    passes = run_codex_agent_ab._criterion_passes(answer, criteria, "SIGNAL")
+                    self.assertEqual(passes[-1], expected)
+                    output = json.dumps({"type": "item.completed", "item": {
+                        "type": "mcp_tool_call", "tool": "search_capture", "status": "completed",
+                        "result": {"content": [{"type": "text", "text": answer}]},
+                    }})
+                    hits, counts = _mcp_result_criterion_exposure(output, criteria)
+                    self.assertEqual(hits["search_capture"], passes)
+                    self.assertEqual(hits["get_capture_slice"], [False] * 4)
+                    self.assertEqual(counts["search_capture"], 1)
+        self.assertEqual(run_codex_agent_ab._criterion_passes("", criteria), [False] * 4)
+        self.assertEqual(run_codex_agent_ab._criterion_passes("I cannot help", criteria), [False] * 4)
+
+    def test_repository_location_regression_rejects_unrelated_correct_number(self):
+        criteria = build_repository_manifest()["tasks"]["targeted-inspection"]["success_criteria"]
+        answer = "TARGETED_SIGNAL appears in src/packet_parser/parser.py:99. See README.md:12 for background."
+        self.assertEqual(run_codex_agent_ab._criterion_passes(answer, criteria), [True, True, False])
+        self.assertFalse(_task_success(answer, criteria))
+
+    def test_source_location_manifest_validation_and_normalization(self):
+        invalid = (None, {}, [None], [{}], [{"path": "p.c"}],
+                   [{"path": "", "line": 1}], [{"path": "./", "line": 1}],
+                   [{"path": 1, "line": 1}], [{"path": "p.c", "line": True}],
+                   [{"path": "p.c", "line": 0}], [{"path": "p.c", "line": 1.5}],
+                   [{"path": "p.c", "line": "1"}],
+                   [{"path": "./SRC/parser.c", "line": 917}, {"path": "src\\parser.c", "line": 917}])
+        for locations in invalid:
+            manifest = copy.deepcopy(build_manifest())
+            criteria = manifest["tasks"]["targeted-inspection"]["success_criteria"]
+            criteria["required_source_locations"] = locations
+            with self.subTest(locations=locations), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "tasks.json"
+                path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "required_source_locations"):
+                    _load_manifest(path)
+                self.assertIsNone(run_codex_agent_ab._criterion_passes("SIGNAL", criteria))
+                with self.assertRaisesRegex(ValueError, "required_source_locations"):
+                    _mcp_result_criterion_exposure("", criteria)
+        criteria = {"required_phrases": ["SIGNAL"], "required_source_locations": [{"path": "./SRC\\parser.c", "line": 917}]}
+        self.assertEqual(run_codex_agent_ab._criterion_passes("SIGNAL src/parser.c:917", criteria), [True, True])
+
     def test_current_fixture_manifests_are_accepted_by_runner(self):
         builders = (
             ("synthetic", build_manifest, 32),
@@ -48,10 +122,11 @@ class TestCodexAgentRunner(unittest.TestCase):
                     manifest = _load_manifest(path)
 
                     self.assertEqual(set(manifest), set(payload["tasks"]))
-                    self.assertEqual(
-                        manifest["targeted-inspection"]["success_criteria"]["required_line_numbers"],
-                        [targeted_line],
-                    )
+                    criteria = manifest["targeted-inspection"]["success_criteria"]
+                    lines = criteria["required_line_numbers"] if name == "synthetic" else [
+                        item["line"] for item in criteria["required_source_locations"]
+                    ]
+                    self.assertEqual(lines, [targeted_line])
 
     def test_mcp_exposure_counts_model_readable_text_not_structured_payloads(self):
         output = "\n".join(json.dumps(event) for event in (
@@ -464,7 +539,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         task = {
             "prompt": "inspect the fixture",
             "signal_marker": "SUCCESS",
-            "success_criteria": {"required_phrases": ["SUCCESS", "line 12"]},
+            "success_criteria": {"required_phrases": ["SUCCESS"], "required_source_locations": [{"path": "private/source.py", "line": 12}]},
         }
         args = argparse.Namespace(
             codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
@@ -478,7 +553,7 @@ class TestCodexAgentRunner(unittest.TestCase):
                     "type": "item.completed",
                     "item": {
                         "type": "agent_message",
-                        "text": "The result is SUCCESS on line 12.",
+                        "text": "The result is SUCCESS in private/source.py, line 12.",
                     },
                 }),
             ]),
@@ -494,6 +569,8 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(output["criterion_passes"], [True, True])
         self.assertTrue(output["signal_retrieved"])
         self.assertNotIn("SUCCESS", json.dumps(output))
+        self.assertNotIn("private/source.py", json.dumps(output))
+        self.assertNotIn("required_source_locations", json.dumps(output))
         command = run.call_args.args[0]
         self.assertIn("gpt-5.6-luna", command)
         self.assertIn("--ephemeral", command)

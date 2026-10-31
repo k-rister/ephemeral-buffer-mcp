@@ -12,6 +12,7 @@ from ..engine import (
     MAX_CAPTURE_SLICE_CONTENT_BYTES,
 )
 from ..mcp_response import (
+    COMPACT_SLICE_CONTENT_MAX_BYTES,
     ToolErrorEnvelope,
     ToolResponseEnvelope,
     call_tool_result_bytes as _call_tool_result_bytes,
@@ -88,11 +89,15 @@ def _capture_slice_response(
             max(4, response_budget - 1536 - (2 * label_bytes)) // 12,
         ),
     )
+    compact_text = _compact_tool_results_enabled_for_mcp(__invocation_mode)
+    content_budget = min(MAX_CAPTURE_SLICE_CONTENT_BYTES, max_bytes // 2)
+    if compact_text:
+        content_budget = min(content_budget, COMPACT_SLICE_CONTENT_MAX_BYTES)
     page = active_engine.get_slice_page(
         start_line,
         end_line,
         capture_id=capture_id,
-        max_content_bytes=min(MAX_CAPTURE_SLICE_CONTENT_BYTES, max_bytes // 2),
+        max_content_bytes=content_budget,
         cursor=cursor,
         max_segment_bytes=max_segment_bytes,
     )
@@ -174,7 +179,7 @@ def _capture_slice_response(
         )
         if _call_tool_result_bytes(
             candidate,
-            compact_text=_compact_tool_results_enabled_for_mcp(__invocation_mode),
+            compact_text=compact_text,
         ) > response_budget:
             break
         selected.append(segment)

@@ -2,6 +2,14 @@
 
 Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
+## Unreleased
+
+- Paginate compact capture slices before applying continuation cursors so
+  text-only clients can retrieve every byte, including within long Unicode lines.
+- Bind agent A/B source-line criteria to their expected files while accepting
+  references and prose. Advance task fixtures to version 4; regenerate manifests
+  and schedules, and keep historical scores separate from the corrected rubric.
+
 ## 0.12.0 - 2026-10-30
 
 - Breaking: Replace FastEmbed with a text-only ONNX Runtime backend and limit

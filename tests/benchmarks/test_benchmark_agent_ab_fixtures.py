@@ -23,7 +23,8 @@ class TestAgentAbFixtures(unittest.TestCase):
             self.assertTrue(criteria["description"])
             self.assertGreaterEqual(
                 len(criteria["required_phrases"])
-                + len(criteria.get("required_line_numbers", [])),
+                + len(criteria.get("required_line_numbers", []))
+                + len(criteria.get("required_source_locations", [])),
                 2,
             )
             self.assertIn(task["signal_marker"], criteria["required_phrases"])
@@ -41,8 +42,8 @@ class TestAgentAbFixtures(unittest.TestCase):
             ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
         )
         self.assertEqual(
-            manifest["tasks"]["build-log-search"]["success_criteria"]["required_line_numbers"],
-            [917],
+            manifest["tasks"]["build-log-search"]["success_criteria"]["required_source_locations"],
+            [{"path": "src/parser.c", "line": 917}],
         )
 
     def test_create_fixture_is_deterministic_and_contains_no_logs(self):

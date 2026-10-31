@@ -122,6 +122,14 @@ def _legacy_v5_records_payload():
 
 
 class TestAgentAbBenchmark(unittest.TestCase):
+    def test_historical_v3_fixture_records_remain_readable(self):
+        schedule, payload = _scored_records_payload()
+        schedule["task_fixture_version"] = 3
+        payload["task_fixture_version"] = 3
+        summary = summarize_records(payload, schedule)
+        self.assertEqual(summary["task_fixture_version"], 3)
+        self.assertEqual(summary["records_schema_version"], 9)
+
     def test_schedule_is_reproducible_and_balanced(self):
         first = build_schedule(repetitions=3, seed=17)
         self.assertEqual(first, build_schedule(repetitions=3, seed=17))

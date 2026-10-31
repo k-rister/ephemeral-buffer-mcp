@@ -29,7 +29,8 @@ class TestRepositoryFixture(unittest.TestCase):
             self.assertTrue(criteria["description"])
             self.assertGreaterEqual(
                 len(criteria["required_phrases"])
-                + len(criteria.get("required_line_numbers", [])),
+                + len(criteria.get("required_line_numbers", []))
+                + len(criteria.get("required_source_locations", [])),
                 2,
             )
             self.assertIn(task["signal_marker"], criteria["required_phrases"])
@@ -38,10 +39,10 @@ class TestRepositoryFixture(unittest.TestCase):
             targeted["required_phrases"],
             ["TARGETED_SIGNAL", "src/packet_parser/parser.py"],
         )
-        self.assertEqual(targeted["required_line_numbers"], [12])
+        self.assertEqual(targeted["required_source_locations"], [{"path": "src/packet_parser/parser.py", "line": 12}])
         build = manifest["tasks"]["build-log-search"]["success_criteria"]
         self.assertEqual(build["required_phrases"], ["BUILD_FAILURE_SIGNAL", "src/parser.c"])
-        self.assertEqual(build["required_line_numbers"], [917])
+        self.assertEqual(build["required_source_locations"], [{"path": "src/parser.c", "line": 917}])
 
     def test_fixture_has_layout_and_deterministic_workflow_output(self):
         with tempfile.TemporaryDirectory() as directory:

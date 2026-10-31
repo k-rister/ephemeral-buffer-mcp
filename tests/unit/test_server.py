@@ -4045,8 +4045,61 @@ class TestServerTools(unittest.TestCase):
             status="ok",
             data={"start_line": 32, "end_line": 32, "content": "x" * 5000},
         ))
-        self.assertIn("[capture slice excerpt truncated]", long_slice)
-        self.assertLessEqual(len(long_slice.encode("utf-8")), 4600)
+        self.assertIn("x" * 5000, long_slice)
+        self.assertNotIn("[capture slice excerpt truncated]", long_slice)
+
+    def test_compact_slice_pages_expose_every_byte_before_the_cursor(self):
+        cases = (
+            "A" * 6000 + "HIDDEN_EVIDENCE" + "B" * 20000,
+            "x" * 4096,
+            "x" * 4097,
+            "λ🙂" * 900 + "\nsecond line\n\nfinal line",
+            "\x00" * 1500 + "\n最後",
+        )
+        for content in cases:
+            capture = server.engine.ingest(content, label="long-label-" + "x" * 5000)
+            for budget in (4096, 8192, 65536):
+                with self.subTest(content_bytes=len(content.encode()), budget=budget):
+                    cursor = None
+                    pages = []
+                    seen_cursors = set()
+                    while True:
+                        arguments = {
+                            "start_line": 1, "end_line": len(content.splitlines()),
+                            "capture_id": capture.capture_id, "max_bytes": budget,
+                        }
+                        if cursor is not None:
+                            arguments["cursor"] = cursor
+                        response = asyncio.run(self.call_mcp_tool_inline("get_capture_slice", arguments))
+                        structured = response.structured_content
+                        self.assertEqual(structured["status"], "ok")
+                        page = structured["data"]["content"]
+                        self.assertLessEqual(len(page.encode()), 4096)
+                        self.assertIn(page, response.content[0].text)
+                        self.assertNotIn("[capture slice excerpt truncated]", response.content[0].text)
+                        self.assertLessEqual(len(response.model_dump_json(by_alias=True).encode()), budget)
+                        pages.append(page)
+                        cursor = structured["next_cursor"]
+                        self.assertEqual(structured["truncated"], cursor is not None)
+                        if cursor is None:
+                            break
+                        self.assertNotIn(cursor, seen_cursors)
+                        seen_cursors.add(cursor)
+                        self.assertIn(cursor, response.content[0].text)
+                    self.assertEqual("".join(pages), content)
+
+    def test_large_slice_keeps_legacy_and_python_page_sizes(self):
+        content = "x" * 10000
+        capture = server.engine.ingest(content, label="legacy-page")
+        direct = server.get_capture_slice_result(1, 1, capture_id=capture.capture_id)
+        self.assertEqual(direct.data["content"], content)
+        legacy_settings = settings_with_environment(EPHEMERAL_COMPACT_TOOL_RESULTS="false")
+        with patch.object(server.DEFAULT_SERVICES, "settings", legacy_settings), patch.object(server, "SETTINGS", legacy_settings):
+            legacy = asyncio.run(self.call_mcp_tool_inline("get_capture_slice", {
+                "start_line": 1, "end_line": 1, "capture_id": capture.capture_id,
+            }))
+        self.assertEqual(legacy.structured_content["data"]["content"], content)
+        self.assertIn(content, legacy.content[0].text)
 
     def test_compact_mcp_results_reduce_bytes_and_legacy_mode_preserves_text(self):
         content = "\n".join(
@@ -4092,7 +4145,7 @@ class TestServerTools(unittest.TestCase):
         byte_sizes = {}
         for label, tool, arguments in requests:
             with self.subTest(tool=tool):
-                with patch.object(server.DEFAULT_SERVICES, "settings", legacy_settings):
+                with patch.object(server.DEFAULT_SERVICES, "settings", legacy_settings), patch.object(server, "SETTINGS", legacy_settings):
                     legacy = asyncio.run(self.call_mcp_tool_inline(tool, arguments))
                 with patch.object(server.DEFAULT_SERVICES, "settings", compact_settings):
                     compact = asyncio.run(self.call_mcp_tool_inline(tool, arguments))
@@ -4100,7 +4153,10 @@ class TestServerTools(unittest.TestCase):
                 legacy_bytes = len(legacy.model_dump_json(by_alias=True).encode("utf-8"))
                 compact_bytes = len(compact.model_dump_json(by_alias=True).encode("utf-8"))
                 byte_sizes[label] = (legacy_bytes, compact_bytes)
-                self.assertLess(compact_bytes, legacy_bytes)
+                if tool != "get_capture_slice":
+                    self.assertLess(compact_bytes, legacy_bytes)
+                else:
+                    self.assertLessEqual(compact_bytes, arguments["max_bytes"])
                 self.assertEqual(compact.structured_content["status"], "ok")
                 self.assertEqual(
                     compact.structured_content["schema_version"],
@@ -4123,11 +4179,11 @@ class TestServerTools(unittest.TestCase):
                     )
                 else:
                     self.assertIn("needle", legacy.content[0].text)
-                    self.assertEqual(
-                        compact.structured_content["data"]["content"],
-                        legacy.structured_content["data"]["content"],
-                    )
-                    self.assertEqual(compact.structured_content["next_cursor"], None)
+                    compact_content = compact.structured_content["data"]["content"]
+                    self.assertTrue(legacy.structured_content["data"]["content"].startswith(compact_content))
+                    self.assertIn(compact_content, compact.content[0].text)
+                    self.assertLessEqual(len(compact_content.encode()), 4096)
+                    self.assertIsNotNone(compact.structured_content["next_cursor"])
 
         self.assertEqual(set(byte_sizes), {"capture", "search", "retrieval"})
         self.byte_sizes = byte_sizes

@@ -43,6 +43,61 @@ _PATH_LINE_REFERENCE_RE = re.compile(
 )
 
 
+def _normalize_source_path(path: str) -> str:
+    path = path.strip().replace("\\", "/").casefold()
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _source_locations(criteria: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate private file/line criteria without persisting source paths."""
+    locations = criteria.get("required_source_locations", [])
+    if not isinstance(locations, list):
+        raise ValueError("required_source_locations must be a list")
+    seen = set()
+    normalized = []
+    for location in locations:
+        if not isinstance(location, dict) or set(location) != {"path", "line"}:
+            raise ValueError("required_source_locations entries require path and line")
+        path, line = location["path"], location["line"]
+        if not isinstance(path, str) or not _normalize_source_path(path):
+            raise ValueError("required_source_locations requires non-empty paths")
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            raise ValueError("required_source_locations requires positive integer lines")
+        path = _normalize_source_path(path)
+        if (path, line) in seen:
+            raise ValueError("duplicate required_source_locations")
+        seen.add((path, line))
+        normalized.append({"path": path, "line": line})
+    return normalized
+
+
+def _source_location_hit(text: str, location: dict[str, Any]) -> bool:
+    """Match an adjacent file/line reference, never independent mentions."""
+    path = re.escape(location["path"])
+    # Accept repository-relative names and absolute checkout prefixes, with
+    # complete path boundaries so other filenames cannot satisfy a location.
+    prefix = r"(?:(?:[a-z]:)?/(?:[\w.-]+/)*|(?:\./)*)"
+    source = rf"(?<![\w./-]){prefix}{path}(?![\w/-]|\.[\w./-])"
+    space = r"[\t `*_]*"
+    numbers = r"([0-9]+)(?:[\t ]*[-–—][\t ]*L?([0-9]+))?(?!\w|\.[0-9])"
+    label = r"(?:lines?(?:[\t ]+number)?[\t ]*[:#]?[\t ]*|L)"
+    patterns = (
+        rf"{source}(?::|#L){numbers}",
+        rf"{source}{space}[,:(]?{space}(?:(?:at|on)[\t ]+)?{label}{space}{numbers}",
+        rf"(?<!\w){label}{space}{numbers}{space}(?:in|of|at)[\t ]+{space}{source}(?![:#])",
+    )
+    normalized_text = text.replace("\\", "/")
+    for pattern in patterns:
+        for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            if min(start, end) <= location["line"] <= max(start, end):
+                return True
+    return False
+
+
 def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
     payload = _read_json(path)
     if payload.get("fixture_version") != TASK_FIXTURE_VERSION:
@@ -69,6 +124,7 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
         description = criteria.get("description")
         required_phrases = criteria.get("required_phrases")
         required_line_numbers = criteria.get("required_line_numbers", [])
+        required_source_locations = _source_locations(criteria)
         if not isinstance(description, str) or not description.strip():
             raise ValueError(f"task {task_id} success_criteria requires a description")
         if (
@@ -85,7 +141,7 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
             raise ValueError(
                 f"task {task_id} success_criteria required_line_numbers must be positive integers"
             )
-        if len(required_phrases) + len(required_line_numbers) < 2:
+        if len(required_phrases) + len(required_line_numbers) + len(required_source_locations) < 2:
             raise ValueError(
                 f"task {task_id} success_criteria requires at least two answer criteria"
             )
@@ -105,6 +161,7 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
                 "description": description,
                 "required_phrases": required_phrases,
                 "required_line_numbers": required_line_numbers,
+                "required_source_locations": required_source_locations,
             },
         }
     missing = known - set(manifest)
@@ -309,6 +366,10 @@ def _criterion_passes(answer: str, criteria: Any, marker: str = "") -> list[bool
     """Return metadata-only answer checks in manifest order, or None for invalid criteria."""
     if not isinstance(criteria, dict):
         return None
+    try:
+        required_source_locations = _source_locations(criteria)
+    except ValueError:
+        return None
     required_phrases = criteria.get("required_phrases")
     required_line_numbers = criteria.get("required_line_numbers", [])
     if not isinstance(required_phrases, list) or not isinstance(required_line_numbers, list):
@@ -320,7 +381,7 @@ def _criterion_passes(answer: str, criteria: Any, marker: str = "") -> list[bool
         or not isinstance(line_number, int)
         or line_number < 1
         for line_number in required_line_numbers
-    ) or len(required_phrases) + len(required_line_numbers) < 2:
+    ) or len(required_phrases) + len(required_line_numbers) + len(required_source_locations) < 2:
         return None
     normalized_phrases = [" ".join(phrase.casefold().split()) for phrase in required_phrases]
     if len(normalized_phrases) != len(set(normalized_phrases)):
@@ -330,16 +391,20 @@ def _criterion_passes(answer: str, criteria: Any, marker: str = "") -> list[bool
     if marker and marker.casefold() not in normalized_phrases:
         return None
     if not answer or _is_refusal(answer):
-        return [False] * (len(normalized_phrases) + len(required_line_numbers))
-    return _criterion_text_hits(answer, required_phrases, required_line_numbers)
+        criterion_count = len(normalized_phrases) + len(required_line_numbers) + len(required_source_locations)
+        return [False] * criterion_count
+    return _criterion_text_hits(
+        answer, required_phrases, required_line_numbers, required_source_locations
+    )
 
 
 def _criterion_text_hits(
     text: str,
     required_phrases: list[str],
     required_line_numbers: list[int] | None = None,
+    required_source_locations: list[dict[str, Any]] | None = None,
 ) -> list[bool]:
-    """Match literal phrases and explicit line-number references."""
+    """Match phrases, unbound line numbers, then file-bound source locations."""
     normalized_text = " ".join(text.casefold().split())
     phrase_hits = [
         re.search(
@@ -371,7 +436,10 @@ def _criterion_text_hits(
             for match in _PATH_LINE_REFERENCE_RE.finditer(text)
         )
         line_hits.append(labeled_hit or path_line_hit)
-    return phrase_hits + line_hits
+    return phrase_hits + line_hits + [
+        _source_location_hit(text, location)
+        for location in required_source_locations or []
+    ]
 
 
 def _mcp_result_criterion_exposure(
@@ -393,9 +461,10 @@ def _mcp_result_criterion_exposure(
         for line_number in required_line_numbers
     ):
         raise ValueError("MCP result exposure requires valid required_line_numbers")
+    required_source_locations = _source_locations(criteria)
 
     sources = ("search_capture", "get_capture_slice")
-    criterion_count = len(required_phrases) + len(required_line_numbers)
+    criterion_count = len(required_phrases) + len(required_line_numbers) + len(required_source_locations)
     hits = {source: [False] * criterion_count for source in sources}
     response_counts = {source: 0 for source in sources}
     for event in _event_objects(output):
@@ -466,6 +535,7 @@ def _mcp_result_criterion_exposure(
             result_text,
             required_phrases,
             required_line_numbers,
+            required_source_locations,
         )
         hits[source] = [prior or current for prior, current in zip(hits[source], response_hits)]
     return hits, response_counts

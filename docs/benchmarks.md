@@ -372,17 +372,24 @@ review.
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
 run, isolates control and MCP configuration, and writes metadata-only records.
-Create a private task manifest (do not commit it) with fixture version 3, a
+Create a private task manifest (do not commit it) with fixture version 4, a
 prompt, signal marker, and objective success criteria for each scheduled task.
 Use `required_phrases` for exact names and descriptions, and
-`required_line_numbers` when the task asks for a source line. A line criterion
-accepts explicit forms such as `line 32`, `line number: 32`, `L32`,
+`required_line_numbers` for output lines without a required source file. Use
+`required_source_locations` for file-bound lines, for example
+`[{"path": "src/parser.c", "line": 917}]`. A file-bound criterion accepts
+`src/parser.c:917`, `src/parser.c#L917`, `src/parser.c, line 917`,
+`line 917 of src/parser.c`, and adjacent ranges containing the required line.
+It does not combine a filename with a line reference belonging to another file.
+Paths accept slash normalization, optional `./`, and absolute checkout prefixes;
+matching is case-insensitive and requires complete path components.
+An unbound line criterion accepts explicit forms such as `line 32`, `line number: 32`, `L32`,
 `src/parser.c:32`, and ranges such as `lines 32-35` that contain the required
 line:
 
 ```json
 {
-  "fixture_version": 3,
+  "fixture_version": 4,
   "tasks": {
     "targeted-inspection": {
       "prompt": "Inspect the fixture and report the marker and line number.",
@@ -411,7 +418,7 @@ line:
       "success_criteria": {
         "description": "Report the marker and its source location.",
         "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
-        "required_line_numbers": [917]
+        "required_source_locations": [{"path": "src/parser.c", "line": 917}]
       }
     },
     "follow-up-context": {
@@ -425,6 +432,11 @@ line:
   }
 }
 ```
+
+Regenerate manifests and schedules for fixture version 4. Historical records
+remain readable, but their scores must stay separate from the corrected rubric.
+Criterion vectors are ordered by required phrases, unbound line numbers, then
+source locations; paths and criterion text remain private and are not recorded.
 
 Run the adapter from the repository checkout:
 

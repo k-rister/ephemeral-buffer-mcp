@@ -15,7 +15,7 @@ import benchmarks.workload_results as wr
 SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_VERSION = 4
 RECORDS_SCHEMA_VERSION = 9
-TASK_FIXTURE_VERSION = 3
+TASK_FIXTURE_VERSION = 4
 MODES = ("control", "mcp")
 EXPOSURE_STATES = (
     "criterion_hit",
