@@ -372,26 +372,74 @@ sharing them as with any other benchmark output.
 
 ## EB effectiveness comparisons (2026-10-30)
 
-These are historical fixture-version-3 results (with earlier v2 runs identified
-below). Fixture version 4 binds source lines to their expected files. These
-results have not been rescored and must not be pooled with v4 measurements.
+The fixture-version-3 results below (and earlier v2 runs) are historical.
+Fixture version 4 binds source lines to their expected files. Historical results
+have not been rescored and must not be pooled with v4 measurements.
 
 The agent-level comparison uses four synthetic tasks, `gpt-6-luna`, the
 `synthetic-eb-heavy-v2` fixture, a fresh fixture copy per invocation, and five
-repetitions per task and mode. Task fixture version 3 scores the targeted
-inspection answer's line number as a typed criterion, accepting formats such
-as `line 32`, `line number: 32`, and `L32`.
+repetitions per task and mode. Fixture version 3 scored the targeted inspection
+answer's line number as a typed criterion, accepting formats such as `line 32`,
+`line number: 32`, and `L32`.
 
-`control` runs without the EB MCP server; `mcp` makes the server available and
-lets the agent choose whether to use it. The current protocol applies the same
-Codex automatic-review policy and `workspace-write` sandbox to both arms, so
-MCP availability is the only configured difference. Embeddings use the
-deterministic test backend. Records contain task-scoped pass/fail metadata,
-not prompts, criterion text, tool responses, or transcripts. The fixture is
-synthetic and small; these results do not establish performance on other
-models or representative agent work.
+`control` runs without the EB MCP server; the `mcp` arm requires the agent to
+use the configured EB tools for the capture and search workflow. Both arms use
+the same Codex automatic-review policy and `workspace-write` sandbox, and the
+deterministic test embedding backend. Records contain task-scoped pass/fail
+metadata, not prompts, criterion text, tool responses, or transcripts. The
+fixture is synthetic and small; these results do not establish performance on
+other models or representative agent work.
 
-### Matched-sandbox results
+### Corrected fixture-v4 batch (seed 20261046)
+
+This run used five repetitions for each of four tasks and both modes, for 20
+paired runs (40 invocations). It used the same model, fixture profile,
+deterministic test embeddings, and matched sandbox/approval setup as the v3
+comparison, with the v4 file-bound source criteria.
+
+| Task | Control | EB available | Difference |
+| --- | ---: | ---: | ---: |
+| Build log search | 5/5 (100%) | 5/5 (100%) | 0 pp |
+| Follow-up context | 5/5 (100%) | 5/5 (100%) | 0 pp |
+| Noisy test failure | 4/5 (80%) | 5/5 (100%) | +20 pp |
+| Targeted inspection | 4/5 (80%) | 2/5 (40%) | -40 pp |
+| **Overall** | **18/20 (90%)** | **17/20 (85%)** | **-5 pp** |
+
+The paired 95% t interval for the overall difference is approximately -22.3 to
++12.3 pp. There were 1 pair where EB succeeded and control failed, 17 ties, and
+2 pairs where control succeeded and EB failed. This single batch does not show
+a reliable overall difference and does not reproduce the v3 estimate; its
+sample is too small to establish that EB reduces effectiveness.
+
+| Task criteria | Control | EB available |
+| --- | ---: | ---: |
+| Build: marker, source file, file-bound line | 5/5 each | 5/5 each |
+| Follow-up: test name, marker | 5/5 each | 5/5 each |
+| Noisy test: failed test, marker, assertion | 5/5, 5/5, 4/5 | 5/5 each |
+| Targeted inspection: marker, output line 32 | 5/5, 4/5 | 5/5, 2/5 |
+
+Search responses exposed every criterion in all five MCP runs for every task.
+`get_capture_slice` returned successful evidence in 2/5 noisy-test runs and 3/5
+targeted-inspection runs, and none of the build or follow-up runs. The targeted
+line criterion passed in only 2/5 MCP answers despite appearing in search
+responses in all five runs; records retain no answers, so the reason for those
+misses cannot be diagnosed from this aggregate data.
+
+| Measure | Control | EB available | Paired mean difference (approx. 95% CI) |
+| --- | ---: | ---: | ---: |
+| Wall time | 16.44 s | 25.24 s | +8.80 s [+1.58, +16.02] |
+| Total tool calls | 2.75 | 3.50 | +0.75 [-0.35, +1.85] |
+| MCP tool calls | 0 | 3.50 | +3.50 |
+| Context-bytes proxy | 3.48 KB | 14.68 KB | +11.20 KB [+5.70, +16.71] |
+| Provider-reported input tokens | 94.4K | 171.3K | +76.9K (per-run means) |
+| Provider-reported output tokens | 1,041 | 880 | -161 (per-run means) |
+| Peak RSS | 424.0 MB | 432.2 MB | +8.2 MB [+0.6, +15.8] |
+
+Both arms had 100% invocation completion and signal retrieval. EB averaged
+30.9 KB of captured command input per run. Token totals are provider-reported
+usage snapshots, not verified sums.
+
+### Matched-sandbox fixture-v3 results
 
 The response guidance was adjusted in stages after earlier batches showed that
 log evidence was retrieved but not always carried into the final answer. Each
@@ -444,9 +492,10 @@ arms. Secondary per-run means for seeds 43–45 were:
 The context-bytes measure is an observable prompt/event proxy, not the model's
 internal context size. Codex emitted one usage sample per run, so token totals
 are provider-reported snapshots rather than verified sums. EB averaged 31.8KB
-of captured command input per run. The latest results improve objective task
-success on all four tasks, with higher context, input-token, wall-time, and
-memory costs.
+of captured command input per run. The fixture-v3 matched-sandbox batch improved
+objective task success on all four tasks, with higher context, input-token,
+wall-time, and memory costs. The corrected fixture-v4 result is reported
+separately above.
 
 ### Earlier v3 runs with unmatched sandbox policy
 
@@ -484,10 +533,11 @@ approximate 95% interval from -15.8 to +3.3 pp. Their task totals were:
 | Noisy test failure | 14/20 | 15/20 |
 | Targeted inspection | 18/20 | 12/20 |
 
-The latest matched v3 estimate is 13.3 pp above control, with a paired 95%
-interval from +2.2 to +24.5 pp. This meets the objective on the current
-synthetic suite. Run privacy-reviewed representative tasks before treating the
-result as a general performance guarantee.
+The matched v3 estimate is 13.3 pp above control, with a paired 95% interval
+from +2.2 to +24.5 pp. The separate v4 batch above has a -5 pp estimate with a
+wide interval that includes zero. Neither synthetic result generalizes to
+representative agent work; collect more v4 repetitions and run privacy-reviewed
+representative tasks before treating either result as a performance guarantee.
 
 An earlier seed-`20261031` attempt is excluded because it omitted
 `--allow-mcp-approvals` and used a different approval/sandbox policy.
