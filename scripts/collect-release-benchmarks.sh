@@ -198,6 +198,15 @@ run_tool() {
     run "$name" "$source_dir" "$embeddings" "${tool_command[@]}" "$@"
 }
 
+is_json_object() {
+    "$python_bin" -c 'import json,sys
+try:
+    value=json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(value, dict) else 1)' "$1" >/dev/null 2>&1
+}
+
 run_benchmark() {
     local revision="$1" source_dir="$2" name="$3" embeddings="$4" script="$5"
     local required_baseline="" timeout_runner="$repo_dir/scripts/run_with_timeout.py"
@@ -382,6 +391,8 @@ mapfile -t agent_ab_stage_repetitions < <(
 )
 baseline_resume_args=()
 candidate_resume_args=()
+baseline_stage_summary=""
+candidate_stage_summary=""
 stage_index=0
 for stage_count in "${agent_ab_stage_repetitions[@]}"; do
     stage_index=$((stage_index + 1))
@@ -397,6 +408,13 @@ for stage_count in "${agent_ab_stage_repetitions[@]}"; do
         fi
         ab_dir="$output_dir/agent-ab/$revision"
         mkdir -p "$ab_dir"
+        stage_summary="$ab_dir/summary.stage-$stage_index.json"
+        stage_result="$ab_dir/summary.stage-$stage_index.result.json"
+        if [[ "$revision" == baseline ]]; then
+            baseline_stage_summary="$stage_summary"
+        else
+            candidate_stage_summary="$stage_summary"
+        fi
         agent_metadata=(--metadata "variant=$revision" --metadata "server_revision=$server_revision")
         if [[ -f "$server_dir/src/ephemeral_buffer_mcp/server.py" ]]; then
             server_args=(--mcp-module ephemeral_buffer_mcp.server \
@@ -414,19 +432,52 @@ for stage_count in "${agent_ab_stage_repetitions[@]}"; do
             "${resume_args[@]}" "${agent_metadata[@]}"
         if [[ -f "$ab_dir/records.json" ]]; then
             run_tool "summarize-agent-ab-$revision-stage-$stage_index" "$repo_dir" 0 benchmark_agent_ab.py \
-                --records "$ab_dir/records.json" --output "$ab_dir/summary.json" \
-                --result "$ab_dir/summary.result.json" "${agent_metadata[@]}"
+                --records "$ab_dir/records.json" --output "$stage_summary" \
+                --result "$stage_result" "${agent_metadata[@]}"
+            if is_json_object "$stage_summary"; then
+                cp "$stage_summary" "$ab_dir/summary.json"
+                if [[ -f "$stage_result" ]]; then
+                    cp "$stage_result" "$ab_dir/summary.result.json"
+                else
+                    rm -f "$ab_dir/summary.result.json"
+                fi
+            elif [[ -e "$stage_summary" ]]; then
+                failures=$((failures + 1))
+                record_status failed "validate-agent-ab-$revision-stage-$stage_index" 1 \
+                    "stage summary is not a JSON object"
+            fi
         else
             skip "summarize-agent-ab-$revision-stage-$stage_index" "agent runner did not create records"
         fi
     done
-    should_continue="$("$python_bin" -c 'import json,sys; paths=sys.argv[1:]; print("1" if any(json.load(open(p, encoding="utf-8")).get("statistical_adequacy", {}).get("continue") for p in paths if p) else "0")' \
-        "$output_dir/agent-ab/baseline/summary.json" "$output_dir/agent-ab/candidate/summary.json")"
+    should_continue="$("$python_bin" -c 'import json,sys
+for path in sys.argv[1:]:
+    try:
+        with open(path, encoding="utf-8") as source:
+            summary = json.load(source)
+    except (OSError, json.JSONDecodeError):
+        continue
+    if not isinstance(summary, dict):
+        continue
+    adequacy = summary.get("statistical_adequacy")
+    if isinstance(adequacy, dict) and adequacy.get("continue") is True:
+        print("1")
+        break
+else:
+    print("0")' "$baseline_stage_summary" "$candidate_stage_summary")"
     if [[ "$should_continue" != "1" ]]; then
         break
     fi
-    baseline_resume_args=(--resume)
-    candidate_resume_args=(--resume)
+    if [[ -f "$output_dir/agent-ab/baseline/records.json" ]]; then
+        baseline_resume_args=(--resume)
+    else
+        baseline_resume_args=()
+    fi
+    if [[ -f "$output_dir/agent-ab/candidate/records.json" ]]; then
+        candidate_resume_args=(--resume)
+    else
+        candidate_resume_args=()
+    fi
 done
 fi
 

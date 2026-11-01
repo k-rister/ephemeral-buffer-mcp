@@ -176,16 +176,19 @@ def _bootstrap_model_inputs(
     """Build task-specific paired-model inputs from current-rubric records."""
     defaults = {
         task["id"]: {
-            "baseline_success_rate": 0.5,
+            "baseline_success_rate": None,
             "discordance_rate": None,
             "matched_repetitions": 0,
-            "source": "maximum-discordance-stress-model",
-            "planning_assumption": "baseline success 0.5; use the maximum feasible discordance for each target effect",
+            "source": "least-favorable-unknown-baseline-full-discordance",
+            "planning_assumption": (
+                "baseline is unknown; use the full-discordance least-favorable paired model "
+                "for each effect direction"
+            ),
         }
         for task in TASKS
     }
     if payload is None and schedule is None:
-        return defaults, "conservative-maximum-discordance", True
+        return defaults, "least-favorable-unknown-baseline-full-discordance", True
     if payload is None or schedule is None:
         raise ValueError("power pilot payload and schedule must be supplied together")
     if (
@@ -218,7 +221,7 @@ def _bootstrap_model_inputs(
             insufficient = True
             results[task["id"]] = {
                 **defaults[task["id"]],
-                "source": "missing-pilot-conservative-maximum-discordance",
+                "source": "missing-pilot-least-favorable-full-discordance",
             }
             continue
         if len(task_pairs) < 20:
@@ -226,10 +229,10 @@ def _bootstrap_model_inputs(
             results[task["id"]] = {
                 **defaults[task["id"]],
                 "matched_repetitions": len(task_pairs),
-                "source": "under-20-pair-conservative-maximum-discordance",
+                "source": "under-20-pair-least-favorable-full-discordance",
                 "planning_assumption": (
-                    "fewer than 20 matched pilot pairs; use baseline success 0.5 "
-                    "and maximum feasible discordance for each target effect"
+                    "fewer than 20 matched pilot pairs; treat baseline as unknown and "
+                    "use the full-discordance least-favorable model for each direction"
                 ),
             }
             continue
@@ -265,15 +268,22 @@ def _scenario_model_cases(
         baseline_sources = []
         for task_id in task_ids:
             model = model_inputs[task_id]
-            baseline = float(model.get("baseline_success_rate", 0.5))
+            baseline_value = model.get("baseline_success_rate", 0.5)
+            baseline = (
+                float(baseline_value)
+                if isinstance(baseline_value, (int, float))
+                and not isinstance(baseline_value, bool)
+                and 0.0 <= baseline_value <= 1.0
+                else 0.5
+            )
             baseline_interval = model.get("baseline_success_rate_interval")
             observed_upper = model.get("discordance_rate")
             if observed_upper is None or not isinstance(baseline_interval, dict):
-                # The conservative no-pilot model fixes the control rate at .5,
-                # where the largest feasible discordance is 1 - |effect|.
-                baseline = 0.5
-                discordance = 1.0 - abs(effect)
-                baseline_source = "conservative-fallback"
+                # Unknown baselines permit fully discordant pairs at the point
+                # that centers the two marginal success rates around .5.
+                baseline = (1.0 - signed_effect) / 2.0
+                discordance = 1.0
+                baseline_source = "least-favorable-unknown-baseline-full-discordance"
             else:
                 lower = float(baseline_interval.get("lower", baseline))
                 upper = float(baseline_interval.get("upper", baseline))
@@ -285,9 +295,9 @@ def _scenario_model_cases(
                     # The pilot's entire baseline interval makes this target
                     # effect impossible in that direction. Keep scenario sizing
                     # conservative without claiming a nonexistent paired model.
-                    baseline = 0.5
-                    discordance = 1.0 - abs(effect)
-                    baseline_source = "conservative-fallback-no-feasible-baseline"
+                    baseline = (1.0 - signed_effect) / 2.0
+                    discordance = 1.0
+                    baseline_source = "least-favorable-no-feasible-pilot-baseline"
                 else:
                     vertex = (1.0 - signed_effect) / 2.0
                     baseline = min(max(vertex, feasible_lower), feasible_upper)
@@ -317,7 +327,14 @@ def _scenario_model_cases(
 
 def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
     """Use the largest feasible discordance supported by pilot/bootstrap data."""
-    p0 = float(model.get("baseline_success_rate", 0.5))
+    baseline_value = model.get("baseline_success_rate", 0.5)
+    p0 = (
+        float(baseline_value)
+        if isinstance(baseline_value, (int, float))
+        and not isinstance(baseline_value, bool)
+        and 0.0 <= baseline_value <= 1.0
+        else 0.5
+    )
     baseline_interval = model.get("baseline_success_rate_interval")
     if isinstance(baseline_interval, dict):
         baseline_lower = float(baseline_interval["lower"])
@@ -328,7 +345,7 @@ def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
         baseline_lower = baseline_upper = p0
     observed_upper = model.get("discordance_rate")
     if observed_upper is None:
-        return 1.0 - abs(effect)
+        return 1.0
     upper = float(observed_upper)
     feasible_caps = []
     for signed_effect in (abs(effect), -abs(effect)):
@@ -343,7 +360,7 @@ def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
         if cap >= abs(effect):
             feasible_caps.append(cap)
     if not feasible_caps:
-        return 1.0 - abs(effect)
+        return 1.0
     return max(abs(effect), min(upper, max(feasible_caps), 1.0))
 
 
@@ -480,7 +497,7 @@ def build_power_design(
                 "token_estimates_note": cost_profile["token_estimates_note"],
             })
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "method": (
             "seeded four-cell paired binary simulation; direction requires Holm-adjusted exact "
             "two-sided McNemar rejection and a Bonferroni-adjusted Newcombe interval excluding zero"
@@ -492,6 +509,10 @@ def build_power_design(
         "pilot_evidence_source": evidence_source,
         "pilot_required": pilot_required,
         "pilot_minimum_repetitions_per_task": 20,
+        "unknown_baseline_fallback": (
+            "for each signed effect delta, control success=(1-delta)/2 and discordance=1; "
+            "this feasible model maximizes discordance and centers both marginal success rates"
+        ),
         "pilot_parameter_family_alpha": PILOT_PARAMETER_FAMILY_ALPHA,
         "pilot_parameter_bound_count": 2 * len(task_ids),
         "baseline_interval_method": (
