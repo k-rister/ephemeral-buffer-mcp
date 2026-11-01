@@ -143,15 +143,35 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_default_schedule_uses_powered_design_and_three_looks(self):
         schedule = build_schedule(seed=20261031)
         design = schedule["statistical_design"]
-        self.assertEqual(design["schema_version"], 4)
+        self.assertEqual(design["schema_version"], 5)
+        self.assertEqual(
+            design["pilot_evidence_source"],
+            "least-favorable-unknown-baseline-full-discordance",
+        )
         self.assertIn("Clopper-Pearson", design["baseline_interval_method"])
         self.assertIn("95% joint coverage", design["pilot_parameter_confidence_rule"])
         selected = next(
             scenario for scenario in design["scenario_matrix"]
             if scenario["effect_pp"] == 10 and scenario["target_power"] == 0.8
         )
+        stress = next(
+            scenario for scenario in design["scenario_matrix"]
+            if scenario["effect_pp"] == 20 and scenario["target_power"] == 0.9
+        )
         self.assertEqual(schedule["repetitions"], design["selected_repetitions"])
         self.assertGreater(schedule["repetitions"], 5)
+        self.assertTrue(all(
+            case["discordance_rates"] == [1.0] * len(benchmark_agent_ab.TASKS)
+            for case in stress["paired_model_cases"]
+        ))
+        self.assertEqual(
+            stress["paired_model_cases"][0]["baseline_success_rates"],
+            [0.4] * len(benchmark_agent_ab.TASKS),
+        )
+        self.assertEqual(
+            stress["paired_model_cases"][1]["baseline_success_rates"],
+            [0.6] * len(benchmark_agent_ab.TASKS),
+        )
         self.assertTrue(all(value >= 0.8 for value in selected["power_lower_bound_by_task"].values()))
         self.assertTrue(all(
             all(
@@ -243,9 +263,10 @@ class TestAgentAbBenchmark(unittest.TestCase):
             2,
         )
         small_task_model = small_design["paired_model_by_task"]["targeted-inspection"]
+        self.assertIsNone(small_task_model["baseline_success_rate"])
         self.assertIsNone(small_task_model["discordance_rate"])
-        self.assertEqual(small_task_model["source"], "under-20-pair-conservative-maximum-discordance")
-        self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(small_task_model, 0.1), 0.9)
+        self.assertEqual(small_task_model["source"], "under-20-pair-least-favorable-full-discordance")
+        self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(small_task_model, 0.1), 1.0)
 
         pilot_schedule, pilot_payload = _scored_records_payload(repetitions=20)
         pilot = build_power_design(pilot_payload, pilot_schedule, simulations=100, seed=73)
@@ -339,10 +360,26 @@ class TestAgentAbBenchmark(unittest.TestCase):
             ["task"],
             0.2,
         )
-        self.assertEqual(cases[0]["baseline_source_by_task"]["task"], "conservative-fallback-no-feasible-baseline")
-        self.assertEqual(cases[0]["baseline_success_rates"], [0.5])
-        self.assertAlmostEqual(cases[0]["discordance_rates"][0], 0.8)
+        self.assertEqual(cases[0]["baseline_source_by_task"]["task"], "least-favorable-no-feasible-pilot-baseline")
+        self.assertEqual(cases[0]["baseline_success_rates"], [0.4])
+        self.assertAlmostEqual(cases[0]["discordance_rates"][0], 1.0)
         self.assertEqual(cases[1]["baseline_source_by_task"]["task"], "exact-baseline-interval")
+
+    def test_unknown_baseline_uses_full_discordance_at_directional_extremes(self):
+        cases = benchmark_agent_ab._scenario_model_cases(
+            {"task": {"baseline_success_rate": None, "discordance_rate": None}},
+            ["task"],
+            0.2,
+        )
+        self.assertEqual(cases[0]["baseline_success_rates"], [0.4])
+        self.assertEqual(cases[0]["discordance_rates"], [1.0])
+        self.assertEqual(cases[1]["baseline_success_rates"], [0.6])
+        self.assertEqual(cases[1]["discordance_rates"], [1.0])
+        self.assertEqual(
+            cases[0]["baseline_source_by_task"]["task"],
+            "least-favorable-unknown-baseline-full-discordance",
+        )
+        self.assertAlmostEqual(cases[0]["baseline_success_rates"][0] + 0.2, 0.6)
 
     def test_adequate_pilot_tasks_keep_bootstrap_when_another_task_is_small(self):
         schedule, payload = _scored_records_payload(repetitions=20)
@@ -711,9 +748,9 @@ class TestAgentAbBenchmark(unittest.TestCase):
         def summary(status):
             return {
                 "statistical_design": {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "selected_repetitions": 900,
-                    "pilot_evidence_source": "conservative-maximum-discordance",
+                    "pilot_evidence_source": "least-favorable-unknown-baseline-full-discordance",
                     "pilot_required": True,
                     "scenario_matrix": [{
                         "effect_pp": 10,
@@ -761,7 +798,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_legacy_design_power_is_not_rendered_as_validated(self):
         summary = {
             "statistical_design": {
-                "schema_version": 3,
+                "schema_version": 4,
                 "scenario_matrix": [{
                     "effect_pp": 10,
                     "target_power": 0.8,

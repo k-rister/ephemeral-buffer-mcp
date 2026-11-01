@@ -367,6 +367,121 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 timeout_index = invocation.index("--timeout")
                 self.assertEqual(invocation[timeout_index + 1], "37")
 
+    def test_agent_ab_stages_continue_with_one_summary_and_stop_cleanly_without_summaries(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            scripts = repository / "scripts"
+            benchmarks = repository / "benchmarks"
+            data = benchmarks / "data"
+            scripts.mkdir(parents=True)
+            data.mkdir(parents=True)
+            shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
+            shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
+            shutil.copyfile(
+                REPOSITORY_ROOT / "benchmarks" / "render_agent_ab_report.py",
+                benchmarks / "render_agent_ab_report.py",
+            )
+            (benchmarks / "__init__.py").write_text("", encoding="utf-8")
+            (benchmarks / "benchmark_agent_ab.py").write_text(
+                "import json, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--schedule-output' in args:\n"
+                "    path = pathlib.Path(args[args.index('--schedule-output') + 1])\n"
+                "    schedule = {'repetitions': 3, 'stage_schedule': [\n"
+                "        {'percent': 33, 'repetitions': 1, 'alpha_spending': 0.01, 'cumulative_alpha': 0.01},\n"
+                "        {'percent': 67, 'repetitions': 2, 'alpha_spending': 0.01, 'cumulative_alpha': 0.02},\n"
+                "        {'percent': 100, 'repetitions': 3, 'alpha_spending': 0.03, 'cumulative_alpha': 0.05}] }\n"
+                "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+                "    path.write_text(json.dumps(schedule), encoding='utf-8')\n"
+                "else:\n"
+                "    output = pathlib.Path(args[args.index('--output') + 1])\n"
+                "    stage = int(output.name.split('stage-')[1].split('.')[0])\n"
+                "    variant = next(value.split('=', 1)[1] for value in args if value.startswith('variant='))\n"
+                "    if stage == 2:\n"
+                "        if variant == 'baseline':\n"
+                "            output.write_text('{invalid json', encoding='utf-8')\n"
+                "            raise SystemExit(0)\n"
+                "        raise SystemExit(1)\n"
+                "    if variant == 'candidate':\n"
+                "        output.write_text(json.dumps({'statistical_adequacy': {'continue': True}}), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (benchmarks / "run_codex_agent_ab.py").write_text(
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "variant = next(value.split('=', 1)[1] for value in args if value.startswith('variant='))\n"
+                "count = int(args[args.index('--max-repetitions') + 1])\n"
+                "with open(os.environ['RELEASE_TEST_AGENT_ARGS_LOG'], 'a', encoding='utf-8') as stream:\n"
+                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args}) + '\\n')\n"
+                "if variant == 'baseline' and count == 1:\n"
+                "    raise SystemExit(0)\n"
+                "output = pathlib.Path(args[args.index('--output') + 1])\n"
+                "output.parent.mkdir(parents=True, exist_ok=True)\n"
+                "output.write_text('{}', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (data / "benchmark_baseline.json").write_text("{}\n", encoding="utf-8")
+
+            _git(repository, "init", "--quiet")
+            _git(repository, "config", "user.name", "Release benchmark test")
+            _git(repository, "config", "user.email", "release-test@example.invalid")
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "fixture")
+            baseline_revision = _git(repository, "rev-parse", "HEAD")
+
+            codex_home = root / "codex-home"
+            binary_directory = root / "bin"
+            codex_home.mkdir()
+            binary_directory.mkdir()
+            fake_codex = binary_directory / "codex"
+            fake_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_codex.chmod(0o700)
+            agent_args_log = root / "agent-args.jsonl"
+            output_directory = root / "bundle"
+            environment = os.environ.copy()
+            environment.update({
+                "PYTHON_BIN": sys.executable,
+                "CODEX_HOME": str(codex_home),
+                "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
+                "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
+            })
+            result = subprocess.run(
+                [
+                    "bash", str(scripts / RELEASE_BENCHMARK_SCRIPT.name),
+                    "--baseline-ref", baseline_revision,
+                    "--model", "test-model",
+                    "--output-dir", str(output_directory),
+                    "--agent-ab-only",
+                    "--agent-timeout", "10",
+                    "--benchmark-timeout", "10",
+                ],
+                cwd=repository,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertNotIn("FileNotFoundError", result.stderr)
+            invocations = [
+                json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(invocations), 4)
+            stage_two = [item for item in invocations if item["count"] == 2]
+            self.assertEqual(
+                {item["variant"]: item["resume"] for item in stage_two},
+                {"baseline": False, "candidate": True},
+            )
+            self.assertTrue((output_directory / "agent-ab/candidate/summary.json").is_file())
+            self.assertFalse((output_directory / "agent-ab/baseline/summary.stage-1.json").exists())
+            statuses = (output_directory / "STATUS.tsv").read_text(encoding="utf-8")
+            self.assertIn("summarize-agent-ab-baseline-stage-2", statuses)
+            self.assertIn("summarize-agent-ab-candidate-stage-2", statuses)
+            self.assertIn("validate-agent-ab-baseline-stage-2", statuses)
+
 
 if __name__ == "__main__":
     unittest.main()

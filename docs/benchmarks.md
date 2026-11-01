@@ -373,12 +373,15 @@ contribute to McNemar's test ([paired binary sample size
 methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
 
 No raw current fixture-v4/rubric-v4 pilot records are checked in. Until a pilot
-is supplied, the reproducible fallback model assumes 50% baseline success and
-the maximum feasible discordance for the requested effect. This conservative
-stress case selects a repetition count for the default 10-point/80% design;
-the current count and independently validated lower power bounds are stored in
-the generated design. It is a planning model, not an empirical estimate for a
-particular model configuration. Current-version records can be supplied with
+is supplied, the reproducible fallback uses fully discordant pairs (`d = 1`)
+and a direction-specific control baseline `(1 - delta) / 2` for signed effect
+`delta`. This feasible model centers the two marginal success rates and
+maximizes paired discordance over the unknown baseline range. It also applies
+when a pilot has fewer than 20 matched pairs or its baseline interval cannot
+support one effect direction. The generated design records the fallback model,
+selected repetition count, and independently validated lower power bounds. It
+is a planning stress case, not an empirical estimate for a particular model
+configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
 For tasks with at least 20 matched pairs, the scheduler uses a 99.375% two-sided
 Clopper-Pearson interval for baseline success and a one-sided exact 99.375%
@@ -389,10 +392,10 @@ bootstrap percentile is retained as a diagnostic only. The finite-sample bound
 stays nonzero when few or no discordances are observed. For each effect
 direction, the scheduler selects the baseline value inside the exact interval
 that allows the largest feasible discordance, capped by the discordance upper
-bound. An under-sampled task instead uses the 50% baseline and maximum feasible
-discordance fallback; the design remains marked as requiring a fuller pilot.
+bound. An under-sampled task instead uses the same full-discordance directional
+fallback; the design remains marked as requiring a fuller pilot.
 If a direction has no feasible baseline anywhere in the pilot interval, that
-direction also uses the conservative 50% baseline stress model.
+direction also uses the full-discordance directional fallback.
 The model and repository fixture are derived from the pilot protocol, and
 optional identity flags must match it. Generated schedules bind those
 identities for runner validation.
@@ -412,20 +415,20 @@ paired binary differences ([Newcombe 1998](https://www.site.uottawa.ca/~nat/Cour
 
 | Difference | Power | Repetitions/task/mode | Minimum validated power lower bound | Paired score CI half-width | Holm-adjusted CI half-width | Invocations/variant | Runtime | Input tokens | Output tokens |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 5 pp | 80% | 5,424 | 80.7% | 2.6 pp | 3.5 pp | 43,392 | n/a | n/a | n/a |
-| 5 pp | 90% | 7,210 | 91.3% | 2.2 pp | 3.1 pp | 57,680 | n/a | n/a | n/a |
-| 10 pp | 80% | **1,274** | 80.9% | 5.2 pp | 7.1 pp | **10,192** | n/a | n/a | n/a |
-| 10 pp | 90% | 1,614 | 90.4% | 4.6 pp | 6.3 pp | 12,912 | n/a | n/a | n/a |
-| 20 pp | 80% | 287 | 82.3% | 10.1 pp | 13.8 pp | 2,296 | n/a | n/a | n/a |
-| 20 pp | 90% | 364 | 91.6% | 9.0 pp | 12.2 pp | 2,912 | n/a | n/a | n/a |
+| 5 pp | 80% | 5,709 | 80.0% | 2.6 pp | 3.5 pp | 45,672 | n/a | n/a | n/a |
+| 5 pp | 90% | 7,229 | 90.7% | 2.3 pp | 3.1 pp | 57,832 | n/a | n/a | n/a |
+| 10 pp | 80% | **1,419** | 81.8% | 5.2 pp | 7.1 pp | **11,352** | n/a | n/a | n/a |
+| 10 pp | 90% | 1,885 | 91.1% | 4.5 pp | 6.1 pp | 15,080 | n/a | n/a | n/a |
+| 20 pp | 80% | 363 | 83.4% | 10.1 pp | 13.8 pp | 2,904 | n/a | n/a | n/a |
+| 20 pp | 90% | 436 | 90.2% | 9.2 pp | 12.5 pp | 3,488 | n/a | n/a | n/a |
 
 Runtime is unavailable until current-protocol timing records are available.
 Provider token projections stay unavailable until usage semantics can be
 interpreted reliably. The summary records the simulation seed, directional
 paired models, assumptions, selection-adjusted power bounds, interval method,
 and cost basis so the matrix can be reproduced. Historical statistical-design
-schema v3 summaries remain readable, but their earlier power bounds are not
-rendered as validated under the current direction-detection rule.
+schema v3 and v4 summaries remain readable, but their earlier power bounds are
+not rendered as validated under the current least-favorable fallback model.
 
 Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
 the same model configuration, repository fixture, environment, and reset policy.
@@ -668,7 +671,7 @@ deterministic noisy signals. It is still synthetic and privacy-safe; it does
 not contain a production repository or user data.
 
 Run the staged powered Codex A/B evaluation with the repository script. The
-default is 1,274 repetitions per task and mode under the conservative model above.
+default is 1,419 repetitions per task and mode under the least-favorable model above.
 The script looks at 50%, 75%, and 100% of that design, applying Holm correction
 within tasks at local alpha-spending increments of 0.005, 0.015, and 0.030
 (cumulative family alpha 0.005, 0.020, and 0.050). It continues while adjusted

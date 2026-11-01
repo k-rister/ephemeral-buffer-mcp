@@ -144,7 +144,7 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
             power_is_validated = (
                 isinstance(design_version, int)
                 and not isinstance(design_version, bool)
-                and design_version >= 4
+                and design_version >= 5
             )
             simulated_power = (
                 f"{min(powers.values()) * 100:.1f}% (LB {min(lower_bounds.values()) * 100:.1f}%)"
