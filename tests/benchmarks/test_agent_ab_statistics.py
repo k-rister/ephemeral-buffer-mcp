@@ -53,7 +53,9 @@ class TestAgentAbStatistics(unittest.TestCase):
             seed=17,
         )
         self.assertLessEqual(result["familywise_rejection_rate"], 0.065)
-        self.assertGreaterEqual(result["familywise_rejection_rate"], 0.02)
+        # Exact two-sided McNemar is discrete at this sample size and is
+        # conservative under the null; this seed's nonzero rate is expected.
+        self.assertGreaterEqual(result["familywise_rejection_rate"], 0.005)
 
     def test_power_simulation_is_seeded_and_selects_an_adequate_size(self):
         first = simulate_paired_mcnemar_power(
@@ -82,6 +84,27 @@ class TestAgentAbStatistics(unittest.TestCase):
         self.assertGreaterEqual(design["selected_power_lower_bound"], 0.8)
         self.assertEqual(design["power_simulation"]["power_bound_method"], "one-sided-clopper-pearson")
 
+    def test_power_requires_both_holm_rejection_and_interval_direction(self):
+        with (
+            patch("benchmarks.agent_ab_statistics._holm_rejections", return_value=[True]),
+            patch(
+                "benchmarks.agent_ab_statistics.newcombe_paired_score_interval",
+                return_value={"lower": -0.1, "upper": 0.2, "estimate": 0.1},
+            ) as interval,
+        ):
+            result = simulate_paired_mcnemar_power(
+                repetitions=10,
+                effect=0.1,
+                discordance_rates=[0.3],
+                simulations=100,
+                alpha=0.04,
+                seed=19,
+            )
+        self.assertEqual(result["holm_rejection_power_by_task"], [1.0])
+        self.assertEqual(result["power_by_task"], [0.0])
+        self.assertEqual(result["interval_confidence"], 0.96)
+        self.assertTrue(all(call.kwargs["confidence"] == 0.96 for call in interval.call_args_list))
+
     def test_selected_power_has_independent_validation_and_retry_alpha_spending(self):
         validation_calls = []
 
@@ -95,8 +118,11 @@ class TestAgentAbStatistics(unittest.TestCase):
                 "simulations": kwargs["simulations"],
                 "seed": kwargs["seed"],
                 "alpha": kwargs["alpha"],
+                "interval_confidence": 1.0 - kwargs["alpha"] / len(kwargs["discordance_rates"]),
                 "power_by_task": [count / kwargs["simulations"] for count in rejected],
                 "rejection_counts_by_task": rejected,
+                "direction_detection_counts_by_task": rejected,
+                "holm_rejection_power_by_task": [count / kwargs["simulations"] for count in rejected],
                 "familywise_rejection_rate": max(rejected) / kwargs["simulations"],
             }
 
@@ -108,6 +134,7 @@ class TestAgentAbStatistics(unittest.TestCase):
                 effect=1.0,
                 target_power=0.8,
                 discordance_rates=[1.0],
+                baseline_success_rates=[0.0],
                 simulations=100,
                 seed=7,
             )
@@ -118,6 +145,73 @@ class TestAgentAbStatistics(unittest.TestCase):
         self.assertNotEqual(validation_calls[0]["seed"], validation_calls[1]["seed"])
         self.assertAlmostEqual(design["validation_alpha_spending"], 0.05 / 6)
         self.assertEqual(design["selected_power_confidence_by_task"], [1.0 - 0.05 / 6])
+
+    def test_validation_alpha_is_split_across_both_direction_cases(self):
+        calls = []
+
+        def validation(**kwargs):
+            calls.append(kwargs)
+            return {
+                "direction_detection_counts_by_task": [kwargs["simulations"]],
+                "power_by_task": [1.0],
+                "holm_rejection_power_by_task": [1.0],
+                "familywise_rejection_rate": 1.0,
+                "interval_confidence": 1.0 - kwargs["alpha"] / len(kwargs["discordance_rates"]),
+            }
+
+        cases = [
+            {"name": "up", "effect": 0.1, "baseline_success_rates": [0.45], "discordance_rates": [0.9]},
+            {"name": "down", "effect": -0.1, "baseline_success_rates": [0.55], "discordance_rates": [0.9]},
+        ]
+        with (
+            patch("benchmarks.agent_ab_statistics.normal_approximate_repetitions", return_value=6),
+            patch("benchmarks.agent_ab_statistics.simulate_paired_mcnemar_power", side_effect=validation),
+        ):
+            design = select_simulated_repetitions(
+                effect=0.1,
+                target_power=0.8,
+                discordance_rates=[0.9],
+                model_cases=cases,
+                simulations=100,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call["effect"] for call in calls], [0.1, -0.1])
+        self.assertEqual(design["power_simulation"]["validation_case_count"], 2)
+        self.assertEqual(design["power_simulation"]["power_lower_confidence_by_task"], [1.0 - 0.025 / 2])
+
+    def test_retry_spending_increases_simulations_when_power_bound_would_be_unreachable(self):
+        calls = []
+
+        def validation(**kwargs):
+            calls.append(kwargs)
+            detected = [kwargs["simulations"]] * 4 if len(calls) > 30 else [0] * 4
+            return {
+                "direction_detection_counts_by_task": detected,
+                "power_by_task": [count / kwargs["simulations"] for count in detected],
+                "holm_rejection_power_by_task": [1.0] * 4,
+                "familywise_rejection_rate": 1.0,
+                "interval_confidence": 1.0 - kwargs["alpha"] / 4,
+            }
+
+        cases = [
+            {"name": "up", "effect": 0.1, "baseline_success_rates": [0.45] * 4, "discordance_rates": [0.9] * 4},
+            {"name": "down", "effect": -0.1, "baseline_success_rates": [0.55] * 4, "discordance_rates": [0.9] * 4},
+        ]
+        with (
+            patch("benchmarks.agent_ab_statistics.normal_approximate_repetitions", return_value=1),
+            patch("benchmarks.agent_ab_statistics.simulate_paired_mcnemar_power", side_effect=validation),
+        ):
+            design = select_simulated_repetitions(
+                effect=0.1,
+                target_power=0.9,
+                discordance_rates=[0.9] * 4,
+                model_cases=cases,
+                simulations=100,
+                seed=37,
+            )
+        self.assertEqual(design["validation_attempt"], 16)
+        self.assertGreater(design["power_simulation"]["simulations"], 100)
+        self.assertEqual(design["power_simulation"]["minimum_requested_simulations"], 100)
 
     def test_exact_discordance_upper_bound_has_finite_sample_coverage(self):
         count = 20

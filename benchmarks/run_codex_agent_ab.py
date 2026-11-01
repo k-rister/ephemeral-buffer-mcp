@@ -7,6 +7,8 @@ manifest and are never copied to the output records.
 """
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -827,6 +829,71 @@ def _codex_command(
     return command
 
 
+def _file_fingerprint(path_value: str | None) -> dict[str, str | None] | None:
+    """Describe a configured launch file without exposing its path in records."""
+    if not path_value:
+        return None
+    path = Path(path_value).expanduser()
+    digest = None
+    try:
+        if path.is_file():
+            file_hash = hashlib.sha256()
+            with path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    file_hash.update(block)
+            digest = file_hash.hexdigest()
+    except OSError:
+        pass
+    return {"configured_path": str(path_value), "content_sha256": digest}
+
+
+def _mcp_launch_fingerprint(args: argparse.Namespace) -> str:
+    """Hash MCP startup inputs; paths and private environment values stay local."""
+    configured_paths = [str(path) for path in getattr(args, "mcp_python_path", [])]
+    inherited_paths = os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    effective_python_path = list(configured_paths)
+    effective_python_path.extend(
+        path for path in inherited_paths if path and path not in effective_python_path
+    )
+    module_source = None
+    module_name = getattr(args, "mcp_module", "")
+    if module_name:
+        try:
+            spec = importlib.util.find_spec(module_name)
+            if spec is not None and spec.origin and spec.origin not in ("built-in", "frozen"):
+                module_source = _file_fingerprint(spec.origin)
+        except (ImportError, ModuleNotFoundError, ValueError):
+            module_source = None
+    environment_keys = (
+        "EPHEMERAL_TEST_EMBEDDINGS",
+        "EPHEMERAL_EMBEDDING_MODEL",
+        "EPHEMERAL_EMBEDDING_CACHE_DIR",
+        "EPHEMERAL_FASTEMBED_CACHE_DIR",
+    )
+    launch_configuration = {
+        "mcp_python": getattr(args, "mcp_python", sys.executable),
+        "mcp_python_resolved": shutil.which(getattr(args, "mcp_python", sys.executable)),
+        "mcp_module": module_name,
+        "mcp_server_script": _file_fingerprint(getattr(args, "mcp_server_script", None)),
+        "mcp_module_source": module_source,
+        "mcp_python_path": effective_python_path,
+        "server_environment": {
+            key: os.environ[key]
+            for key in environment_keys
+            if key in os.environ
+        },
+        "runner_environment": {
+            "EPHEMERAL_DISABLE_SOCKET_SERVER": "1",
+            "EPHEMERAL_METRICS": "1",
+            "EPHEMERAL_LOG_LEVEL": (
+                "INFO" if getattr(args, "diagnostic_log_dir", None) else None
+            ),
+        },
+    }
+    canonical = json.dumps(launch_configuration, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _run_one(
     item: dict[str, Any],
     task: dict[str, Any],
@@ -1021,12 +1088,18 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
             else "read-only-sandbox"
         ),
         "mcp_usage_policy": "required" if getattr(args, "require_mcp_calls", False) else "opportunistic",
+        "timeout_seconds": args.timeout,
+        "effective_sandbox": (
+            "workspace-write" if getattr(args, "allow_mcp_approvals", False) else args.sandbox
+        ),
+        "mcp_launch_fingerprint": _mcp_launch_fingerprint(args),
         "embedding_mode": "test" if test_embeddings else "onnx",
         "embedding_model": "deterministic-test" if test_embeddings else os.environ.get("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
         "embedding_cache": "not-applicable" if test_embeddings else (
-            os.environ.get("EPHEMERAL_EMBEDDING_CACHE_DIR")
-            or os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR")
-            or "default"
+            "custom" if (
+                os.environ.get("EPHEMERAL_EMBEDDING_CACHE_DIR")
+                or os.environ.get("EPHEMERAL_FASTEMBED_CACHE_DIR")
+            ) else "default"
         ),
     }
 
@@ -1143,7 +1216,7 @@ def main() -> None:
         help="Optional directory for content-free MCP lifecycle logs",
     )
     parser.add_argument("--max-repetitions", type=int, help="Run only the first N scheduled repetitions for a staged look")
-    parser.add_argument("--resume", action="store_true", help="Extend compatible records without rerunning completed pairs")
+    parser.add_argument("--resume", action="store_true", help="Resume a compatible staged run without rerunning completed pairs")
     parser.add_argument("--dry-run", action="store_true")
     wr.add_result_argument(parser)
     args = parser.parse_args()

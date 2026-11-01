@@ -353,16 +353,23 @@ When `--repetitions` is omitted, the A/B scheduler plans a design for an
 absolute 10 percentage-point task-success difference with 80% power. Its
 outcome model is paired binary data: each repetition runs the same task in both
 modes, then exact two-sided McNemar tests are adjusted across the four tasks
-with Holm's procedure. A normal approximation proposes a discovery candidate;
-the scheduler validates that candidate on a separate seeded simulation stream,
-using exact one-sided Clopper-Pearson lower confidence bounds on each task's
-simulated power. Validation alpha is split
-across tasks; if a candidate fails, the next candidate grows by 5% and receives
-an independent validation stream. Retry `k` spends `0.05/[k*(k+1)]` of alpha,
-so validation error across retries sums to 0.05. The reported count is the
-first independently validated retry, not an unadjusted pointwise power
-estimate. Paired binary power depends on discordance, because concordant pairs
-do not contribute to McNemar's test ([paired binary sample size
+with Holm's procedure. A simulated direction is detected only when the
+Holm-adjusted exact McNemar result passes and the Bonferroni-adjusted Newcombe
+paired score interval excludes zero. A normal approximation proposes a
+discovery candidate; the scheduler validates that candidate on independent
+seeded simulation streams for both positive and negative effects, using exact
+one-sided Clopper-Pearson lower confidence bounds on each task's direction
+detection power. Validation alpha is split across tasks, directions, and
+retries; if a candidate fails, the next candidate grows by 5% and receives an
+independent validation stream. Retry `k` spends `0.05/[k*(k+1)]` of alpha, so
+validation error across retries sums to 0.05. The reported count is the first
+independently validated retry, not an unadjusted pointwise power estimate.
+If retry alpha spending would make the requested lower bound unreachable even
+with all simulated runs detecting the effect, the validator increases the
+simulation count enough to keep that bound attainable; the effective count is
+recorded with each scenario.
+Paired binary power depends on discordance, because concordant pairs do not
+contribute to McNemar's test ([paired binary sample size
 methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
 
 No raw current fixture-v4/rubric-v4 pilot records are checked in. Until a pilot
@@ -373,15 +380,19 @@ the current count and independently validated lower power bounds are stored in
 the generated design. It is a planning model, not an empirical estimate for a
 particular model configuration. Current-version records can be supplied with
 `--pilot-records` (and `--pilot-schedule` if the schedule is not embedded).
-For tasks with at least 20 matched pairs, the scheduler uses a 97.5% two-sided
-Clopper-Pearson interval for baseline success and a one-sided exact 97.5%
-Clopper-Pearson upper bound for discordance. The paired bootstrap percentile is
-retained as a diagnostic only. The finite-sample bound stays nonzero when few
-or no discordances are observed. The scheduler maximizes feasible discordance
-across the baseline interval for both effect directions. Bonferroni combination
-gives at least 95% joint coverage for these pilot parameter bounds. An
-under-sampled task instead uses the 50% baseline and maximum feasible
+For tasks with at least 20 matched pairs, the scheduler uses a 99.375% two-sided
+Clopper-Pearson interval for baseline success and a one-sided exact 99.375%
+Clopper-Pearson upper bound for discordance. These eight bounds split the 5%
+pilot-parameter error budget across baseline and discordance for all four tasks,
+giving at least 95% joint coverage for the complete task set. The paired
+bootstrap percentile is retained as a diagnostic only. The finite-sample bound
+stays nonzero when few or no discordances are observed. For each effect
+direction, the scheduler selects the baseline value inside the exact interval
+that allows the largest feasible discordance, capped by the discordance upper
+bound. An under-sampled task instead uses the 50% baseline and maximum feasible
 discordance fallback; the design remains marked as requiring a fuller pilot.
+If a direction has no feasible baseline anywhere in the pilot interval, that
+direction also uses the conservative 50% baseline stress model.
 The model and repository fixture are derived from the pilot protocol, and
 optional identity flags must match it. Generated schedules bind those
 identities for runner validation.
@@ -392,7 +403,7 @@ The scenario table uses design seed `20261031` and 1,000 independent power
 validation simulations per row. Its power targets use the final look's local
 alpha allocation (0.030); the three local allocations sum to the overall 0.05
 familywise budget. Each row's listed lower bound is the minimum across tasks;
-per-task validation confidence is recorded in the generated design. Cost is
+per-task and per-direction validation confidence is recorded in the generated design. Cost is
 per variant (one baseline or candidate): four tasks × two modes × repetitions.
 Release comparisons run two variants. Score-interval precision is an expected
 95% Newcombe paired score half-width; the report also shows a simultaneous
@@ -401,17 +412,20 @@ paired binary differences ([Newcombe 1998](https://www.site.uottawa.ca/~nat/Cour
 
 | Difference | Power | Repetitions/task/mode | Minimum validated power lower bound | Paired score CI half-width | Holm-adjusted CI half-width | Invocations/variant | Runtime | Input tokens | Output tokens |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 5 pp | 80% | 4,684 | 84.8% | 2.8 pp | 3.8 pp | 37,472 | n/a | n/a | n/a |
-| 5 pp | 90% | 5,930 | 93.1% | 2.5 pp | 3.4 pp | 47,440 | n/a | n/a | n/a |
-| 10 pp | 80% | **1,100** | 82.2% | 5.6 pp | 7.6 pp | **8,800** | n/a | n/a | n/a |
-| 10 pp | 90% | 1,393 | 92.7% | 5.0 pp | 6.8 pp | 11,144 | n/a | n/a | n/a |
-| 20 pp | 80% | 235 | 82.0% | 11.1 pp | 15.2 pp | 1,880 | n/a | n/a | n/a |
-| 20 pp | 90% | 298 | 91.3% | 9.9 pp | 13.5 pp | 2,384 | n/a | n/a | n/a |
+| 5 pp | 80% | 5,424 | 80.7% | 2.6 pp | 3.5 pp | 43,392 | n/a | n/a | n/a |
+| 5 pp | 90% | 7,210 | 91.3% | 2.2 pp | 3.1 pp | 57,680 | n/a | n/a | n/a |
+| 10 pp | 80% | **1,274** | 80.9% | 5.2 pp | 7.1 pp | **10,192** | n/a | n/a | n/a |
+| 10 pp | 90% | 1,614 | 90.4% | 4.6 pp | 6.3 pp | 12,912 | n/a | n/a | n/a |
+| 20 pp | 80% | 287 | 82.3% | 10.1 pp | 13.8 pp | 2,296 | n/a | n/a | n/a |
+| 20 pp | 90% | 364 | 91.6% | 9.0 pp | 12.2 pp | 2,912 | n/a | n/a | n/a |
 
 Runtime is unavailable until current-protocol timing records are available.
 Provider token projections stay unavailable until usage semantics can be
-interpreted reliably. The summary records the simulation seed, assumptions,
-power bounds, interval method, and cost basis so the matrix can be reproduced.
+interpreted reliably. The summary records the simulation seed, directional
+paired models, assumptions, selection-adjusted power bounds, interval method,
+and cost basis so the matrix can be reproduced. Historical statistical-design
+schema v3 summaries remain readable, but their earlier power bounds are not
+rendered as validated under the current direction-detection rule.
 
 Run each scheduled task with MCP disabled (`control`) and enabled (`mcp`) using
 the same model configuration, repository fixture, environment, and reset policy.
@@ -433,6 +447,11 @@ recommendations. It does not invoke a model, require credentials, or accept raw
 prompts, transcripts, commands, captures, or user content. Do not commit agent
 records or generated captures; share only the aggregate summary after privacy
 review.
+
+The Codex runner writes records schema v11. Resume checks bind to the timeout,
+effective sandbox, and privacy-safe MCP launch fingerprint so a staged run
+cannot mix execution protocols. Schema-v10 records remain readable for
+summaries but cannot be resumed under v11.
 
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
@@ -649,7 +668,7 @@ deterministic noisy signals. It is still synthetic and privacy-safe; it does
 not contain a production repository or user data.
 
 Run the staged powered Codex A/B evaluation with the repository script. The
-default is 1,100 repetitions per task and mode under the conservative model above.
+default is 1,274 repetitions per task and mode under the conservative model above.
 The script looks at 50%, 75%, and 100% of that design, applying Holm correction
 within tasks at local alpha-spending increments of 0.005, 0.015, and 0.030
 (cumulative family alpha 0.005, 0.020, and 0.050). It continues while adjusted
@@ -659,7 +678,12 @@ reported as **powered but inconclusive**. A short explicit
 `AGENT_AB_REPETITIONS` value runs once and is labeled **exploratory**. Set
 `--max-repetitions` only to one of the schedule's planned look counts; arbitrary
 interim caps are rejected so an alpha allocation cannot be reused. A zero cap
-is invalid. Set
+is invalid. Explicit repetition schedules cannot be resumed to a larger count;
+use the automatically generated staged schedule when later looks may be needed.
+Resume also requires the same timeout, effective sandbox, and MCP launch
+configuration. The MCP launch settings are represented in records by a
+privacy-safe fingerprint; configured paths and environment values are not
+written into that fingerprint field. Set
 `CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
 records, and lifecycle logs remain under a unique temporary directory (normally
 `/tmp`) by default:

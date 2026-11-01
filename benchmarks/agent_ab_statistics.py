@@ -266,16 +266,17 @@ def simulate_paired_mcnemar_power(
     repetitions: int,
     effect: float,
     discordance_rates: Sequence[float],
+    baseline_success_rates: Sequence[float] | None = None,
     simulations: int = 5000,
     alpha: float = 0.05,
     seed: int = 20261031,
 ) -> dict[str, Any]:
-    """Simulate matched binary pairs, exact McNemar tests, then Holm correction.
+    """Simulate the complete direction-detection rule for paired binary outcomes.
 
     The paired outcome probabilities are determined by the marginal difference
-    ``effect`` and the discordance probability. Each pair is sampled as one of
-    the two discordant outcomes or a concordant outcome; independent-arm
-    Bernoulli samples are never used.
+    ``effect``, control baseline, and discordance probability. A simulated task
+    detects the direction only when its Holm-adjusted exact McNemar result passes
+    ``alpha`` and its Bonferroni-adjusted Newcombe interval excludes zero.
     """
     if repetitions < 1 or simulations < 1:
         raise ValueError("repetitions and simulations must be positive")
@@ -288,43 +289,83 @@ def simulate_paired_mcnemar_power(
     for rate in discordance_rates:
         if not 0.0 <= rate <= 1.0 or rate + 1e-12 < abs(effect):
             raise ValueError("discordance rates must be at least the absolute effect and at most one")
+    if baseline_success_rates is None:
+        baseline_success_rates = [0.5] * len(discordance_rates)
+    if len(baseline_success_rates) != len(discordance_rates):
+        raise ValueError("baseline success rates must match the task count")
+    if any(not 0.0 <= rate <= 1.0 for rate in baseline_success_rates):
+        raise ValueError("baseline success rates must be probabilities")
+    pair_probabilities = [
+        estimate_pair_probabilities(baseline, effect, discordance)
+        for baseline, discordance in zip(baseline_success_rates, discordance_rates)
+    ]
 
     rng = random.Random(seed)
     rejected_counts = [0] * len(discordance_rates)
+    detected_counts = [0] * len(discordance_rates)
     any_rejected_count = 0
+    any_detected_count = 0
+    interval_confidence = 1.0 - alpha / len(discordance_rates)
     for _ in range(simulations):
         p_values = []
-        for discordance in discordance_rates:
-            mcp_only_probability = (discordance + effect) / 2.0
-            discordant_probability = discordance
+        paired_counts = []
+        for probabilities in pair_probabilities:
+            both_success_probability = probabilities["both_success"]
+            mcp_only_probability = probabilities["mcp_only_success"]
+            control_only_probability = probabilities["control_only_success"]
             mcp_only = 0
             control_only = 0
+            both_successes = 0
             for _ in range(repetitions):
                 draw = rng.random()
-                if draw < mcp_only_probability:
+                if draw < both_success_probability:
+                    both_successes += 1
+                elif draw < both_success_probability + mcp_only_probability:
                     mcp_only += 1
-                elif draw < discordant_probability:
+                elif draw < both_success_probability + mcp_only_probability + control_only_probability:
                     control_only += 1
             p_values.append(exact_mcnemar_pvalue(mcp_only, control_only))
+            paired_counts.append((both_successes, mcp_only, control_only))
         rejections = _holm_rejections(p_values, alpha)
         any_rejected_count += int(any(rejections))
+        any_detected = False
         for index, rejected in enumerate(rejections):
             rejected_counts[index] += int(rejected)
+            both_successes, mcp_only, control_only = paired_counts[index]
+            interval = newcombe_paired_score_interval(
+                both_successes=both_successes,
+                mcp_only_successes=mcp_only,
+                control_only_successes=control_only,
+                count=repetitions,
+                confidence=interval_confidence,
+            )
+            interval_excludes_zero = interval["lower"] > 0.0 or interval["upper"] < 0.0
+            detected = rejected and interval_excludes_zero and interval["estimate"] != 0.0
+            detected_counts[index] += int(detected)
+            any_detected = any_detected or detected
+        any_detected_count += int(any_detected)
 
-    powers = [count / simulations for count in rejected_counts]
-    intervals = [_wilson_interval(count, simulations, 0.95) for count in rejected_counts]
+    powers = [count / simulations for count in detected_counts]
+    intervals = [_wilson_interval(count, simulations, 0.95) for count in detected_counts]
+    holm_powers = [count / simulations for count in rejected_counts]
     return {
         "repetitions": repetitions,
         "effect": effect,
         "discordance_rates": list(discordance_rates),
+        "baseline_success_rates": list(baseline_success_rates),
         "simulations": simulations,
         "seed": seed,
         "alpha": alpha,
+        "interval_confidence": interval_confidence,
+        "power_definition": "Holm exact McNemar rejection and simultaneous Newcombe interval excludes zero",
         "power_by_task": powers,
+        "holm_rejection_power_by_task": holm_powers,
         "power_lower_95_by_task": [interval[0] for interval in intervals],
         "power_upper_95_by_task": [interval[1] for interval in intervals],
         "rejection_counts_by_task": rejected_counts,
+        "direction_detection_counts_by_task": detected_counts,
         "familywise_rejection_rate": any_rejected_count / simulations,
+        "familywise_direction_detection_rate": any_detected_count / simulations,
     }
 
 
@@ -501,14 +542,17 @@ def select_simulated_repetitions(
     effect: float,
     target_power: float,
     discordance_rates: Sequence[float],
+    baseline_success_rates: Sequence[float] | None = None,
+    model_cases: Sequence[dict[str, Any]] | None = None,
     simulations: int = 3000,
     family_alpha: float = 0.05,
     seed: int = 20261031,
 ) -> dict[str, Any]:
     """Propose a starting size, then certify it with independent simulations.
 
-    A normal approximation proposes the starting size. Final power bounds use
-    independent exact binomial lower bounds, with error spent across tasks and
+    A normal approximation proposes the starting size. Each model case is
+    independently simulated under the complete Holm-plus-interval direction
+    rule. Exact binomial lower bounds spend error across tasks, cases, and
     retries.
     """
     if simulations < 100:
@@ -525,13 +569,57 @@ def select_simulated_repetitions(
     if not 0.0 < family_alpha < 1.0:
         raise ValueError("family alpha must be between zero and one")
 
-    # A normal approximation is only a starting candidate. It makes discovery
-    # inexpensive; no evidence claim uses its result or its assumed variance.
     task_count = len(discordance_rates)
+    if model_cases is None:
+        baselines = (
+            list(baseline_success_rates)
+            if baseline_success_rates is not None
+            else [0.5] * task_count
+        )
+        model_cases = [{
+            "name": "primary",
+            "effect": effect,
+            "baseline_success_rates": baselines,
+            "discordance_rates": list(discordance_rates),
+        }]
+    if not model_cases:
+        raise ValueError("at least one paired power model case is required")
+    normalized_cases = []
+    for case_index, case in enumerate(model_cases):
+        if not isinstance(case, dict):
+            raise ValueError("paired power model cases must be objects")
+        case_effect = case.get("effect")
+        case_baselines = case.get("baseline_success_rates")
+        case_discordances = case.get("discordance_rates")
+        if not isinstance(case_effect, (int, float)) or abs(abs(case_effect) - abs(effect)) > 1e-12:
+            raise ValueError("paired power model cases must match the target effect magnitude")
+        if (
+            not isinstance(case_baselines, (list, tuple))
+            or len(case_baselines) != task_count
+            or not isinstance(case_discordances, (list, tuple))
+            or len(case_discordances) != task_count
+        ):
+            raise ValueError("paired power model case values must match the task count")
+        for baseline, discordance in zip(case_baselines, case_discordances):
+            estimate_pair_probabilities(float(baseline), float(case_effect), float(discordance))
+        normalized_cases.append({
+            "name": str(case.get("name", f"case-{case_index + 1}")),
+            "effect": float(case_effect),
+            "baseline_success_rates": [float(value) for value in case_baselines],
+            "discordance_rates": [float(value) for value in case_discordances],
+            "baseline_source_by_task": case.get("baseline_source_by_task"),
+        })
+
+    # A normal approximation is only a starting candidate; no evidence claim
+    # uses its result or assumed variance.
+    planning_discordance_rates = [
+        max(case["discordance_rates"][task_index] for case in normalized_cases)
+        for task_index in range(task_count)
+    ]
     discovery_candidate = normal_approximate_repetitions(
         effect=effect,
         target_power=target_power,
-        discordance_rates=discordance_rates,
+        discordance_rates=planning_discordance_rates,
         family_alpha=family_alpha,
         task_count=task_count,
     )
@@ -539,52 +627,105 @@ def select_simulated_repetitions(
         raise ValueError("power target requires more than 100000 repetitions")
 
     # A candidate and every retry are validated on independent streams. The
-    # per-attempt error budgets sum to 0.05; each is split across all tasks.
+    # per-attempt error budgets sum to 0.05 and are split across tasks and cases.
     candidate = discovery_candidate
     attempt = 1
     while True:
         attempt_alpha = 0.05 / (attempt * (attempt + 1))
-        per_task_alpha = attempt_alpha / task_count
-        confidence = 1.0 - per_task_alpha
-        validation_seed = _derive_validation_seed(seed, attempt)
-        validation = simulate_paired_mcnemar_power(
-            repetitions=candidate,
-            effect=effect,
-            discordance_rates=discordance_rates,
-            simulations=simulations,
-            alpha=family_alpha,
-            seed=validation_seed,
-        )
-        lower_bounds = [
-            clopper_pearson_lower_bound(count, simulations, confidence)
-            for count in validation["rejection_counts_by_task"]
-        ]
-        confidence_by_task = [confidence] * task_count
-        if min(lower_bounds) >= target_power:
-            validation.pop("power_lower_95_by_task", None)
-            validation.pop("power_upper_95_by_task", None)
-            validation.update({
+        per_bound_alpha = attempt_alpha / (task_count * len(normalized_cases))
+        confidence = 1.0 - per_bound_alpha
+        # For all successes, the exact lower bound is alpha**(1/n). Increase
+        # simulations when retry spending would otherwise make the requested
+        # power impossible to certify, even with a perfect validation stream.
+        minimum_simulations = math.ceil(math.log(per_bound_alpha) / math.log(target_power))
+        attempt_simulations = max(simulations, minimum_simulations)
+        case_results = []
+        for case_index, case in enumerate(normalized_cases):
+            validation_seed = _derive_validation_seed(
+                seed,
+                (attempt - 1) * len(normalized_cases) + case_index + 1,
+            )
+            validation = simulate_paired_mcnemar_power(
+                repetitions=candidate,
+                effect=case["effect"],
+                baseline_success_rates=case["baseline_success_rates"],
+                discordance_rates=case["discordance_rates"],
+                simulations=attempt_simulations,
+                alpha=family_alpha,
+                seed=validation_seed,
+            )
+            lower_bounds = [
+                clopper_pearson_lower_bound(count, attempt_simulations, confidence)
+                for count in validation["direction_detection_counts_by_task"]
+            ]
+            case_results.append({
+                "name": case["name"],
+                "effect": case["effect"],
+                "interval_confidence": validation["interval_confidence"],
+                "simulations": attempt_simulations,
+                "baseline_success_rates": case["baseline_success_rates"],
+                "discordance_rates": case["discordance_rates"],
+                "baseline_source_by_task": case["baseline_source_by_task"],
+                "seed": validation_seed,
+                "power_by_task": validation["power_by_task"],
                 "power_lower_bound_by_task": lower_bounds,
-                "power_lower_confidence_by_task": confidence_by_task,
+                "direction_detection_counts_by_task": validation["direction_detection_counts_by_task"],
+                "holm_rejection_power_by_task": validation["holm_rejection_power_by_task"],
+                "familywise_rejection_rate": validation["familywise_rejection_rate"],
+            })
+        lower_bounds_by_task = [
+            min(case["power_lower_bound_by_task"][task_index] for case in case_results)
+            for task_index in range(task_count)
+        ]
+        powers_by_task = [
+            min(case["power_by_task"][task_index] for case in case_results)
+            for task_index in range(task_count)
+        ]
+        if min(lower_bounds_by_task) >= target_power:
+            validation_summary = {
+                "repetitions": candidate,
+                "effect": effect,
+                "discordance_rates": planning_discordance_rates,
+                "simulations": attempt_simulations,
+                "minimum_requested_simulations": simulations,
+                "alpha": family_alpha,
+                "power_definition": "Holm exact McNemar rejection and simultaneous Newcombe interval excludes zero",
+                "power_by_task": powers_by_task,
+                "power_by_task_by_case": {
+                    case["name"]: dict(zip(
+                        [str(index) for index in range(task_count)],
+                        case["power_by_task"],
+                    ))
+                    for case in case_results
+                },
+                "power_lower_bound_by_task": lower_bounds_by_task,
+                "power_lower_bound_by_task_by_case": {
+                    case["name"]: case["power_lower_bound_by_task"]
+                    for case in case_results
+                },
+                "power_lower_confidence_by_task": [confidence] * task_count,
                 "power_bound_method": "one-sided-clopper-pearson",
                 "validation_attempt": attempt,
                 "validation_alpha_spending": attempt_alpha,
+                "validation_case_count": len(normalized_cases),
+                "validation_cases": case_results,
                 "discovery_seed": seed,
-            })
+            }
             return {
                 "repetitions": candidate,
                 "target_power": target_power,
-                "selected_power": min(validation["power_by_task"]),
-                "selected_power_lower_bound": min(lower_bounds),
-                "selected_power_lower_bound_by_task": lower_bounds,
-                "selected_power_confidence_by_task": confidence_by_task,
+                "selected_power": min(powers_by_task),
+                "selected_power_lower_bound": min(lower_bounds_by_task),
+                "selected_power_lower_bound_by_task": lower_bounds_by_task,
+                "selected_power_confidence_by_task": [confidence] * task_count,
                 "validation_attempt": attempt,
                 "validation_alpha_spending": attempt_alpha,
                 "discovery_candidate_repetitions": discovery_candidate,
-                "power_simulation": validation,
+                "power_simulation": validation_summary,
                 "selection_rule": (
-                    "independently validated with one-sided exact Clopper-Pearson lower bounds; "
-                    "alpha 0.05/[attempt*(attempt+1)] is split across tasks"
+                    "independently validated direction detections require Holm exact McNemar "
+                    "rejection and a simultaneous Newcombe interval excluding zero; exact "
+                    "Clopper-Pearson lower bounds split alpha across tasks, model cases, and retries"
                 ),
             }
         if candidate >= 100000:
