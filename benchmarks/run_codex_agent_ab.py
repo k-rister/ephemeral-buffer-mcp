@@ -8,7 +8,6 @@ manifest and are never copied to the output records.
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -768,6 +767,23 @@ def _data_path_bytes(path: Path | None) -> dict[str, int]:
     return result
 
 
+def _mcp_environment_overrides(
+    mcp_python_path: list[str] | None,
+    mcp_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the same MCP environment overrides used by Codex and fingerprinting."""
+    environment = dict(mcp_env or {})
+    if mcp_python_path:
+        inherited_python_path = environment.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
+        python_paths = [str(path) for path in mcp_python_path]
+        python_paths.extend(
+            path for path in inherited_python_path.split(os.pathsep)
+            if path and path not in python_paths
+        )
+        environment["PYTHONPATH"] = os.pathsep.join(python_paths)
+    return environment
+
+
 def _codex_command(
     *,
     codex: str,
@@ -802,15 +818,7 @@ def _codex_command(
         "model=" + json.dumps(model),
     ])
     if mode == "mcp":
-        if mcp_python_path:
-            mcp_env = dict(mcp_env or {})
-            inherited_python_path = mcp_env.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
-            python_paths = list(mcp_python_path)
-            python_paths.extend(
-                path for path in inherited_python_path.split(os.pathsep)
-                if path and path not in python_paths
-            )
-            mcp_env["PYTHONPATH"] = os.pathsep.join(python_paths)
+        mcp_env = _mcp_environment_overrides(mcp_python_path, mcp_env)
         mcp_args = [mcp_server_script] if mcp_server_script else ["-m", mcp_module]
         command.extend([
             "--config",
@@ -847,23 +855,118 @@ def _file_fingerprint(path_value: str | None) -> dict[str, str | None] | None:
     return {"configured_path": str(path_value), "content_sha256": digest}
 
 
-def _mcp_launch_fingerprint(args: argparse.Namespace) -> str:
+_MCP_MODULE_SOURCE_SCRIPT = r"""
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import sys
+
+module_name = sys.argv[1]
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        spec = importlib.util.find_spec(module_name)
+        if spec is None:
+            raise ModuleNotFoundError(module_name)
+        specs = [spec]
+        if spec.submodule_search_locations is not None:
+            entrypoint = importlib.util.find_spec(module_name + ".__main__")
+            if entrypoint is None:
+                raise ModuleNotFoundError(module_name + ".__main__")
+            specs.append(entrypoint)
+        sources = []
+        for source_spec in specs:
+            origin = source_spec.origin
+            if not origin or origin in ("built-in", "frozen"):
+                raise ImportError("module source is unavailable")
+            loader = source_spec.loader
+            source = loader.get_source(source_spec.name) if loader is not None else None
+            if source is not None:
+                content = source.encode("utf-8")
+            else:
+                with open(origin, "rb") as source_file:
+                    content = source_file.read()
+            sources.append({
+                "module": source_spec.name,
+                "content_sha256": hashlib.sha256(content).hexdigest(),
+            })
+    print(json.dumps(sources, sort_keys=True, separators=(",", ":")))
+except Exception as error:
+    print(json.dumps({"error": type(error).__name__}))
+    sys.exit(2)
+"""
+
+
+def _resolve_mcp_module_source(
+    *,
+    mcp_python: str,
+    module_name: str,
+    python_path: str,
+    repository: Path | None,
+) -> list[dict[str, str]] | None:
+    """Resolve and hash the executable module using the configured MCP Python."""
+    environment = os.environ.copy()
+    if python_path:
+        environment["PYTHONPATH"] = python_path
+    try:
+        result = subprocess.run(
+            [mcp_python, "-c", _MCP_MODULE_SOURCE_SCRIPT, module_name],
+            cwd=str(repository) if repository is not None else None,
+            env=environment,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        sources = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    if not isinstance(sources, list) or not sources:
+        return None
+    if any(
+        not isinstance(source, dict)
+        or not isinstance(source.get("module"), str)
+        or not isinstance(source.get("content_sha256"), str)
+        for source in sources
+    ):
+        return None
+    return sources
+
+
+def _mcp_launch_fingerprint(
+    args: argparse.Namespace,
+    *,
+    require_module_source: bool = False,
+    repository: Path | None = None,
+) -> str:
     """Hash MCP startup inputs; paths and private environment values stay local."""
-    configured_paths = [str(path) for path in getattr(args, "mcp_python_path", [])]
-    inherited_paths = os.environ.get("PYTHONPATH", "").split(os.pathsep)
-    effective_python_path = list(configured_paths)
-    effective_python_path.extend(
-        path for path in inherited_paths if path and path not in effective_python_path
+    mcp_python = getattr(args, "mcp_python", sys.executable)
+    module_name = getattr(args, "mcp_module", "")
+    server_script = getattr(args, "mcp_server_script", None)
+    mcp_environment = _mcp_environment_overrides(
+        [str(path) for path in getattr(args, "mcp_python_path", [])],
+    )
+    effective_python_path = mcp_environment.get(
+        "PYTHONPATH",
+        os.environ.get("PYTHONPATH", ""),
     )
     module_source = None
-    module_name = getattr(args, "mcp_module", "")
-    if module_name:
-        try:
-            spec = importlib.util.find_spec(module_name)
-            if spec is not None and spec.origin and spec.origin not in ("built-in", "frozen"):
-                module_source = _file_fingerprint(spec.origin)
-        except (ImportError, ModuleNotFoundError, ValueError):
-            module_source = None
+    if module_name and not server_script:
+        module_source = _resolve_mcp_module_source(
+            mcp_python=mcp_python,
+            module_name=module_name,
+            python_path=effective_python_path,
+            repository=repository,
+        )
+        if require_module_source and module_source is None:
+            raise ValueError(
+                "cannot resume: unable to resolve or hash the configured MCP module source"
+            )
+    elif require_module_source and not server_script:
+        raise ValueError("cannot resume: configured MCP module source is unavailable")
     environment_keys = (
         "EPHEMERAL_TEST_EMBEDDINGS",
         "EPHEMERAL_EMBEDDING_MODEL",
@@ -871,10 +974,10 @@ def _mcp_launch_fingerprint(args: argparse.Namespace) -> str:
         "EPHEMERAL_FASTEMBED_CACHE_DIR",
     )
     launch_configuration = {
-        "mcp_python": getattr(args, "mcp_python", sys.executable),
-        "mcp_python_resolved": shutil.which(getattr(args, "mcp_python", sys.executable)),
+        "mcp_python": mcp_python,
+        "mcp_python_resolved": shutil.which(mcp_python),
         "mcp_module": module_name,
-        "mcp_server_script": _file_fingerprint(getattr(args, "mcp_server_script", None)),
+        "mcp_server_script": _file_fingerprint(server_script),
         "mcp_module_source": module_source,
         "mcp_python_path": effective_python_path,
         "server_environment": {
@@ -1092,7 +1195,11 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "effective_sandbox": (
             "workspace-write" if getattr(args, "allow_mcp_approvals", False) else args.sandbox
         ),
-        "mcp_launch_fingerprint": _mcp_launch_fingerprint(args),
+        "mcp_launch_fingerprint": _mcp_launch_fingerprint(
+            args,
+            require_module_source=getattr(args, "resume", False),
+            repository=repository,
+        ),
         "embedding_mode": "test" if test_embeddings else "onnx",
         "embedding_model": "deterministic-test" if test_embeddings else os.environ.get("EPHEMERAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
         "embedding_cache": "not-applicable" if test_embeddings else (

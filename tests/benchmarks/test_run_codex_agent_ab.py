@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -876,6 +877,39 @@ class TestCodexAgentRunner(unittest.TestCase):
         env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
         self.assertIn('PYTHONPATH="/tmp/revision/src:/tmp/revision', env_config)
 
+    def test_module_fingerprint_uses_configured_interpreter_path_and_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module_dir = Path(directory) / "mcp-source"
+            module_dir.mkdir()
+            module_file = module_dir / "agent_ab_fingerprint_probe.py"
+            module_file.write_text("VALUE = 'first'\n", encoding="utf-8")
+            args = argparse.Namespace(
+                mcp_python=sys.executable,
+                mcp_module="agent_ab_fingerprint_probe",
+                mcp_server_script=None,
+                mcp_python_path=[module_dir],
+            )
+            with patch.dict(os.environ, {"PYTHONPATH": ""}, clear=False):
+                first_fingerprint = run_codex_agent_ab._mcp_launch_fingerprint(args)
+                self.assertRegex(first_fingerprint, r"^sha256:[0-9a-f]{64}$")
+
+                module_file.write_text("VALUE = 'second'\n", encoding="utf-8")
+                second_fingerprint = run_codex_agent_ab._mcp_launch_fingerprint(args)
+
+                self.assertNotEqual(first_fingerprint, second_fingerprint)
+                self.assertNotIn(str(module_dir), first_fingerprint)
+
+                args.mcp_module = "missing_agent_ab_fingerprint_probe"
+                self.assertRegex(
+                    run_codex_agent_ab._mcp_launch_fingerprint(args),
+                    r"^sha256:[0-9a-f]{64}$",
+                )
+                with self.assertRaisesRegex(ValueError, "cannot resume.*MCP module source"):
+                    run_codex_agent_ab._mcp_launch_fingerprint(
+                        args,
+                        require_module_source=True,
+                    )
+
     def test_codex_command_uses_current_exec_subcommand_syntax(self):
         from benchmarks.run_codex_agent_ab import _codex_command
 
@@ -997,9 +1031,25 @@ class TestCodexAgentRunner(unittest.TestCase):
         }) + "\n")
         with tempfile.TemporaryDirectory() as directory:
             records_path = Path(directory) / "records.json"
+            mcp_source_dir = Path(directory) / "mcp-source"
+            mcp_source_dir.mkdir()
+            mcp_source_file = mcp_source_dir / "resume_test_mcp.py"
+            original_mcp_source = "VALUE = 'original'\n"
+            mcp_source_file.write_text(original_mcp_source, encoding="utf-8")
+            (mcp_source_dir / "different_server_module.py").write_text(
+                "VALUE = 'different module'\n",
+                encoding="utf-8",
+            )
+            alternate_mcp_source_dir = Path(directory) / "alternate-mcp-source"
+            alternate_mcp_source_dir.mkdir()
+            (alternate_mcp_source_dir / "resume_test_mcp.py").write_text(
+                "VALUE = 'alternate source path'\n",
+                encoding="utf-8",
+            )
             args = argparse.Namespace(
                 repository=".", repository_fixture="fixture", environment="test", model="gpt-5.6-luna",
-                codex="codex", mcp_python="python", mcp_module="server", mcp_server_script=None,
+                codex="codex", mcp_python=sys.executable, mcp_module="resume_test_mcp", mcp_server_script=None,
+                mcp_python_path=[mcp_source_dir],
                 sandbox="read-only", timeout=10, allow_mcp_approvals=False,
                 dry_run=False, output=records_path, max_repetitions=1, resume=False,
             )
@@ -1031,6 +1081,18 @@ class TestCodexAgentRunner(unittest.TestCase):
                 records_path.write_text(json.dumps(first_payload), encoding="utf-8")
                 args.max_repetitions = 2
                 args.resume = True
+
+                mcp_source_file.write_text("VALUE = 'changed'\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                self.assertEqual(runner.call_count, 8)
+
+                mcp_source_file.unlink()
+                with self.assertRaisesRegex(ValueError, "unable to resolve or hash.*MCP module source"):
+                    run_schedule(extended_schedule, manifest, args)
+                self.assertEqual(runner.call_count, 8)
+
+                mcp_source_file.write_text(original_mcp_source, encoding="utf-8")
                 extended_payload = run_schedule(extended_schedule, manifest, args)
                 extended_result = records_workload_result(
                     extended_payload,
@@ -1055,17 +1117,18 @@ class TestCodexAgentRunner(unittest.TestCase):
                     run_schedule(extended_schedule, manifest, args)
                 args.sandbox = "read-only"
                 args.mcp_python = "different-python"
+                with self.assertRaisesRegex(ValueError, "cannot resume.*MCP module source"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.mcp_python = sys.executable
+                args.mcp_module = "different_server_module"
                 with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
                     run_schedule(extended_schedule, manifest, args)
-                args.mcp_python = "python"
-                args.mcp_module = "different-server-module"
+                args.mcp_module = "resume_test_mcp"
+                args.mcp_python = sys.executable
+                args.mcp_python_path = [alternate_mcp_source_dir]
                 with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
                     run_schedule(extended_schedule, manifest, args)
-                args.mcp_module = "server"
-                args.mcp_python_path = [Path("/private/mcp-source")]
-                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
-                    run_schedule(extended_schedule, manifest, args)
-                args.mcp_python_path = []
+                args.mcp_python_path = [mcp_source_dir]
                 legacy_payload = copy.deepcopy(extended_payload)
                 legacy_payload["records_schema_version"] = 10
                 records_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
