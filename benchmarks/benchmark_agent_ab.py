@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import random
+import re
 import statistics
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,7 @@ import benchmarks.workload_results as wr
 from benchmarks.agent_ab_statistics import (
     bootstrap_discordance_upper,
     exact_mcnemar_pvalue,
+    estimate_pair_probabilities,
     holm_adjust,
     newcombe_paired_score_interval,
     select_simulated_repetitions,
@@ -23,7 +25,7 @@ from benchmarks.agent_ab_statistics import (
 
 SCHEMA_VERSION = 2
 SUMMARY_SCHEMA_VERSION = 5
-RECORDS_SCHEMA_VERSION = 10
+RECORDS_SCHEMA_VERSION = 11
 TASK_FIXTURE_VERSION = 4
 TASK_RUBRIC_VERSION = 4
 MODES = ("control", "mcp")
@@ -31,6 +33,7 @@ DEFAULT_AGENT_AB_SEED = 20260909
 DEFAULT_DESIGN_SEED = 20261031
 DEFAULT_POWER_SIMULATIONS = 1000
 DEFAULT_ALPHA = 0.05
+PILOT_PARAMETER_FAMILY_ALPHA = DEFAULT_ALPHA
 DEFAULT_EFFECT = 0.10
 DEFAULT_TARGET_POWER = 0.80
 DEFAULT_PRACTICAL_EFFECT = 0.10
@@ -112,6 +115,8 @@ PROTOCOL_FIELDS = (
     "embedding_mode",
     "embedding_model",
     "embedding_cache",
+    "effective_sandbox",
+    "mcp_launch_fingerprint",
 )
 LEGACY_PROTOCOL_FIELDS = PROTOCOL_FIELDS[:5]
 CONTEXT_PROXY_NOTE = "prompt plus event envelope bytes; the agent CLI does not expose context size"
@@ -232,12 +237,12 @@ def _bootstrap_model_inputs(
             task_pairs,
             simulations=5000,
             seed=seed + task_index,
-            quantile=0.975,
+            quantile=1.0 - PILOT_PARAMETER_FAMILY_ALPHA / (2 * len(TASKS)),
         )
         results[task["id"]] = {
             **bootstrap,
             "discordance_rate": bootstrap["discordance_upper_estimate"],
-            "source": "paired-records-exact-clopper-pearson-97.5%-upper-bound",
+            "source": "paired-records-familywise-exact-clopper-pearson-upper-bound",
         }
     evidence_source = (
         "paired-records-exact-bounds-with-conservative-fallback"
@@ -245,6 +250,69 @@ def _bootstrap_model_inputs(
         else "paired-records-exact-bounds"
     )
     return results, evidence_source, insufficient
+
+
+def _scenario_model_cases(
+    model_inputs: dict[str, dict[str, Any]],
+    task_ids: list[str],
+    effect: float,
+) -> list[dict[str, Any]]:
+    """Build conservative paired models for both directions of an effect."""
+    cases = []
+    for signed_effect, name in ((abs(effect), "mcp-higher"), (-abs(effect), "mcp-lower")):
+        baselines = []
+        discordances = []
+        baseline_sources = []
+        for task_id in task_ids:
+            model = model_inputs[task_id]
+            baseline = float(model.get("baseline_success_rate", 0.5))
+            baseline_interval = model.get("baseline_success_rate_interval")
+            observed_upper = model.get("discordance_rate")
+            if observed_upper is None or not isinstance(baseline_interval, dict):
+                # The conservative no-pilot model fixes the control rate at .5,
+                # where the largest feasible discordance is 1 - |effect|.
+                baseline = 0.5
+                discordance = 1.0 - abs(effect)
+                baseline_source = "conservative-fallback"
+            else:
+                lower = float(baseline_interval.get("lower", baseline))
+                upper = float(baseline_interval.get("upper", baseline))
+                if not 0.0 <= lower <= upper <= 1.0:
+                    raise ValueError("baseline success interval must be ordered probabilities")
+                feasible_lower = max(lower, -signed_effect, 0.0)
+                feasible_upper = min(upper, 1.0 - signed_effect, 1.0)
+                if feasible_lower > feasible_upper:
+                    # The pilot's entire baseline interval makes this target
+                    # effect impossible in that direction. Keep scenario sizing
+                    # conservative without claiming a nonexistent paired model.
+                    baseline = 0.5
+                    discordance = 1.0 - abs(effect)
+                    baseline_source = "conservative-fallback-no-feasible-baseline"
+                else:
+                    vertex = (1.0 - signed_effect) / 2.0
+                    baseline = min(max(vertex, feasible_lower), feasible_upper)
+                    feasible_cap = min(
+                        2.0 * (1.0 - baseline) - signed_effect,
+                        2.0 * baseline + signed_effect,
+                    )
+                    discordance = max(
+                        abs(effect),
+                        min(float(observed_upper), feasible_cap),
+                    )
+                    baseline_source = "exact-baseline-interval"
+            # Validate the conservative point lies in the paired 2x2 simplex.
+            estimate_pair_probabilities(baseline, signed_effect, discordance)
+            baselines.append(baseline)
+            discordances.append(discordance)
+            baseline_sources.append(baseline_source)
+        cases.append({
+            "name": name,
+            "effect": signed_effect,
+            "baseline_success_rates": baselines,
+            "discordance_rates": discordances,
+            "baseline_source_by_task": dict(zip(task_ids, baseline_sources)),
+        })
+    return cases
 
 
 def _scenario_discordance(model: dict[str, Any], effect: float) -> float:
@@ -332,23 +400,26 @@ def build_power_design(
     )
     cost_profile = _pilot_cost_profile(pilot_payload)
     task_ids = [task["id"] for task in TASKS]
+    default_model_cases = _scenario_model_cases(model_inputs, task_ids, DEFAULT_EFFECT)
     default_discordance = [
-        _scenario_discordance(model_inputs[task_id], DEFAULT_EFFECT)
-        for task_id in task_ids
+        max(case["discordance_rates"][index] for case in default_model_cases)
+        for index in range(len(task_ids))
     ]
     selected = select_simulated_repetitions(
         effect=DEFAULT_EFFECT,
         target_power=DEFAULT_TARGET_POWER,
         discordance_rates=default_discordance,
+        model_cases=default_model_cases,
         simulations=simulations,
         family_alpha=FINAL_LOOK_ALPHA,
         seed=seed,
     )
     scenarios = []
     for effect_index, effect in enumerate(SCENARIO_EFFECTS):
+        model_cases = _scenario_model_cases(model_inputs, task_ids, effect)
         discordance_rates = [
-            _scenario_discordance(model_inputs[task_id], effect)
-            for task_id in task_ids
+            max(case["discordance_rates"][index] for case in model_cases)
+            for index in range(len(task_ids))
         ]
         for power_index, target_power in enumerate(SCENARIO_POWERS):
             scenario_seed = seed + 100 + effect_index * len(SCENARIO_POWERS) + power_index
@@ -361,6 +432,7 @@ def build_power_design(
                     effect=effect,
                     target_power=target_power,
                     discordance_rates=discordance_rates,
+                    model_cases=model_cases,
                     simulations=simulations,
                     family_alpha=FINAL_LOOK_ALPHA,
                     seed=scenario_seed,
@@ -381,10 +453,13 @@ def build_power_design(
                 "final_look_alpha": FINAL_LOOK_ALPHA,
                 "task_count": len(task_ids),
                 "discordance_rates": dict(zip(task_ids, discordance_rates)),
+                "paired_model_cases": model_cases,
                 "repetitions_per_task_and_mode": repetitions,
                 "simulated_power_by_task": dict(zip(task_ids, simulated["power_by_task"])),
                 "power_lower_bound_by_task": dict(zip(task_ids, simulated["power_lower_bound_by_task"])),
                 "power_lower_confidence_by_task": dict(zip(task_ids, simulated["power_lower_confidence_by_task"])),
+                "validation_simulations": simulated["simulations"],
+                "validated_power_by_model_case": simulated["validation_cases"],
                 "power_validation_attempt": selected_scenario["validation_attempt"],
                 "power_validation_alpha_spending": selected_scenario["validation_alpha_spending"],
                 "expected_paired_score_ci95_half_width_pp": expected_ci * 100,
@@ -405,8 +480,11 @@ def build_power_design(
                 "token_estimates_note": cost_profile["token_estimates_note"],
             })
     return {
-        "schema_version": 3,
-        "method": "seeded paired binary simulation; exact two-sided McNemar tests; Holm familywise correction",
+        "schema_version": 4,
+        "method": (
+            "seeded four-cell paired binary simulation; direction requires Holm-adjusted exact "
+            "two-sided McNemar rejection and a Bonferroni-adjusted Newcombe interval excluding zero"
+        ),
         "effect_target": DEFAULT_EFFECT,
         "power_target": DEFAULT_TARGET_POWER,
         "family_alpha": DEFAULT_ALPHA,
@@ -414,21 +492,26 @@ def build_power_design(
         "pilot_evidence_source": evidence_source,
         "pilot_required": pilot_required,
         "pilot_minimum_repetitions_per_task": 20,
-        "baseline_interval_method": "97.5% two-sided exact Clopper-Pearson interval for control success",
+        "pilot_parameter_family_alpha": PILOT_PARAMETER_FAMILY_ALPHA,
+        "pilot_parameter_bound_count": 2 * len(task_ids),
+        "baseline_interval_method": (
+            f"{(1.0 - PILOT_PARAMETER_FAMILY_ALPHA / (2 * len(task_ids))) * 100:.3f}% "
+            "two-sided exact Clopper-Pearson interval for control success"
+        ),
         "bootstrap_method": (
             "resample matched current-rubric pairs 5000 times for a diagnostic percentile; "
-            "sizing uses a one-sided exact 97.5% Clopper-Pearson upper bound"
+            "sizing uses a familywise one-sided exact Clopper-Pearson upper bound"
         ),
         "pilot_parameter_confidence_rule": (
-            "Bonferroni combination of exact 97.5% baseline and discordance bounds gives at least "
-            "95% joint coverage"
+            "Bonferroni splits 5% across baseline and discordance bounds for every task, "
+            "giving at least 95% joint coverage across the full task set"
         ),
         "paired_model_by_task": model_inputs,
         "simulation_seed": seed,
         "power_simulations": simulations,
         "power_confidence_rule": (
             "independent exact one-sided Clopper-Pearson lower bounds meet target; "
-            "validation alpha 0.05/[attempt*(attempt+1)] is split across tasks"
+            "validation alpha 0.05/[attempt*(attempt+1)] is split across tasks and both effect directions"
         ),
         "final_look_alpha": FINAL_LOOK_ALPHA,
         "selected_repetitions": selected["repetitions"],
@@ -561,7 +644,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _validate_protocol(protocol: Any) -> None:
+def _validate_protocol(protocol: Any, records_schema_version: int = 1) -> None:
     if not isinstance(protocol, dict):
         raise ValueError("records protocol metadata is required")
     for field in LEGACY_PROTOCOL_FIELDS:
@@ -576,6 +659,27 @@ def _validate_protocol(protocol: Any) -> None:
             value = protocol[field]
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"records protocol field {field} must be a non-empty identifier")
+    timeout = protocol.get("timeout_seconds")
+    if timeout is not None and (
+        isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1
+    ):
+        raise ValueError("records protocol timeout_seconds must be a positive integer")
+    effective_sandbox = protocol.get("effective_sandbox")
+    if effective_sandbox is not None and effective_sandbox not in ("read-only", "workspace-write"):
+        raise ValueError("records protocol effective_sandbox is invalid")
+    fingerprint = protocol.get("mcp_launch_fingerprint")
+    if fingerprint is not None and (
+        not isinstance(fingerprint, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint)
+    ):
+        raise ValueError("records protocol mcp_launch_fingerprint must be a SHA-256 fingerprint")
+    if records_schema_version >= 11:
+        if timeout is None:
+            raise ValueError("current records protocol requires timeout_seconds")
+        if effective_sandbox is None:
+            raise ValueError("current records protocol requires effective_sandbox")
+        if fingerprint is None:
+            raise ValueError("current records protocol requires mcp_launch_fingerprint")
 
 
 def _run_key(record: dict[str, Any]) -> tuple[int, str, str]:
@@ -623,10 +727,10 @@ def validate_records(
     schedule_rubric = schedule.get("task_rubric_version")
     if payload_rubric is not None and schedule_rubric is not None and payload_rubric != schedule_rubric:
         raise ValueError("records task_rubric_version does not match schedule")
-    _validate_protocol(payload.get("protocol"))
     records_schema_version = payload.get("records_schema_version", 1)
-    if records_schema_version not in (1, 2, 3, 4, 5, 6, 7, 8, 9, RECORDS_SCHEMA_VERSION):
+    if records_schema_version not in range(1, RECORDS_SCHEMA_VERSION + 1):
         raise ValueError("records schema version is unsupported")
+    _validate_protocol(payload.get("protocol"), records_schema_version)
     if records_schema_version >= 10 and (
         payload_rubric != TASK_RUBRIC_VERSION
         or schedule_rubric != TASK_RUBRIC_VERSION
@@ -876,10 +980,13 @@ def validate_schedule_extension(
     for field in stable_fields:
         if previous_schedule.get(field) != extended_schedule.get(field):
             raise ValueError(f"schedule extension changed {field}")
+    previous_explicit = previous_schedule.get("repetitions_explicit", True)
     if (
-        not previous_schedule.get("repetitions_explicit", True)
-        and previous_schedule.get("stage_schedule") != extended_schedule.get("stage_schedule")
+        previous_explicit
+        and extended_schedule.get("repetitions", 0) > previous_schedule.get("repetitions", 0)
     ):
+        raise ValueError("explicit schedules cannot be extended; use a preplanned staged schedule")
+    if previous_schedule.get("stage_schedule") != extended_schedule.get("stage_schedule"):
         raise ValueError("schedule extension changed stage_schedule")
     previous_items = previous_schedule.get("schedule")
     extended_items = extended_schedule.get("schedule")

@@ -950,7 +950,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             os.environ,
             {
                 "EPHEMERAL_TEST_EMBEDDINGS": "",
-                "EPHEMERAL_EMBEDDING_CACHE_DIR": "",
+                "EPHEMERAL_EMBEDDING_CACHE_DIR": "/private/cache/agent-ab",
                 "EPHEMERAL_FASTEMBED_CACHE_DIR": "",
                 "EPHEMERAL_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5-fp32",
             },
@@ -959,7 +959,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 10)
+        self.assertEqual(payload["records_schema_version"], 11)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")
@@ -969,7 +969,12 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertIn("capture_input_bytes", result["runs"][0]["measurements"])
         self.assertEqual(payload["protocol"]["embedding_mode"], "onnx")
         self.assertEqual(payload["protocol"]["embedding_model"], "BAAI/bge-small-en-v1.5-fp32")
-        self.assertEqual(payload["protocol"]["embedding_cache"], "default")
+        self.assertEqual(payload["protocol"]["embedding_cache"], "custom")
+        self.assertEqual(payload["protocol"]["timeout_seconds"], 10)
+        self.assertEqual(payload["protocol"]["effective_sandbox"], "read-only")
+        fingerprint = payload["protocol"]["mcp_launch_fingerprint"]
+        self.assertRegex(fingerprint, r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("/private/cache/agent-ab", json.dumps(payload["protocol"]))
 
     def test_resume_extends_staged_run_without_rerunning_matched_pairs(self):
         stage_design = {"selected_repetitions": 2}
@@ -1002,13 +1007,21 @@ class TestCodexAgentRunner(unittest.TestCase):
                 os.environ,
                 {
                     "EPHEMERAL_TEST_EMBEDDINGS": "",
-                    "EPHEMERAL_EMBEDDING_CACHE_DIR": "",
+                    "EPHEMERAL_EMBEDDING_CACHE_DIR": "/private/cache/agent-ab",
                     "EPHEMERAL_FASTEMBED_CACHE_DIR": "",
                     "EPHEMERAL_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5-fp32",
                 },
                 clear=False,
             ):
                 first_payload = run_schedule(first_schedule, manifest, args)
+                self.assertEqual(first_payload["protocol"]["timeout_seconds"], 10)
+                self.assertEqual(first_payload["protocol"]["effective_sandbox"], "read-only")
+                self.assertEqual(first_payload["protocol"]["embedding_cache"], "custom")
+                self.assertRegex(
+                    first_payload["protocol"]["mcp_launch_fingerprint"],
+                    r"^sha256:[0-9a-f]{64}$",
+                )
+                self.assertNotIn("/private/cache/agent-ab", json.dumps(first_payload["protocol"]))
                 first_result = records_workload_result(
                     first_payload,
                     producer="run_codex_agent_ab.py",
@@ -1031,6 +1044,32 @@ class TestCodexAgentRunner(unittest.TestCase):
                 args.max_repetitions = 2
                 args.model = "different-model"
                 with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.model = "gpt-5.6-luna"
+                args.timeout = 11
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.timeout = 10
+                args.sandbox = "workspace-write"
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.sandbox = "read-only"
+                args.mcp_python = "different-python"
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.mcp_python = "python"
+                args.mcp_module = "different-server-module"
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.mcp_module = "server"
+                args.mcp_python_path = [Path("/private/mcp-source")]
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
+                args.mcp_python_path = []
+                legacy_payload = copy.deepcopy(extended_payload)
+                legacy_payload["records_schema_version"] = 10
+                records_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "different records schema"):
                     run_schedule(extended_schedule, manifest, args)
 
         self.assertEqual(len(first_payload["runs"]), 8)

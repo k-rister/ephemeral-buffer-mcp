@@ -56,6 +56,9 @@ def _records_payload(repetitions=2, design=None):
             "embedding_mode": "test",
             "embedding_model": "deterministic-test",
             "embedding_cache": "not-applicable",
+            "timeout_seconds": 10,
+            "effective_sandbox": "read-only",
+            "mcp_launch_fingerprint": "sha256:" + "0" * 64,
         },
         "schedule": schedule,
         "runs": runs,
@@ -94,7 +97,7 @@ def _scored_records_payload(repetitions=2, design=None):
 
 
 def _legacy_v6_records_payload():
-    schedule, payload = _scored_records_payload()
+    schedule, payload = _scored_records_payload(design={"selected_repetitions": 20})
     payload["records_schema_version"] = 6
     for record in payload["runs"]:
         record.pop("criterion_passes")
@@ -128,7 +131,8 @@ def _legacy_v5_records_payload():
 
 class TestAgentAbBenchmark(unittest.TestCase):
     def test_historical_v3_fixture_records_remain_readable(self):
-        schedule, payload = _scored_records_payload()
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 20})
+        payload["records_schema_version"] = 10
         schedule["task_fixture_version"] = 3
         payload["task_fixture_version"] = 3
         summary = summarize_records(payload, schedule)
@@ -139,7 +143,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_default_schedule_uses_powered_design_and_three_looks(self):
         schedule = build_schedule(seed=20261031)
         design = schedule["statistical_design"]
-        self.assertEqual(design["schema_version"], 3)
+        self.assertEqual(design["schema_version"], 4)
         self.assertIn("Clopper-Pearson", design["baseline_interval_method"])
         self.assertIn("95% joint coverage", design["pilot_parameter_confidence_rule"])
         selected = next(
@@ -188,19 +192,24 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_schedule_extension_requires_exact_prefix_and_matching_versions(self):
         design = {"selected_repetitions": 20}
-        original = build_schedule(repetitions=4, seed=17, design=design)
-        extended = build_schedule(repetitions=8, seed=17, design=design)
+        original = build_schedule(repetitions=None, seed=17, design=design)
+        extended = build_schedule(repetitions=None, seed=17, design=design)
         validate_schedule_extension(original, extended)
-        changed_seed = build_schedule(repetitions=8, seed=18, design=design)
+        explicit = build_schedule(repetitions=4, seed=17, design=design)
+        explicit_extension = build_schedule(repetitions=8, seed=17, design=design)
+        with self.assertRaisesRegex(ValueError, "explicit schedules cannot be extended"):
+            validate_schedule_extension(explicit, explicit_extension)
+        validate_schedule_extension(explicit, explicit)
+        changed_seed = build_schedule(repetitions=None, seed=18, design=design)
         with self.assertRaisesRegex(ValueError, "seed"):
             validate_schedule_extension(original, changed_seed)
         changed_model = build_schedule(
-            repetitions=8, seed=17, design=design, model_config="different-model"
+            repetitions=None, seed=17, design=design, model_config="different-model"
         )
         with self.assertRaisesRegex(ValueError, "model_config"):
             validate_schedule_extension(original, changed_model)
         changed_fixture = build_schedule(
-            repetitions=8, seed=17, design=design, repository_fixture="different-fixture"
+            repetitions=None, seed=17, design=design, repository_fixture="different-fixture"
         )
         with self.assertRaisesRegex(ValueError, "repository_fixture"):
             validate_schedule_extension(original, changed_fixture)
@@ -242,6 +251,8 @@ class TestAgentAbBenchmark(unittest.TestCase):
         pilot = build_power_design(pilot_payload, pilot_schedule, simulations=100, seed=73)
         self.assertEqual(pilot["pilot_evidence_source"], "paired-records-exact-bounds")
         self.assertFalse(pilot["pilot_required"])
+        self.assertEqual(pilot["pilot_parameter_family_alpha"], benchmark_agent_ab.DEFAULT_ALPHA)
+        self.assertEqual(pilot["pilot_parameter_bound_count"], 2 * len(benchmark_agent_ab.TASKS))
         self.assertEqual(
             pilot["paired_model_by_task"]["targeted-inspection"]["matched_repetitions"],
             20,
@@ -252,7 +263,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         )
         self.assertEqual(
             pilot["paired_model_by_task"]["targeted-inspection"]["baseline_success_rate_interval"]["confidence"],
-            0.975,
+            1.0 - 0.05 / (2 * len(benchmark_agent_ab.TASKS)),
         )
 
     def test_zero_discordance_pilot_uses_exact_upper_bound_for_power_design(self):
@@ -263,15 +274,19 @@ class TestAgentAbBenchmark(unittest.TestCase):
             record["criterion_passes"] = [shared_success, shared_success]
 
         design = build_power_design(payload, schedule, simulations=100, seed=83)
-        expected = 1.0 - 0.025 ** (1.0 / 20)
+        pilot_bound_alpha = 0.05 / (2 * len(benchmark_agent_ab.TASKS))
+        expected = 1.0 - pilot_bound_alpha ** (1.0 / 20)
         for model in design["paired_model_by_task"].values():
             self.assertEqual(model["observed_discordance_rate"], 0.0)
             self.assertEqual(model["discordance_upper_bootstrap"], 0.0)
             self.assertAlmostEqual(model["discordance_rate"], expected)
             self.assertAlmostEqual(benchmark_agent_ab._scenario_discordance(model, 0.1), expected)
             self.assertEqual(model["discordance_upper_method"], "one-sided-clopper-pearson")
-            self.assertEqual(model["source"], "paired-records-exact-clopper-pearson-97.5%-upper-bound")
-            self.assertEqual(model["baseline_success_rate_interval"]["confidence"], 0.975)
+            self.assertEqual(model["source"], "paired-records-familywise-exact-clopper-pearson-upper-bound")
+            self.assertEqual(
+                model["baseline_success_rate_interval"]["confidence"],
+                1.0 - pilot_bound_alpha,
+            )
 
     def test_near_boundary_baseline_does_not_clip_pilot_discordance_upper(self):
         schedule, payload = _scored_records_payload(repetitions=20)
@@ -281,6 +296,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
             record["criterion_passes"] = [mcp_only_success, mcp_only_success]
 
         design = build_power_design(payload, schedule, simulations=100, seed=89)
+        pilot_bound_alpha = 0.05 / (2 * len(benchmark_agent_ab.TASKS))
         default_scenario = next(
             scenario for scenario in design["scenario_matrix"]
             if scenario["effect_pp"] == 10 and scenario["target_power"] == 0.8
@@ -290,6 +306,10 @@ class TestAgentAbBenchmark(unittest.TestCase):
             self.assertEqual(model["observed_discordance_rate"], 0.1)
             self.assertGreater(model["discordance_rate"], 0.1)
             self.assertGreater(model["baseline_success_rate_interval"]["upper"], 0.05)
+            self.assertEqual(
+                model["baseline_success_rate_interval"]["confidence"],
+                1.0 - pilot_bound_alpha,
+            )
             self.assertAlmostEqual(
                 benchmark_agent_ab._scenario_discordance(model, 0.1),
                 model["discordance_rate"],
@@ -297,6 +317,32 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertTrue(all(
             rate > 0.1 for rate in default_scenario["discordance_rates"].values()
         ))
+        self.assertEqual(
+            [case["effect"] for case in default_scenario["paired_model_cases"]],
+            [0.1, -0.1],
+        )
+        positive, negative = default_scenario["paired_model_cases"]
+        task_index = 0
+        self.assertGreater(positive["baseline_success_rates"][task_index], 0.05)
+        self.assertGreater(positive["discordance_rates"][task_index], 0.1)
+        self.assertGreater(negative["discordance_rates"][task_index], 0.1)
+
+    def test_infeasible_pilot_baseline_uses_conservative_directional_fallback(self):
+        cases = benchmark_agent_ab._scenario_model_cases(
+            {
+                "task": {
+                    "baseline_success_rate": 0.95,
+                    "baseline_success_rate_interval": {"lower": 0.90, "upper": 0.99},
+                    "discordance_rate": 0.99,
+                },
+            },
+            ["task"],
+            0.2,
+        )
+        self.assertEqual(cases[0]["baseline_source_by_task"]["task"], "conservative-fallback-no-feasible-baseline")
+        self.assertEqual(cases[0]["baseline_success_rates"], [0.5])
+        self.assertAlmostEqual(cases[0]["discordance_rates"][0], 0.8)
+        self.assertEqual(cases[1]["baseline_source_by_task"]["task"], "exact-baseline-interval")
 
     def test_adequate_pilot_tasks_keep_bootstrap_when_another_task_is_small(self):
         schedule, payload = _scored_records_payload(repetitions=20)
@@ -570,7 +616,21 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertNotIn("line 32", json.dumps(summary))
 
     def test_agent_ab_report_renders_new_and_legacy_summaries(self):
-        schedule, payload = _scored_records_payload()
+        report_design = {
+            "schema_version": 3,
+            "selected_repetitions": 20,
+            "scenario_matrix": [{
+                "effect_pp": 10,
+                "target_power": 0.8,
+                "repetitions_per_task_and_mode": 20,
+                "expected_paired_score_ci95_half_width_pp": None,
+                "invocations_per_variant": 160,
+                "estimated_runtime_seconds_per_variant": None,
+                "estimated_input_tokens_per_variant": None,
+                "estimated_output_tokens_per_variant": None,
+            }],
+        }
+        schedule, payload = _scored_records_payload(design=report_design)
         targeted_mcp = sorted(
             (
                 record for record in payload["runs"]
@@ -651,6 +711,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         def summary(status):
             return {
                 "statistical_design": {
+                    "schema_version": 4,
                     "selected_repetitions": 900,
                     "pilot_evidence_source": "conservative-maximum-discordance",
                     "pilot_required": True,
@@ -696,6 +757,25 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertIn("Validated minimum power (adjusted lower bound)", report)
         self.assertIn("| resolved | 10 pp | 80.0% | 90.0% (LB 82.0%) | 900 | 6.2 | 7200 | n/a | n/a | n/a |", report)
         self.assertIn("Provider token estimates remain unavailable", report)
+
+    def test_legacy_design_power_is_not_rendered_as_validated(self):
+        summary = {
+            "statistical_design": {
+                "schema_version": 3,
+                "scenario_matrix": [{
+                    "effect_pp": 10,
+                    "target_power": 0.8,
+                    "simulated_power_by_task": {"task": 0.95},
+                    "power_lower_bound_by_task": {"task": 0.91},
+                    "repetitions_per_task_and_mode": 900,
+                    "expected_paired_score_ci95_half_width_pp": 6.2,
+                    "invocations_per_variant": 7200,
+                }],
+            },
+        }
+        report = render_agent_ab_sections([("legacy-design", summary)])
+        self.assertIn("| legacy-design | 10 pp | 80.0% | n/a | 900 | 6.2 | 7200 |", report)
+        self.assertNotIn("95.0% (LB 91.0%)", report)
 
     def test_legacy_v6_records_keep_criterion_results_unavailable(self):
         schedule, payload = _legacy_v6_records_payload()
@@ -779,6 +859,15 @@ class TestAgentAbBenchmark(unittest.TestCase):
         schedule, payload = _records_payload()
         for field in ("embedding_mode", "embedding_model", "embedding_cache"):
             del payload["protocol"][field]
+        self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
+
+    def test_current_records_require_resume_protocol_identity(self):
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        del payload["protocol"]["timeout_seconds"]
+        with self.assertRaisesRegex(ValueError, "requires timeout_seconds"):
+            validate_records(payload, schedule)
+
+        payload["records_schema_version"] = 10
         self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
 
     def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):

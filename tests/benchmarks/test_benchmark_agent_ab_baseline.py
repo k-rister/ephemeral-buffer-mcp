@@ -45,6 +45,8 @@ def summary_fixture():
             "environment": "test", "reset_policy": "fresh-copy-per-run", "agent_adapter": "codex-cli",
             "embedding_mode": "test", "embedding_model": "deterministic-test",
             "embedding_cache": "not-applicable",
+            "timeout_seconds": 10, "effective_sandbox": "read-only",
+            "mcp_launch_fingerprint": "sha256:" + "0" * 64,
         }, "schedule": schedule, "runs": runs,
     }
     return summarize_records(payload, schedule)

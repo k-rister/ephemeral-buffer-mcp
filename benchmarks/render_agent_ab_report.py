@@ -140,9 +140,15 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
         for scenario in scenarios:
             powers = scenario.get("simulated_power_by_task", {})
             lower_bounds = scenario.get("power_lower_bound_by_task", {})
+            design_version = design.get("schema_version") if isinstance(design, dict) else None
+            power_is_validated = (
+                isinstance(design_version, int)
+                and not isinstance(design_version, bool)
+                and design_version >= 4
+            )
             simulated_power = (
                 f"{min(powers.values()) * 100:.1f}% (LB {min(lower_bounds.values()) * 100:.1f}%)"
-                if powers and lower_bounds else "n/a"
+                if power_is_validated and powers and lower_bounds else "n/a"
             )
             lines.append(
                 f"| {revision} | {scenario.get('effect_pp', 'n/a')} pp | "
