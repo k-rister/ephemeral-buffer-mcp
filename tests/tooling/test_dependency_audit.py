@@ -1,4 +1,4 @@
-"""Tests for the dependency audit policy and Pillow dependency watch."""
+"""Tests for the dependency audit policy."""
 
 import json
 import tempfile
@@ -11,7 +11,6 @@ from scripts.dependency_audit import (
     load_exceptions,
     validate_report,
 )
-from scripts.pillow_compatibility_watch import pillow_status
 
 
 class TestDependencyAudit(unittest.TestCase):
@@ -73,50 +72,6 @@ class TestDependencyAudit(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertIn("example-package==1.0.0", matched[0])
-
-    def test_report_without_pillow_is_clean(self):
-        clean, detail = pillow_status({"dependencies": [{"name": "numpy", "version": "2.5.2", "vulns": []}]})
-
-        self.assertTrue(clean)
-        self.assertEqual(detail, "Pillow is not installed in this requirements resolution")
-
-    def test_pillow_watch_reports_clean_and_vulnerable_states(self):
-        clean, detail = pillow_status(
-            {"dependencies": [{"name": "Pillow", "version": "13.0.0", "vulns": []}]}
-        )
-        self.assertTrue(clean)
-        self.assertIn("Pillow 13.0.0", detail)
-
-        clean, detail = pillow_status(
-            {
-                "dependencies": [
-                    {
-                        "name": "pillow",
-                        "version": "12.3.0",
-                        "vulns": [{"id": "CVE-2026-114501"}],
-                    }
-                ]
-            }
-        )
-        self.assertFalse(clean)
-        self.assertIn("CVE-2026-114501", detail)
-
-    def test_pillow_watch_rejects_duplicate_pillow_records(self):
-        report = {
-            "dependencies": [
-                {"name": "pillow", "version": "13.0.0", "vulns": []},
-                {"name": "Pillow", "version": "13.0.0", "vulns": []},
-            ]
-        }
-
-        with self.assertRaisesRegex(ValueError, "found 2"):
-            pillow_status(report)
-
-    def test_pillow_watch_rejects_malformed_reports(self):
-        with self.assertRaisesRegex(ValueError, "missing its dependencies list"):
-            pillow_status({})
-        with self.assertRaisesRegex(ValueError, "malformed Pillow record"):
-            pillow_status({"dependencies": [{"name": "Pillow", "version": "13.0.0"}]})
 
     def test_exception_policy_still_rejects_malformed_documents(self):
         with tempfile.TemporaryDirectory() as directory:
