@@ -113,7 +113,10 @@ class TestCodexAgentRunner(unittest.TestCase):
     def test_repository_location_regression_rejects_unrelated_correct_number(self):
         criteria = build_repository_manifest()["tasks"]["targeted-inspection"]["success_criteria"]
         answer = "TARGETED_SIGNAL appears in src/packet_parser/parser.py:99. See README.md:12 for background."
-        self.assertEqual(run_codex_agent_ab._criterion_passes(answer, criteria), [True, True, False])
+        self.assertEqual(
+            run_codex_agent_ab._criterion_passes(answer, criteria),
+            [True, True, False, False],
+        )
         self.assertFalse(_task_success(answer, criteria))
 
     def test_source_location_manifest_validation_and_normalization(self):
