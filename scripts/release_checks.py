@@ -92,7 +92,7 @@ def validate_distribution_metadata(
     semantic_extra = core.get("optional-dependencies", {}).get("semantic", [])
     expected_semantic_extra = {
         "filelock>=4.2.1,<5",
-        "huggingface-hub>=0.20,<2",
+        "huggingface-hub>=0.20,<3",
         "numpy>=1.24.0",
         "onnxruntime>=1.17,<2",
         "tokenizers>=0.15,<1",
