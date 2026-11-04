@@ -9,6 +9,7 @@ export PYTHONPATH="$project_dir/src:$project_dir${PYTHONPATH:+:$PYTHONPATH}"
 python_bin="${PYTHON_BIN:-$project_dir/.venv/bin/python}"
 model="${AGENT_AB_MODEL:-gpt-5.6-luna}"
 repetitions="${AGENT_AB_REPETITIONS:-}"
+powered="${AGENT_AB_POWERED:-0}"
 seed="${AGENT_AB_SEED:-20260909}"
 timeout_seconds="${AGENT_AB_TIMEOUT_SECONDS:-900}"
 fixture_profile="${AGENT_AB_FIXTURE_PROFILE:-synthetic-eb-heavy-v1}"
@@ -38,6 +39,18 @@ if [[ "$test_embeddings" != "0" && "$test_embeddings" != "1" ]]; then
     echo "AGENT_AB_TEST_EMBEDDINGS must be 0 or 1" >&2
     exit 2
 fi
+if [[ "$powered" != "0" && "$powered" != "1" ]]; then
+    echo "AGENT_AB_POWERED must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$powered" == "1" && -n "${AGENT_AB_REPETITIONS+x}" ]]; then
+    echo "AGENT_AB_POWERED=1 cannot be combined with AGENT_AB_REPETITIONS" >&2
+    exit 2
+fi
+if [[ -n "$repetitions" && ! "$repetitions" =~ ^[1-9][0-9]*$ ]]; then
+    echo "AGENT_AB_REPETITIONS must be a positive integer" >&2
+    exit 2
+fi
 
 if ! CODEX_HOME="$CODEX_HOME" codex login status >/dev/null 2>&1; then
     echo "codex CLI is not logged in (CODEX_HOME=$CODEX_HOME)" >&2
@@ -50,10 +63,14 @@ mkdir -p "$run_dir"
 
 # Experiment group and metadata recorded in both workload result documents so
 # list_workload_results.py and compare_workload_results.py can organise runs.
+workload_size="${repetitions:-5}"
+if [[ "$powered" == "1" ]]; then
+    workload_size="powered"
+fi
 experiment_args=(
     --metadata "model=$model"
     --metadata "task_type=$fixture_profile"
-    --metadata "workload_size=${repetitions:-powered-default}"
+    --metadata "workload_size=$workload_size"
     --metadata "environment=$([[ "$test_embeddings" == "1" ]] && echo test-embeddings || echo onnx)"
     --metadata "started_at=$started_at"
 )
@@ -82,6 +99,9 @@ schedule_args=(
 )
 if [[ -n "$repetitions" ]]; then
     schedule_args+=(--repetitions "$repetitions")
+fi
+if [[ "$powered" == "1" ]]; then
+    schedule_args+=(--powered)
 fi
 if [[ -n "${AGENT_AB_PILOT_RECORDS:-}" ]]; then
     schedule_args+=(--pilot-records "$AGENT_AB_PILOT_RECORDS")

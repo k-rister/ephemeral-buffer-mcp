@@ -247,6 +247,25 @@ class TestReleaseBenchmarkTimeoutRunner(unittest.TestCase):
 
 
 class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
+    def test_powered_release_option_rejects_both_count_overrides_before_collection(self):
+        for option in ("--repetitions", "--agent-ab-repetitions"):
+            with self.subTest(option=option):
+                result = subprocess.run(
+                    [
+                        "bash", str(RELEASE_BENCHMARK_SCRIPT),
+                        "--baseline-ref", "unused-ref",
+                        "--model", "test-model",
+                        "--agent-ab-powered",
+                        option, "2",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("cannot be combined", result.stderr)
+
     def test_timeout_is_recorded_and_collection_continues_without_changing_agent_timeout(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -260,9 +279,11 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
             (benchmarks / "__init__.py").write_text("", encoding="utf-8")
             (benchmarks / "benchmark_agent_ab.py").write_text(
-                "import json, sys\n"
+                "import json, os, sys\n"
                 "if '--schedule-output' in sys.argv:\n"
                 "    path = sys.argv[sys.argv.index('--schedule-output') + 1]\n"
+                "    with open(os.environ['RELEASE_TEST_SCHEDULE_ARGS_LOG'], 'a', encoding='utf-8') as stream:\n"
+                "        stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
                 "    with open(path, 'w', encoding='utf-8') as stream:\n"
                 "        json.dump({'repetitions': 1, 'stage_schedule': [{'percent': 100, 'repetitions': 1, 'alpha_spending': 0.05}]}, stream)\n"
                 "elif '--records' in sys.argv:\n"
@@ -310,6 +331,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                     "CODEX_HOME": str(codex_home),
                     "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                     "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
+                    "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(root / "schedule-args.jsonl"),
                 }
             )
 
@@ -330,7 +352,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                     "--repetitions",
                     "1",
                     "--agent-ab-repetitions",
-                    "1",
+                    "2",
                     "--agent-timeout",
                     "37",
                     "--benchmark-timeout",
@@ -358,6 +380,13 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             manifest = json.loads((output_directory / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["configuration"]["benchmark_timeout_seconds"], 1)
             self.assertEqual(manifest["configuration"]["agent_timeout_seconds"], 37)
+            schedule_calls = [
+                json.loads(line)
+                for line in (root / "schedule-args.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            for schedule_args in schedule_calls:
+                repetition_index = schedule_args.index("--repetitions")
+                self.assertEqual(schedule_args[repetition_index + 1], "2")
 
             agent_invocations = [
                 json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
@@ -388,10 +417,16 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 "if '--schedule-output' in args:\n"
                 "    path = pathlib.Path(args[args.index('--schedule-output') + 1])\n"
-                "    schedule = {'repetitions': 3, 'stage_schedule': [\n"
-                "        {'percent': 33, 'repetitions': 1, 'alpha_spending': 0.01, 'cumulative_alpha': 0.01},\n"
-                "        {'percent': 67, 'repetitions': 2, 'alpha_spending': 0.01, 'cumulative_alpha': 0.02},\n"
-                "        {'percent': 100, 'repetitions': 3, 'alpha_spending': 0.03, 'cumulative_alpha': 0.05}] }\n"
+                "    if '--powered' in args:\n"
+                "        schedule = {'repetitions': 3, 'stage_schedule': [\n"
+                "            {'percent': 33, 'repetitions': 1, 'alpha_spending': 0.01, 'cumulative_alpha': 0.01},\n"
+                "            {'percent': 67, 'repetitions': 2, 'alpha_spending': 0.01, 'cumulative_alpha': 0.02},\n"
+                "            {'percent': 100, 'repetitions': 3, 'alpha_spending': 0.03, 'cumulative_alpha': 0.05}] }\n"
+                "    else:\n"
+                "        schedule = {'repetitions': 5, 'stage_schedule': [\n"
+                "            {'percent': 100, 'repetitions': 5, 'alpha_spending': 0.05, 'cumulative_alpha': 0.05}]}\n"
+                "    with open(__import__('os').environ['RELEASE_TEST_SCHEDULE_ARGS_LOG'], 'a', encoding='utf-8') as stream:\n"
+                "        stream.write(json.dumps(args) + '\\n')\n"
                 "    path.parent.mkdir(parents=True, exist_ok=True)\n"
                 "    path.write_text(json.dumps(schedule), encoding='utf-8')\n"
                 "else:\n"
@@ -413,7 +448,8 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "variant = next(value.split('=', 1)[1] for value in args if value.startswith('variant='))\n"
                 "count = int(args[args.index('--max-repetitions') + 1])\n"
                 "with open(os.environ['RELEASE_TEST_AGENT_ARGS_LOG'], 'a', encoding='utf-8') as stream:\n"
-                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args}) + '\\n')\n"
+                "    output = pathlib.Path(args[args.index('--output') + 1])\n"
+                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args, 'output': str(output)}) + '\\n')\n"
                 "if variant == 'baseline' and count == 1:\n"
                 "    raise SystemExit(0)\n"
                 "output = pathlib.Path(args[args.index('--output') + 1])\n"
@@ -445,6 +481,125 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "CODEX_HOME": str(codex_home),
                 "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                 "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
+                "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(root / "schedule-args.jsonl"),
+            })
+            result = subprocess.run(
+                [
+                    "bash", str(scripts / RELEASE_BENCHMARK_SCRIPT.name),
+                    "--baseline-ref", baseline_revision,
+                    "--model", "test-model",
+                    "--output-dir", str(output_directory),
+                    "--agent-ab-only",
+                    "--agent-ab-powered",
+                    "--agent-timeout", "10",
+                    "--benchmark-timeout", "10",
+                ],
+                cwd=repository,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertNotIn("FileNotFoundError", result.stderr)
+            invocations = [
+                json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
+            ]
+            powered_invocations = [item for item in invocations if str(output_directory) in item["output"]]
+            self.assertEqual(len(powered_invocations), 4)
+            stage_two = [item for item in powered_invocations if item["count"] == 2]
+            self.assertEqual(
+                {item["variant"]: item["resume"] for item in stage_two},
+                {"baseline": False, "candidate": True},
+            )
+            self.assertTrue((output_directory / "agent-ab/candidate/summary.json").is_file())
+            self.assertFalse((output_directory / "agent-ab/baseline/summary.stage-1.json").exists())
+            statuses = (output_directory / "STATUS.tsv").read_text(encoding="utf-8")
+            self.assertIn("summarize-agent-ab-baseline-stage-2", statuses)
+            self.assertIn("summarize-agent-ab-candidate-stage-2", statuses)
+            self.assertIn("validate-agent-ab-baseline-stage-2", statuses)
+            manifest = json.loads((output_directory / "manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue(manifest["configuration"]["agent_ab_powered"])
+
+    def test_release_collector_defaults_to_five_exploratory_repetitions(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            scripts = repository / "scripts"
+            benchmarks = repository / "benchmarks"
+            data = benchmarks / "data"
+            scripts.mkdir(parents=True)
+            data.mkdir(parents=True)
+            shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
+            shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
+            (benchmarks / "__init__.py").write_text("", encoding="utf-8")
+            (benchmarks / "benchmark_agent_ab.py").write_text(
+                "import json, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--schedule-output' in args:\n"
+                "    schedule_path = pathlib.Path(args[args.index('--schedule-output') + 1])\n"
+                "    with open(__import__('os').environ['RELEASE_TEST_SCHEDULE_ARGS_LOG'], 'a', encoding='utf-8') as log:\n"
+                "        log.write(json.dumps(args) + '\\n')\n"
+                "    schedule_path.write_text(json.dumps({'repetitions': 5, 'stage_schedule': [{'percent': 100, 'repetitions': 5}]}), encoding='utf-8')\n"
+                "else:\n"
+                "    output_path = pathlib.Path(args[args.index('--output') + 1])\n"
+                "    output_path.write_text(json.dumps({'statistical_adequacy': {'continue': False}}), encoding='utf-8')\n"
+                "    if '--result' in args:\n"
+                "        pathlib.Path(args[args.index('--result') + 1]).write_text('{}', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (benchmarks / "benchmark_agent_ab_fixtures.py").write_text(
+                "import pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "pathlib.Path(args[args.index('--fixture-output') + 1]).mkdir(parents=True, exist_ok=True)\n"
+                "pathlib.Path(args[args.index('--manifest-output') + 1]).write_text('{}', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (benchmarks / "run_codex_agent_ab.py").write_text(
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "count = int(args[args.index('--max-repetitions') + 1])\n"
+                "with open(os.environ['RELEASE_TEST_AGENT_ARGS_LOG'], 'a', encoding='utf-8') as log:\n"
+                "    log.write(json.dumps({'count': count, 'output': args[args.index('--output') + 1]}) + '\\n')\n"
+                "output = pathlib.Path(args[args.index('--output') + 1])\n"
+                "output.write_text('{}', encoding='utf-8')\n"
+                "pathlib.Path(args[args.index('--result') + 1]).write_text('{}', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (benchmarks / "render_agent_ab_report.py").write_text(
+                "import pathlib, sys\n"
+                "output = pathlib.Path(sys.argv[3])\n"
+                "output.write_text('stub report', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (data / "benchmark_baseline.json").write_text("{}\n", encoding="utf-8")
+
+            _git(repository, "init", "--quiet")
+            _git(repository, "config", "user.name", "Release benchmark test")
+            _git(repository, "config", "user.email", "release-test@example.invalid")
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "fixture")
+            baseline_revision = _git(repository, "rev-parse", "HEAD")
+
+            codex_home = root / "codex-home"
+            binary_directory = root / "bin"
+            codex_home.mkdir()
+            binary_directory.mkdir()
+            fake_codex = binary_directory / "codex"
+            fake_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_codex.chmod(0o700)
+            schedule_log = root / "schedule-args.jsonl"
+            agent_log = root / "agent-args.jsonl"
+            output_directory = root / "bundle"
+            environment = os.environ.copy()
+            environment.update({
+                "PYTHON_BIN": sys.executable,
+                "CODEX_HOME": str(codex_home),
+                "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
+                "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(schedule_log),
+                "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_log),
             })
             result = subprocess.run(
                 [
@@ -464,23 +619,18 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 timeout=30,
             )
 
-            self.assertEqual(result.returncode, 1, result.stderr)
-            self.assertNotIn("FileNotFoundError", result.stderr)
-            invocations = [
-                json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
-            ]
-            self.assertEqual(len(invocations), 4)
-            stage_two = [item for item in invocations if item["count"] == 2]
-            self.assertEqual(
-                {item["variant"]: item["resume"] for item in stage_two},
-                {"baseline": False, "candidate": True},
-            )
-            self.assertTrue((output_directory / "agent-ab/candidate/summary.json").is_file())
-            self.assertFalse((output_directory / "agent-ab/baseline/summary.stage-1.json").exists())
-            statuses = (output_directory / "STATUS.tsv").read_text(encoding="utf-8")
-            self.assertIn("summarize-agent-ab-baseline-stage-2", statuses)
-            self.assertIn("summarize-agent-ab-candidate-stage-2", statuses)
-            self.assertIn("validate-agent-ab-baseline-stage-2", statuses)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            schedule_args = json.loads(schedule_log.read_text(encoding="utf-8").splitlines()[0])
+            self.assertNotIn("--powered", schedule_args)
+            self.assertNotIn("--repetitions", schedule_args)
+            schedule = json.loads((output_directory / "agent-ab" / "schedule.json").read_text(encoding="utf-8"))
+            self.assertEqual(schedule["repetitions"], 5)
+            self.assertEqual(schedule["stage_schedule"], [{"percent": 100, "repetitions": 5}])
+            invocations = [json.loads(line) for line in agent_log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([item["count"] for item in invocations], [5, 5])
+            manifest = json.loads((output_directory / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["configuration"]["agent_ab_repetitions"], 5)
+            self.assertFalse(manifest["configuration"]["agent_ab_powered"])
 
 
 if __name__ == "__main__":

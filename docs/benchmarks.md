@@ -343,14 +343,18 @@ repeat the evaluation with representative agent tasks before generalizing the
 results.
 
 For an end-to-end coding-agent evaluation, generate a counterbalanced,
-privacy-safe schedule:
+privacy-safe schedule. By default, it uses five repetitions per task and mode,
+runs in one shot, and is labeled exploratory. Exploratory results do not carry
+the powered design's statistical guarantee, even when an explicit count equals
+or exceeds the powered design. Add `--powered` to opt into the staged design;
+it cannot be combined with `--repetitions` or used with `--records`:
 ```bash
 .venv/bin/python -m benchmarks.benchmark_agent_ab \
-  --schedule-output agent-ab-schedule.json --seed 20260909 \
+  --schedule-output agent-ab-schedule.json --powered --seed 20260909 \
   --model-config gpt-6-luna --repository-fixture synthetic-eb-heavy-v2
 ```
-When `--repetitions` is omitted, the A/B scheduler plans a design for an
-absolute 10 percentage-point task-success difference with 80% power. Its
+With `--powered`, the A/B scheduler plans a design for an absolute 10
+percentage-point task-success difference with 80% power. Its
 outcome model is paired binary data: each repetition runs the same task in both
 modes, then exact two-sided McNemar tests are adjusted across the four tasks
 with Holm's procedure. A simulated direction is detected only when the
@@ -649,12 +653,16 @@ response exposure cross-tabs against answer pass/fail. `criterion_hit` means
 the criterion matched in a successful response; `response_without_criterion_hit`
 means a successful response was returned without a criterion match. Criterion
 absence does not establish semantic irrelevance.
-`--agent-ab-only` skips the other benchmark sections;
-when both repetition options are omitted, the wrapper uses the powered A/B
-design. An explicit `--repetitions N` also sets the A/B count when
-`--agent-ab-repetitions` is omitted; either explicit override can still request
-a short exploratory run. Baseline and candidate records extend in matched
-stages, and completed pairs are skipped when the runner resumes.
+`--agent-ab-only` skips the other benchmark sections. The default A/B run uses
+five repetitions per task and mode, runs once, and is labeled exploratory; it
+does not carry the powered design's statistical guarantee. An explicit
+`--agent-ab-repetitions N` overrides `--repetitions N` for A/B, while an
+explicit `--repetitions N` supplies the A/B count when the A/B-specific option
+is omitted. Either count makes A/B exploratory, including counts at or above
+the powered design. Use `--agent-ab-powered` to request the staged powered
+design; it cannot be combined with either repetition option. Baseline and
+candidate records use the same schedule, and powered runs extend in matched
+stages while skipping completed pairs.
 Keep the generated schedule unchanged across stages; an in-progress run using
 an earlier statistical design must finish with that schedule or restart under
 the current design.
@@ -685,19 +693,24 @@ tooling. Its test and build commands inspect that layout while producing
 deterministic noisy signals. It is still synthetic and privacy-safe; it does
 not contain a production repository or user data.
 
-Run the staged powered Codex A/B evaluation with the repository script. The
-default is 1,419 repetitions per task and mode under the least-favorable model above.
+The repository script defaults to five repetitions per task and mode. This
+one-shot run is exploratory and does not carry the powered design's statistical
+guarantee. To run the staged powered Codex A/B evaluation, set
+`AGENT_AB_POWERED=1`; it cannot be combined with `AGENT_AB_REPETITIONS`. The
+current default powered design is 1,419 repetitions per task and mode under
+the least-favorable model above, so it makes substantially more Codex calls.
 The script looks at 50%, 75%, and 100% of that design, applying Holm correction
 within tasks at local alpha-spending increments of 0.005, 0.015, and 0.030
 (cumulative family alpha 0.005, 0.020, and 0.050). It continues while adjusted
 intervals neither establish a direction nor fit inside the ±10-point practical
 range. At the cap, unresolved outcomes are
-reported as **powered but inconclusive**. A short explicit
-`AGENT_AB_REPETITIONS` value runs once and is labeled **exploratory**. Set
+reported as **powered but inconclusive**. An explicit
+`AGENT_AB_REPETITIONS` value selects a one-shot exploratory run regardless of
+whether it is below, equal to, or above the powered count. Set
 `--max-repetitions` only to one of the schedule's planned look counts; arbitrary
 interim caps are rejected so an alpha allocation cannot be reused. A zero cap
 is invalid. Explicit repetition schedules cannot be resumed to a larger count;
-use the automatically generated staged schedule when later looks may be needed.
+use `AGENT_AB_POWERED=1` when later looks may be needed.
 Resume also requires the same timeout, effective sandbox, and MCP launch
 configuration. The MCP launch settings are represented in records by a
 privacy-safe fingerprint; configured paths and environment values are not
@@ -712,6 +725,7 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 ```
 
 Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
+`AGENT_AB_POWERED=1`,
 `AGENT_AB_SEED`, `AGENT_AB_TIMEOUT_SECONDS`, or `AGENT_AB_TEST_EMBEDDINGS` to
 repeat a different experiment. The script also writes
 `records.result.json` and `summary.result.json` in the common workload result

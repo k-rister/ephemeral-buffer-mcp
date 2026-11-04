@@ -14,6 +14,7 @@ agent_ab_repetitions=""
 agent_ab_pilot_records=""
 agent_ab_pilot_schedule=""
 agent_ab_only=0
+agent_ab_powered=0
 repetitions_explicit=0
 agent_ab_repetitions_explicit=0
 seed=20261006
@@ -31,7 +32,8 @@ Options:
   --samples N                Latency, prefetch, routing, and warm-up samples (default: 5)
   --semantic-samples N       Semantic-index samples per size (default: 3)
   --repetitions N            Effectiveness repetitions (default: 5)
-  --agent-ab-repetitions N   Agent A/B repetitions (default: powered A/B design; an explicit --repetitions also applies)
+  --agent-ab-repetitions N   Agent A/B exploratory repetitions (default: 5; an explicit --repetitions also applies)
+  --agent-ab-powered         Use the powered staged A/B design (conflicts with either repetition option)
   --agent-ab-pilot-records PATH Current fixture/rubric-v4 paired pilot records
   --agent-ab-pilot-schedule PATH Schedule for pilot records when not embedded
   --agent-ab-only            Skip non-agent benchmarks and comparisons
@@ -54,6 +56,7 @@ while (($#)); do
         --semantic-samples) semantic_samples="${2:?missing value for --semantic-samples}"; shift 2 ;;
         --repetitions) repetitions="${2:?missing value for --repetitions}"; repetitions_explicit=1; shift 2 ;;
         --agent-ab-repetitions) agent_ab_repetitions="${2:?missing value for --agent-ab-repetitions}"; agent_ab_repetitions_explicit=1; shift 2 ;;
+        --agent-ab-powered) agent_ab_powered=1; shift ;;
         --agent-ab-pilot-records) agent_ab_pilot_records="${2:?missing value for --agent-ab-pilot-records}"; shift 2 ;;
         --agent-ab-pilot-schedule) agent_ab_pilot_schedule="${2:?missing value for --agent-ab-pilot-schedule}"; shift 2 ;;
         --agent-ab-only) agent_ab_only=1; shift ;;
@@ -72,6 +75,10 @@ if [[ -z "$baseline_ref" || -z "$model" || "$model" == "your-fixed-model" ]]; th
 fi
 if [[ -n "$agent_ab_pilot_schedule" && -z "$agent_ab_pilot_records" ]]; then
     echo "--agent-ab-pilot-schedule requires --agent-ab-pilot-records" >&2
+    exit 2
+fi
+if ((agent_ab_powered == 1 && (repetitions_explicit == 1 || agent_ab_repetitions_explicit == 1))); then
+    echo "--agent-ab-powered cannot be combined with --repetitions or --agent-ab-repetitions" >&2
     exit 2
 fi
 if ((agent_ab_repetitions_explicit == 0 && repetitions_explicit == 1)); then
@@ -373,6 +380,9 @@ schedule_args=(
 if [[ -n "$agent_ab_repetitions" ]]; then
     schedule_args+=(--repetitions "$agent_ab_repetitions")
 fi
+if ((agent_ab_powered == 1)); then
+    schedule_args+=(--powered)
+fi
 if [[ -n "$agent_ab_pilot_records" ]]; then
     schedule_args+=(--pilot-records "$agent_ab_pilot_records")
     if [[ -n "$agent_ab_pilot_schedule" ]]; then
@@ -504,6 +514,7 @@ if ! RELEASE_BENCHMARK_BASELINE_REF="$baseline_ref" \
     RELEASE_BENCHMARK_SEMANTIC_SAMPLES="$semantic_samples" \
     RELEASE_BENCHMARK_REPETITIONS="$repetitions" \
     RELEASE_BENCHMARK_AGENT_AB_REPETITIONS="$agent_ab_repetitions" \
+    RELEASE_BENCHMARK_AGENT_AB_POWERED="$agent_ab_powered" \
     RELEASE_BENCHMARK_AGENT_AB_ONLY="$agent_ab_only" \
     RELEASE_BENCHMARK_SEED="$seed" \
     RELEASE_BENCHMARK_AGENT_TIMEOUT="$agent_timeout" \
@@ -542,6 +553,7 @@ manifest = {
         "semantic_index_samples": int(os.environ["RELEASE_BENCHMARK_SEMANTIC_SAMPLES"]),
         "repetitions": int(os.environ["RELEASE_BENCHMARK_REPETITIONS"]),
         "agent_ab_repetitions": int(os.environ["RELEASE_BENCHMARK_AGENT_AB_REPETITIONS"]),
+        "agent_ab_powered": os.environ["RELEASE_BENCHMARK_AGENT_AB_POWERED"] == "1",
         "agent_ab_only": os.environ["RELEASE_BENCHMARK_AGENT_AB_ONLY"] == "1",
         "seed": int(os.environ["RELEASE_BENCHMARK_SEED"]),
         "agent_timeout_seconds": int(os.environ["RELEASE_BENCHMARK_AGENT_TIMEOUT"]),
@@ -575,12 +587,16 @@ then
     printf 'Failed to write manifest.json.\n' >&2
 fi
 
+agent_ab_mode="exploratory-one-shot"
+if ((agent_ab_powered)); then
+    agent_ab_mode="powered-staged"
+fi
 {
     printf '# Release benchmark bundle\n\n'
     printf '%s\n' "- Baseline: \`$baseline_ref\` (\`${baseline_revision:0:12}\`)"
     printf '%s\n' "- Candidate: \`${candidate_revision:0:12}\`"
     printf '%s\n' "- Model: \`$model\`"
-    printf '%s\n' "- Repetitions: effectiveness=$repetitions; agent A/B=$agent_ab_repetitions; seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
+    printf '%s\n' "- Repetitions: effectiveness=$repetitions; agent A/B=$agent_ab_repetitions ($agent_ab_mode); seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
     printf '%s\n' "- Timeouts: local benchmark=${benchmark_timeout}s (5s cleanup grace); agent A/B=${agent_timeout}s per task"
     if ((agent_ab_only)); then
         printf '%s\n' '- Scope: agent A/B only; other local benchmarks and comparisons were skipped.'
