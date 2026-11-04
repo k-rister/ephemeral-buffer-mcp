@@ -24,11 +24,16 @@ from benchmarks.agent_ab_statistics import (
 
 
 SCHEMA_VERSION = 2
-SUMMARY_SCHEMA_VERSION = 5
-RECORDS_SCHEMA_VERSION = 11
+SUMMARY_SCHEMA_VERSION = 6
+RECORDS_SCHEMA_VERSION = 12
 TASK_FIXTURE_VERSION = 4
-TASK_RUBRIC_VERSION = 4
+TASK_RUBRIC_VERSION = 6
 MODES = ("control", "mcp")
+LINE_REFERENCE_DIAGNOSTIC_CATEGORIES = (
+    "recognized_reference",
+    "expected_number_present_unrecognized_format",
+    "expected_number_absent",
+)
 DEFAULT_AGENT_AB_SEED = 20260909
 DEFAULT_DESIGN_SEED = 20261031
 DEFAULT_POWER_SIMULATIONS = 1000
@@ -95,6 +100,9 @@ RUN_KEYS_V8 = RUN_KEYS_V7 | {
     "get_capture_slice_responses",
 }
 RUN_KEYS_V9 = RUN_KEYS_V8
+RUN_KEYS_V10 = RUN_KEYS_V9
+RUN_KEYS_V11 = RUN_KEYS_V10
+RUN_KEYS_V12 = RUN_KEYS_V11 | {"line_reference_diagnostics"}
 METRICS = (
     "completed",
     "task_success",
@@ -198,7 +206,7 @@ def _bootstrap_model_inputs(
         or schedule.get("task_rubric_version", TASK_RUBRIC_VERSION) != TASK_RUBRIC_VERSION
         or payload.get("records_schema_version", 1) < 6
     ):
-        raise ValueError("power pilot records must contain current fixture-v4/rubric-v4 paired task-success outcomes")
+        raise ValueError("power pilot records must contain current fixture-v4/rubric-v6 paired task-success outcomes")
     _resolve_pilot_identity(
         payload,
         schedule,
@@ -752,11 +760,19 @@ def validate_records(
     if records_schema_version not in range(1, RECORDS_SCHEMA_VERSION + 1):
         raise ValueError("records schema version is unsupported")
     _validate_protocol(payload.get("protocol"), records_schema_version)
-    if records_schema_version >= 10 and (
-        payload_rubric != TASK_RUBRIC_VERSION
-        or schedule_rubric != TASK_RUBRIC_VERSION
+    if records_schema_version >= 12 and (
+        payload.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or payload_rubric not in (5, TASK_RUBRIC_VERSION)
+        or schedule_rubric not in (5, TASK_RUBRIC_VERSION)
     ):
-        raise ValueError("current records require matching fixture-v4/rubric-v4 metadata")
+        raise ValueError(
+            "records schema version 12 requires matching fixture-v4/rubric-v5 or rubric-v6 metadata"
+        )
+    if 10 <= records_schema_version <= 11 and (
+        payload_rubric != 4 or schedule_rubric != 4
+    ):
+        raise ValueError("records schema versions 10 and 11 require rubric-v4 metadata")
     run_keys = (
         RUN_KEYS
         if records_schema_version == 1
@@ -774,7 +790,9 @@ def validate_records(
         if records_schema_version == 7
         else RUN_KEYS_V8
         if records_schema_version == 8
-        else RUN_KEYS_V9
+        else RUN_KEYS_V12
+        if records_schema_version >= 12
+        else RUN_KEYS_V11
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
     runs = payload.get("runs")
@@ -782,6 +800,7 @@ def validate_records(
         raise ValueError("records runs must be a list")
     actual = {}
     criterion_counts_by_task: dict[str, int] = {}
+    criterion_diagnostic_indices_by_task: dict[str, list[int]] = {}
     for record in runs:
         if not isinstance(record, dict) or set(record) != run_keys:
             raise ValueError("each run must contain exactly the documented metadata fields")
@@ -812,6 +831,39 @@ def validate_records(
                 raise ValueError(f"criterion_passes length must be consistent for task: {record['task_id']}")
             if record["task_success"] and not all(criterion_passes):
                 raise ValueError(f"task_success requires every criterion to pass in run: {key}")
+        if records_schema_version >= 12:
+            diagnostics = record["line_reference_diagnostics"]
+            if not isinstance(diagnostics, list):
+                raise ValueError(f"line_reference_diagnostics must be a list in run: {key}")
+            diagnostic_indices = []
+            for diagnostic in diagnostics:
+                if not isinstance(diagnostic, dict) or set(diagnostic) != {"criterion_index", "category"}:
+                    raise ValueError(
+                        f"line-reference diagnostics may contain only criterion_index and category in run: {key}"
+                    )
+                criterion_index = diagnostic["criterion_index"]
+                category = diagnostic["category"]
+                if (
+                    isinstance(criterion_index, bool)
+                    or not isinstance(criterion_index, int)
+                    or not 1 <= criterion_index <= len(record["criterion_passes"])
+                ):
+                    raise ValueError(f"line-reference diagnostic criterion_index is invalid in run: {key}")
+                if (
+                    not isinstance(category, str)
+                    or category not in LINE_REFERENCE_DIAGNOSTIC_CATEGORIES
+                ):
+                    raise ValueError(f"line-reference diagnostic category is invalid in run: {key}")
+                diagnostic_indices.append(criterion_index)
+            if diagnostic_indices != sorted(set(diagnostic_indices)):
+                raise ValueError(f"line-reference diagnostic criterion indexes must be unique and ordered in run: {key}")
+            prior_indices = criterion_diagnostic_indices_by_task.setdefault(
+                record["task_id"], diagnostic_indices
+            )
+            if diagnostic_indices != prior_indices:
+                raise ValueError(
+                    f"line-reference diagnostic indexes must be consistent for task: {record['task_id']}"
+                )
         if records_schema_version >= 8:
             exposure_fields = (
                 "criterion_search_response_hits",
@@ -1397,6 +1449,51 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
                 "tasks": source_tasks,
             }
 
+    line_reference_diagnostics_by_mode = {
+        mode: {"available": False, "tasks": {}}
+        for mode in MODES
+    }
+    if records_schema_version >= 12:
+        line_reference_diagnostics_by_mode = {}
+        for mode in MODES:
+            mode_records = [record for record in runs if record["mode"] == mode]
+            task_summaries = {}
+            for task_id in sorted({record["task_id"] for record in mode_records}):
+                task_records = [
+                    record for record in mode_records if record["task_id"] == task_id
+                ]
+                criterion_indices = [
+                    diagnostic["criterion_index"]
+                    for diagnostic in task_records[0]["line_reference_diagnostics"]
+                ]
+                criteria = []
+                for criterion_index in criterion_indices:
+                    category_counts = {
+                        category: sum(
+                            diagnostic["category"] == category
+                            for record in task_records
+                            for diagnostic in record["line_reference_diagnostics"]
+                            if diagnostic["criterion_index"] == criterion_index
+                        )
+                        for category in LINE_REFERENCE_DIAGNOSTIC_CATEGORIES
+                    }
+                    criteria.append({
+                        "criterion_index": criterion_index,
+                        "count": len(task_records),
+                        "categories": {
+                            category: {
+                                "count": category_counts[category],
+                                "rate": category_counts[category] / len(task_records),
+                            }
+                            for category in LINE_REFERENCE_DIAGNOSTIC_CATEGORIES
+                        },
+                    })
+                task_summaries[task_id] = criteria
+            line_reference_diagnostics_by_mode[mode] = {
+                "available": True,
+                "tasks": task_summaries,
+            }
+
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
@@ -1474,8 +1571,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         "criterion_summaries_by_mode": criterion_summaries_by_mode,
         "paired_criterion_deltas_mcp_minus_control": paired_criterion_deltas,
         "criterion_exposure_summaries_by_mode": criterion_exposure_summaries_by_mode,
+        "line_reference_diagnostics_by_mode": line_reference_diagnostics_by_mode,
         "recommendations": recommendations,
-        "privacy": "summary contains aggregate metadata and task-scoped criterion indices only; raw prompts, criterion text, tool responses, commands, captures, transcripts, and user content are excluded",
+        "privacy": "summary contains aggregate metadata, task-scoped criterion indices, and fixed line-reference diagnostic categories only; raw prompts, criterion text, tool responses, commands, captures, transcripts, and user content are excluded",
     }
 
 
@@ -1637,7 +1735,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=DEFAULT_AGENT_AB_SEED)
     parser.add_argument("--model-config", help="Model identifier used to validate resumable stages")
     parser.add_argument("--repository-fixture", help="Fixture profile used to validate resumable stages")
-    parser.add_argument("--pilot-records", type=Path, help="Current fixture-v4/rubric-v4 records used to bootstrap paired outcomes")
+    parser.add_argument("--pilot-records", type=Path, help="Current fixture-v4/rubric-v6 records used to bootstrap paired outcomes")
     parser.add_argument("--pilot-schedule", type=Path, help="Schedule for --pilot-records when not embedded")
     parser.add_argument("--records", type=Path, help="Analyze an external metadata-only records envelope")
     parser.add_argument("--schedule", type=Path, help="Schedule JSON when it is not embedded in records")

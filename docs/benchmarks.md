@@ -372,7 +372,7 @@ Paired binary power depends on discordance, because concordant pairs do not
 contribute to McNemar's test ([paired binary sample size
 methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
 
-No raw current fixture-v4/rubric-v4 pilot records are checked in. Until a pilot
+No raw current fixture-v4/rubric-v6 pilot records are checked in. Until a pilot
 is supplied, the reproducible fallback uses fully discordant pairs (`d = 1`)
 and a direction-specific control baseline `(1 - delta) / 2` for signed effect
 `delta`. This feasible model centers the two marginal success rates and
@@ -399,8 +399,8 @@ direction also uses the full-discordance directional fallback.
 The model and repository fixture are derived from the pilot protocol, and
 optional identity flags must match it. Generated schedules bind those
 identities for runner validation.
-Fixture and rubric versions must match v4; historical rubric results are never
-pooled.
+Fixture version 4 and the current rubric version 6 must match; historical
+rubric results are never pooled.
 
 The scenario table uses design seed `20261031` and 1,000 independent power
 validation simulations per row. Its power targets use the final look's local
@@ -451,40 +451,44 @@ prompts, transcripts, commands, captures, or user content. Do not commit agent
 records or generated captures; share only the aggregate summary after privacy
 review.
 
-The Codex runner writes records schema v11. Resume checks bind to the timeout,
+The Codex runner writes records schema v12. Resume checks bind to the timeout,
 effective sandbox, and privacy-safe MCP launch fingerprint so a staged run
-cannot mix execution protocols. Schema-v10 records remain readable for
-summaries but cannot be resumed under v11.
+cannot mix execution protocols. Schema-v10 and schema-v11 records remain
+readable for summaries but cannot be resumed under v12.
 
 The repository includes a Codex CLI adapter for executing that protocol. It
 uses the requested model explicitly, creates a fresh fixture copy for every
 run, isolates control and MCP configuration, and writes metadata-only records.
-Create a private task manifest (do not commit it) with fixture and rubric
-version 4, a
+Create a private task manifest (do not commit it) with fixture version 4 and
+rubric version 6, a
 prompt, signal marker, and objective success criteria for each scheduled task.
 Use `required_phrases` for exact names and descriptions, and
-`required_line_numbers` for output lines without a required source file. Use
-`required_source_locations` for file-bound lines, for example
+`required_line_numbers` for command-output lines. Use
+`required_source_locations` for file-bound source lines, for example
 `[{"path": "src/parser.c", "line": 917}]`. A file-bound criterion accepts
 `src/parser.c:917`, `src/parser.c#L917`, `src/parser.c, line 917`,
 `line 917 of src/parser.c`, and adjacent ranges containing the required line.
 It does not combine a filename with a line reference belonging to another file.
+A task that asks for both a command-output line and a source-file line should
+include both criteria so the two line references are scored independently.
 Paths accept slash normalization, optional `./`, and absolute checkout prefixes;
 matching is case-insensitive and requires complete path components.
 An unbound line criterion accepts explicit forms such as `line 32`, `line number: 32`, `L32`,
 `src/parser.c:32`, and ranges such as `lines 32-35` that contain the required
-line:
+line. A reference number must be a whole integer token: `132` and `32.5` do not
+match the expected number `32`, and a grouped number such as `1,232` does not
+match the expected number `232`:
 
 ```json
 {
   "fixture_version": 4,
-  "rubric_version": 4,
+  "rubric_version": 6,
   "tasks": {
     "targeted-inspection": {
-      "prompt": "Inspect the fixture and report the marker and line number.",
+      "prompt": "Inspect the fixture and report the marker and command-output line in the format `line <number>`.",
       "signal_marker": "TARGETED_SIGNAL",
       "success_criteria": {
-        "description": "Report the signal and its correct output line.",
+        "description": "Report the signal and its correct command-output line number.",
         "required_phrases": ["TARGETED_SIGNAL"],
         "required_line_numbers": [32]
       }
@@ -561,7 +565,7 @@ task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 9. Version 7 added `criterion_passes`, ordered
+Runner records use version 12. Version 7 added `criterion_passes`, ordered
 booleans for the task's required answer criteria, including literal phrases and
 typed line numbers. Summary indexes are one-based and scoped to the task ID and
 fixture version. Criterion text and final answers are not stored. Empty or
@@ -571,7 +575,7 @@ invocation flag remains separate. Records include exit code, failure reason,
 MCP-specific tool-call count, provider-reported input/output token counts, and
 every provider usage sample when Codex emits them. They break the observable
 context proxy into prompt and output byte components. Version-1 through
-version-8 records remain readable. Criterion scores are unavailable for
+version-11 records remain readable. Criterion scores are unavailable for
 versions 1 through 6; task-success and affirmative retrieval scores are
 unavailable for versions 1 through 5. Missing values are not inferred from
 invocation status or marker-only scoring. Missing provider metrics are
@@ -605,11 +609,22 @@ criteria accept explicit labels, path-and-line references, and ranges containing
 the required line. Summary schema version 5 adds statistical design and
 stopping-adequacy metadata; it uses generic `criterion_hit` and
 `response_without_criterion_hit` state names so the cross-tabs also describe
-typed line-number criteria. The report renderer continues to read version 3
-phrase-only state names. No successful response does not prove that a tool was
-called, and no criterion
-match does not prove that semantically useful evidence was absent. Older
-summaries show these new fields as unavailable.
+typed line-number criteria. Version 11 added and requires the timeout,
+effective sandbox, and privacy-safe MCP launch fingerprint for resumable runs.
+Version 12 adds one fixed diagnostic category and a one-based criterion index
+for each unbound line-number criterion: `recognized_reference`,
+`expected_number_present_unrecognized_format`, or `expected_number_absent`.
+The expected number, answer text, phrase criteria, and source paths are not
+stored. Diagnostics are computed in memory from the final answer before
+refusal gating, so refusal answers remain unsuccessful while their line
+reference formatting can still be classified. File-bound source-location
+criteria do not receive these diagnostics. Summary schema version 6 reports
+per-mode category counts and rates by task and criterion, and the report
+renderer includes those aggregates. The report renderer continues to read
+version 3 phrase-only state names. No successful response does not prove that
+a tool was called, and no criterion match does not prove that semantically
+useful evidence was absent. Older summaries show these new fields as
+unavailable.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.
@@ -706,8 +721,9 @@ deterministic, offline runs; set it to `0` to exercise the configured ONNX
 model and measure real model startup and first-query behavior. Keep the model,
 embedding cache, and other environment settings identical across paired runs.
 To seed the design from current records, set `AGENT_AB_PILOT_RECORDS` and
-optionally `AGENT_AB_PILOT_SCHEDULE`; records must use fixture and rubric
-version 4 and the same model/configuration. Historical versions are rejected.
+optionally `AGENT_AB_PILOT_SCHEDULE`; records must use fixture version 4,
+rubric version 6, and the same model/configuration. Historical versions are
+rejected.
 The script uses the synthetic fixture by default; set
 `AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1` for the repository-shaped
 synthetic profile. Use the lower-level runner commands above for a

@@ -14,6 +14,7 @@ class TestAgentAbFixtures(unittest.TestCase):
         manifest = build_manifest()
         self.assertEqual(FIXTURE_VERSION, TASK_FIXTURE_VERSION)
         self.assertEqual(manifest["fixture_version"], TASK_FIXTURE_VERSION)
+        self.assertEqual(manifest["rubric_version"], 6)
         self.assertIn("synthetic", manifest["privacy"])
         self.assertEqual(len(manifest["tasks"]), 4)
         for task in manifest["tasks"].values():
@@ -36,6 +37,14 @@ class TestAgentAbFixtures(unittest.TestCase):
         self.assertEqual(
             manifest["tasks"]["targeted-inspection"]["success_criteria"]["required_line_numbers"],
             [32],
+        )
+        self.assertIn(
+            "command-output line in the format `line <number>`",
+            manifest["tasks"]["targeted-inspection"]["prompt"],
+        )
+        self.assertIn(
+            "command-output line number",
+            manifest["tasks"]["targeted-inspection"]["success_criteria"]["description"],
         )
         self.assertEqual(
             manifest["tasks"]["build-log-search"]["success_criteria"]["required_phrases"],

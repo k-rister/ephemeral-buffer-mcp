@@ -55,6 +55,26 @@ def _display_ci(interval: Any) -> str:
     return f"[{interval['lower'] * 100:+.1f}, {interval['upper'] * 100:+.1f}] pp"
 
 
+def _line_reference_category(item: Any, category: str) -> str:
+    if not isinstance(item, dict):
+        return "n/a"
+    categories = item.get("categories")
+    value = categories.get(category) if isinstance(categories, dict) else None
+    if not isinstance(value, dict):
+        return "n/a"
+    count = value.get("count")
+    total = item.get("count")
+    rate = value.get("rate")
+    if (
+        isinstance(count, bool) or not isinstance(count, int)
+        or isinstance(total, bool) or not isinstance(total, int)
+        or not total
+        or not isinstance(rate, (int, float)) or isinstance(rate, bool)
+    ):
+        return "n/a"
+    return f"{count}/{total} ({rate * 100:.1f}%)"
+
+
 def _display_status(value: Any) -> str:
     labels = {
         "evidence_ready": "evidence-ready",
@@ -92,7 +112,7 @@ def _response_state_outcome(outcomes: dict[str, Any], state: str) -> Any:
 
 
 def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str:
-    """Render task success, criterion outcomes, and response/outcome cross-tabs."""
+    """Render task outcomes, line diagnostics, and response/outcome cross-tabs."""
     lines = ["", "## Agent A/B statistical design", ""]
     lines.append(
         "Task-success planning uses matched binary outcomes, exact two-sided "
@@ -324,6 +344,50 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
                         f"| {revision} | {task_id} | {index + 1} | {source} "
                         f"| {values[0]} | {values[1]} | {values[2]} |"
                     )
+
+    lines.extend(("", "## Unbound line-reference diagnostics", ""))
+    lines.append(
+        "Each category count and rate is scoped to a task and one-based criterion index. "
+        "`recognized_reference` uses the answer scorer's accepted formats; "
+        "`expected_number_present_unrecognized_format` means the expected integer "
+        "appeared without an accepted reference format; `expected_number_absent` "
+        "means that standalone integer was absent. Only fixed categories and indexes are stored."
+    )
+    lines.extend((
+        "",
+        "| Revision | Mode | Task | Criterion | Recognized reference (count/rate) | Number present, unrecognized format (count/rate) | Number absent (count/rate) |",
+        "|---|---|---|---:|---:|---:|---:|",
+    ))
+    diagnostic_categories = (
+        "recognized_reference",
+        "expected_number_present_unrecognized_format",
+        "expected_number_absent",
+    )
+    for revision, summary in summaries:
+        diagnostics_by_mode = summary.get("line_reference_diagnostics_by_mode", {})
+        emitted = False
+        available = False
+        for mode in ("control", "mcp"):
+            mode_summary = diagnostics_by_mode.get(mode, {})
+            available = available or (
+                isinstance(mode_summary, dict) and mode_summary.get("available") is True
+            )
+            task_summaries = mode_summary.get("tasks", {}) if isinstance(mode_summary, dict) else {}
+            for task_id, criteria in sorted(task_summaries.items()):
+                for criterion in criteria:
+                    emitted = True
+                    cells = [
+                        _line_reference_category(criterion, category)
+                        for category in diagnostic_categories
+                    ]
+                    lines.append(
+                        f"| {revision} | {mode} | {task_id} | "
+                        f"{criterion.get('criterion_index', 'n/a')} | "
+                        f"{cells[0]} | {cells[1]} | {cells[2]} |"
+                    )
+        if not emitted:
+            status = "no unbound line criteria" if available else "diagnostics unavailable"
+            lines.append(f"| {revision} | n/a | {status} | n/a | n/a | n/a | n/a |")
     return "\n".join(lines) + "\n"
 
 

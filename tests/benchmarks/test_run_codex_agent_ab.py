@@ -21,6 +21,7 @@ from benchmarks.run_codex_agent_ab import (
     _data_path_bytes,
     _event_metrics,
     _criterion_text_hits,
+    _line_reference_diagnostics,
     _load_manifest,
     _mcp_result_criterion_exposure,
     _run_codex_process,
@@ -138,12 +139,9 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(run_codex_agent_ab._criterion_passes("SIGNAL src/parser.c:917", criteria), [True, True])
 
     def test_current_fixture_manifests_are_accepted_by_runner(self):
-        builders = (
-            ("synthetic", build_manifest, 32),
-            ("repository", build_repository_manifest, 12),
-        )
+        builders = (("synthetic", build_manifest), ("repository", build_repository_manifest))
         with tempfile.TemporaryDirectory() as directory:
-            for name, builder, targeted_line in builders:
+            for name, builder in builders:
                 with self.subTest(fixture=name):
                     payload = builder()
                     self.assertEqual(payload["fixture_version"], TASK_FIXTURE_VERSION)
@@ -154,10 +152,27 @@ class TestCodexAgentRunner(unittest.TestCase):
 
                     self.assertEqual(set(manifest), set(payload["tasks"]))
                     criteria = manifest["targeted-inspection"]["success_criteria"]
-                    lines = criteria["required_line_numbers"] if name == "synthetic" else [
-                        item["line"] for item in criteria["required_source_locations"]
-                    ]
-                    self.assertEqual(lines, [targeted_line])
+                    if name == "synthetic":
+                        self.assertEqual(criteria["required_line_numbers"], [32])
+                    else:
+                        self.assertEqual(criteria["required_line_numbers"], [32])
+                        self.assertEqual(
+                            [item["line"] for item in criteria["required_source_locations"]],
+                            [12],
+                        )
+                        answer = (
+                            "TARGETED_SIGNAL src/packet_parser/parser.py:12; "
+                            "command-output line 32"
+                        )
+                        self.assertEqual(
+                            _criterion_text_hits(
+                                answer,
+                                criteria["required_phrases"],
+                                criteria["required_line_numbers"],
+                                criteria["required_source_locations"],
+                            ),
+                            [True, True, True, True],
+                        )
 
     def test_mcp_exposure_counts_model_readable_text_not_structured_payloads(self):
         output = "\n".join(json.dumps(event) for event in (
@@ -241,6 +256,100 @@ class TestCodexAgentRunner(unittest.TestCase):
             ),
             [True, False],
         )
+
+    def test_line_reference_diagnostics_use_private_indexes_and_fixed_categories(self):
+        criteria = {
+            "required_phrases": ["SIGNAL", "DETAIL"],
+            "required_line_numbers": [32, 917, 12],
+            "required_source_locations": [{"path": "private/source.py", "line": 12}],
+        }
+        diagnostics = _line_reference_diagnostics(
+            "SIGNAL DETAIL at L32 and src/parser.c:917, plus lines 10-14",
+            criteria,
+        )
+        self.assertEqual(diagnostics, [
+            {"criterion_index": 3, "category": "recognized_reference"},
+            {"criterion_index": 4, "category": "recognized_reference"},
+            {"criterion_index": 5, "category": "recognized_reference"},
+        ])
+        self.assertNotIn("32", json.dumps(diagnostics))
+        self.assertNotIn("private/source.py", json.dumps(diagnostics))
+        self.assertEqual(
+            _line_reference_diagnostics("SIGNAL src/parser.c:32", {
+                "required_phrases": ["SIGNAL"],
+                "required_source_locations": [{"path": "src/parser.c", "line": 32}],
+            }),
+            [],
+        )
+
+        cases = (
+            ("SIGNAL 32", 32, "expected_number_present_unrecognized_format"),
+            ("SIGNAL 32, please", 32, "expected_number_present_unrecognized_format"),
+            ("SIGNAL 132", 32, "expected_number_absent"),
+            ("SIGNAL line 32.5", 32, "expected_number_absent"),
+            ("SIGNAL 1,232", 32, "expected_number_absent"),
+            ("SIGNAL 1,232", 232, "expected_number_absent"),
+            ("SIGNAL line 32,456", 32, "expected_number_absent"),
+            ("SIGNAL src/parser.c:1,232", 232, "expected_number_absent"),
+        )
+        for answer, line_number, category in cases:
+            with self.subTest(answer=answer, line_number=line_number):
+                self.assertEqual(
+                    _line_reference_diagnostics(answer, {
+                        "required_phrases": ["SIGNAL"],
+                        "required_line_numbers": [line_number],
+                    }),
+                    [{"criterion_index": 2, "category": category}],
+                )
+        self.assertEqual(
+            _criterion_text_hits("SIGNAL line 32.5", ["SIGNAL"], [32]),
+            [True, False],
+        )
+        self.assertEqual(
+            _criterion_text_hits("SIGNAL line 32,456", ["SIGNAL"], [32]),
+            [True, False],
+        )
+        self.assertEqual(
+            _criterion_text_hits("SIGNAL src/parser.c:1,232", ["SIGNAL"], [232]),
+            [True, False],
+        )
+
+    def test_line_diagnostic_is_computed_even_when_refusal_gates_scoring(self):
+        item = {
+            "sequence": 1,
+            "repetition": 1,
+            "task_id": "targeted-inspection",
+            "mode": "control",
+        }
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        answer = "I cannot fulfill your request. The result is TARGETED_SIGNAL at line 32."
+        result = subprocess_result(stdout=json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": answer},
+        }))
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repo"
+            repository.mkdir()
+            with patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=result):
+                record = _run_one(
+                    item,
+                    task,
+                    args=args,
+                    repository=repository,
+                    scratch=Path(directory),
+                )
+
+        self.assertFalse(record["task_success"])
+        self.assertEqual(record["criterion_passes"], [False, False])
+        self.assertEqual(record["line_reference_diagnostics"], [
+            {"criterion_index": 2, "category": "recognized_reference"},
+        ])
+        self.assertNotIn("line 32", json.dumps(record))
 
     def test_mcp_exposure_does_not_count_timestamp_as_line_evidence(self):
         output = json.dumps({
@@ -993,7 +1102,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 11)
+        self.assertEqual(payload["records_schema_version"], 12)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")
