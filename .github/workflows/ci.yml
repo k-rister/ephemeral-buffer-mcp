@@ -73,6 +73,8 @@ jobs:
       - name: Verify full-featured installed distribution
         run: |
           python -m venv /tmp/ephemeral-package-full-venv
+          # Use this checkout's core metadata if the same version is on PyPI.
+          /tmp/ephemeral-package-full-venv/bin/python -m pip install --no-deps dist/ephemeral_buffer_mcp_core-*.whl
           /tmp/ephemeral-package-full-venv/bin/python -m pip install -c constraints.txt --find-links dist dist/ephemeral_buffer_mcp-*.whl
           /tmp/ephemeral-package-full-venv/bin/ephbuf --help
           /tmp/ephemeral-package-full-venv/bin/python -c "from ephemeral_buffer_mcp.metrics import LocalMetrics; assert LocalMetrics"
@@ -86,6 +88,8 @@ jobs:
       - name: Verify lexical-only installed distribution
         run: |
           python -m venv /tmp/ephemeral-package-lexical-venv
+          # Use this checkout's core metadata if the same version is on PyPI.
+          /tmp/ephemeral-package-lexical-venv/bin/python -m pip install --no-deps dist/ephemeral_buffer_mcp_core-*.whl
           /tmp/ephemeral-package-lexical-venv/bin/python -m pip install --find-links dist dist/ephemeral_buffer_mcp_lexical-*.whl
           /tmp/ephemeral-package-lexical-venv/bin/ephbuf --help
           /tmp/ephemeral-package-lexical-venv/bin/python scripts/installed_lexical_package_smoke.py
