@@ -3,7 +3,7 @@
 # after the focused and end-to-end test suites pass on Python 3.11 and 3.12.
 mcp==2.3.0
 filelock==4.2.1
-huggingface-hub==1.30.0
+huggingface-hub==2.4.0
 numpy==2.2.6
 onnxruntime==1.23.2
 tokenizers==0.23.2
