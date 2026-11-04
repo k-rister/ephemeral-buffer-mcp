@@ -7,18 +7,19 @@ from pathlib import Path
 from typing import Any
 
 FIXTURE_VERSION = 4
-RUBRIC_VERSION = 4
+RUBRIC_VERSION = 6
 PROFILE = "repository-shaped-v1"
 
 TASKS = {
     "targeted-inspection": {
         "category": "repository-inspection",
         "output_profile": "32 lines",
-        "prompt": "From the repository root, run python3 tools/repository_checks.py targeted. Use the repository source and configuration to find the exact line containing TARGETED_SIGNAL and report that signal and its source line number. Do not paste the complete output.",
+        "prompt": "From the repository root, run python3 tools/repository_checks.py targeted. Use the repository source and configuration to find the exact line containing TARGETED_SIGNAL. Report the signal, its source location in the format `<path>:<source-line>`, and the command-output line in the format `line <number>`. Do not paste the complete output.",
         "signal_marker": "TARGETED_SIGNAL",
         "success_criteria": {
-            "description": "Final response contains TARGETED_SIGNAL and the correct source line number.",
+            "description": "Final response contains TARGETED_SIGNAL, its correct source location, and the correct command-output line number.",
             "required_phrases": ["TARGETED_SIGNAL", "src/packet_parser/parser.py"],
+            "required_line_numbers": [32],
             "required_source_locations": [{"path": "src/packet_parser/parser.py", "line": 12}],
         },
     },

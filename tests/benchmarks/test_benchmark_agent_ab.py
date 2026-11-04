@@ -1,5 +1,6 @@
 """Tests for the privacy-safe agent-level A/B evaluation harness."""
 
+import copy
 import io
 import json
 import tempfile
@@ -84,6 +85,18 @@ def _scored_records_payload(repetitions=2, design=None):
             "task_success": record["mode"] == "mcp" and record["repetition"] == 2,
         })
         record["criterion_passes"] = [record["task_success"], record["task_success"]]
+        record["line_reference_diagnostics"] = (
+            [{
+                "criterion_index": 2,
+                "category": (
+                    "recognized_reference"
+                    if record["criterion_passes"][1]
+                    else "expected_number_absent"
+                ),
+            }]
+            if record["task_id"] == "targeted-inspection"
+            else []
+        )
         record["criterion_search_response_hits"] = [False, False] if record["mode"] == "mcp" else None
         record["criterion_slice_response_hits"] = [False, False] if record["mode"] == "mcp" else None
         record["search_capture_responses"] = 0
@@ -101,10 +114,21 @@ def _legacy_v6_records_payload():
     payload["records_schema_version"] = 6
     for record in payload["runs"]:
         record.pop("criterion_passes")
+        record.pop("line_reference_diagnostics")
         record.pop("criterion_search_response_hits")
         record.pop("criterion_slice_response_hits")
         record.pop("search_capture_responses")
         record.pop("get_capture_slice_responses")
+    return schedule, payload
+
+
+def _legacy_v10_records_payload():
+    schedule, payload = _scored_records_payload()
+    payload["records_schema_version"] = 10
+    payload["task_rubric_version"] = 4
+    schedule["task_rubric_version"] = 4
+    for record in payload["runs"]:
+        record.pop("line_reference_diagnostics")
     return schedule, payload
 
 
@@ -130,9 +154,18 @@ def _legacy_v5_records_payload():
 
 
 class TestAgentAbBenchmark(unittest.TestCase):
+    def test_historical_rubric_v5_records_remain_readable_under_schema_v12(self):
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        schedule["task_rubric_version"] = 5
+        payload["task_rubric_version"] = 5
+
+        summary = summarize_records(payload, schedule)
+
+        self.assertEqual(summary["task_rubric_version"], 5)
+        self.assertEqual(summary["records_schema_version"], 12)
+
     def test_historical_v3_fixture_records_remain_readable(self):
-        schedule, payload = _scored_records_payload(design={"selected_repetitions": 20})
-        payload["records_schema_version"] = 10
+        schedule, payload = _legacy_v10_records_payload()
         schedule["task_fixture_version"] = 3
         payload["task_fixture_version"] = 3
         summary = summarize_records(payload, schedule)
@@ -240,9 +273,9 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_power_pilot_rejects_mixed_fixture_or_rubric_versions(self):
         schedule, payload = _scored_records_payload()
         payload["task_rubric_version"] = TASK_RUBRIC_VERSION
-        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v4"):
+        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v6"):
             build_power_design(dict(payload, task_fixture_version=3), schedule, simulations=100)
-        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v4"):
+        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v6"):
             build_power_design(dict(payload, task_rubric_version=3), schedule, simulations=100)
 
     def test_power_design_bootstraps_paired_pilot_and_marks_small_samples(self):
@@ -562,7 +595,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
-        self.assertEqual(summary["schema_version"], 5)
+        self.assertEqual(summary["schema_version"], 6)
         task_success = summary["task_success_by_mode"]
         self.assertEqual(
             task_success["mcp"]["tasks"]["targeted-inspection"],
@@ -707,6 +740,15 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
         self.assertIn("## Agent A/B task success", report)
         self.assertIn("## MCP response exposure and answer outcomes", report)
+        self.assertIn("## Unbound line-reference diagnostics", report)
+        self.assertIn(
+            "| baseline | n/a | diagnostics unavailable | n/a | n/a | n/a | n/a |",
+            report,
+        )
+        self.assertIn(
+            "| candidate | mcp | targeted-inspection | 2 | 1/2 (50.0%) | 0/2 (0.0%) | 1/2 (50.0%) |",
+            report,
+        )
         self.assertIn("`criterion_hit` means", report)
         self.assertIn("response_without_criterion_hit", report)
         self.assertIn("no_successful_response", report)
@@ -743,6 +785,21 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertIn("| Criterion hit (pass/fail) | Response without criterion hit (pass/fail) |", report)
         self.assertIn("| legacy | targeted-inspection | 1 | search_capture | 1/0 | 0/1 | 0/0 |", report)
         self.assertNotIn("phrase_hit", report)
+
+    def test_agent_ab_report_distinguishes_no_unbound_lines_from_legacy_data(self):
+        summary = {
+            "line_reference_diagnostics_by_mode": {
+                mode: {"available": True, "tasks": {"file-bound-task": []}}
+                for mode in ("control", "mcp")
+            },
+        }
+
+        report = render_agent_ab_sections([("current", summary)])
+
+        self.assertIn(
+            "| current | n/a | no unbound line criteria | n/a | n/a | n/a | n/a |",
+            report,
+        )
 
     def test_agent_ab_report_labels_evidence_ready_inconclusive_and_missing_costs(self):
         def summary(status):
@@ -844,6 +901,82 @@ class TestAgentAbBenchmark(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "task_success requires every criterion to pass"):
             validate_records(payload, schedule)
 
+    def test_line_reference_diagnostics_are_validated_and_legacy_v11_is_readable(self):
+        schedule, payload = _scored_records_payload()
+        record = next(
+            item for item in payload["runs"]
+            if item["task_id"] == "targeted-inspection" and item["mode"] == "mcp"
+        )
+        original = record["line_reference_diagnostics"]
+        invalid_values = (
+            [{"criterion_index": 2, "category": "answer text"}],
+            [{"criterion_index": 2, "category": {"answer": "text"}}],
+            [{"criterion_index": 2, "category": "recognized_reference", "text": "line 32"}],
+            [{"criterion_index": True, "category": "recognized_reference"}],
+            [{"criterion_index": 3, "category": "recognized_reference"}],
+            [
+                {"criterion_index": 2, "category": "recognized_reference"},
+                {"criterion_index": 2, "category": "expected_number_absent"},
+            ],
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                record["line_reference_diagnostics"] = invalid
+                with self.assertRaises(ValueError):
+                    validate_records(payload, schedule)
+        record["line_reference_diagnostics"] = original
+
+        wrong_fixture_schedule = copy.deepcopy(schedule)
+        wrong_fixture_payload = copy.deepcopy(payload)
+        wrong_fixture_schedule["task_fixture_version"] = 3
+        wrong_fixture_payload["task_fixture_version"] = 3
+        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v5 or rubric-v6"):
+            validate_records(wrong_fixture_payload, wrong_fixture_schedule)
+
+        legacy_schedule, legacy_payload = _legacy_v10_records_payload()
+        legacy_payload["records_schema_version"] = 11
+        summary = summarize_records(legacy_payload, legacy_schedule)
+        self.assertEqual(summary["records_schema_version"], 11)
+        self.assertEqual(
+            summary["line_reference_diagnostics_by_mode"]["mcp"],
+            {"available": False, "tasks": {}},
+        )
+
+    def test_line_reference_summary_reports_counts_and_rates_by_mode(self):
+        schedule, payload = _scored_records_payload()
+        for record in payload["runs"]:
+            if record["task_id"] != "targeted-inspection":
+                continue
+            if record["mode"] == "control":
+                category = (
+                    "recognized_reference"
+                    if record["repetition"] == 1
+                    else "expected_number_absent"
+                )
+            else:
+                category = (
+                    "expected_number_present_unrecognized_format"
+                    if record["repetition"] == 1
+                    else "expected_number_absent"
+                )
+            record["line_reference_diagnostics"] = [
+                {"criterion_index": 2, "category": category}
+            ]
+
+        summary = summarize_records(payload, schedule)
+        control = summary["line_reference_diagnostics_by_mode"]["control"]["tasks"]["targeted-inspection"][0]
+        mcp = summary["line_reference_diagnostics_by_mode"]["mcp"]["tasks"]["targeted-inspection"][0]
+        self.assertEqual(control["count"], 2)
+        self.assertEqual(control["categories"]["recognized_reference"], {"count": 1, "rate": 0.5})
+        self.assertEqual(control["categories"]["expected_number_absent"], {"count": 1, "rate": 0.5})
+        self.assertEqual(mcp["categories"]["expected_number_present_unrecognized_format"], {"count": 1, "rate": 0.5})
+        self.assertEqual(mcp["categories"]["expected_number_absent"], {"count": 1, "rate": 0.5})
+        self.assertEqual(
+            summary["paired_task_success_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"]["count"],
+            2,
+        )
+        self.assertIn("ci95_half_width", summary["paired_task_success_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"])
+
     def test_summary_excludes_unavailable_rss_measurements(self):
         schedule, payload = _records_payload()
         for record in payload["runs"]:
@@ -905,6 +1038,10 @@ class TestAgentAbBenchmark(unittest.TestCase):
             validate_records(payload, schedule)
 
         payload["records_schema_version"] = 10
+        payload["task_rubric_version"] = 4
+        schedule["task_rubric_version"] = 4
+        for record in payload["runs"]:
+            record.pop("line_reference_diagnostics")
         self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
 
     def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):

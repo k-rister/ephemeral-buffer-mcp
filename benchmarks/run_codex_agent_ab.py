@@ -43,7 +43,12 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_TIMEOUT = 900
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 _PATH_LINE_REFERENCE_RE = re.compile(
-    r"(?<!\w)(?:[\w.-]*[\\/][\w./\\-]*|[\w-]+(?:\.[A-Za-z][\w-]*)+):(\d+)(?!\d)"
+    r"(?<!\w)(?:[\w.-]*[\\/][\w./\\-]*|[\w-]+(?:\.[A-Za-z][\w-]*)+):(\d+)(?!\w|\.[0-9]|,[0-9])"
+)
+_LABELED_LINE_REFERENCE_RE = re.compile(
+    r"(?<!\w)(?:lines?(?:\s+number)?\s*[:#]?\s*|L)\s*"
+    r"(\d+)(?:\s*[-–—]\s*(?:L\s*)?(\d+))?(?!\w|\.[0-9]|,[0-9])",
+    flags=re.IGNORECASE,
 )
 
 
@@ -421,31 +426,54 @@ def _criterion_text_hits(
     ]
     line_hits = []
     for line_number in required_line_numbers or []:
-        labeled_references = re.finditer(
-            r"(?<!\w)(?:lines?(?:\s+number)?\s*[:#]?\s*|L)\s*"
-            r"(\d+)(?:\s*[-–—]\s*(?:L\s*)?(\d+))?(?!\d)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        labeled_hit = any(
-            int(match.group(1)) == line_number
-            or (
-                match.group(2) is not None
-                and min(int(match.group(1)), int(match.group(2)))
-                <= line_number
-                <= max(int(match.group(1)), int(match.group(2)))
-            )
-            for match in labeled_references
-        )
-        path_line_hit = any(
-            int(match.group(1)) == line_number
-            for match in _PATH_LINE_REFERENCE_RE.finditer(text)
-        )
-        line_hits.append(labeled_hit or path_line_hit)
+        line_hits.append(_line_reference_hit(text, line_number))
     return phrase_hits + line_hits + [
         _source_location_hit(text, location)
         for location in required_source_locations or []
     ]
+
+
+def _line_reference_hit(text: str, line_number: int) -> bool:
+    """Match the same explicit unbound references used by the answer scorer."""
+    for match in _LABELED_LINE_REFERENCE_RE.finditer(text):
+        first = int(match.group(1))
+        last = int(match.group(2) or first)
+        if min(first, last) <= line_number <= max(first, last):
+            return True
+    return any(
+        int(match.group(1)) == line_number
+        for match in _PATH_LINE_REFERENCE_RE.finditer(text)
+    )
+
+
+def _line_reference_diagnostics(
+    answer: str,
+    criteria: Any,
+) -> list[dict[str, Any]]:
+    """Classify each unbound line criterion without retaining answer text."""
+    if not isinstance(criteria, dict):
+        return []
+    required_phrases = criteria.get("required_phrases", [])
+    required_line_numbers = criteria.get("required_line_numbers", [])
+    if not isinstance(required_phrases, list) or not isinstance(required_line_numbers, list):
+        return []
+
+    diagnostics = []
+    for offset, line_number in enumerate(required_line_numbers):
+        if _line_reference_hit(answer, line_number):
+            category = "recognized_reference"
+        elif re.search(
+            rf"(?<![\w.])(?<!\d,){line_number}(?!\w|\.[0-9]|,[0-9])",
+            answer,
+        ):
+            category = "expected_number_present_unrecognized_format"
+        else:
+            category = "expected_number_absent"
+        diagnostics.append({
+            "criterion_index": len(required_phrases) + offset + 1,
+            "category": category,
+        })
+    return diagnostics
 
 
 def _mcp_result_criterion_exposure(
@@ -1106,7 +1134,12 @@ def _run_one(
         failure_reason = "mcp_not_used"
     marker = task["signal_marker"]
     final_answer = _final_answer_text(stdout)
-    criterion_passes = _criterion_passes(final_answer, task.get("success_criteria"), marker)
+    criteria = task.get("success_criteria")
+    # Classify references directly from the answer before refusal gating, so a
+    # refusal that includes a valid line reference remains diagnosable without
+    # being scored as a successful answer.
+    line_reference_diagnostics = _line_reference_diagnostics(final_answer, criteria)
+    criterion_passes = _criterion_passes(final_answer, criteria, marker)
     if criterion_passes is None:
         raise ValueError(f"task {item['task_id']} has invalid success criteria")
     if item["mode"] == "mcp":
@@ -1136,6 +1169,8 @@ def _run_one(
         # Ordered booleans are scoped by task_id and task_fixture_version. Never
         # persist the criterion text or final answer in the records envelope.
         "criterion_passes": criterion_passes,
+        # Only unbound line criteria receive a fixed category and criterion index.
+        "line_reference_diagnostics": line_reference_diagnostics,
         # MCP treatment runs store only per-criterion exposure booleans from
         # named successful tool results. Control exposure is not applicable.
         "criterion_search_response_hits": criterion_search_response_hits,
@@ -1272,7 +1307,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "protocol": protocol,
         "schedule": schedule,
         "runs": runs,
-        "privacy": "records contain metadata, task-scoped criterion pass and MCP response exposure booleans, and response counts only; prompts, criterion text, tool responses, transcripts, commands, captures, and user content are excluded",
+        "privacy": "records contain metadata, task-scoped criterion pass and MCP response exposure booleans, line-reference criterion indexes and fixed diagnostic categories, and response counts only; prompts, criterion text, tool responses, transcripts, commands, captures, and user content are excluded",
     }
     validate_records(
         payload,

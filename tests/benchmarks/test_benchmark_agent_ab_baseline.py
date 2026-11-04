@@ -24,6 +24,7 @@ def summary_fixture():
             "task_id": item["task_id"], "repetition": item["repetition"], "mode": item["mode"],
             "completed": True, "task_success": mcp, "signal_retrieved": mcp,
             "criterion_passes": [mcp, mcp],
+            "line_reference_diagnostics": [],
             "criterion_search_response_hits": [mcp, mcp] if mcp else None,
             "criterion_slice_response_hits": [mcp, mcp] if mcp else None,
             "search_capture_responses": 1 if mcp else 0,

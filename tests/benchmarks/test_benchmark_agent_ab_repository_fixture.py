@@ -20,6 +20,7 @@ class TestRepositoryFixture(unittest.TestCase):
     def test_manifest_describes_repository_workflows(self):
         manifest = build_manifest()
         self.assertEqual(manifest["fixture_version"], TASK_FIXTURE_VERSION)
+        self.assertEqual(manifest["rubric_version"], 6)
         self.assertEqual(manifest["profile"], PROFILE)
         self.assertIn("synthetic", manifest["privacy"])
         self.assertEqual(len(manifest["tasks"]), 4)
@@ -40,6 +41,17 @@ class TestRepositoryFixture(unittest.TestCase):
             ["TARGETED_SIGNAL", "src/packet_parser/parser.py"],
         )
         self.assertEqual(targeted["required_source_locations"], [{"path": "src/packet_parser/parser.py", "line": 12}])
+        self.assertEqual(targeted["required_line_numbers"], [32])
+        self.assertIn(
+            "source location in the format `<path>:<source-line>`",
+            manifest["tasks"]["targeted-inspection"]["prompt"],
+        )
+        self.assertIn(
+            "command-output line in the format `line <number>`",
+            manifest["tasks"]["targeted-inspection"]["prompt"],
+        )
+        self.assertIn("correct source location", targeted["description"])
+        self.assertIn("correct command-output line number", targeted["description"])
         build = manifest["tasks"]["build-log-search"]["success_criteria"]
         self.assertEqual(build["required_phrases"], ["BUILD_FAILURE_SIGNAL", "src/parser.c"])
         self.assertEqual(build["required_source_locations"], [{"path": "src/parser.c", "line": 917}])
@@ -56,6 +68,9 @@ class TestRepositoryFixture(unittest.TestCase):
             output = subprocess.check_output(["python3", str(checks), "targeted"], text=True)
             self.assertIn("TARGETED_SIGNAL in src/packet_parser/parser.py", output)
             self.assertIn(":12", output)
+            output_lines = output.splitlines()
+            self.assertEqual(len(output_lines), 32)
+            self.assertTrue(output_lines[31].startswith("inspection result: TARGETED_SIGNAL"))
 
     def test_fixture_rejects_nonempty_destination(self):
         with tempfile.TemporaryDirectory() as directory:

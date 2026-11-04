@@ -8,19 +8,20 @@ from typing import Any
 
 
 FIXTURE_VERSION = 4
-RUBRIC_VERSION = 4
+RUBRIC_VERSION = 6
 TASKS = {
     "targeted-inspection": {
         "category": "small-targeted-output",
         "output_profile": "32 lines",
         "prompt": (
             "Run python3 emit_log.py targeted using the best available output workflow. "
-            "Find the exact line containing TARGETED_SIGNAL and report that signal and its line number. "
+            "Find the exact line containing TARGETED_SIGNAL and report that signal and the command-output line "
+            "in the format `line <number>`. "
             "Do not paste the complete output."
         ),
         "signal_marker": "TARGETED_SIGNAL",
         "success_criteria": {
-            "description": "Final response contains TARGETED_SIGNAL and the correct source line number.",
+            "description": "Final response contains TARGETED_SIGNAL and the correct command-output line number.",
             "required_phrases": ["TARGETED_SIGNAL"],
             "required_line_numbers": [32],
         },

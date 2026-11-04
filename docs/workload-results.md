@@ -370,17 +370,21 @@ file. Metadata that should not be recorded at all is simply not passed; the
 result format is still not a privacy exemption, so review documents before
 sharing them as with any other benchmark output.
 
-## EB effectiveness comparisons (2026-10-30)
+## EB effectiveness comparisons (updated 2026-11-03)
 
 The fixture-version-3 results below (and earlier v2 runs) are historical.
-Fixture version 4 binds source lines to their expected files. Historical results
-have not been rescored and must not be pooled with v4 measurements.
+Fixture version 4 binds source lines to their expected files. The recorded v4
+batch used rubric v4; the rubric-v5 results below are a separate comparison.
+Historical rubric results have not been rescored and must not be pooled.
 
-The agent-level comparison uses four synthetic tasks, `gpt-6-luna`, the
-`synthetic-eb-heavy-v2` fixture, a fresh fixture copy per invocation, and five
-repetitions per task and mode. Fixture version 3 scored the targeted inspection
-answer's line number as a typed criterion, accepting formats such as `line 32`,
-`line number: 32`, and `L32`.
+The agent-level comparisons use four synthetic tasks, `gpt-6-luna`, the
+`synthetic-eb-heavy-v2` fixture, a fresh fixture copy per invocation, matched
+sandbox and approval settings, and deterministic test embeddings. The
+historical fixture-v4/rubric-v4 batch used five repetitions per task and mode;
+the separate fixture-v4/rubric-v5 sequential comparison below used up to 848
+repetitions per task and mode, with interim looks. Fixture version 3 scored
+the targeted inspection answer's line number as a typed criterion, accepting
+formats such as `line 32`, `line number: 32`, and `L32`.
 
 `control` runs without the EB MCP server; the `mcp` arm requires the agent to
 use the configured EB tools for the capture and search workflow. Both arms use
@@ -390,12 +394,14 @@ metadata, not prompts, criterion text, tool responses, or transcripts. The
 fixture is synthetic and small; these results do not establish performance on
 other models or representative agent work.
 
-### Corrected fixture-v4 batch (seed 20261046)
+### Historical fixture-v4 / rubric-v4 batch (seed 20261046)
 
-This run used five repetitions for each of four tasks and both modes, for 20
-paired runs (40 invocations). It used the same model, fixture profile,
-deterministic test embeddings, and matched sandbox/approval setup as the v3
-comparison, with the v4 file-bound source criteria.
+This historical rubric-v4 run used five repetitions for each of four tasks and
+both modes, for 20 paired runs (40 invocations). It used the same model,
+fixture profile, deterministic test embeddings, and matched sandbox/approval
+setup as the v3 comparison, with the v4 file-bound source criteria. It is kept
+separate from the rubric-v5 comparison below because the targeted-inspection
+prompt changed.
 
 | Task | Control | EB available | Difference |
 | --- | ---: | ---: | ---: |
@@ -438,6 +444,64 @@ misses cannot be diagnosed from this aggregate data.
 Both arms had 100% invocation completion and signal retrieval. EB averaged
 30.9 KB of captured command input per run. Token totals are provider-reported
 usage snapshots, not verified sums.
+
+### Powered fixture-v4 / rubric-v5 sequential comparison (seed 20261102)
+
+This fresh run kept fixture version 4 and changed the targeted-inspection
+prompt and criterion to rubric version 5. The preplanned power analysis
+selected 848 repetitions per task, with looks at 424, 636, and 848 repetitions
+(50%, 75%, and 100%). Collection stopped at the second look: 636 matched
+repetitions per task, or 2,544 matched task pairs and 5,088 invocations. The
+sequential summary marked the evidence ready and set `continue` to false, so
+the final planned stage was not run. Records use schema v12 and the summary
+uses schema v6.
+
+The stopping analysis used Holm-adjusted exact McNemar tests across tasks and
+simultaneous Newcombe paired-score intervals. The intervals below have 99.625%
+simultaneous confidence (the second look spent alpha 0.015, cumulative alpha
+0.02). The first table also gives descriptive paired 95% t intervals for
+MCP-minus-control task success.
+
+| Task | Control | MCP | Difference, MCP − control (approx. paired 95% CI) |
+| --- | ---: | ---: | ---: |
+| Build log search | 636/636 (100%) | 626/636 (98.4%) | -1.57 pp [-2.54, -0.60] |
+| Follow-up context | 636/636 (100%) | 632/636 (99.4%) | -0.63 pp [-1.24, -0.01] |
+| Noisy test failure | 450/636 (70.8%) | 515/636 (81.0%) | +10.22 pp [+5.46, +14.98] |
+| Targeted inspection | 539/636 (84.7%) | 429/636 (67.5%) | -17.30 pp [-22.00, -12.59] |
+| **Overall** | **2,261/2,544 (88.9%)** | **2,202/2,544 (86.6%)** | **-2.32 pp [-4.06, -0.58]** |
+
+For the sequential decision, the simultaneous task intervals and statuses were:
+
+| Task | Difference, MCP − control | Simultaneous 99.625% Newcombe interval | Evidence status |
+| --- | ---: | ---: | --- |
+| Build log search | -1.57 pp | [-3.76, +0.03] pp | Within practical range |
+| Follow-up context | -0.63 pp | [-2.38, +0.76] pp | Within practical range |
+| Noisy test failure | +10.22 pp | [+3.13, +17.18] pp | Direction established |
+| Targeted inspection | -17.30 pp | [-24.14, -10.24] pp | Direction established |
+
+The targeted-inspection criterion results show that the task-level gap was
+concentrated in the marker criterion, while the command-output line criterion
+passed in nearly every run:
+
+| Targeted-inspection criterion | Control | MCP | Difference, MCP − control (approx. paired 95% CI) |
+| --- | ---: | ---: | ---: |
+| Marker | 540/636 (84.9%) | 446/636 (70.1%) | -14.78 pp [-19.42, -10.14] |
+| Command-output line | 635/636 (99.8%) | 634/636 (99.7%) | -0.16 pp [-0.69, +0.38] |
+
+The privacy-safe line-reference diagnostics give the reason category without
+storing answer text:
+
+| Line-reference category | Control | MCP |
+| --- | ---: | ---: |
+| Recognized reference | 635/636 (99.8%) | 634/636 (99.7%) |
+| Expected number present, unrecognized format | 1/636 (0.2%) | 2/636 (0.3%) |
+| Expected number absent | 0/636 (0%) | 0/636 (0%) |
+
+Thus, only one control response and two MCP responses contained the expected
+number without a recognized line-reference format; neither mode omitted the
+number. Both modes had 100% invocation completion and signal retrieval. This
+result diagnoses the line-reference misses for this fixture and rubric, but it
+does not establish performance on other models or representative agent work.
 
 ### Matched-sandbox fixture-v3 results
 
