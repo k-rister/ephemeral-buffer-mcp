@@ -34,6 +34,7 @@ from .benchmark_agent_ab import (
     _read_json,
     _stage_repetition_counts,
     records_workload_result,
+    schedule_uses_staged_looks,
     validate_records,
     validate_schedule_extension,
 )
@@ -1272,7 +1273,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         validate_records(
             existing_payload,
             previous_schedule,
-            allow_staged_prefix=not previous_schedule.get("repetitions_explicit", True),
+            allow_staged_prefix=schedule_uses_staged_looks(previous_schedule),
         )
         runs.extend(existing_payload.get("runs", []))
     existing_keys = {
@@ -1312,7 +1313,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
     validate_records(
         payload,
         schedule,
-        allow_staged_prefix=not schedule.get("repetitions_explicit", True),
+        allow_staged_prefix=schedule_uses_staged_looks(schedule),
     )
     return payload
 

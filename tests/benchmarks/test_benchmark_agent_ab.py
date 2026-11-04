@@ -26,8 +26,8 @@ from benchmarks.benchmark_agent_ab import (
 )
 
 
-def _records_payload(repetitions=2, design=None):
-    schedule = build_schedule(repetitions=repetitions, seed=17, design=design)
+def _records_payload(repetitions=2, design=None, powered=False):
+    schedule = build_schedule(repetitions=repetitions, seed=17, design=design, powered=powered)
     runs = []
     for item in schedule["schedule"]:
         mcp = item["mode"] == "mcp"
@@ -66,8 +66,8 @@ def _records_payload(repetitions=2, design=None):
     }
 
 
-def _scored_records_payload(repetitions=2, design=None):
-    schedule, payload = _records_payload(repetitions=repetitions, design=design)
+def _scored_records_payload(repetitions=2, design=None, powered=False):
+    schedule, payload = _records_payload(repetitions=repetitions, design=design, powered=powered)
     payload["records_schema_version"] = RECORDS_SCHEMA_VERSION
     for record in payload["runs"]:
         context_bytes = record.pop("context_bytes")
@@ -173,8 +173,16 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertEqual(summary["records_schema_version"], 10)
         self.assertEqual(summary["statistical_adequacy"]["status"], "unknown")
 
-    def test_default_schedule_uses_powered_design_and_three_looks(self):
-        schedule = build_schedule(seed=20261031)
+    def test_default_schedule_is_five_exploratory_repetitions_in_one_look(self):
+        schedule = build_schedule(seed=20261031, design={"selected_repetitions": 12})
+        self.assertEqual(schedule["repetitions"], 5)
+        self.assertFalse(schedule["powered"])
+        self.assertEqual(schedule["run_label"], "exploratory")
+        self.assertEqual(len(schedule["schedule"]), 5 * len(benchmark_agent_ab.TASKS) * len(benchmark_agent_ab.MODES))
+        self.assertEqual([item["repetitions"] for item in schedule["stage_schedule"]], [5])
+
+    def test_powered_schedule_uses_powered_design_and_three_looks(self):
+        schedule = build_schedule(seed=20261031, powered=True)
         design = schedule["statistical_design"]
         self.assertEqual(design["schema_version"], 5)
         self.assertEqual(
@@ -243,26 +251,63 @@ class TestAgentAbBenchmark(unittest.TestCase):
             [(50, 6, 0.005, 0.005), (75, 9, 0.015, 0.02), (100, 12, 0.03, 0.05)],
         )
 
+    def test_explicit_count_at_or_above_powered_design_stays_exploratory(self):
+        design = {"selected_repetitions": 5}
+        schedule = build_schedule(repetitions=7, seed=4, design=design)
+        self.assertEqual(schedule["run_label"], "exploratory")
+        self.assertFalse(schedule["powered"])
+        self.assertEqual([item["repetitions"] for item in schedule["stage_schedule"]], [7])
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            build_schedule(repetitions=7, powered=True, design=design)
+
+    def test_schedule_helpers_keep_legacy_power_and_staging_semantics(self):
+        legacy_powered = build_schedule(powered=True, design={"selected_repetitions": 8})
+        legacy_powered.pop("powered")
+        self.assertTrue(benchmark_agent_ab.schedule_is_powered(legacy_powered))
+        self.assertTrue(benchmark_agent_ab.schedule_uses_staged_looks(legacy_powered))
+
+        legacy_exploratory = build_schedule(
+            repetitions=3,
+            design={"selected_repetitions": 8},
+        )
+        legacy_exploratory.pop("powered")
+        self.assertFalse(benchmark_agent_ab.schedule_is_powered(legacy_exploratory))
+        self.assertFalse(benchmark_agent_ab.schedule_uses_staged_looks(legacy_exploratory))
+        self.assertTrue(benchmark_agent_ab.schedule_is_powered({
+            "repetitions": 5,
+            "repetitions_explicit": True,
+        }))
+
+    def test_exploratory_adequacy_never_claims_power_from_large_count(self):
+        schedule, payload = _scored_records_payload(
+            repetitions=5,
+            design={"selected_repetitions": 5},
+        )
+        adequacy = summarize_records(payload, schedule)["statistical_adequacy"]
+        self.assertEqual(adequacy["status"], "exploratory")
+        self.assertFalse(adequacy["continue"])
+        self.assertTrue(all(not task["adequate_repetitions"] for task in adequacy["tasks"].values()))
+
     def test_schedule_extension_requires_exact_prefix_and_matching_versions(self):
         design = {"selected_repetitions": 20}
-        original = build_schedule(repetitions=None, seed=17, design=design)
-        extended = build_schedule(repetitions=None, seed=17, design=design)
+        original = build_schedule(seed=17, powered=True, design=design)
+        extended = build_schedule(seed=17, powered=True, design=design)
         validate_schedule_extension(original, extended)
         explicit = build_schedule(repetitions=4, seed=17, design=design)
         explicit_extension = build_schedule(repetitions=8, seed=17, design=design)
-        with self.assertRaisesRegex(ValueError, "explicit schedules cannot be extended"):
+        with self.assertRaisesRegex(ValueError, "exploratory schedules cannot be extended"):
             validate_schedule_extension(explicit, explicit_extension)
         validate_schedule_extension(explicit, explicit)
-        changed_seed = build_schedule(repetitions=None, seed=18, design=design)
+        changed_seed = build_schedule(seed=18, powered=True, design=design)
         with self.assertRaisesRegex(ValueError, "seed"):
             validate_schedule_extension(original, changed_seed)
         changed_model = build_schedule(
-            repetitions=None, seed=17, design=design, model_config="different-model"
+            seed=17, powered=True, design=design, model_config="different-model"
         )
         with self.assertRaisesRegex(ValueError, "model_config"):
             validate_schedule_extension(original, changed_model)
         changed_fixture = build_schedule(
-            repetitions=None, seed=17, design=design, repository_fixture="different-fixture"
+            seed=17, powered=True, design=design, repository_fixture="different-fixture"
         )
         with self.assertRaisesRegex(ValueError, "repository_fixture"):
             validate_schedule_extension(original, changed_fixture)
@@ -484,7 +529,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_direction_requires_holm_significance_and_simultaneous_interval(self):
         design = {"selected_repetitions": 12}
-        schedule, payload = _scored_records_payload(repetitions=None, design=design)
+        schedule, payload = _scored_records_payload(repetitions=None, design=design, powered=True)
         for record in payload["runs"]:
             record["task_success"] = record["mode"] == "mcp"
             record["criterion_passes"] = [record["task_success"], record["task_success"]]
@@ -501,7 +546,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_staged_summary_continues_then_reports_powered_inconclusive_at_cap(self):
         design = {"selected_repetitions": 12}
-        schedule, payload = _scored_records_payload(repetitions=None, design=design)
+        schedule, payload = _scored_records_payload(repetitions=None, design=design, powered=True)
         payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 6]
         first_look = summarize_records(payload, schedule)
         adequacy = first_look["statistical_adequacy"]
@@ -510,7 +555,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertEqual(adequacy["extension_stage"]["percent"], 50)
         self.assertEqual(adequacy["look_cumulative_alpha"], 0.005)
 
-        payload["runs"] = [record for record in _scored_records_payload(repetitions=None, design=design)[1]["runs"]]
+        payload["runs"] = [record for record in _scored_records_payload(repetitions=None, design=design, powered=True)[1]["runs"]]
         final_look = summarize_records(payload, schedule)
         self.assertEqual(final_look["statistical_adequacy"]["status"], "powered_but_inconclusive")
         self.assertFalse(final_look["statistical_adequacy"]["continue"])
@@ -521,7 +566,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
     def test_staged_summary_rejects_unplanned_or_undefined_looks(self):
         design = {"selected_repetitions": 12}
-        schedule, payload = _scored_records_payload(repetitions=None, design=design)
+        schedule, payload = _scored_records_payload(repetitions=None, design=design, powered=True)
         payload["runs"] = [record for record in payload["runs"] if record["repetition"] <= 7]
         with self.assertRaisesRegex(ValueError, "planned stage look"):
             summarize_records(payload, schedule)
@@ -1234,6 +1279,39 @@ class TestAgentAbWorkloadResults(unittest.TestCase):
 
         self.assertEqual(generated["model_config"], "test-model")
         self.assertEqual(generated["repository_fixture"], "synthetic-repo-v1")
+
+    def test_schedule_cli_defaults_to_exploratory_and_requires_explicit_power_opt_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            default_path = root / "default.json"
+            powered_path = root / "powered.json"
+            design = {"selected_repetitions": 9, "pilot_required": False}
+            with patch("benchmarks.benchmark_agent_ab._default_power_design", return_value=design):
+                with patch("sys.argv", ["benchmark_agent_ab.py", "--schedule-output", str(default_path)]), patch(
+                    "sys.stdout", new_callable=io.StringIO
+                ):
+                    benchmark_agent_ab.main()
+                with patch("sys.argv", ["benchmark_agent_ab.py", "--schedule-output", str(powered_path), "--powered"]), patch(
+                    "sys.stdout", new_callable=io.StringIO
+                ):
+                    benchmark_agent_ab.main()
+            default = json.loads(default_path.read_text(encoding="utf-8"))
+            powered = json.loads(powered_path.read_text(encoding="utf-8"))
+            self.assertEqual(default["repetitions"], 5)
+            self.assertEqual(default["run_label"], "exploratory")
+            self.assertEqual(default["stage_schedule"][0]["repetitions"], 5)
+            self.assertEqual(powered["repetitions"], 9)
+            self.assertTrue(powered["powered"])
+            self.assertEqual([item["percent"] for item in powered["stage_schedule"]], [50, 75, 100])
+
+            for argv, expected_error in (
+                (["benchmark_agent_ab.py", "--schedule-output", str(root / "bad.json"), "--powered", "--repetitions", "2"], "cannot be combined"),
+                (["benchmark_agent_ab.py", "--records", str(root / "records.json"), "--powered"], "only valid when generating a schedule"),
+            ):
+                with patch("sys.argv", argv), patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+                    benchmark_agent_ab.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(expected_error, stderr.getvalue())
 
     def test_main_result_flag_requires_records_mode(self):
         schedule, payload = _records_payload()

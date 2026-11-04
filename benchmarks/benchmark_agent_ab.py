@@ -35,6 +35,7 @@ LINE_REFERENCE_DIAGNOSTIC_CATEGORIES = (
     "expected_number_absent",
 )
 DEFAULT_AGENT_AB_SEED = 20260909
+DEFAULT_EXPLORATORY_REPETITIONS = 5
 DEFAULT_DESIGN_SEED = 20261031
 DEFAULT_POWER_SIMULATIONS = 1000
 DEFAULT_ALPHA = 0.05
@@ -570,14 +571,22 @@ def build_schedule(
     repetitions: int | None = None,
     seed: int = DEFAULT_AGENT_AB_SEED,
     *,
+    powered: bool = False,
     design: dict[str, Any] | None = None,
     model_config: str | None = None,
     repository_fixture: str | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic counterbalanced task/mode schedule."""
+    if powered and repetitions is not None:
+        raise ValueError("powered schedules cannot be combined with an explicit repetition count")
     is_explicit = repetitions is not None
     power_design = design if design is not None else _default_power_design()
-    selected_repetitions = repetitions if repetitions is not None else power_design["selected_repetitions"]
+    if powered:
+        selected_repetitions = power_design["selected_repetitions"]
+    elif repetitions is not None:
+        selected_repetitions = repetitions
+    else:
+        selected_repetitions = DEFAULT_EXPLORATORY_REPETITIONS
     if selected_repetitions < 1:
         raise ValueError("repetitions must be positive")
     rng = random.Random(seed)
@@ -607,14 +616,11 @@ def build_schedule(
         "selected_design_repetitions": power_design["selected_repetitions"],
         "repetitions_explicit": is_explicit,
         "requested_repetitions": repetitions,
-        "run_label": (
-            "exploratory"
-            if is_explicit and selected_repetitions < power_design["selected_repetitions"]
-            else "evidence-ready-schedule"
-        ),
+        "powered": powered,
+        "run_label": "evidence-ready-schedule" if powered else "exploratory",
         "stage_schedule": (
             stage_repetitions(selected_repetitions)
-            if not is_explicit
+            if powered
             else [{
                 "percent": 100,
                 "repetitions": selected_repetitions,
@@ -630,6 +636,28 @@ def build_schedule(
         "schedule": schedule,
         "privacy": "schedule contains task IDs and categories only; no prompts, captures, commands, or user content",
     }
+
+
+def schedule_is_powered(schedule: dict[str, Any]) -> bool:
+    """Return the powered intent, preserving legacy schedule interpretation."""
+    if isinstance(schedule.get("powered"), bool):
+        return schedule["powered"]
+    planned = int(schedule.get("repetitions", 0))
+    design = schedule.get("statistical_design")
+    target = int(schedule.get(
+        "selected_design_repetitions",
+        design.get("selected_repetitions", planned) if isinstance(design, dict) else planned,
+    ))
+    # Before explicit opt-in was added, omitted counts selected the staged design;
+    # shorter explicit counts were labeled exploratory.
+    return not (bool(schedule.get("repetitions_explicit", False)) and planned < target)
+
+
+def schedule_uses_staged_looks(schedule: dict[str, Any]) -> bool:
+    """Return whether a schedule allows partial records and staged resumption."""
+    if isinstance(schedule.get("powered"), bool):
+        return schedule["powered"]
+    return not schedule.get("repetitions_explicit", True)
 
 
 def _resolve_pilot_identity(
@@ -1053,12 +1081,12 @@ def validate_schedule_extension(
     for field in stable_fields:
         if previous_schedule.get(field) != extended_schedule.get(field):
             raise ValueError(f"schedule extension changed {field}")
-    previous_explicit = previous_schedule.get("repetitions_explicit", True)
+    previous_staged = schedule_uses_staged_looks(previous_schedule)
     if (
-        previous_explicit
+        not previous_staged
         and extended_schedule.get("repetitions", 0) > previous_schedule.get("repetitions", 0)
     ):
-        raise ValueError("explicit schedules cannot be extended; use a preplanned staged schedule")
+        raise ValueError("exploratory schedules cannot be extended; use a powered staged schedule")
     if previous_schedule.get("stage_schedule") != extended_schedule.get("stage_schedule"):
         raise ValueError("schedule extension changed stage_schedule")
     previous_items = previous_schedule.get("schedule")
@@ -1115,8 +1143,8 @@ def _statistical_adequacy(
     completed = min(counts.values(), default=0)
     planned = int(schedule.get("repetitions", 0))
     target = int(schedule.get("selected_design_repetitions", design.get("selected_repetitions", planned)))
-    explicit = bool(schedule.get("repetitions_explicit", False))
-    exploratory_override = explicit and planned < target
+    powered = schedule_is_powered(schedule)
+    exploratory_override = not powered
     looks = schedule.get("stage_schedule", [])
     look = next(
         (item for item in reversed(looks) if completed >= item.get("repetitions", 0)),
@@ -1215,7 +1243,7 @@ def _statistical_adequacy(
             "within_practical_range": equivalent,
             "status": task_status,
             "target_repetitions": target,
-            "adequate_repetitions": result["matched_repetitions"] >= target,
+            "adequate_repetitions": powered and result["matched_repetitions"] >= target,
         }
 
     if exploratory_override:
@@ -1253,7 +1281,7 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
     runs = validate_records(
         payload,
         schedule,
-        allow_staged_prefix=not schedule.get("repetitions_explicit", True),
+        allow_staged_prefix=schedule_uses_staged_looks(schedule),
     )
     records_schema_version = payload.get("records_schema_version", 1)
     by_mode = {}
@@ -1661,7 +1689,7 @@ def records_workload_result(
     for record in validate_records(
         payload,
         schedule,
-        allow_staged_prefix=not schedule.get("repetitions_explicit", True),
+        allow_staged_prefix=schedule_uses_staged_looks(schedule),
     ):
         failure_reason = record.get("failure_reason")
         task_success = record.get("task_success")
@@ -1731,7 +1759,12 @@ def records_workload_result(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--schedule-output", type=Path, help="Write a deterministic run schedule")
-    parser.add_argument("--repetitions", type=int, help="Explicit smoke/evaluation override; omitted selects the powered A/B design")
+    parser.add_argument("--repetitions", type=int, help="Exploratory run count (default: 5; runs once)")
+    parser.add_argument(
+        "--powered",
+        action="store_true",
+        help="Use the powered staged design; incompatible with --repetitions and --records",
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_AGENT_AB_SEED)
     parser.add_argument("--model-config", help="Model identifier used to validate resumable stages")
     parser.add_argument("--repository-fixture", help="Fixture profile used to validate resumable stages")
@@ -1742,6 +1775,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="Write an aggregate summary JSON")
     wr.add_result_argument(parser)
     args = parser.parse_args()
+    if args.powered and args.repetitions is not None:
+        parser.error("--powered cannot be combined with --repetitions")
+    if args.powered and args.records:
+        parser.error("--powered is only valid when generating a schedule")
     if bool(args.schedule_output) == bool(args.records):
         parser.error("provide exactly one of --schedule-output or --records")
     if args.schedule_output and (args.result or args.experiment or args.metadata or args.redact):
@@ -1775,6 +1812,7 @@ def main() -> None:
         schedule = build_schedule(
             args.repetitions,
             args.seed,
+            powered=args.powered,
             design=design,
             model_config=resolved_model_config,
             repository_fixture=resolved_repository_fixture,

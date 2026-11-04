@@ -35,7 +35,7 @@ from benchmarks.run_codex_agent_ab import (
 
 class TestCodexAgentRunner(unittest.TestCase):
     def test_runner_rejects_zero_and_unplanned_repetition_caps_before_invocation(self):
-        schedule = build_schedule(repetitions=None, seed=47, design={"selected_repetitions": 4})
+        schedule = build_schedule(seed=47, powered=True, design={"selected_repetitions": 4})
         manifest = {
             task["id"]: {
                 "prompt": task["id"],
@@ -1124,8 +1124,8 @@ class TestCodexAgentRunner(unittest.TestCase):
 
     def test_resume_extends_staged_run_without_rerunning_matched_pairs(self):
         stage_design = {"selected_repetitions": 2}
-        first_schedule = build_schedule(repetitions=None, seed=53, design=stage_design)
-        extended_schedule = build_schedule(repetitions=None, seed=53, design=stage_design)
+        first_schedule = build_schedule(seed=53, powered=True, design=stage_design)
+        extended_schedule = build_schedule(seed=53, powered=True, design=stage_design)
         manifest = {
             task["id"]: {
                 "prompt": task["id"],

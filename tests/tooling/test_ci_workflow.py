@@ -1,6 +1,7 @@
 """Tests for the GitHub Actions CI workflow policy."""
 
 import inspect
+import json
 import os
 import re
 import shutil
@@ -290,6 +291,111 @@ class TestCiWorkflow(unittest.TestCase):
                 f"codex CLI is not logged in (CODEX_HOME={codex_home})",
                 result.stderr,
             )
+
+    def test_agent_ab_wrapper_defaults_to_exploratory_and_forwards_opt_ins(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = os.path.abspath(temporary_directory)
+            codex_home = os.path.join(root, "codex-home")
+            binary_directory = os.path.join(root, "bin")
+            os.makedirs(codex_home)
+            os.makedirs(binary_directory)
+            fake_codex = os.path.join(binary_directory, "codex")
+            with open(fake_codex, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake_codex, 0o700)
+
+            python_shim = os.path.join(root, "python-shim")
+            with open(python_shim, "w", encoding="utf-8") as stream:
+                stream.write(f"#!{sys.executable}\n")
+                stream.write(
+                    "import json, os, pathlib, subprocess, sys\n"
+                    "args = sys.argv[1:]\n"
+                    "if args and args[0] == '-c':\n"
+                    "    raise SystemExit(subprocess.call([os.environ['REAL_PYTHON'], *args]))\n"
+                    "if len(args) < 2 or args[0] != '-m':\n"
+                    "    raise SystemExit(2)\n"
+                    "module, call_args = args[1], args[2:]\n"
+                    "with open(os.environ['AGENT_AB_TEST_CALLS'], 'a', encoding='utf-8') as log:\n"
+                    "    log.write(json.dumps({'module': module, 'args': call_args}) + '\\n')\n"
+                    "def value(flag):\n"
+                    "    return call_args[call_args.index(flag) + 1]\n"
+                    "if module in {'benchmarks.benchmark_agent_ab_fixtures', 'benchmarks.benchmark_agent_ab_repository_fixture'}:\n"
+                    "    pathlib.Path(value('--fixture-output')).mkdir(parents=True, exist_ok=True)\n"
+                    "    pathlib.Path(value('--manifest-output')).write_text('{}', encoding='utf-8')\n"
+                    "elif module == 'benchmarks.benchmark_agent_ab' and '--schedule-output' in call_args:\n"
+                    "    count = 8 if '--powered' in call_args else int(value('--repetitions')) if '--repetitions' in call_args else 5\n"
+                    "    looks = [4, 8] if '--powered' in call_args else [count]\n"
+                    "    pathlib.Path(value('--schedule-output')).write_text(json.dumps({'stage_schedule': [{'repetitions': n} for n in looks]}), encoding='utf-8')\n"
+                    "elif module == 'benchmarks.run_codex_agent_ab':\n"
+                    "    output = pathlib.Path(value('--output'))\n"
+                    "    output.parent.mkdir(parents=True, exist_ok=True)\n"
+                    "    output.write_text('{}', encoding='utf-8')\n"
+                    "    pathlib.Path(value('--result')).write_text('{}', encoding='utf-8')\n"
+                    "elif module == 'benchmarks.benchmark_agent_ab' and '--records' in call_args:\n"
+                    "    pathlib.Path(value('--output')).write_text(json.dumps({'statistical_adequacy': {'continue': False}}), encoding='utf-8')\n"
+                    "    pathlib.Path(value('--result')).write_text('{}', encoding='utf-8')\n"
+                    "else:\n"
+                    "    raise SystemExit(f'unexpected fake module: {module}')\n"
+                )
+            os.chmod(python_shim, 0o700)
+
+            def run_case(name, overrides):
+                run_dir = os.path.join(root, name)
+                call_log = os.path.join(root, f"{name}.jsonl")
+                environment = os.environ.copy()
+                for variable in ("AGENT_AB_POWERED", "AGENT_AB_REPETITIONS"):
+                    environment.pop(variable, None)
+                environment.update({
+                    "CODEX_HOME": codex_home,
+                    "PATH": binary_directory + os.pathsep + environment.get("PATH", ""),
+                    "PYTHON_BIN": python_shim,
+                    "REAL_PYTHON": sys.executable,
+                    "AGENT_AB_TEST_CALLS": call_log,
+                    "AGENT_AB_RUN_DIR": run_dir,
+                    **overrides,
+                })
+                result = subprocess.run(
+                    ["bash", str(REPOSITORY_ROOT / "benchmarks" / "run_agent_ab_experiment.sh")],
+                    cwd=REPOSITORY_ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                return result, call_log
+
+            for name, overrides, expected_size, expected_flag, expected_count in (
+                ("default", {}, "5", None, None),
+                ("custom", {"AGENT_AB_REPETITIONS": "3"}, "3", "--repetitions", "3"),
+                ("powered", {"AGENT_AB_POWERED": "1"}, "powered", "--powered", None),
+            ):
+                with self.subTest(name=name):
+                    result, call_log = run_case(name, overrides)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    with open(call_log, encoding="utf-8") as call_stream:
+                        calls = [json.loads(line) for line in call_stream]
+                    schedule = next(
+                        call for call in calls
+                        if call["module"] == "benchmarks.benchmark_agent_ab"
+                        and "--schedule-output" in call["args"]
+                    )
+                    run_call = next(call for call in calls if call["module"] == "benchmarks.run_codex_agent_ab")
+                    self.assertIn(f"workload_size={expected_size}", run_call["args"])
+                    if expected_flag is None:
+                        self.assertNotIn("--powered", schedule["args"])
+                        self.assertNotIn("--repetitions", schedule["args"])
+                    else:
+                        index = schedule["args"].index(expected_flag)
+                        if expected_count is not None:
+                            self.assertEqual(schedule["args"][index + 1], expected_count)
+
+            conflict_result, conflict_log = run_case(
+                "conflict",
+                {"AGENT_AB_POWERED": "1", "AGENT_AB_REPETITIONS": "3"},
+            )
+            self.assertEqual(conflict_result.returncode, 2)
+            self.assertIn("cannot be combined", conflict_result.stderr)
+            self.assertFalse(os.path.exists(conflict_log))
 
     def test_release_notes_import_release_checks_from_scripts_package(self):
         source = RELEASE_WORKFLOW.read_text()

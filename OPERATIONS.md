@@ -1214,7 +1214,12 @@ CODEX_HOME=/path/to/writable/authenticated-codex-home \
 The runner creates a temporary worktree at the baseline ref, runs every
 available benchmark on both revisions, compares their workload-result files,
 and runs the same synthetic agent A/B schedule against each revision (five
-repetitions by default). It uses deterministic test embeddings for synthetic
+exploratory repetitions per task and mode by default, in one shot). This
+default does not carry the powered design's statistical guarantee. Pass
+`--agent-ab-powered` to use the staged powered design; it cannot be combined
+with `--repetitions` or `--agent-ab-repetitions`. The current powered design
+uses 1,419 repetitions per task and mode, so it requires substantially more
+Codex calls. It uses deterministic test embeddings for synthetic
 retrieval and effectiveness checks, and the configured ONNX model for
 performance, indexing, memory, and warm-up measurements. Agent A/B runs make
 live Codex CLI calls with the selected model. The default output directory is
@@ -1232,12 +1237,15 @@ The command is recorded as failed with exit code 124, and collection continues
 with later benchmarks. Agent A/B tasks keep their separate per-task
 `--agent-timeout` (900 seconds by default).
 
-To repeat the agent A/B comparison more heavily without rerunning local
-benchmarks, add `--agent-ab-repetitions N --agent-ab-only`. The independent
-agent A/B count defaults to the value of `--repetitions`; the selected model,
-seed, and one shared counterbalanced schedule are used across control and MCP
-runs on both revisions. For example, `--agent-ab-repetitions 20` produces 20
-scheduled repetitions per task and mode on each revision. The report shows
+To run a one-shot exploratory agent A/B comparison with a custom count without
+rerunning local benchmarks, add `--agent-ab-repetitions N --agent-ab-only`.
+The A/B-specific count takes precedence over `--repetitions`; an explicit
+generic `--repetitions` supplies the A/B count when the A/B-specific option is
+omitted. Both options produce exploratory results, even at or above the powered
+count. The selected model, seed, and one shared counterbalanced schedule are
+used across control and MCP runs on both revisions. For example,
+`--agent-ab-repetitions 20` produces 20 scheduled repetitions per task and mode
+on each revision. The report shows
 per-criterion final-answer rates and paired deltas, plus whether each required
 phrase appeared in any successful `search_capture` or `get_capture_slice`
 response. Those exposure measurements help distinguish missing retrieval
