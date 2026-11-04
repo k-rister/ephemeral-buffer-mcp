@@ -637,6 +637,10 @@ exceed the configured buffer byte limit; the tools return a validation error
 instead of silently clamping them.
 
 For agent-side MCP operations, see the [MCP tool reference](tool-reference.md).
+The `execute_and_capture` tool includes bounded head and tail previews for log
+and plain-text output, so a short targeted result may already be visible without
+another retrieval call. Include requested signals and line numbers from those
+previews directly in your answer.
 
 ## Capture hygiene
 

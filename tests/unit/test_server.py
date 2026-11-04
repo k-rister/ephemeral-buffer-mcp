@@ -1538,6 +1538,42 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(result["previews"]["head"], result["previews"]["tail"])
         self.assertIn("AssertionError: expected ready", result["previews"]["tail"])
 
+    def test_execute_includes_bounded_previews_for_plain_text_output(self):
+        lines = [
+            f"inspection record {number:02d}: unchanged"
+            for number in range(1, 32)
+        ]
+        lines.append(
+            "inspection result: TARGETED_SIGNAL cache key collision in parser"
+        )
+        output = "\n".join(lines)
+        with patch.object(
+            capture_tools,
+            "run_command_bounded",
+            return_value=BoundedCommandResult(
+                output,
+                0,
+                False,
+                len(output.encode("utf-8")),
+                False,
+                cleanup_confirmed=True,
+            ),
+        ):
+            result = json.loads(
+                server.execute_and_capture("python3 tools/repository_checks.py targeted")
+            )
+
+        self.assertEqual(result["content_type"], "text")
+        self.assertIn(
+            "32 | inspection result: TARGETED_SIGNAL", result["previews"]["tail"]
+        )
+        self.assertNotIn("inspection record 01", result["previews"]["tail"])
+        compact_result = mcp_transport._compact_tool_text(
+            server.ToolResponseEnvelope(status="ok", data=result)
+        )
+        self.assertIn("Tail preview:", compact_result)
+        self.assertIn("32 | inspection result: TARGETED_SIGNAL", compact_result)
+
     def test_execute_reports_command_and_capture_outcomes_separately(self):
         cases = (
             (
