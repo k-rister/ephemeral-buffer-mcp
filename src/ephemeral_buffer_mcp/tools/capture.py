@@ -379,10 +379,11 @@ def execute_and_capture(
     structured_metrics: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Run a command and return compact JSON with status, duration, sizes, token
-    estimates, truncation, signals, previews, and optional metrics. Log previews
-    show bounded head/tail lines. Check them first; preserve requested signals,
-    test names, line numbers, and assertion text verbatim. Search for missing
-    details and slice only if evidence is absent or truncated.
+    estimates, truncation, signals, previews, and optional metrics. Log and
+    plain-text previews show bounded head/tail lines. Check them first and
+    preserve requested signals, test names, line numbers, and assertion text verbatim.
+    When the requested details appear in a preview, report them directly. Search
+    for missing details and slice only if evidence is absent or truncated.
 
     Use for commands expected to finish within the MCP client's tool-call window.
     Use start_execution when duration may approach or exceed that window; use
@@ -476,7 +477,7 @@ def execute_and_capture(
             )
         payload = summary_payload(
             summary,
-            include_previews=summary.get("content_type") == "log",
+            include_previews=summary.get("content_type") in {"log", "text"},
         )
         bounded_command, command_truncated = _bounded_command(command)
         payload["command"] = bounded_command
