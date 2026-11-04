@@ -84,7 +84,7 @@ class TestReleaseChecks(unittest.TestCase):
                 '[project]\nname="ephemeral-buffer-mcp-core"\nversion="1.2.3"\nrequires-python=">=3.11"\n'
                 'dependencies=["mcp>=2.3.0,<3", "urllib3>=2.8.0"]\n'
                 '[project.optional-dependencies]\nsemantic=["filelock>=4.2.1,<5", '
-                '"huggingface-hub>=0.20,<2", "numpy>=1.24.0", '
+                '"huggingface-hub>=0.20,<3", "numpy>=1.24.0", '
                 '"onnxruntime>=1.17,<2", '
                 '"tokenizers>=0.15,<1"]\n',
                 encoding="utf-8",
@@ -121,7 +121,7 @@ class TestReleaseChecks(unittest.TestCase):
                 "core_dependencies": ["mcp>=2.3.0,<3", "urllib3>=2.8.0"],
                 "semantic_extra": [
                     "filelock>=4.2.1,<5",
-                    "huggingface-hub>=0.20,<2",
+                    "huggingface-hub>=0.20,<3",
                     "numpy>=1.24.0",
                     "onnxruntime>=1.17,<2",
                     "tokenizers>=0.15,<1",
