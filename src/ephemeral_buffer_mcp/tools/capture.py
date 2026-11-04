@@ -381,9 +381,9 @@ def execute_and_capture(
     """Run a command and return compact JSON with status, duration, sizes, token
     estimates, truncation, signals, previews, and optional metrics. Log and
     plain-text previews show bounded head/tail lines. Review them first and
-    report requested signals, test names, line numbers, and assertion text
-    verbatim. Search for missing details and slice only if evidence is absent or
-    truncated.
+    preserve requested signals, test names, line numbers, and assertion text
+    verbatim in the response. Search for missing details and slice only if
+    evidence is absent or truncated.
 
     Use for commands expected to finish within the MCP client's tool-call window.
     Use start_execution when duration may approach or exceed that window; use
