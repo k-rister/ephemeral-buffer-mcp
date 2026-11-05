@@ -558,11 +558,13 @@ To retain the complete Codex event stream for unsuccessful runs, opt in with
 one directory per failed scheduled run with `stdout.jsonl`, `stderr.txt`, and
 `metadata.json`. It includes task-criterion failures, MCP-not-used outcomes,
 nonzero exits, spawn errors, and timeouts (including partial output). Only the
-failed run is saved; a passing paired run is not. These raw streams may include
-private task prompts, assistant output, tool requests and results, and command
-output. Keep the directory local, review it before sharing, and remove it when
-it is no longer needed. It is separate from the metadata-only `--output` and
-`--result` files and is never generated unless the option is supplied. A
+failed run is saved; a passing paired run is not. Keep this directory outside
+the source fixture; the runner rejects paths at or under `--repository` so a
+saved transcript cannot enter a later fixture copy. These raw streams may
+include private task prompts, assistant output, tool requests and results, and
+command output. Keep the directory local, review it before sharing, and remove
+it when it is no longer needed. It is separate from the metadata-only `--output`
+and `--result` files and is never generated unless the option is supplied. A
 `--resume` run warns about earlier unsuccessful records without a trace; it
 does not rerun completed tasks to recreate one.
 When the fixture does not contain the application package, select the source
