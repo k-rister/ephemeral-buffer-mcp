@@ -393,7 +393,9 @@ deterministic test embedding backend. Records contain task-scoped pass/fail
 metadata, not prompts, criterion text, tool responses, or transcripts. The
 separate opt-in `--failure-artifacts-dir` can store raw stdout/stderr traces for
 unsuccessful runs; those artifacts may contain private prompts and tool data and
-are not part of these result records. Review them before sharing. The
+are not part of these result records. Store them outside the source fixture;
+the runner rejects an artifact directory at or under `--repository` to keep
+traces out of later fixture copies. Review them before sharing. The
 fixture is synthetic and small; these results do not establish performance on
 other models or representative agent work.
 

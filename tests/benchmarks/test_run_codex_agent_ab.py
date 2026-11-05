@@ -1356,6 +1356,73 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertRegex(fingerprint, r"^sha256:[0-9a-f]{64}$")
         self.assertNotIn("/private/cache/agent-ab", json.dumps(payload["protocol"]))
 
+    def test_run_schedule_rejects_failure_artifacts_inside_repository(self):
+        schedule = build_schedule(
+            repetitions=1,
+            seed=3,
+            model_config="gpt-5.6-luna",
+            repository_fixture="fixture",
+        )
+        manifest = {
+            task["id"]: {
+                "prompt": task["id"],
+                "signal_marker": "ok",
+                "success_criteria": {
+                    "description": "report the signal and a deterministic result",
+                    "required_phrases": ["ok", "expected answer"],
+                },
+            }
+            for task in schedule["tasks"]
+        }
+        args = argparse.Namespace(
+            repository=".", repository_fixture="fixture", model="gpt-5.6-luna",
+            failure_artifacts_dir=None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "fixture"
+            repository.mkdir()
+            args.repository = repository
+            for artifact_dir in (repository, repository / "failure-traces"):
+                with self.subTest(artifact_dir=artifact_dir):
+                    args.failure_artifacts_dir = artifact_dir
+                    with patch("benchmarks.run_codex_agent_ab._run_one") as run_one:
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "--failure-artifacts-dir must be outside the --repository source fixture",
+                        ):
+                            run_schedule(schedule, manifest, args)
+                        run_one.assert_not_called()
+                    self.assertFalse((repository / "failure-traces").exists())
+
+            args.failure_artifacts_dir = Path("fixture/failure-traces")
+            with contextlib.chdir(root), patch(
+                "benchmarks.run_codex_agent_ab._run_one"
+            ) as run_one:
+                args.repository = Path("fixture")
+                with self.assertRaisesRegex(ValueError, "failure-artifacts-dir"):
+                    run_schedule(schedule, manifest, args)
+                run_one.assert_not_called()
+
+            args.repository = repository
+            external_target = root / "external-traces"
+            external_target.mkdir()
+            inside_link = repository / "traces-link"
+            inside_link.symlink_to(external_target, target_is_directory=True)
+            args.failure_artifacts_dir = inside_link / "failure-traces"
+            with patch("benchmarks.run_codex_agent_ab._run_one") as run_one:
+                with self.assertRaisesRegex(ValueError, "failure-artifacts-dir"):
+                    run_schedule(schedule, manifest, args)
+                run_one.assert_not_called()
+
+            outside_link = root / "outside-traces-link"
+            outside_link.symlink_to(repository / "failure-traces", target_is_directory=True)
+            args.failure_artifacts_dir = outside_link
+            with patch("benchmarks.run_codex_agent_ab._run_one") as run_one:
+                with self.assertRaisesRegex(ValueError, "failure-artifacts-dir"):
+                    run_schedule(schedule, manifest, args)
+                run_one.assert_not_called()
+
     def test_resume_extends_staged_run_without_rerunning_matched_pairs(self):
         stage_design = {"selected_repetitions": 2}
         first_schedule = build_schedule(seed=53, powered=True, design=stage_design)

@@ -189,6 +189,33 @@ def _copy_fixture(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, ignore=ignore, symlinks=False)
 
 
+def _path_is_within(path: Path, directory: Path) -> bool:
+    return path == directory or directory in path.parents
+
+
+def _validate_failure_artifacts_dir(
+    repository_input: Path,
+    repository: Path,
+    failure_artifacts_dir: Path | None,
+) -> None:
+    if failure_artifacts_dir is None:
+        return
+
+    # Check the paths as supplied as well as their resolved locations. The
+    # lexical check catches a fixture symlink that points outside the fixture;
+    # the resolved check catches an external alias that points into it.
+    repository_spelling = Path(os.path.abspath(repository_input))
+    artifact_spelling = Path(os.path.abspath(failure_artifacts_dir))
+    artifact_resolved = failure_artifacts_dir.resolve()
+    if (
+        _path_is_within(artifact_spelling, repository_spelling)
+        or _path_is_within(artifact_resolved, repository)
+    ):
+        raise ValueError(
+            "--failure-artifacts-dir must be outside the --repository source fixture"
+        )
+
+
 def _event_objects(output: str) -> list[dict[str, Any]]:
     events = []
     for line in output.splitlines():
@@ -1319,6 +1346,11 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
     repository = Path(args.repository).resolve()
     if not repository.is_dir():
         raise ValueError(f"repository fixture is not a directory: {repository}")
+    _validate_failure_artifacts_dir(
+        Path(args.repository),
+        repository,
+        getattr(args, "failure_artifacts_dir", None),
+    )
 
     test_embeddings = os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1"
     protocol = {
