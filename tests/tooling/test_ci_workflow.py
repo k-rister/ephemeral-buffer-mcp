@@ -22,6 +22,27 @@ AGENT_AB_REPORTER = REPOSITORY_ROOT / "benchmarks" / "render_agent_ab_report.py"
 TOOL_REFERENCE = REPOSITORY_ROOT / "docs" / "tool-reference.md"
 
 
+def _write_codex_test_profile(codex_home, key_file):
+    os.makedirs(codex_home, exist_ok=True)
+    with open(os.path.join(codex_home, "local-eval.config.toml"), "w", encoding="utf-8") as stream:
+        stream.write('model = "test-model"\nmodel_provider = "self_hosted"\n')
+    with open(os.path.join(codex_home, "config.toml"), "w", encoding="utf-8") as stream:
+        stream.write(
+            '[model_providers.self_hosted]\n'
+            'name = "Self-hosted"\n'
+            'base_url = "https://models.example.invalid/v1"\n'
+            'wire_api = "responses"\n'
+            'env_key = "TEST_MODEL_API_KEY"\n'
+        )
+    with open(key_file, "w", encoding="utf-8") as stream:
+        stream.write("test-model-key\n")
+    return {
+        "AGENT_AB_CODEX_PROFILE": "local-eval",
+        "AGENT_AB_CODEX_API_KEY_FILE": key_file,
+        "AGENT_AB_CODEX_API_KEY_ENV": "TEST_MODEL_API_KEY",
+    }
+
+
 def _registered_signature(function, name):
     """Render the registered argument names and defaults in reference format."""
     parameters = []
@@ -197,7 +218,15 @@ class TestCiWorkflow(unittest.TestCase):
                     "#!/usr/bin/env python3\n"
                     "import json, os, sys\n"
                     "if len(sys.argv) > 1 and sys.argv[1] == '-c':\n"
+                    "    if len(sys.argv) > 3 and 'json.loads' in sys.argv[2]:\n"
+                    "        metadata = json.loads(sys.argv[3])\n"
+                    "        field = next(name for name in ('model_id', 'provider_id', 'config_sha256', 'name') if name in sys.argv[2])\n"
+                    "        print(metadata[field])\n"
+                    "        raise SystemExit(0)\n"
                     "    print(os.path.realpath(sys.argv[3]))\n"
+                    "    raise SystemExit(0)\n"
+                    "if len(sys.argv) > 2 and sys.argv[1:3] == ['-m', 'benchmarks.codex_profile']:\n"
+                    "    print(json.dumps({'name': 'local-eval', 'model_id': 'test-model', 'provider_id': 'self_hosted', 'config_sha256': 'sha256:' + 'a' * 64}))\n"
                     "    raise SystemExit(0)\n"
                     "with open(os.environ['FAKE_PYTHON_LOG'], 'a', encoding='utf-8') as log:\n"
                     "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
@@ -209,8 +238,11 @@ class TestCiWorkflow(unittest.TestCase):
             os.makedirs(binary_directory)
             fake_codex = os.path.join(binary_directory, "codex")
             with open(fake_codex, "w", encoding="utf-8") as stream:
-                stream.write("#!/bin/sh\nexit 0\n")
+                stream.write("#!/bin/sh\n[ \"$1\" = login ] && exit 1\nexit 0\n")
             os.chmod(fake_codex, 0o700)
+            profile_environment = _write_codex_test_profile(
+                codex_home, os.path.join(root, "api-key")
+            )
             output_directory = os.path.join(root, "bundle")
             environment = os.environ.copy()
             environment.update({
@@ -218,12 +250,12 @@ class TestCiWorkflow(unittest.TestCase):
                 "FAKE_PYTHON_LOG": fake_python_log,
                 "CODEX_HOME": codex_home,
                 "PATH": binary_directory + os.pathsep + environment.get("PATH", ""),
+                **profile_environment,
             })
             result = subprocess.run(
                 [
                     "bash", os.path.join(scripts, "collect-release-benchmarks.sh"),
                     "--baseline-ref", baseline_revision,
-                    "--model", "gpt-5.6-luna",
                     "--output-dir", output_directory,
                     "--samples", "1",
                     "--semantic-samples", "1",
@@ -261,7 +293,7 @@ class TestCiWorkflow(unittest.TestCase):
             self.assertIn("benchmark_baseline.json", invocations)
             self.assertIn("benchmark_relevance_baseline.json", invocations)
 
-    def test_agent_ab_runner_reports_missing_codex_authentication(self):
+    def test_agent_ab_runner_requires_profile_before_generating_fixture(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             codex_home = os.path.join(temporary_directory, "codex-home")
             binary_directory = os.path.join(temporary_directory, "bin")
@@ -276,6 +308,7 @@ class TestCiWorkflow(unittest.TestCase):
                 "CODEX_HOME": codex_home,
                 "PATH": binary_directory + os.pathsep + environment.get("PATH", ""),
                 "PYTHON_BIN": sys.executable,
+                "AGENT_AB_RUN_DIR": os.path.join(temporary_directory, "run-output"),
             })
             result = subprocess.run(
                 ["bash", str(REPOSITORY_ROOT / "benchmarks" / "run_agent_ab_experiment.sh")],
@@ -287,10 +320,58 @@ class TestCiWorkflow(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertIn(
-                f"codex CLI is not logged in (CODEX_HOME={codex_home})",
-                result.stderr,
+            self.assertIn("AGENT_AB_CODEX_PROFILE", result.stderr)
+            self.assertFalse(os.path.exists(os.path.join(temporary_directory, "run-output")))
+
+    def test_agent_ab_runner_rejects_bad_key_and_provider_before_generating_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            codex_home = os.path.join(temporary_directory, "codex-home")
+            binary_directory = os.path.join(temporary_directory, "bin")
+            key_file = os.path.join(temporary_directory, "api-key")
+            os.makedirs(binary_directory)
+            profile_environment = _write_codex_test_profile(codex_home, key_file)
+            fake_codex = os.path.join(binary_directory, "codex")
+            with open(fake_codex, "w", encoding="utf-8") as stream:
+                stream.write("#!/bin/sh\n[ \"$1\" = login ] && exit 1\nexit 0\n")
+            os.chmod(fake_codex, 0o700)
+            run_directory = os.path.join(temporary_directory, "run-output")
+            environment = os.environ.copy()
+            environment.update({
+                "CODEX_HOME": codex_home,
+                "PATH": binary_directory + os.pathsep + environment.get("PATH", ""),
+                "PYTHON_BIN": sys.executable,
+                "AGENT_AB_RUN_DIR": run_directory,
+                **profile_environment,
+            })
+
+            with open(key_file, "w", encoding="utf-8") as stream:
+                stream.write("  \n")
+            empty_key_result = subprocess.run(
+                ["bash", str(REPOSITORY_ROOT / "benchmarks" / "run_agent_ab_experiment.sh")],
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
+            self.assertEqual(empty_key_result.returncode, 2)
+            self.assertIn("API key file", empty_key_result.stderr)
+            self.assertFalse(os.path.exists(run_directory))
+
+            with open(key_file, "w", encoding="utf-8") as stream:
+                stream.write("test-model-key\n")
+            environment["AGENT_AB_CODEX_API_KEY_ENV"] = "WRONG_API_KEY"
+            provider_result = subprocess.run(
+                ["bash", str(REPOSITORY_ROOT / "benchmarks" / "run_agent_ab_experiment.sh")],
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(provider_result.returncode, 2)
+            self.assertIn("env_key", provider_result.stderr)
+            self.assertFalse(os.path.exists(run_directory))
 
     def test_agent_ab_wrapper_defaults_to_exploratory_and_forwards_opt_ins(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -301,7 +382,7 @@ class TestCiWorkflow(unittest.TestCase):
             os.makedirs(binary_directory)
             fake_codex = os.path.join(binary_directory, "codex")
             with open(fake_codex, "w", encoding="utf-8") as stream:
-                stream.write("#!/bin/sh\nexit 0\n")
+                stream.write("#!/bin/sh\n[ \"$1\" = login ] && exit 1\nexit 0\n")
             os.chmod(fake_codex, 0o700)
 
             python_shim = os.path.join(root, "python-shim")
@@ -312,11 +393,15 @@ class TestCiWorkflow(unittest.TestCase):
                     "args = sys.argv[1:]\n"
                     "if args and args[0] == '-c':\n"
                     "    raise SystemExit(subprocess.call([os.environ['REAL_PYTHON'], *args]))\n"
+                    "if args and args[0] == '-B':\n"
+                    "    args = args[1:]\n"
                     "if len(args) < 2 or args[0] != '-m':\n"
                     "    raise SystemExit(2)\n"
                     "module, call_args = args[1], args[2:]\n"
                     "with open(os.environ['AGENT_AB_TEST_CALLS'], 'a', encoding='utf-8') as log:\n"
                     "    log.write(json.dumps({'module': module, 'args': call_args}) + '\\n')\n"
+                    "if module == 'benchmarks.codex_profile':\n"
+                    "    raise SystemExit(subprocess.call([os.environ['REAL_PYTHON'], '-m', module, *call_args]))\n"
                     "def value(flag):\n"
                     "    return call_args[call_args.index(flag) + 1]\n"
                     "if module in {'benchmarks.benchmark_agent_ab_fixtures', 'benchmarks.benchmark_agent_ab_repository_fixture'}:\n"
@@ -331,6 +416,8 @@ class TestCiWorkflow(unittest.TestCase):
                     "    output.parent.mkdir(parents=True, exist_ok=True)\n"
                     "    output.write_text('{}', encoding='utf-8')\n"
                     "    pathlib.Path(value('--result')).write_text('{}', encoding='utf-8')\n"
+                    "    with open(os.environ['AGENT_AB_TEST_CALLS'], 'a', encoding='utf-8') as log:\n"
+                    "        log.write(json.dumps({'runner_profile': os.environ.get('AGENT_AB_CODEX_PROFILE'), 'key_env': os.environ.get('AGENT_AB_CODEX_API_KEY_ENV'), 'key_file_configured': bool(os.environ.get('AGENT_AB_CODEX_API_KEY_FILE'))}) + '\\n')\n"
                     "elif module == 'benchmarks.benchmark_agent_ab' and '--records' in call_args:\n"
                     "    pathlib.Path(value('--output')).write_text(json.dumps({'statistical_adequacy': {'continue': False}}), encoding='utf-8')\n"
                     "    pathlib.Path(value('--result')).write_text('{}', encoding='utf-8')\n"
@@ -338,6 +425,8 @@ class TestCiWorkflow(unittest.TestCase):
                     "    raise SystemExit(f'unexpected fake module: {module}')\n"
                 )
             os.chmod(python_shim, 0o700)
+            api_key_file = os.path.join(root, "api-key")
+            profile_environment = _write_codex_test_profile(codex_home, api_key_file)
 
             def run_case(name, overrides):
                 run_dir = os.path.join(root, name)
@@ -352,6 +441,7 @@ class TestCiWorkflow(unittest.TestCase):
                     "REAL_PYTHON": sys.executable,
                     "AGENT_AB_TEST_CALLS": call_log,
                     "AGENT_AB_RUN_DIR": run_dir,
+                    **profile_environment,
                     **overrides,
                 })
                 result = subprocess.run(
@@ -388,6 +478,11 @@ class TestCiWorkflow(unittest.TestCase):
                         index = schedule["args"].index(expected_flag)
                         if expected_count is not None:
                             self.assertEqual(schedule["args"][index + 1], expected_count)
+                    runner_settings = [call for call in calls if "runner_profile" in call]
+                    self.assertTrue(runner_settings)
+                    self.assertTrue(all(call["runner_profile"] == "local-eval" for call in runner_settings))
+                    self.assertTrue(all(call["key_env"] == "TEST_MODEL_API_KEY" for call in runner_settings))
+                    self.assertTrue(all(call["key_file_configured"] for call in runner_settings))
 
             conflict_result, conflict_log = run_case(
                 "conflict",

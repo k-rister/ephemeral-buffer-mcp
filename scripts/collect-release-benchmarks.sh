@@ -5,7 +5,13 @@ set -uo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${PYTHON_BIN:-$repo_dir/.venv/bin/python}"
 baseline_ref=""
+codex_profile="${AGENT_AB_CODEX_PROFILE:-}"
+codex_api_key_file="${AGENT_AB_CODEX_API_KEY_FILE:-}"
+codex_api_key_env="${AGENT_AB_CODEX_API_KEY_ENV:-}"
+codex_profile_json=""
 model=""
+provider_id=""
+profile_config_hash=""
 output_dir=""
 samples=5
 semantic_samples=3
@@ -25,7 +31,7 @@ cleanup_failure=0
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/collect-release-benchmarks.sh --baseline-ref TAG --model MODEL [options]
+Usage: scripts/collect-release-benchmarks.sh --baseline-ref TAG [options]
 
 Options:
   --output-dir PATH          New output directory (default: timestamped path under /tmp)
@@ -42,15 +48,16 @@ Options:
   --benchmark-timeout SECONDS Timeout for each local benchmark (default: 3600)
   -h, --help                 Show this help
 
-Requires a clean checkout, .venv (or PYTHON_BIN), CODEX_HOME, an authenticated
-Codex CLI, and a real model identifier. Agent A/B runs make live Codex calls.
+Requires a clean checkout, .venv (or PYTHON_BIN), writable CODEX_HOME,
+AGENT_AB_CODEX_PROFILE, AGENT_AB_CODEX_API_KEY_FILE,
+AGENT_AB_CODEX_API_KEY_ENV, and Codex CLI on PATH. The selected profile supplies
+the model and provider. Agent A/B runs make live Codex calls.
 USAGE
 }
 
 while (($#)); do
     case "$1" in
         --baseline-ref) baseline_ref="${2:?missing value for --baseline-ref}"; shift 2 ;;
-        --model) model="${2:?missing value for --model}"; shift 2 ;;
         --output-dir) output_dir="${2:?missing value for --output-dir}"; shift 2 ;;
         --samples) samples="${2:?missing value for --samples}"; shift 2 ;;
         --semantic-samples) semantic_samples="${2:?missing value for --semantic-samples}"; shift 2 ;;
@@ -68,8 +75,8 @@ while (($#)); do
     esac
 done
 
-if [[ -z "$baseline_ref" || -z "$model" || "$model" == "your-fixed-model" ]]; then
-    echo "--baseline-ref and a real --model identifier are required" >&2
+if [[ -z "$baseline_ref" ]]; then
+    echo "--baseline-ref is required" >&2
     usage >&2
     exit 2
 fi
@@ -100,19 +107,28 @@ if [[ ! -x "$python_bin" ]]; then
 fi
 codex_home="${CODEX_HOME:-}"
 if [[ -z "$codex_home" || ! -d "$codex_home" || ! -w "$codex_home" ]]; then
-    echo "CODEX_HOME must point to a writable, authenticated Codex home" >&2
+    echo "CODEX_HOME must point to a writable Codex home" >&2
     exit 2
 fi
 codex_home="$(cd "$codex_home" && pwd)"
 export CODEX_HOME="$codex_home"
+export AGENT_AB_CODEX_PROFILE="$codex_profile"
+export AGENT_AB_CODEX_API_KEY_FILE="$codex_api_key_file"
+export AGENT_AB_CODEX_API_KEY_ENV="$codex_api_key_env"
 if ! command -v codex >/dev/null 2>&1; then
     echo "Codex CLI is not on PATH" >&2
     exit 2
 fi
-if ! CODEX_HOME="$CODEX_HOME" codex login status >/dev/null 2>&1; then
-    echo "Codex CLI is not authenticated in CODEX_HOME" >&2
+if ! profile_metadata="$(PYTHONPATH="$repo_dir/src:$repo_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$python_bin" -B -m benchmarks.codex_profile --format json)"; then
+    echo "Codex profile preflight failed" >&2
     exit 2
 fi
+model="$("$python_bin" -c 'import json,sys; print(json.loads(sys.argv[1])["model_id"])' "$profile_metadata")"
+provider_id="$("$python_bin" -c 'import json,sys; print(json.loads(sys.argv[1])["provider_id"])' "$profile_metadata")"
+profile_config_hash="$("$python_bin" -c 'import json,sys; print(json.loads(sys.argv[1])["config_sha256"])' "$profile_metadata")"
+codex_profile="$("$python_bin" -c 'import json,sys; print(json.loads(sys.argv[1])["name"])' "$profile_metadata")"
+codex_profile_json="$profile_metadata"
 if [[ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=all)" ]]; then
     echo "working tree must be clean so the candidate revision is reproducible" >&2
     exit 2
@@ -375,6 +391,7 @@ schedule_args=(
     --schedule-output "$schedule"
     --seed "$seed"
     --model-config "$model"
+    --codex-profile-json "$codex_profile_json"
     --repository-fixture synthetic-eb-heavy-v2
 )
 if [[ -n "$agent_ab_repetitions" ]]; then
@@ -434,7 +451,7 @@ for stage_count in "${agent_ab_stage_repetitions[@]}"; do
         fi
         run_tool "agent-ab-$revision-stage-$stage_index" "$repo_dir" 1 run_codex_agent_ab.py \
             --schedule "$schedule" --tasks "$tasks" --repository "$fixture_dir" \
-            --repository-fixture synthetic-eb-heavy-v2 --model "$model" \
+            --repository-fixture synthetic-eb-heavy-v2 \
             "${server_args[@]}" --mcp-python "$python_bin" \
             --allow-mcp-approvals --require-mcp-calls --sandbox read-only --timeout "$agent_timeout" \
             --max-repetitions "$stage_count" --diagnostic-log-dir "$ab_dir/lifecycle" \
@@ -510,6 +527,9 @@ if ! RELEASE_BENCHMARK_BASELINE_REF="$baseline_ref" \
     RELEASE_BENCHMARK_BASELINE_REVISION="$baseline_revision" \
     RELEASE_BENCHMARK_CANDIDATE_REVISION="$candidate_revision" \
     RELEASE_BENCHMARK_MODEL="$model" \
+    RELEASE_BENCHMARK_CODEX_PROFILE="$codex_profile" \
+    RELEASE_BENCHMARK_CODEX_PROVIDER="$provider_id" \
+    RELEASE_BENCHMARK_CODEX_PROFILE_CONFIG_HASH="$profile_config_hash" \
     RELEASE_BENCHMARK_SAMPLES="$samples" \
     RELEASE_BENCHMARK_SEMANTIC_SAMPLES="$semantic_samples" \
     RELEASE_BENCHMARK_REPETITIONS="$repetitions" \
@@ -549,6 +569,12 @@ manifest = {
     },
     "configuration": {
         "model": os.environ["RELEASE_BENCHMARK_MODEL"],
+        "codex_profile": {
+            "name": os.environ["RELEASE_BENCHMARK_CODEX_PROFILE"],
+            "model_id": os.environ["RELEASE_BENCHMARK_MODEL"],
+            "provider_id": os.environ["RELEASE_BENCHMARK_CODEX_PROVIDER"],
+            "config_sha256": os.environ["RELEASE_BENCHMARK_CODEX_PROFILE_CONFIG_HASH"],
+        },
         "samples": int(os.environ["RELEASE_BENCHMARK_SAMPLES"]),
         "semantic_index_samples": int(os.environ["RELEASE_BENCHMARK_SEMANTIC_SAMPLES"]),
         "repetitions": int(os.environ["RELEASE_BENCHMARK_REPETITIONS"]),
@@ -595,7 +621,7 @@ fi
     printf '# Release benchmark bundle\n\n'
     printf '%s\n' "- Baseline: \`$baseline_ref\` (\`${baseline_revision:0:12}\`)"
     printf '%s\n' "- Candidate: \`${candidate_revision:0:12}\`"
-    printf '%s\n' "- Model: \`$model\`"
+    printf '%s\n' "- Codex profile: \`$codex_profile\` (model \`$model\`, provider \`$provider_id\`)"
     printf '%s\n' "- Repetitions: effectiveness=$repetitions; agent A/B=$agent_ab_repetitions ($agent_ab_mode); seed: $seed; samples: $samples; semantic-index samples: $semantic_samples"
     printf '%s\n' "- Timeouts: local benchmark=${benchmark_timeout}s (5s cleanup grace); agent A/B=${agent_timeout}s per task"
     if ((agent_ab_only)); then

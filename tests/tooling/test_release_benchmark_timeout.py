@@ -19,6 +19,29 @@ from tests.paths import REPOSITORY_ROOT
 
 TIMEOUT_RUNNER = REPOSITORY_ROOT / "scripts" / "run_with_timeout.py"
 RELEASE_BENCHMARK_SCRIPT = REPOSITORY_ROOT / "scripts" / "collect-release-benchmarks.sh"
+CODEX_PROFILE_MODULE = REPOSITORY_ROOT / "benchmarks" / "codex_profile.py"
+
+
+def _codex_profile_environment(root: Path, codex_home: Path) -> dict[str, str]:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "local-eval.config.toml").write_text(
+        'model = "test-model"\nmodel_provider = "self_hosted"\n', encoding="utf-8"
+    )
+    (codex_home / "config.toml").write_text(
+        '[model_providers.self_hosted]\n'
+        'name = "Self-hosted"\n'
+        'base_url = "https://models.example.invalid/v1"\n'
+        'wire_api = "responses"\n'
+        'env_key = "TEST_MODEL_API_KEY"\n',
+        encoding="utf-8",
+    )
+    key_file = root / "api-key"
+    key_file.write_text("test-model-key\n", encoding="utf-8")
+    return {
+        "AGENT_AB_CODEX_PROFILE": "local-eval",
+        "AGENT_AB_CODEX_API_KEY_FILE": str(key_file),
+        "AGENT_AB_CODEX_API_KEY_ENV": "TEST_MODEL_API_KEY",
+    }
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -254,7 +277,6 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                     [
                         "bash", str(RELEASE_BENCHMARK_SCRIPT),
                         "--baseline-ref", "unused-ref",
-                        "--model", "test-model",
                         "--agent-ab-powered",
                         option, "2",
                     ],
@@ -265,6 +287,57 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("cannot be combined", result.stderr)
+
+    def test_release_profile_preflight_fails_before_creating_bundle_or_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository = root / "repository"
+            scripts = repository / "scripts"
+            benchmarks = repository / "benchmarks"
+            scripts.mkdir(parents=True)
+            benchmarks.mkdir(parents=True)
+            shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
+            shutil.copyfile(CODEX_PROFILE_MODULE, benchmarks / "codex_profile.py")
+            (benchmarks / "__init__.py").write_text("", encoding="utf-8")
+            _git(repository, "init", "--quiet")
+            _git(repository, "config", "user.name", "Release benchmark test")
+            _git(repository, "config", "user.email", "release-test@example.invalid")
+            _git(repository, "add", ".")
+            _git(repository, "commit", "--quiet", "-m", "fixture")
+            baseline_revision = _git(repository, "rev-parse", "HEAD")
+
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            binary_directory = root / "bin"
+            binary_directory.mkdir()
+            fake_codex = binary_directory / "codex"
+            fake_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_codex.chmod(0o700)
+            output_directory = root / "bundle"
+            environment = os.environ.copy()
+            environment.update({
+                "PYTHON_BIN": sys.executable,
+                "CODEX_HOME": str(codex_home),
+                "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
+            })
+            result = subprocess.run(
+                [
+                    "bash", str(scripts / RELEASE_BENCHMARK_SCRIPT.name),
+                    "--baseline-ref", baseline_revision,
+                    "--output-dir", str(output_directory),
+                    "--agent-ab-only",
+                ],
+                cwd=repository,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("AGENT_AB_CODEX_PROFILE", result.stderr)
+            self.assertFalse(output_directory.exists())
 
     def test_timeout_is_recorded_and_collection_continues_without_changing_agent_timeout(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -277,6 +350,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             data.mkdir(parents=True)
             shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
             shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
+            shutil.copyfile(CODEX_PROFILE_MODULE, benchmarks / "codex_profile.py")
             (benchmarks / "__init__.py").write_text("", encoding="utf-8")
             (benchmarks / "benchmark_agent_ab.py").write_text(
                 "import json, os, sys\n"
@@ -332,6 +406,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                     "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                     "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
                     "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(root / "schedule-args.jsonl"),
+                    **_codex_profile_environment(root, codex_home),
                 }
             )
 
@@ -341,8 +416,6 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                     str(scripts / RELEASE_BENCHMARK_SCRIPT.name),
                     "--baseline-ref",
                     baseline_revision,
-                    "--model",
-                    "test-model",
                     "--output-dir",
                     str(output_directory),
                     "--samples",
@@ -407,6 +480,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             data.mkdir(parents=True)
             shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
             shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
+            shutil.copyfile(CODEX_PROFILE_MODULE, benchmarks / "codex_profile.py")
             shutil.copyfile(
                 REPOSITORY_ROOT / "benchmarks" / "render_agent_ab_report.py",
                 benchmarks / "render_agent_ab_report.py",
@@ -449,7 +523,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "count = int(args[args.index('--max-repetitions') + 1])\n"
                 "with open(os.environ['RELEASE_TEST_AGENT_ARGS_LOG'], 'a', encoding='utf-8') as stream:\n"
                 "    output = pathlib.Path(args[args.index('--output') + 1])\n"
-                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args, 'output': str(output)}) + '\\n')\n"
+                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args, 'output': str(output), 'profile': os.environ.get('AGENT_AB_CODEX_PROFILE'), 'key_env': os.environ.get('AGENT_AB_CODEX_API_KEY_ENV'), 'key_file_configured': bool(os.environ.get('AGENT_AB_CODEX_API_KEY_FILE'))}) + '\\n')\n"
                 "if variant == 'baseline' and count == 1:\n"
                 "    raise SystemExit(0)\n"
                 "output = pathlib.Path(args[args.index('--output') + 1])\n"
@@ -482,12 +556,12 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                 "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
                 "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(root / "schedule-args.jsonl"),
+                **_codex_profile_environment(root, codex_home),
             })
             result = subprocess.run(
                 [
                     "bash", str(scripts / RELEASE_BENCHMARK_SCRIPT.name),
                     "--baseline-ref", baseline_revision,
-                    "--model", "test-model",
                     "--output-dir", str(output_directory),
                     "--agent-ab-only",
                     "--agent-ab-powered",
@@ -509,6 +583,9 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             ]
             powered_invocations = [item for item in invocations if str(output_directory) in item["output"]]
             self.assertEqual(len(powered_invocations), 4)
+            self.assertTrue(all(item["profile"] == "local-eval" for item in powered_invocations))
+            self.assertTrue(all(item["key_env"] == "TEST_MODEL_API_KEY" for item in powered_invocations))
+            self.assertTrue(all(item["key_file_configured"] for item in powered_invocations))
             stage_two = [item for item in powered_invocations if item["count"] == 2]
             self.assertEqual(
                 {item["variant"]: item["resume"] for item in stage_two},
@@ -534,6 +611,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             data.mkdir(parents=True)
             shutil.copyfile(RELEASE_BENCHMARK_SCRIPT, scripts / RELEASE_BENCHMARK_SCRIPT.name)
             shutil.copyfile(TIMEOUT_RUNNER, scripts / TIMEOUT_RUNNER.name)
+            shutil.copyfile(CODEX_PROFILE_MODULE, benchmarks / "codex_profile.py")
             (benchmarks / "__init__.py").write_text("", encoding="utf-8")
             (benchmarks / "benchmark_agent_ab.py").write_text(
                 "import json, pathlib, sys\n"
@@ -562,7 +640,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 "count = int(args[args.index('--max-repetitions') + 1])\n"
                 "with open(os.environ['RELEASE_TEST_AGENT_ARGS_LOG'], 'a', encoding='utf-8') as log:\n"
-                "    log.write(json.dumps({'count': count, 'output': args[args.index('--output') + 1]}) + '\\n')\n"
+                "    log.write(json.dumps({'count': count, 'output': args[args.index('--output') + 1], 'profile': os.environ.get('AGENT_AB_CODEX_PROFILE'), 'key_env': os.environ.get('AGENT_AB_CODEX_API_KEY_ENV'), 'key_file_configured': bool(os.environ.get('AGENT_AB_CODEX_API_KEY_FILE'))}) + '\\n')\n"
                 "output = pathlib.Path(args[args.index('--output') + 1])\n"
                 "output.write_text('{}', encoding='utf-8')\n"
                 "pathlib.Path(args[args.index('--result') + 1]).write_text('{}', encoding='utf-8')\n",
@@ -600,12 +678,12 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                 "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(schedule_log),
                 "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_log),
+                **_codex_profile_environment(root, codex_home),
             })
             result = subprocess.run(
                 [
                     "bash", str(scripts / RELEASE_BENCHMARK_SCRIPT.name),
                     "--baseline-ref", baseline_revision,
-                    "--model", "test-model",
                     "--output-dir", str(output_directory),
                     "--agent-ab-only",
                     "--agent-timeout", "10",
@@ -623,14 +701,31 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             schedule_args = json.loads(schedule_log.read_text(encoding="utf-8").splitlines()[0])
             self.assertNotIn("--powered", schedule_args)
             self.assertNotIn("--repetitions", schedule_args)
+            profile_argument = schedule_args[schedule_args.index("--codex-profile-json") + 1]
+            self.assertEqual(json.loads(profile_argument)["name"], "local-eval")
             schedule = json.loads((output_directory / "agent-ab" / "schedule.json").read_text(encoding="utf-8"))
             self.assertEqual(schedule["repetitions"], 5)
             self.assertEqual(schedule["stage_schedule"], [{"percent": 100, "repetitions": 5}])
             invocations = [json.loads(line) for line in agent_log.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([item["count"] for item in invocations], [5, 5])
+            self.assertTrue(all(item["profile"] == "local-eval" for item in invocations))
+            self.assertTrue(all(item["key_env"] == "TEST_MODEL_API_KEY" for item in invocations))
+            self.assertTrue(all(item["key_file_configured"] for item in invocations))
             manifest = json.loads((output_directory / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["configuration"]["agent_ab_repetitions"], 5)
             self.assertFalse(manifest["configuration"]["agent_ab_powered"])
+            self.assertEqual(
+                manifest["configuration"]["codex_profile"],
+                {
+                    "name": "local-eval",
+                    "model_id": "test-model",
+                    "provider_id": "self_hosted",
+                    "config_sha256": json.loads(profile_argument)["config_sha256"],
+                },
+            )
+            persisted = "".join(path.read_text(encoding="utf-8") for path in output_directory.rglob("*.*") if path.is_file())
+            self.assertNotIn(str(root / "api-key"), persisted)
+            self.assertNotIn("test-model-key", persisted)
 
 
 if __name__ == "__main__":

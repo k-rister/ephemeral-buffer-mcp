@@ -283,14 +283,17 @@ EPHEMERAL_TEST_EMBEDDINGS=1 EPHEMERAL_SEMANTIC_CHUNK_LINES=16 .venv/bin/python -
 ```
 
 For coding-agent runs, `run_agent_ab_experiment.sh` tags both of its result
-documents (`records.result.json` and `summary.result.json`) with the model,
+documents (`records.result.json` and `summary.result.json`) with the profile's model,
 fixture profile, repetition count, embedding environment, and start time, and
 takes the group from `AGENT_AB_EXPERIMENT` and the variant from
 `AGENT_AB_VARIANT`:
 
 ```bash
 AGENT_AB_EXPERIMENT=policy-ab AGENT_AB_VARIANT=summarize-first \
-  CODEX_HOME=/path/to/writable/authenticated-codex-home ./benchmarks/run_agent_ab_experiment.sh
+  AGENT_AB_CODEX_PROFILE=self-hosted \
+  AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key \
+  AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY \
+  CODEX_HOME=/path/to/writable-codex-home ./benchmarks/run_agent_ab_experiment.sh
 ```
 
 **List.** `list_workload_results.py` searches files and directories

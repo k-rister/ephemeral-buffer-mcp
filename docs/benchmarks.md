@@ -349,10 +349,29 @@ the powered design's statistical guarantee, even when an explicit count equals
 or exceeds the powered design. Add `--powered` to opt into the staged design;
 it cannot be combined with `--repetitions` or used with `--records`:
 ```bash
+export CODEX_HOME=/path/to/writable-codex-home
+export AGENT_AB_CODEX_PROFILE=self-hosted
+export AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key
+export AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY
+profile_json="$(.venv/bin/python -m benchmarks.codex_profile)"
+model_id="$(.venv/bin/python -c 'import json,sys; print(json.loads(sys.argv[1])["model_id"])' "$profile_json")"
 .venv/bin/python -m benchmarks.benchmark_agent_ab \
   --schedule-output agent-ab-schedule.json --powered --seed 20260909 \
-  --model-config gpt-6-luna --repository-fixture synthetic-eb-heavy-v2
+  --model-config "$model_id" --codex-profile-json "$profile_json" \
+  --repository-fixture synthetic-eb-heavy-v2
 ```
+The profile must be configured at
+`$CODEX_HOME/self-hosted.config.toml` and select the intended model and custom
+provider. The provider's `env_key` must match `AGENT_AB_CODEX_API_KEY_ENV`, and
+it must use environment-variable authentication rather than
+`requires_openai_auth = true`. Store the nonempty API key in the file named by
+`AGENT_AB_CODEX_API_KEY_FILE`; the scripts do not require Codex account login.
+Preflight checks these settings before generating fixtures or schedules.
+Schedules and records retain the profile name, model and provider IDs, and a
+SHA-256 hash of the base and selected profile configuration. They omit the API
+key and key-file path. The Codex process receives the key in its environment,
+and Codex is configured to exclude that variable from spawned command
+environments.
 With `--powered`, the A/B scheduler plans a design for an absolute 10
 percentage-point task-success difference with 80% power. Its
 outcome model is paired binary data: each repetition runs the same task in both
@@ -460,9 +479,12 @@ effective sandbox, and privacy-safe MCP launch fingerprint so a staged run
 cannot mix execution protocols. Schema-v10 and schema-v11 records remain
 readable for summaries but cannot be resumed under v12.
 
-The repository includes a Codex CLI adapter for executing that protocol. It
-uses the requested model explicitly, creates a fresh fixture copy for every
-run, isolates control and MCP configuration, and writes metadata-only records.
+The repository includes a Codex CLI adapter for executing that protocol. The
+selected Codex profile supplies the model. The adapter creates a fresh fixture
+copy for every run, disables inherited MCP servers in both arms, and enables
+only `ephemeral-buffer` for the MCP arm. It writes metadata-only records and
+binds the MCP server policy into the protocol metadata so older mixed-policy
+runs cannot be resumed.
 Create a private task manifest (do not commit it) with fixture version 4 and
 rubric version 6, a
 prompt, signal marker, and objective success criteria for each scheduled task.
@@ -542,15 +564,16 @@ Run the adapter from the repository checkout:
   --schedule agent-ab-schedule.json \
   --tasks /path/to/private-agent-tasks.json \
   --repository /path/to/privacy-reviewed-fixture \
-  --model gpt-5.6-luna \
   --output /tmp/agent-ab-records.json
 .venv/bin/python -m benchmarks.benchmark_agent_ab \
   --records /tmp/agent-ab-records.json \
   --output /tmp/agent-ab-summary.json
 ```
 
-The runner requires a locally authenticated `codex` CLI. It uses
-`codex exec --json --ephemeral` with a read-only sandbox by default.
+The runner requires the profile and key-file environment settings above and a
+`codex` CLI on `PATH`. It uses `codex --profile PROFILE exec --json --ephemeral`
+with a read-only sandbox by default. The profile selects the model for both
+arms; the runner does not override it with `--model`.
 `context_bytes_proxy` is an observable prompt/event-envelope proxy because the
 CLI does not expose the model's internal context size.
 To retain the complete Codex event stream for unsuccessful runs, opt in with
@@ -573,7 +596,8 @@ checkout's server module and add its `src` directory, for example
 `--mcp-module ephemeral_buffer_mcp.server --mcp-python-path /path/to/checkout/src`.
 For a matched MCP comparison where the client must call the configured server,
 add `--allow-mcp-approvals`. It applies Codex automatic review and the same
-`workspace-write` sandbox to both arms; only the MCP arm receives the server.
+`workspace-write` sandbox to both arms; inherited profile servers stay disabled
+and only the MCP arm receives `ephemeral-buffer`.
 Use it with a disposable, privacy-reviewed fixture. The records protocol
 identifies the matched policy. Add `--require-mcp-calls` when the MCP arm must
 exercise at least one MCP tool; runs that bypass MCP are marked with reason
@@ -652,16 +676,18 @@ From a clean candidate checkout, collect only the paired agent A/B runs and
 use a separate repetition count from local benchmarks:
 
 ```bash
-CODEX_HOME=/path/to/writable/authenticated-codex-home \
+AGENT_AB_CODEX_PROFILE=self-hosted \
+AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key \
+AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY \
+CODEX_HOME=/path/to/writable-codex-home \
   ./scripts/collect-release-benchmarks.sh \
   --baseline-ref v0.6.3 \
-  --model gpt-6-luna \
   --agent-ab-only \
   --seed 20261006
 ```
 
 The wrapper creates one counterbalanced schedule and reuses it for control and
-MCP runs on both revisions, passing the same model to every run. The bundle
+MCP runs on both revisions, passing the same profile to every run. The bundle
 report includes per-task success counts and paired MCP-minus-control deltas,
 per-criterion final-answer counts and paired deltas, and source-specific MCP
 response exposure cross-tabs against answer pass/fail. `criterion_hit` means
@@ -699,7 +725,10 @@ For a repository-shaped evaluation, set `AGENT_AB_FIXTURE_PROFILE`:
 
 ```bash
 AGENT_AB_FIXTURE_PROFILE=repository-shaped-v1 \
-  CODEX_HOME=/path/to/writable/authenticated-codex-home \
+  AGENT_AB_CODEX_PROFILE=self-hosted \
+  AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key \
+  AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY \
+  CODEX_HOME=/path/to/writable-codex-home \
   ./benchmarks/run_agent_ab_experiment.sh
 ```
 
@@ -726,20 +755,23 @@ whether it is below, equal to, or above the powered count. Set
 interim caps are rejected so an alpha allocation cannot be reused. A zero cap
 is invalid. Explicit repetition schedules cannot be resumed to a larger count;
 use `AGENT_AB_POWERED=1` when later looks may be needed.
-Resume also requires the same timeout, effective sandbox, and MCP launch
-configuration. The MCP launch settings are represented in records by a
-privacy-safe fingerprint; configured paths and environment values are not
-written into that fingerprint field. Set
-`CODEX_HOME` to a writable, authenticated Codex home; generated fixtures,
-records, and lifecycle logs remain under a unique temporary directory (normally
-`/tmp`) by default:
+Resume also requires the same timeout, effective sandbox, MCP launch
+configuration, and Codex profile configuration. The MCP launch settings are
+represented in records by a privacy-safe fingerprint; configured paths and
+environment values are not written into that fingerprint field. Set
+`CODEX_HOME` to a writable Codex home containing the selected profile; generated
+fixtures, records, and lifecycle logs remain under a unique temporary directory
+(normally `/tmp`) by default:
 
 ```bash
-CODEX_HOME=/path/to/writable/authenticated-codex-home \
+AGENT_AB_CODEX_PROFILE=self-hosted \
+AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key \
+AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY \
+CODEX_HOME=/path/to/writable-codex-home \
   ./benchmarks/run_agent_ab_experiment.sh
 ```
 
-Override `AGENT_AB_RUN_DIR`, `AGENT_AB_MODEL`, `AGENT_AB_REPETITIONS`,
+Override `AGENT_AB_RUN_DIR`, `AGENT_AB_REPETITIONS`,
 `AGENT_AB_POWERED=1`,
 `AGENT_AB_SEED`, `AGENT_AB_TIMEOUT_SECONDS`, or `AGENT_AB_TEST_EMBEDDINGS` to
 repeat a different experiment. The script also writes

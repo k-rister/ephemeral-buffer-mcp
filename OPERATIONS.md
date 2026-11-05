@@ -893,9 +893,11 @@ privacy review before sharing the aggregate summary.
 
 For Codex CLI experiments, use `run_codex_agent_ab.py` as the external
 adapter. It accepts a private task manifest, creates a fresh fixture copy per
-scheduled run, invokes `codex exec` with the selected model, and configures the
-ephemeral-buffer MCP server only for `mcp` runs. Control runs use an isolated
-Codex configuration with no MCP server. The adapter records metadata only and
+scheduled run, invokes `codex --profile PROFILE exec`, disables MCP servers
+inherited from the base and selected profile for both arms, and enables only
+`ephemeral-buffer` for `mcp` runs. Control runs have no MCP server. The adapter
+records this policy in protocol metadata and writes metadata-only records; a
+run created under the earlier policy cannot be resumed. It
 does not write transcripts or raw command output to the records file. Its
 `context_bytes_proxy` field is an observable prompt/event-envelope proxy, not a
 provider-reported model-context measurement.
@@ -967,11 +969,14 @@ repository unless they have passed a separate privacy review.
 Repeat the complete synthetic five-repetition Codex run with:
 
 ```bash
-CODEX_HOME=/path/to/writable/authenticated-codex-home \
+AGENT_AB_CODEX_PROFILE=self-hosted \
+AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key \
+AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY \
+CODEX_HOME=/path/to/writable-codex-home \
   ./benchmarks/run_agent_ab_experiment.sh
 ```
 
-The script checks Codex authentication, creates a unique run directory under
+The script validates the selected profile and key file, creates a unique run directory under
 `TMPDIR` (or `/tmp` when unset), executes paired control and MCP sessions, and
 writes metadata records, an aggregate summary, `records.result.json` and
 `summary.result.json` workload result documents, and content-free lifecycle
@@ -1019,13 +1024,21 @@ usage samples.
 Example:
 
 ```bash
+export CODEX_HOME=/path/to/writable-codex-home
+export AGENT_AB_CODEX_PROFILE=self-hosted
+export AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key
+export AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY
+.venv/bin/python -m benchmarks.codex_profile
 .venv/bin/python -m benchmarks.run_codex_agent_ab \
   --schedule agent-ab-schedule.json \
   --tasks /path/to/private-agent-tasks.json \
   --repository /path/to/privacy-reviewed-fixture \
-  --model gpt-5.6-luna \
   --output /tmp/agent-ab-records.json
 ```
+
+Generate `agent-ab-schedule.json` with the same profile identity using
+`benchmarks.benchmark_agent_ab --codex-profile-json` so a profile change
+invalidates schedule reuse and powered-run resume.
 
 If the MCP arm is expected to call the configured server, add
 `--allow-mcp-approvals`. The adapter then uses Codex automatic review and a
@@ -1205,10 +1218,12 @@ the previous release from a clean candidate checkout:
 
 ```bash
 git fetch --tags
-CODEX_HOME=/path/to/writable/authenticated-codex-home \
+AGENT_AB_CODEX_PROFILE=self-hosted \
+  AGENT_AB_CODEX_API_KEY_FILE=/path/to/private-api-key \
+  AGENT_AB_CODEX_API_KEY_ENV=SELF_HOSTED_API_KEY \
+CODEX_HOME=/path/to/writable-codex-home \
   ./scripts/collect-release-benchmarks.sh \
-  --baseline-ref "$(git describe --tags --abbrev=0 HEAD)" \
-  --model gpt-6-luna
+  --baseline-ref "$(git describe --tags --abbrev=0 HEAD)"
 ```
 
 The runner creates a temporary worktree at the baseline ref, runs every
@@ -1222,7 +1237,8 @@ uses 1,419 repetitions per task and mode, so it requires substantially more
 Codex calls. It uses deterministic test embeddings for synthetic
 retrieval and effectiveness checks, and the configured ONNX model for
 performance, indexing, memory, and warm-up measurements. Agent A/B runs make
-live Codex CLI calls with the selected model. The default output directory is
+live Codex CLI calls with the selected profile and its API-key environment
+variable. The default output directory is
 under `/tmp`; `manifest.json` records the revisions, run settings, Python and
 platform details, artifact paths, and command status counts. `REPORT.md`,
 `STATUS.tsv`, native measurements, common result files, comparison reports,
@@ -1242,7 +1258,7 @@ rerunning local benchmarks, add `--agent-ab-repetitions N --agent-ab-only`.
 The A/B-specific count takes precedence over `--repetitions`; an explicit
 generic `--repetitions` supplies the A/B count when the A/B-specific option is
 omitted. Both options produce exploratory results, even at or above the powered
-count. The selected model, seed, and one shared counterbalanced schedule are
+count. The selected Codex profile, seed, and one shared counterbalanced schedule are
 used across control and MCP runs on both revisions. For example,
 `--agent-ab-repetitions 20` produces 20 scheduled repetitions per task and mode
 on each revision. The report shows

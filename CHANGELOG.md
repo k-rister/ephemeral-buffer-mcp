@@ -9,6 +9,10 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Bind agent A/B source-line criteria to their expected files while accepting
   references and prose. Advance task fixtures to version 4; regenerate manifests
   and schedules, and keep historical scores separate from the corrected rubric.
+- Run agent A/B benchmarks with a configured Codex profile and file-backed API
+  key, and bind the profile configuration to schedules and resumable records.
+- Disable profile-inherited MCP servers across agent A/B runs, enabling only the
+  ephemeral-buffer server in the treatment arm and preventing mixed-policy resumes.
 
 ## 0.12.0 - 2026-10-30
 
