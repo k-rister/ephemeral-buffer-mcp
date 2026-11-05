@@ -34,6 +34,7 @@ LINE_REFERENCE_DIAGNOSTIC_CATEGORIES = (
     "expected_number_present_unrecognized_format",
     "expected_number_absent",
 )
+CODEX_PROFILE_IDENTITY_FIELDS = {"name", "model_id", "provider_id", "config_sha256"}
 DEFAULT_AGENT_AB_SEED = 20260909
 DEFAULT_EXPLORATORY_REPETITIONS = 5
 DEFAULT_DESIGN_SEED = 20261031
@@ -126,6 +127,7 @@ PROTOCOL_FIELDS = (
     "embedding_cache",
     "effective_sandbox",
     "mcp_launch_fingerprint",
+    "mcp_server_policy",
 )
 LEGACY_PROTOCOL_FIELDS = PROTOCOL_FIELDS[:5]
 CONTEXT_PROXY_NOTE = "prompt plus event envelope bytes; the agent CLI does not expose context size"
@@ -575,8 +577,10 @@ def build_schedule(
     design: dict[str, Any] | None = None,
     model_config: str | None = None,
     repository_fixture: str | None = None,
+    codex_profile: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic counterbalanced task/mode schedule."""
+    codex_profile = _validate_codex_profile_identity(codex_profile)
     if powered and repetitions is not None:
         raise ValueError("powered schedules cannot be combined with an explicit repetition count")
     is_explicit = repetitions is not None
@@ -629,6 +633,7 @@ def build_schedule(
             }]
         ),
         "model_config": model_config,
+        "codex_profile": codex_profile,
         "repository_fixture": repository_fixture,
         "statistical_design": power_design,
         "modes": list(MODES),
@@ -691,6 +696,57 @@ def _resolve_pilot_identity(
     return resolved["model_config"], resolved["repository_fixture"]
 
 
+def _resolve_pilot_codex_profile(
+    pilot_payload: dict[str, Any],
+    pilot_schedule: dict[str, Any] | None,
+    requested: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Require a profile-backed schedule to match the pilot run identity."""
+    protocol = pilot_payload.get("protocol")
+    if not isinstance(protocol, dict):
+        raise ValueError("pilot records protocol metadata is required")
+    pilot_profile = protocol.get("codex_profile")
+    if pilot_profile != requested:
+        raise ValueError("pilot records Codex profile does not match the requested profile")
+    if pilot_schedule is not None and pilot_schedule.get("codex_profile") != pilot_profile:
+        raise ValueError("pilot schedule Codex profile does not match pilot records protocol")
+    return requested
+
+
+def _parse_codex_profile_json(value: str | None) -> dict[str, str] | None:
+    if value is None:
+        return None
+    try:
+        profile = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--codex-profile-json must be a JSON object") from exc
+    if profile is None:
+        raise ValueError("--codex-profile-json must be a JSON object")
+    try:
+        return _validate_codex_profile_identity(profile)
+    except ValueError:
+        raise ValueError("--codex-profile-json has an invalid profile identity") from None
+
+
+def _validate_codex_profile_identity(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != CODEX_PROFILE_IDENTITY_FIELDS
+        or any(
+            not isinstance(value[field], str) or not value[field].strip()
+            for field in CODEX_PROFILE_IDENTITY_FIELDS
+        )
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["config_sha256"])
+    ):
+        raise ValueError("Codex profile identity is invalid")
+    return {
+        field: value[field]
+        for field in ("name", "model_id", "provider_id", "config_sha256")
+    }
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -716,6 +772,8 @@ def _validate_protocol(protocol: Any, records_schema_version: int = 1) -> None:
             value = protocol[field]
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"records protocol field {field} must be a non-empty identifier")
+    if "codex_profile" in protocol:
+        _validate_codex_profile_identity(protocol["codex_profile"])
     timeout = protocol.get("timeout_seconds")
     if timeout is not None and (
         isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1
@@ -1073,6 +1131,7 @@ def validate_schedule_extension(
         "tasks",
         "modes",
         "model_config",
+        "codex_profile",
         "repository_fixture",
         "selected_design_repetitions",
         "repetitions_explicit",
@@ -1767,6 +1826,10 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_AGENT_AB_SEED)
     parser.add_argument("--model-config", help="Model identifier used to validate resumable stages")
+    parser.add_argument(
+        "--codex-profile-json",
+        help="Privacy-safe Codex profile identity from benchmarks.codex_profile",
+    )
     parser.add_argument("--repository-fixture", help="Fixture profile used to validate resumable stages")
     parser.add_argument("--pilot-records", type=Path, help="Current fixture-v4/rubric-v6 records used to bootstrap paired outcomes")
     parser.add_argument("--pilot-schedule", type=Path, help="Schedule for --pilot-records when not embedded")
@@ -1784,6 +1847,16 @@ def main() -> None:
     if args.schedule_output and (args.result or args.experiment or args.metadata or args.redact):
         parser.error("--result, --experiment, --metadata, and --redact require --records")
     if args.schedule_output:
+        try:
+            requested_codex_profile = _parse_codex_profile_json(args.codex_profile_json)
+        except ValueError as exc:
+            parser.error(str(exc))
+        resolved_model_config = args.model_config
+        if requested_codex_profile is not None:
+            profile_model = requested_codex_profile["model_id"]
+            if resolved_model_config is not None and resolved_model_config != profile_model:
+                parser.error("--model-config does not match the Codex profile model")
+            resolved_model_config = profile_model
         pilot_payload = _read_json(args.pilot_records) if args.pilot_records else None
         pilot_schedule = (
             _read_json(args.pilot_schedule)
@@ -1792,7 +1865,6 @@ def main() -> None:
         )
         if args.pilot_schedule and not args.pilot_records:
             parser.error("--pilot-schedule requires --pilot-records")
-        resolved_model_config = args.model_config
         resolved_repository_fixture = args.repository_fixture
         if pilot_payload is not None:
             try:
@@ -1801,6 +1873,11 @@ def main() -> None:
                     pilot_schedule,
                     model_config=args.model_config,
                     repository_fixture=args.repository_fixture,
+                )
+                _resolve_pilot_codex_profile(
+                    pilot_payload,
+                    pilot_schedule,
+                    requested_codex_profile,
                 )
             except ValueError as exc:
                 parser.error(str(exc))
@@ -1816,6 +1893,7 @@ def main() -> None:
             design=design,
             model_config=resolved_model_config,
             repository_fixture=resolved_repository_fixture,
+            codex_profile=requested_codex_profile,
         )
         args.schedule_output.parent.mkdir(parents=True, exist_ok=True)
         args.schedule_output.write_text(json.dumps(schedule, indent=2, sort_keys=True) + "\n", encoding="utf-8")

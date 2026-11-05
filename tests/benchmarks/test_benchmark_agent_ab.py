@@ -315,6 +315,46 @@ class TestAgentAbBenchmark(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "task_rubric_version"):
             validate_schedule_extension(original, changed_rubric)
 
+    def test_schedule_binds_profile_identity_and_rejects_changes(self):
+        profile = {
+            "name": "self-hosted",
+            "model_id": "custom-model",
+            "provider_id": "gateway",
+            "config_sha256": "sha256:" + "a" * 64,
+        }
+        schedule = build_schedule(
+            repetitions=1,
+            seed=19,
+            design={"selected_repetitions": 1},
+            model_config=profile["model_id"],
+            codex_profile=profile,
+        )
+        self.assertEqual(schedule["codex_profile"], profile)
+        self.assertEqual(
+            benchmark_agent_ab._parse_codex_profile_json(json.dumps(profile)),
+            profile,
+        )
+
+        changed_profile = {**profile, "config_sha256": "sha256:" + "b" * 64}
+        changed_schedule = build_schedule(
+            repetitions=1,
+            seed=19,
+            design={"selected_repetitions": 1},
+            model_config=profile["model_id"],
+            codex_profile=changed_profile,
+        )
+        with self.assertRaisesRegex(ValueError, "codex_profile"):
+            validate_schedule_extension(schedule, changed_schedule)
+        with self.assertRaisesRegex(ValueError, "profile identity"):
+            build_schedule(
+                repetitions=1,
+                seed=19,
+                design={"selected_repetitions": 1},
+                codex_profile={**profile, "config_sha256": "unhashed"},
+            )
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            benchmark_agent_ab._parse_codex_profile_json("null")
+
     def test_power_pilot_rejects_mixed_fixture_or_rubric_versions(self):
         schedule, payload = _scored_records_payload()
         payload["task_rubric_version"] = TASK_RUBRIC_VERSION

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import benchmarks.run_codex_agent_ab as run_codex_agent_ab
 import benchmarks.workload_results as wr
+from benchmarks.codex_profile import validate_codex_profile
 from benchmarks.benchmark_agent_ab import TASK_FIXTURE_VERSION, build_schedule, records_workload_result
 from benchmarks.benchmark_agent_ab_fixtures import build_manifest
 from benchmarks.benchmark_agent_ab_repository_fixture import build_manifest as build_repository_manifest
@@ -64,6 +65,149 @@ class TestCodexAgentRunner(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "planned stage look"):
                     run_schedule(schedule, manifest, args)
                 runner.assert_not_called()
+
+    def test_changed_profile_configuration_rejects_resume_with_old_powered_schedule(self):
+        old_profile = {
+            "name": "self-hosted",
+            "model_id": "custom-model",
+            "provider_id": "local_gateway",
+            "config_sha256": "sha256:" + "a" * 64,
+        }
+        changed_profile = {**old_profile, "config_sha256": "sha256:" + "b" * 64}
+        schedule = build_schedule(
+            seed=59,
+            powered=True,
+            design={"selected_repetitions": 4},
+            model_config="custom-model",
+            repository_fixture="fixture",
+            codex_profile=old_profile,
+        )
+        args = argparse.Namespace(
+            model="custom-model",
+            repository_fixture="fixture",
+            codex_profile=changed_profile,
+            require_codex_profile=True,
+            resume=True,
+        )
+
+        with patch("benchmarks.run_codex_agent_ab._run_codex_process") as runner:
+            with self.assertRaisesRegex(ValueError, "Codex profile configuration"):
+                run_schedule(schedule, {}, args)
+            runner.assert_not_called()
+
+    def test_pre_isolation_records_remain_valid_but_cannot_resume(self):
+        from benchmarks.benchmark_agent_ab import _validate_protocol
+
+        schedule = build_schedule(
+            repetitions=1,
+            seed=61,
+            model_config="test-model",
+            repository_fixture="fixture",
+        )
+        fingerprint = "sha256:" + "0" * 64
+        old_protocol = {
+            "model_config": "test-model",
+            "codex_profile": None,
+            "repository_fixture": "fixture",
+            "environment": "test",
+            "reset_policy": "fresh-copy-per-run",
+            "agent_adapter": "codex-cli",
+            "approval_policy": "read-only-sandbox",
+            "mcp_usage_policy": "opportunistic",
+            "timeout_seconds": 10,
+            "effective_sandbox": "read-only",
+            "mcp_launch_fingerprint": fingerprint,
+            "embedding_mode": "test",
+            "embedding_model": "deterministic-test",
+            "embedding_cache": "not-applicable",
+        }
+        _validate_protocol(old_protocol, records_schema_version=12)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            output = root / "records.json"
+            output.write_text(json.dumps({
+                "schema_version": schedule["schema_version"],
+                "benchmark": "agent-ab",
+                "records_schema_version": 12,
+                "task_fixture_version": schedule["task_fixture_version"],
+                "task_rubric_version": schedule["task_rubric_version"],
+                "protocol": old_protocol,
+                "schedule": schedule,
+                "runs": [],
+            }), encoding="utf-8")
+            args = argparse.Namespace(
+                model="test-model",
+                repository_fixture="fixture",
+                repository=repository,
+                environment="test",
+                codex_profile=None,
+                timeout=10,
+                allow_mcp_approvals=False,
+                require_mcp_calls=False,
+                sandbox="read-only",
+                resume=True,
+                output=output,
+                max_repetitions=None,
+            )
+            with patch.dict(os.environ, {"EPHEMERAL_TEST_EMBEDDINGS": "1"}), patch(
+                "benchmarks.run_codex_agent_ab._mcp_launch_fingerprint",
+                return_value=fingerprint,
+            ):
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(schedule, {}, args)
+
+    def test_codex_command_uses_profile_mcp_server_names_from_preflight(self):
+        from benchmarks.codex_profile import validate_codex_profile_and_mcp_servers
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                '[model_providers.self_hosted]\n'
+                'name = "Self-hosted"\n'
+                'base_url = "https://models.example.invalid/v1"\n'
+                'wire_api = "responses"\n'
+                'env_key = "TEST_MODEL_API_KEY"\n'
+                '\n[mcp_servers.base_only]\ncommand = "base"\n'
+                '\n[mcp_servers."vendor.mcp"]\ncommand = "vendor"\n',
+                encoding="utf-8",
+            )
+            (codex_home / "local-eval.config.toml").write_text(
+                'model = "custom-model"\nmodel_provider = "self_hosted"\n'
+                '\n[mcp_servers.profile_only]\ncommand = "profile"\n',
+                encoding="utf-8",
+            )
+            key_file = root / "api-key"
+            key_file.write_text("test-model-key\n", encoding="utf-8")
+            _, server_names = validate_codex_profile_and_mcp_servers(
+                codex_home=str(codex_home),
+                profile_name="local-eval",
+                api_key_file=str(key_file),
+                api_key_env="TEST_MODEL_API_KEY",
+            )
+
+            command = run_codex_agent_ab._codex_command(
+                codex="codex",
+                profile="local-eval",
+                mode="mcp",
+                fixture=root,
+                mcp_python="python",
+                mcp_module="server",
+                mcp_server_script=None,
+                allow_mcp_approvals=False,
+                sandbox="read-only",
+                timeout=10,
+                inherited_mcp_servers=server_names,
+            )
+
+        self.assertIn('mcp_servers."base_only".enabled=false', command)
+        self.assertIn('mcp_servers."profile_only".enabled=false', command)
+        self.assertIn('mcp_servers."vendor.mcp".enabled=false', command)
+        self.assertIn("mcp_servers.ephemeral-buffer.enabled=true", command)
 
     def test_source_locations_bind_lines_to_files_in_answers_and_exposure(self):
         criteria = {
@@ -906,7 +1050,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate required_phrases"):
                 _load_manifest(path)
 
-    def test_run_one_is_metadata_only_and_uses_requested_model(self):
+    def test_run_one_is_metadata_only_and_uses_profile_without_model_override(self):
         schedule = build_schedule(repetitions=1, seed=3)
         item = schedule["schedule"][0]
         task = {
@@ -915,7 +1059,12 @@ class TestCodexAgentRunner(unittest.TestCase):
             "success_criteria": {"required_phrases": ["SUCCESS"], "required_source_locations": [{"path": "private/source.py", "line": 12}]},
         }
         args = argparse.Namespace(
-            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            codex="codex", model="gpt-5.6-luna",
+            codex_profile={
+                "name": "eval-profile", "model_id": "gpt-5.6-luna",
+                "provider_id": "self_hosted", "config_sha256": "sha256:" + "a" * 64,
+            },
+            codex_api_key_env="EVAL_API_KEY", mcp_python="python", mcp_module="server",
             mcp_server_script=None, sandbox="read-only", timeout=10,
             allow_mcp_approvals=False,
         )
@@ -945,7 +1094,9 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertNotIn("private/source.py", json.dumps(output))
         self.assertNotIn("required_source_locations", json.dumps(output))
         command = run.call_args.args[0]
-        self.assertIn("gpt-5.6-luna", command)
+        self.assertIn("--profile", command)
+        self.assertIn("eval-profile", command)
+        self.assertNotIn("--model", command)
         self.assertIn("--ephemeral", command)
         self.assertEqual(run.call_args.kwargs["timeout"], 10)
         self.assertEqual(output["mcp_tool_calls"], 0)
@@ -1158,13 +1309,13 @@ class TestCodexAgentRunner(unittest.TestCase):
         from benchmarks.run_codex_agent_ab import _codex_command
 
         mcp_command = _codex_command(
-            codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+            codex="codex", mode="mcp", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
             allow_mcp_approvals=True, sandbox="read-only", timeout=10,
             mcp_env={"EPHEMERAL_TEST_EMBEDDINGS": "1"},
         )
         control_command = _codex_command(
-            codex="codex", model="gpt-5.6-luna", mode="control", fixture=Path("/tmp/fixture"),
+            codex="codex", mode="control", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="server", mcp_server_script=None,
             allow_mcp_approvals=True, sandbox="read-only", timeout=10,
         )
@@ -1176,6 +1327,44 @@ class TestCodexAgentRunner(unittest.TestCase):
 
         env_config = next(item for item in mcp_command if item.startswith("mcp_servers.ephemeral-buffer.env="))
         self.assertIn('EPHEMERAL_TEST_EMBEDDINGS="1"', env_config)
+
+    def test_profile_mcp_servers_are_isolated_to_ephemeral_buffer_treatment(self):
+        from benchmarks.run_codex_agent_ab import _codex_command
+
+        inherited = ("base-only", "ephemeral-buffer", "vendor.mcp")
+        common = {
+            "codex": "codex",
+            "fixture": Path("/tmp/fixture"),
+            "mcp_python": "python",
+            "mcp_module": "server",
+            "allow_mcp_approvals": False,
+            "sandbox": "read-only",
+            "timeout": 10,
+            "inherited_mcp_servers": inherited,
+        }
+        control = _codex_command(
+            **common,
+            mode="control",
+            mcp_server_script=None,
+        )
+        treatment = _codex_command(
+            **common,
+            mode="mcp",
+            mcp_server_script="/tmp/server.py",
+        )
+
+        for server in inherited:
+            server_key = json.dumps(server)
+            self.assertIn(f"mcp_servers.{server_key}.enabled=false", control)
+        self.assertIn('mcp_servers."ephemeral-buffer".enabled=false', control)
+        self.assertFalse(any(".enabled=true" in value for value in control))
+
+        self.assertIn('mcp_servers."base-only".enabled=false', treatment)
+        self.assertIn('mcp_servers."vendor.mcp".enabled=false', treatment)
+        self.assertNotIn('mcp_servers."ephemeral-buffer".enabled=false', treatment)
+        self.assertIn("mcp_servers.ephemeral-buffer.enabled=true", treatment)
+        enabled_overrides = [value for value in treatment if value.endswith(".enabled=true")]
+        self.assertEqual(enabled_overrides, ["mcp_servers.ephemeral-buffer.enabled=true"])
 
     def test_mcp_forwards_embedding_model_and_cache_configuration(self):
         from benchmarks.run_codex_agent_ab import _codex_command
@@ -1190,7 +1379,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             clear=False,
         ):
             command = _codex_command(
-                codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+                codex="codex", mode="mcp", fixture=Path("/tmp/fixture"),
                 mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
                 allow_mcp_approvals=False, sandbox="read-only", timeout=10,
                 mcp_env={
@@ -1210,7 +1399,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         from benchmarks.run_codex_agent_ab import _codex_command
 
         command = _codex_command(
-            codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+            codex="codex", mode="mcp", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="ephemeral_buffer_mcp.server", mcp_server_script=None,
             allow_mcp_approvals=False, sandbox="read-only", timeout=10,
             mcp_python_path=["/tmp/revision/src", "/tmp/revision"],
@@ -1256,24 +1445,102 @@ class TestCodexAgentRunner(unittest.TestCase):
         from benchmarks.run_codex_agent_ab import _codex_command
 
         command = _codex_command(
-            codex="codex", model="gpt-5.6-luna", mode="control", fixture=Path("/tmp/fixture"),
+            codex="codex", mode="control", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="server", mcp_server_script=None,
             allow_mcp_approvals=False, sandbox="read-only", timeout=10,
         )
 
-        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertEqual(command[:4], ["codex", "--profile", "test-profile", "exec"])
+        self.assertNotIn("--model", command)
+        self.assertFalse(any(value.startswith("model=") for value in command))
         self.assertNotIn("--ask-for-approval", command)
+        self.assertIn(
+            'shell_environment_policy.filters.AGENT_AB_TEST_API_KEY="exclude"',
+            command,
+        )
 
     def test_mcp_approval_flag_is_global_before_exec_subcommand(self):
         from benchmarks.run_codex_agent_ab import _codex_command
 
         command = _codex_command(
-            codex="codex", model="gpt-5.6-luna", mode="mcp", fixture=Path("/tmp/fixture"),
+            codex="codex", mode="mcp", fixture=Path("/tmp/fixture"),
             mcp_python="python", mcp_module="server", mcp_server_script="/tmp/server.py",
             allow_mcp_approvals=True, sandbox="read-only", timeout=10,
         )
 
-        self.assertEqual(command[:3], ["codex", "--approve-for-me", "exec"])
+        self.assertEqual(
+            command[:5],
+            ["codex", "--profile", "test-profile", "--approve-for-me", "exec"],
+        )
+
+    def test_profile_key_is_scoped_to_codex_and_redacted_from_failure_artifacts(self):
+        item = {"sequence": 1, "repetition": 1, "task_id": "credential-test", "mode": "control"}
+        task = {
+            "prompt": "inspect the fixture",
+            "signal_marker": "SUCCESS",
+            "success_criteria": {"required_phrases": ["SUCCESS", "expected answer"]},
+        }
+        profile = {
+            "name": "self-hosted",
+            "model_id": "custom-model",
+            "provider_id": "local_gateway",
+            "config_sha256": "sha256:" + "a" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            key_file = root / "private-api-key"
+            key_file.write_text("test-secret-key\n", encoding="utf-8")
+            traces = root / "traces"
+            args = argparse.Namespace(
+                codex="codex", model="custom-model", codex_profile=profile,
+                codex_api_key_file=str(key_file), codex_api_key_env="SELF_HOSTED_API_KEY",
+                mcp_python="python", mcp_module="server", mcp_server_script=None,
+                sandbox="read-only", timeout=10, allow_mcp_approvals=False,
+                failure_artifacts_dir=traces,
+            )
+            result = subprocess_result(
+                returncode=1,
+                stdout=json.dumps({"type": "item.completed", "item": {
+                    "type": "agent_message", "text": "diagnostic included test-secret-key",
+                }}),
+                stderr="codex diagnostic test-secret-key",
+            )
+            captured_process_environment = {}
+
+            def capture_codex_environment(command, *, cwd, timeout, env):
+                captured_process_environment.update(env)
+                return result
+
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                side_effect=capture_codex_environment,
+            ) as run:
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+            command = run.call_args.args[0]
+            child_environment = captured_process_environment
+            self.assertEqual(command[:3], ["codex", "--profile", "self-hosted"])
+            self.assertNotIn("--model", command)
+            self.assertIn(
+                'shell_environment_policy.filters.SELF_HOSTED_API_KEY="exclude"',
+                command,
+            )
+            self.assertEqual(child_environment["SELF_HOSTED_API_KEY"], "test-secret-key")
+            for variable in (
+                "AGENT_AB_CODEX_PROFILE",
+                "AGENT_AB_CODEX_API_KEY_FILE",
+                "AGENT_AB_CODEX_API_KEY_ENV",
+            ):
+                self.assertNotIn(variable, child_environment)
+            self.assertNotIn(str(key_file), json.dumps(command) + json.dumps(child_environment))
+            self.assertNotIn("test-secret-key", json.dumps(record))
+            self.assertNotIn(str(key_file), json.dumps(record))
+            for filename in ("stdout.jsonl", "stderr.txt", "metadata.json"):
+                artifact_text = (traces / "0001-control" / filename).read_text(encoding="utf-8")
+                self.assertNotIn("test-secret-key", artifact_text)
+                self.assertNotIn(str(key_file), artifact_text)
 
     def test_required_mcp_usage_marks_mcp_bypass_as_incomplete(self):
         item = {"sequence": 1, "repetition": 1, "task_id": "noisy-test-failure", "mode": "mcp"}
@@ -1630,11 +1897,38 @@ def subprocess_result(**kwargs):
 
 class TestCodexAgentWorkloadResult(unittest.TestCase):
     def test_main_emits_a_workload_result_next_to_the_records(self):
-        schedule = build_schedule(repetitions=1, seed=3)
         manifest = build_manifest()
         completed = subprocess_result(stdout=json.dumps({"type": "completed"}) + "\nok\n")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            (codex_home / "local-eval.config.toml").write_text(
+                'model = "custom-model"\nmodel_provider = "self_hosted"\n',
+                encoding="utf-8",
+            )
+            (codex_home / "config.toml").write_text(
+                '[model_providers.self_hosted]\n'
+                'name = "Self-hosted"\n'
+                'base_url = "https://models.example.invalid/v1"\n'
+                'wire_api = "responses"\n'
+                'env_key = "TEST_MODEL_API_KEY"\n',
+                encoding="utf-8",
+            )
+            key_file = root / "api-key"
+            key_file.write_text("test-model-key\n", encoding="utf-8")
+            profile = validate_codex_profile(
+                codex_home=str(codex_home),
+                profile_name="local-eval",
+                api_key_file=str(key_file),
+                api_key_env="TEST_MODEL_API_KEY",
+            )
+            schedule = build_schedule(
+                repetitions=1,
+                seed=3,
+                model_config=profile["model_id"],
+                codex_profile=profile,
+            )
             (root / "schedule.json").write_text(json.dumps(schedule), encoding="utf-8")
             (root / "tasks.json").write_text(json.dumps(manifest), encoding="utf-8")
             trace_dir = root / "failure-traces"
@@ -1643,13 +1937,26 @@ class TestCodexAgentWorkloadResult(unittest.TestCase):
                 "--output", str(root / "records.json"), "--repository", ".", "--result", str(root / "result.json"),
                 "--failure-artifacts-dir", str(trace_dir),
             ]
-            with patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=completed), patch(
+            with patch.dict(os.environ, {
+                "CODEX_HOME": str(codex_home),
+                "AGENT_AB_CODEX_PROFILE": "local-eval",
+                "AGENT_AB_CODEX_API_KEY_FILE": str(key_file),
+                "AGENT_AB_CODEX_API_KEY_ENV": "TEST_MODEL_API_KEY",
+            }), patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=completed), patch(
                 "sys.argv", argv
             ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 run_codex_agent_ab.main()
             result = wr.load_result(root / "result.json")
             records = json.loads((root / "records.json").read_text(encoding="utf-8"))
             self.assertEqual(records["benchmark"], "agent-ab")
+            self.assertEqual(records["schedule"]["codex_profile"], profile)
+            self.assertEqual(records["protocol"]["codex_profile"], profile)
+            self.assertEqual(
+                records["protocol"]["mcp_server_policy"],
+                run_codex_agent_ab.MCP_SERVER_POLICY,
+            )
+            self.assertNotIn(str(key_file), json.dumps(records))
+            self.assertNotIn("test-model-key", json.dumps(records))
             self.assertTrue(any(trace_dir.glob("*/metadata.json")))
             self.assertNotIn("stdout.jsonl", json.dumps(records))
         self.assertEqual(result["workload"]["kind"], "agent-run")

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import benchmarks.workload_results as wr
+from .codex_profile import read_api_key, validate_codex_profile_and_mcp_servers
 from ephemeral_buffer_mcp.config import DEFAULT_EMBEDDING_MODEL
 from .benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
@@ -40,8 +41,9 @@ from .benchmark_agent_ab import (
 )
 
 
-DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_TIMEOUT = 900
+MCP_TREATMENT_SERVER = "ephemeral-buffer"
+MCP_SERVER_POLICY = "only-ephemeral-buffer-in-treatment"
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 _PATH_LINE_REFERENCE_RE = re.compile(
     r"(?<!\w)(?:[\w.-]*[\\/][\w./\\-]*|[\w-]+(?:\.[A-Za-z][\w-]*)+):(\d+)(?!\w|\.[0-9]|,[0-9])"
@@ -900,7 +902,8 @@ def _mcp_environment_overrides(
 def _codex_command(
     *,
     codex: str,
-    model: str,
+    profile: str = "test-profile",
+    api_key_env: str = "AGENT_AB_TEST_API_KEY",
     mode: str,
     fixture: Path,
     mcp_python: str,
@@ -911,33 +914,43 @@ def _codex_command(
     timeout: int,
     mcp_env: dict[str, str] | None = None,
     mcp_python_path: list[str] | None = None,
+    inherited_mcp_servers: tuple[str, ...] | list[str] = (),
 ) -> list[str]:
-    command = [codex]
+    command = [codex, "--profile", profile]
     if allow_mcp_approvals:
         command.append("--approve-for-me")
     command.append("exec")
     command.extend([
-        "--model",
-        model,
         "--json",
         "--ephemeral",
-        "--ignore-user-config",
         "--skip-git-repo-check",
         "--sandbox",
         "workspace-write" if allow_mcp_approvals else sandbox,
         "--cd",
         str(fixture),
         "--config",
-        "model=" + json.dumps(model),
+        f"shell_environment_policy.filters.{api_key_env}=\"exclude\"",
     ])
+    servers_to_disable = set(inherited_mcp_servers)
+    if mode == "mcp":
+        servers_to_disable.discard(MCP_TREATMENT_SERVER)
+    for server_name in sorted(servers_to_disable):
+        # Quoted TOML key segments preserve names that contain dots or spaces.
+        server_key = json.dumps(server_name)
+        command.extend([
+            "--config",
+            f"mcp_servers.{server_key}.enabled=false",
+        ])
     if mode == "mcp":
         mcp_env = _mcp_environment_overrides(mcp_python_path, mcp_env)
         mcp_args = [mcp_server_script] if mcp_server_script else ["-m", mcp_module]
         command.extend([
             "--config",
-            "mcp_servers.ephemeral-buffer.command=" + json.dumps(mcp_python),
+            f"mcp_servers.{MCP_TREATMENT_SERVER}.enabled=true",
             "--config",
-            "mcp_servers.ephemeral-buffer.args=" + json.dumps(mcp_args),
+            f"mcp_servers.{MCP_TREATMENT_SERVER}.command=" + json.dumps(mcp_python),
+            "--config",
+            f"mcp_servers.{MCP_TREATMENT_SERVER}.args=" + json.dumps(mcp_args),
         ])
         if mcp_env:
             env_config = "{" + ", ".join(
@@ -945,9 +958,14 @@ def _codex_command(
             ) + "}"
             command.extend([
                 "--config",
-                "mcp_servers.ephemeral-buffer.env=" + env_config,
+                f"mcp_servers.{MCP_TREATMENT_SERVER}.env=" + env_config,
             ])
     return command
+
+
+def _redact_secret(text: str, secret: str | None) -> str:
+    """Remove the API key from captured Codex output before further handling."""
+    return text.replace(secret, "[REDACTED]") if secret else text
 
 
 def _file_fingerprint(path_value: str | None) -> dict[str, str | None] | None:
@@ -1151,7 +1169,12 @@ def _run_one(
         mcp_env["EPHEMERAL_METRICS_FILE"] = str(metrics_file)
     command = _codex_command(
         codex=args.codex,
-        model=args.model,
+        profile=(
+            args.codex_profile["name"]
+            if isinstance(getattr(args, "codex_profile", None), dict)
+            else getattr(args, "codex_profile", None) or "test-profile"
+        ),
+        api_key_env=getattr(args, "codex_api_key_env", "AGENT_AB_TEST_API_KEY"),
         mode=item["mode"],
         fixture=fixture,
         mcp_python=args.mcp_python,
@@ -1164,6 +1187,7 @@ def _run_one(
         mcp_python_path=[
             str(path) for path in getattr(args, "mcp_python_path", [])
         ],
+        inherited_mcp_servers=getattr(args, "codex_mcp_servers", ()),
     )
     started = time.monotonic()
     output = ""
@@ -1174,6 +1198,23 @@ def _run_one(
     peak_rss_bytes = 0
     stdout = ""
     stderr = ""
+    api_key = None
+    codex_environment = os.environ.copy()
+    for variable in (
+        "AGENT_AB_CODEX_PROFILE",
+        "AGENT_AB_CODEX_API_KEY_FILE",
+        "AGENT_AB_CODEX_API_KEY_ENV",
+    ):
+        codex_environment.pop(variable, None)
+    api_key_env = getattr(args, "codex_api_key_env", None)
+    if api_key_env:
+        codex_environment.pop(api_key_env, None)
+    api_key_file = getattr(args, "codex_api_key_file", None)
+    if api_key_file:
+        if not api_key_env:
+            raise ValueError("AGENT_AB_CODEX_API_KEY_ENV is required")
+        api_key = read_api_key(api_key_file)
+        codex_environment[api_key_env] = api_key
     require_mcp_calls = item["mode"] == "mcp" and getattr(args, "require_mcp_calls", False)
     prompt = task["prompt"]
     if require_mcp_calls:
@@ -1185,10 +1226,10 @@ def _run_one(
         )
     try:
         completed = _run_codex_process(
-            [*command, prompt], cwd=fixture, timeout=args.timeout
+            [*command, prompt], cwd=fixture, timeout=args.timeout, env=codex_environment
         )
-        stdout = completed.stdout
-        stderr = completed.stderr
+        stdout = _redact_secret(completed.stdout, api_key)
+        stderr = _redact_secret(completed.stderr, api_key)
         output = stdout + stderr
         invocation_completed = completed.returncode == 0
         execution_eligible = invocation_completed
@@ -1197,18 +1238,21 @@ def _run_one(
         if not invocation_completed:
             failure_reason = "codex_exit_nonzero"
     except subprocess.TimeoutExpired as exc:
-        stdout = _as_text(exc.stdout)
-        stderr = _as_text(exc.stderr)
+        stdout = _redact_secret(_as_text(exc.stdout), api_key)
+        stderr = _redact_secret(_as_text(exc.stderr), api_key)
         output = stdout + stderr
         invocation_completed = False
         execution_eligible = False
         failure_reason = "timeout"
     except OSError as exc:
-        stderr = str(exc)
+        stderr = _redact_secret(str(exc), api_key)
         output = stderr
         invocation_completed = False
         execution_eligible = False
         failure_reason = "codex_spawn_error"
+    if api_key_env:
+        codex_environment.pop(api_key_env, None)
+    api_key = None
     duration = time.monotonic() - started
     data_path_bytes = _data_path_bytes(metrics_file)
     (
@@ -1398,6 +1442,14 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         raise ValueError(f"schedule task_rubric_version must be {TASK_RUBRIC_VERSION}")
     if schedule.get("model_config") and schedule["model_config"] != args.model:
         raise ValueError("schedule model_config does not match runner model")
+    codex_profile = getattr(args, "codex_profile", None)
+    if getattr(args, "require_codex_profile", False):
+        if not isinstance(codex_profile, dict):
+            raise ValueError("Codex profile configuration is required")
+        if schedule.get("codex_profile") != codex_profile:
+            raise ValueError("schedule Codex profile configuration does not match runner")
+        if schedule.get("model_config") != codex_profile["model_id"]:
+            raise ValueError("schedule model_config does not match Codex profile model")
     if schedule.get("repository_fixture") and schedule["repository_fixture"] != args.repository_fixture:
         raise ValueError("schedule repository_fixture does not match runner fixture")
     repository = Path(args.repository).resolve()
@@ -1412,10 +1464,12 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
     test_embeddings = os.environ.get("EPHEMERAL_TEST_EMBEDDINGS") == "1"
     protocol = {
         "model_config": args.model,
+        "codex_profile": codex_profile,
         "repository_fixture": args.repository_fixture,
         "environment": args.environment,
         "reset_policy": "fresh-copy-per-run",
         "agent_adapter": "codex-cli",
+        "mcp_server_policy": MCP_SERVER_POLICY,
         "approval_policy": (
             "automatic-review-matched-sandbox"
             if getattr(args, "allow_mcp_approvals", False)
@@ -1528,7 +1582,6 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--repository-fixture", default="local-fixture")
     parser.add_argument("--environment", default="local")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--mcp-python", default=sys.executable)
     parser.add_argument("--mcp-module", default="ephemeral_buffer_mcp.server")
@@ -1575,6 +1628,15 @@ def main() -> None:
     args = parser.parse_args()
     if args.timeout < 1:
         parser.error("--timeout must be positive")
+    try:
+        args.codex_profile, args.codex_mcp_servers = validate_codex_profile_and_mcp_servers()
+    except ValueError as exc:
+        parser.error(str(exc))
+    os.environ["CODEX_HOME"] = str(Path(os.environ["CODEX_HOME"]).expanduser().resolve())
+    args.model = args.codex_profile["model_id"]
+    args.codex_api_key_file = os.environ.get("AGENT_AB_CODEX_API_KEY_FILE")
+    args.codex_api_key_env = os.environ.get("AGENT_AB_CODEX_API_KEY_ENV")
+    args.require_codex_profile = True
     schedule = _read_json(args.schedule)
     manifest = _load_manifest(args.tasks)
     payload = run_schedule(schedule, manifest, args)

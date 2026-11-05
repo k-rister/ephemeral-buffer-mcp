@@ -7,7 +7,6 @@ project_dir="$(cd "$benchmark_dir/.." && pwd)"
 cd "$project_dir"
 export PYTHONPATH="$project_dir/src:$project_dir${PYTHONPATH:+:$PYTHONPATH}"
 python_bin="${PYTHON_BIN:-$project_dir/.venv/bin/python}"
-model="${AGENT_AB_MODEL:-gpt-5.6-luna}"
 repetitions="${AGENT_AB_REPETITIONS:-}"
 powered="${AGENT_AB_POWERED:-0}"
 seed="${AGENT_AB_SEED:-20260909}"
@@ -17,16 +16,21 @@ test_embeddings="${AGENT_AB_TEST_EMBEDDINGS:-1}"
 run_dir="${AGENT_AB_RUN_DIR:-}"
 experiment="${AGENT_AB_EXPERIMENT:-}"
 variant="${AGENT_AB_VARIANT:-}"
+codex_profile="${AGENT_AB_CODEX_PROFILE:-}"
+codex_api_key_file="${AGENT_AB_CODEX_API_KEY_FILE:-}"
+codex_api_key_env="${AGENT_AB_CODEX_API_KEY_ENV:-}"
 started_at="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 if [[ -z "${CODEX_HOME:-}" ]]; then
-    echo "CODEX_HOME must point to a writable, authenticated Codex home" >&2
+    echo "CODEX_HOME must point to a writable Codex home" >&2
     exit 2
 fi
 if [[ ! -d "$CODEX_HOME" || ! -w "$CODEX_HOME" ]]; then
     echo "CODEX_HOME is missing or not writable: $CODEX_HOME" >&2
     exit 2
 fi
+CODEX_HOME="$(cd "$CODEX_HOME" && pwd)"
+export CODEX_HOME
 if [[ ! -x "$python_bin" ]]; then
     echo "Python executable not found: $python_bin" >&2
     exit 2
@@ -35,6 +39,9 @@ if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI is not on PATH" >&2
     exit 2
 fi
+export AGENT_AB_CODEX_PROFILE="$codex_profile"
+export AGENT_AB_CODEX_API_KEY_FILE="$codex_api_key_file"
+export AGENT_AB_CODEX_API_KEY_ENV="$codex_api_key_env"
 if [[ "$test_embeddings" != "0" && "$test_embeddings" != "1" ]]; then
     echo "AGENT_AB_TEST_EMBEDDINGS must be 0 or 1" >&2
     exit 2
@@ -52,10 +59,12 @@ if [[ -n "$repetitions" && ! "$repetitions" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-if ! CODEX_HOME="$CODEX_HOME" codex login status >/dev/null 2>&1; then
-    echo "codex CLI is not logged in (CODEX_HOME=$CODEX_HOME)" >&2
+if ! profile_metadata="$("$python_bin" -B -m benchmarks.codex_profile --format json)"; then
+    echo "Codex profile preflight failed" >&2
     exit 2
 fi
+model="$("$python_bin" -c 'import json,sys; print(json.loads(sys.argv[1])["model_id"])' "$profile_metadata")"
+codex_profile="$("$python_bin" -c 'import json,sys; print(json.loads(sys.argv[1])["name"])' "$profile_metadata")"
 if [[ -z "$run_dir" ]]; then
     run_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-ab-run.XXXXXX")"
 fi
@@ -95,6 +104,7 @@ schedule_args=(
     --schedule-output "$run_dir/schedule.json"
     --seed "$seed"
     --model-config "$model"
+    --codex-profile-json "$profile_metadata"
     --repository-fixture "$fixture_profile"
 )
 if [[ -n "$repetitions" ]]; then
@@ -123,7 +133,6 @@ for stage_count in "${stage_repetitions[@]}"; do
         --tasks "$run_dir/tasks.json" \
         --repository "$run_dir/fixture" \
         --repository-fixture "$fixture_profile" \
-        --model "$model" \
         --mcp-module ephemeral_buffer_mcp.server \
         --mcp-python-path "$project_dir/src" \
         --mcp-python "$python_bin" \
