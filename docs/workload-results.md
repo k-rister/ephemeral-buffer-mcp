@@ -391,6 +391,9 @@ use the configured EB tools for the capture and search workflow. Both arms use
 the same Codex automatic-review policy and `workspace-write` sandbox, and the
 deterministic test embedding backend. Records contain task-scoped pass/fail
 metadata, not prompts, criterion text, tool responses, or transcripts. The
+separate opt-in `--failure-artifacts-dir` can store raw stdout/stderr traces for
+unsuccessful runs; those artifacts may contain private prompts and tool data and
+are not part of these result records. Review them before sharing. The
 fixture is synthetic and small; these results do not establish performance on
 other models or representative agent work.
 

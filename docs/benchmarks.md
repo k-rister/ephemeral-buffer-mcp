@@ -553,6 +553,18 @@ The runner requires a locally authenticated `codex` CLI. It uses
 `codex exec --json --ephemeral` with a read-only sandbox by default.
 `context_bytes_proxy` is an observable prompt/event-envelope proxy because the
 CLI does not expose the model's internal context size.
+To retain the complete Codex event stream for unsuccessful runs, opt in with
+`--failure-artifacts-dir /path/to/private-failure-traces`. The runner creates
+one directory per failed scheduled run with `stdout.jsonl`, `stderr.txt`, and
+`metadata.json`. It includes task-criterion failures, MCP-not-used outcomes,
+nonzero exits, spawn errors, and timeouts (including partial output). Only the
+failed run is saved; a passing paired run is not. These raw streams may include
+private task prompts, assistant output, tool requests and results, and command
+output. Keep the directory local, review it before sharing, and remove it when
+it is no longer needed. It is separate from the metadata-only `--output` and
+`--result` files and is never generated unless the option is supplied. A
+`--resume` run warns about earlier unsuccessful records without a trace; it
+does not rerun completed tasks to recreate one.
 When the fixture does not contain the application package, select the source
 checkout's server module and add its `src` directory, for example
 `--mcp-module ephemeral_buffer_mcp.server --mcp-python-path /path/to/checkout/src`.

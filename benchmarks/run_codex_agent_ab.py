@@ -1119,6 +1119,12 @@ def _run_one(
         invocation_completed = False
         execution_eligible = False
         failure_reason = "timeout"
+    except OSError as exc:
+        stderr = str(exc)
+        output = stderr
+        invocation_completed = False
+        execution_eligible = False
+        failure_reason = "codex_spawn_error"
     duration = time.monotonic() - started
     data_path_bytes = _data_path_bytes(metrics_file)
     (
@@ -1159,7 +1165,7 @@ def _run_one(
     task_success = execution_eligible and all(criterion_passes)
     if execution_eligible and not task_success:
         failure_reason = "task_success_criteria_not_met"
-    return {
+    record = {
         "task_id": item["task_id"],
         "repetition": item["repetition"],
         "mode": item["mode"],
@@ -1197,6 +1203,106 @@ def _run_one(
         "output_token_samples": output_token_samples,
         **data_path_bytes,
     }
+    failure_artifacts_dir = getattr(args, "failure_artifacts_dir", None)
+    if failure_artifacts_dir is not None and not task_success:
+        _write_failure_artifact(
+            failure_artifacts_dir,
+            item=item,
+            record=record,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    return record
+
+
+def _failure_artifact_path(root: Path, item: dict[str, Any]) -> Path:
+    return root / f"{item['sequence']:04d}-{item['mode']}"
+
+
+def _write_failure_artifact(
+    root: Path,
+    *,
+    item: dict[str, Any],
+    record: dict[str, Any],
+    stdout: str,
+    stderr: str,
+) -> None:
+    """Persist the full Codex event streams outside the privacy-safe records."""
+    root = Path(root)
+    target = _failure_artifact_path(root, item)
+    staging: Path | None = None
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise FileExistsError(f"failure artifact already exists: {target}")
+        staging = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=root))
+        (staging / "stdout.jsonl").write_text(stdout, encoding="utf-8", newline="")
+        (staging / "stderr.txt").write_text(stderr, encoding="utf-8", newline="")
+        metadata = {
+            "schema_version": 1,
+            "run": {
+                "sequence": item["sequence"],
+                "task_id": item["task_id"],
+                "repetition": item["repetition"],
+                "mode": item["mode"],
+                "task_fixture_version": TASK_FIXTURE_VERSION,
+                "task_rubric_version": TASK_RUBRIC_VERSION,
+            },
+            "outcome": {
+                "completed": record["completed"],
+                "task_success": record["task_success"],
+                "criterion_passes": record["criterion_passes"],
+                "failure_reason": record["failure_reason"],
+                "exit_code": record["exit_code"],
+            },
+            "streams": {
+                "stdout": "stdout.jsonl",
+                "stderr": "stderr.txt",
+            },
+        }
+        (staging / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="",
+        )
+        if target.exists():
+            raise FileExistsError(f"failure artifact already exists: {target}")
+        staging.rename(target)
+    except OSError as exc:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        print(
+            f"warning: unable to save failure trace for run {item['sequence']}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _warn_missing_resumed_failure_artifacts(
+    records: list[dict[str, Any]],
+    schedule: dict[str, Any],
+    artifact_root: Path,
+) -> None:
+    sequence_by_key = {
+        (item["repetition"], item["task_id"], item["mode"]): item["sequence"]
+        for item in schedule.get("schedule", [])
+    }
+    missing = 0
+    for record in records:
+        if record.get("task_success"):
+            continue
+        key = (record["repetition"], record["task_id"], record["mode"])
+        sequence = sequence_by_key.get(key)
+        if sequence is None:
+            continue
+        item = {"sequence": sequence, "mode": record["mode"]}
+        if not (_failure_artifact_path(artifact_root, item) / "metadata.json").is_file():
+            missing += 1
+    if missing:
+        print(
+            f"warning: {missing} resumed unsuccessful run(s) have no saved trace; "
+            "completed runs are not rerun to backfill failure artifacts",
+            file=sys.stderr,
+        )
 
 
 def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
@@ -1299,6 +1405,13 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
             runs.append(_run_one(item, manifest[item["task_id"]], args=args, repository=repository, scratch=scratch))
     if args.dry_run:
         return {}
+    failure_artifacts_dir = getattr(args, "failure_artifacts_dir", None)
+    if existing_payload is not None and failure_artifacts_dir is not None:
+        _warn_missing_resumed_failure_artifacts(
+            existing_payload.get("runs", []),
+            schedule,
+            Path(failure_artifacts_dir),
+        )
     payload = {
         "schema_version": schedule["schema_version"],
         "benchmark": "agent-ab",
@@ -1357,6 +1470,14 @@ def main() -> None:
         "--diagnostic-log-dir",
         type=Path,
         help="Optional directory for content-free MCP lifecycle logs",
+    )
+    parser.add_argument(
+        "--failure-artifacts-dir",
+        type=Path,
+        help=(
+            "Optional local directory for full Codex stdout/stderr traces from "
+            "unsuccessful runs; traces may contain private prompts and tool output"
+        ),
     )
     parser.add_argument("--max-repetitions", type=int, help="Run only the first N scheduled repetitions for a staged look")
     parser.add_argument("--resume", action="store_true", help="Resume a compatible staged run without rerunning completed pairs")
