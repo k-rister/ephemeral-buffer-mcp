@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import contextlib
 import io
 import json
 import os
@@ -354,6 +355,131 @@ class TestCodexAgentRunner(unittest.TestCase):
         ])
         self.assertNotIn("line 32", json.dumps(record))
 
+    def test_failed_task_saves_full_trace_outside_records(self):
+        item = {
+            "sequence": 7,
+            "repetition": 2,
+            "task_id": "targeted-inspection",
+            "mode": "mcp",
+        }
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        tool_event = {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "tool": "ephemeral-buffer.search_capture",
+                "status": "completed",
+                "result": {
+                    "content": [{"type": "text", "text": "TARGETED_SIGNAL at line 32"}],
+                },
+            },
+        }
+        answer_event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "The relevant output is on line 32."},
+        }
+        stdout = "\n".join(json.dumps(event) for event in (tool_event, answer_event)) + "\n"
+        stderr = "diagnostic from the runner\n"
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            traces = root / "failure-traces"
+            args.failure_artifacts_dir = traces
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                return_value=subprocess_result(stdout=stdout, stderr=stderr),
+            ):
+                record = _run_one(
+                    item,
+                    task,
+                    args=args,
+                    repository=repository,
+                    scratch=root,
+                )
+
+            artifact = traces / "0007-mcp"
+            self.assertEqual((artifact / "stdout.jsonl").read_text(encoding="utf-8"), stdout)
+            self.assertEqual((artifact / "stderr.txt").read_text(encoding="utf-8"), stderr)
+            metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(record["task_success"])
+        self.assertEqual(record["criterion_passes"], [False, True])
+        self.assertEqual(metadata["run"], {
+            "sequence": 7,
+            "task_id": "targeted-inspection",
+            "repetition": 2,
+            "mode": "mcp",
+            "task_fixture_version": run_codex_agent_ab.TASK_FIXTURE_VERSION,
+            "task_rubric_version": run_codex_agent_ab.TASK_RUBRIC_VERSION,
+        })
+        self.assertEqual(metadata["outcome"]["failure_reason"], "task_success_criteria_not_met")
+        self.assertNotIn("TARGETED_SIGNAL", json.dumps(record))
+
+    def test_failure_trace_write_error_does_not_change_task_result(self):
+        item = {"sequence": 3, "repetition": 1, "task_id": "targeted-inspection", "mode": "control"}
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            trace_root = root / "not-a-directory"
+            trace_root.write_text("block", encoding="utf-8")
+            args.failure_artifacts_dir = trace_root
+            result = subprocess_result(stdout="The result is on line 32.")
+            warning = io.StringIO()
+            with patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=result), \
+                    contextlib.redirect_stderr(warning):
+                record = _run_one(
+                    item,
+                    task,
+                    args=args,
+                    repository=repository,
+                    scratch=root,
+                )
+
+        self.assertFalse(record["task_success"])
+        self.assertIn("unable to save failure trace for run 3", warning.getvalue())
+
+    def test_successful_run_does_not_create_failure_trace_directory(self):
+        item = {"sequence": 4, "repetition": 1, "task_id": "targeted-inspection", "mode": "control"}
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            traces = root / "failure-traces"
+            args.failure_artifacts_dir = traces
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                return_value=subprocess_result(stdout="TARGETED_SIGNAL at line 32"),
+            ):
+                record = _run_one(
+                    item,
+                    task,
+                    args=args,
+                    repository=repository,
+                    scratch=root,
+                )
+
+        self.assertTrue(record["task_success"])
+        self.assertFalse(traces.exists())
+
     def test_mcp_exposure_does_not_count_timestamp_as_line_evidence(self):
         output = json.dumps({
             "type": "item.completed",
@@ -481,12 +607,23 @@ class TestCodexAgentRunner(unittest.TestCase):
         ):
             repository = Path(directory) / "repo"
             repository.mkdir()
+            traces = Path(directory) / "failure-traces"
+            args.failure_artifacts_dir = traces
             timed_out = _run_one(
                 item, task, args=args, repository=repository, scratch=Path(directory)
             )
             continued = _run_one(
                 next_item, task, args=args, repository=repository, scratch=Path(directory)
             )
+            self.assertEqual(
+                (traces / "0001-control" / "stdout.jsonl").read_text(encoding="utf-8"),
+                "partial",
+            )
+            self.assertEqual(
+                (traces / "0001-control" / "stderr.txt").read_text(encoding="utf-8"),
+                "timed out",
+            )
+            self.assertFalse((traces / "0002-control").exists())
 
         self.assertFalse(timed_out["completed"])
         self.assertEqual(timed_out["failure_reason"], "timeout")
@@ -495,6 +632,99 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertTrue(continued["completed"])
         self.assertTrue(continued["task_success"])
         self.assertEqual(continued["peak_rss_bytes"], 4321)
+
+    def test_nonzero_exit_saves_full_trace(self):
+        item = {"sequence": 5, "repetition": 1, "task_id": "nonzero", "mode": "control"}
+        task = {
+            "prompt": "inspect the fixture",
+            "signal_marker": "SUCCESS",
+            "success_criteria": {"required_phrases": ["SUCCESS", "task found"]},
+        }
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            traces = root / "failure-traces"
+            args.failure_artifacts_dir = traces
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                return_value=subprocess_result(returncode=2, stdout="partial event stream\n", stderr="failed\n"),
+            ):
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+            artifact = traces / "0005-control"
+            self.assertEqual(record["failure_reason"], "codex_exit_nonzero")
+            self.assertEqual((artifact / "stdout.jsonl").read_text(encoding="utf-8"), "partial event stream\n")
+            self.assertEqual((artifact / "stderr.txt").read_text(encoding="utf-8"), "failed\n")
+
+    def test_codex_spawn_error_saves_failure_trace(self):
+        item = {"sequence": 6, "repetition": 1, "task_id": "spawn-error", "mode": "control"}
+        task = {
+            "prompt": "inspect the fixture",
+            "signal_marker": "SUCCESS",
+            "success_criteria": {"required_phrases": ["SUCCESS", "task found"]},
+        }
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            traces = root / "failure-traces"
+            args.failure_artifacts_dir = traces
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                side_effect=FileNotFoundError("codex executable not found"),
+            ):
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+            artifact = traces / "0006-control"
+            self.assertEqual(record["failure_reason"], "codex_spawn_error")
+            self.assertEqual((artifact / "stdout.jsonl").read_text(encoding="utf-8"), "")
+            self.assertEqual(
+                (artifact / "stderr.txt").read_text(encoding="utf-8"),
+                "codex executable not found",
+            )
+
+    def test_resume_warns_when_old_failure_trace_cannot_be_recreated(self):
+        item = {"sequence": 9, "repetition": 1, "task_id": "targeted-inspection", "mode": "mcp"}
+        records = [{
+            "repetition": 1,
+            "task_id": "targeted-inspection",
+            "mode": "mcp",
+            "task_success": False,
+        }]
+        schedule = {"schedule": [item]}
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory)
+            warning = io.StringIO()
+            with contextlib.redirect_stderr(warning):
+                run_codex_agent_ab._warn_missing_resumed_failure_artifacts(
+                    records,
+                    schedule,
+                    artifact_root,
+                )
+            self.assertIn("completed runs are not rerun to backfill", warning.getvalue())
+
+            warning = io.StringIO()
+            artifact = artifact_root / "0009-mcp"
+            artifact.mkdir()
+            (artifact / "metadata.json").write_text("{}\n", encoding="utf-8")
+            with contextlib.redirect_stderr(warning):
+                run_codex_agent_ab._warn_missing_resumed_failure_artifacts(
+                    records,
+                    schedule,
+                    artifact_root,
+                )
+            self.assertEqual(warning.getvalue(), "")
 
     def test_status_peak_rss_parser_converts_linux_kib(self):
         self.assertEqual(_status_peak_rss_bytes("Name:\tcodex\nVmHWM:\t1234 kB\n"), 1234 * 1024)
@@ -1061,7 +1291,11 @@ class TestCodexAgentRunner(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=result) as run:
             repository = Path(directory) / "repo"
             repository.mkdir()
+            traces = Path(directory) / "failure-traces"
+            args.failure_artifacts_dir = traces
             output = _run_one(item, task, args=args, repository=repository, scratch=Path(directory))
+            artifact = traces / "0001-mcp"
+            self.assertEqual((artifact / "stdout.jsonl").read_text(encoding="utf-8"), "SUCCESS\n")
 
         self.assertTrue(output["completed"])
         self.assertFalse(output["task_success"])
@@ -1290,16 +1524,21 @@ class TestCodexAgentWorkloadResult(unittest.TestCase):
             root = Path(directory)
             (root / "schedule.json").write_text(json.dumps(schedule), encoding="utf-8")
             (root / "tasks.json").write_text(json.dumps(manifest), encoding="utf-8")
+            trace_dir = root / "failure-traces"
             argv = [
                 "run_codex_agent_ab.py", "--schedule", str(root / "schedule.json"), "--tasks", str(root / "tasks.json"),
                 "--output", str(root / "records.json"), "--repository", ".", "--result", str(root / "result.json"),
+                "--failure-artifacts-dir", str(trace_dir),
             ]
             with patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=completed), patch(
                 "sys.argv", argv
             ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 run_codex_agent_ab.main()
             result = wr.load_result(root / "result.json")
-            self.assertEqual(json.loads((root / "records.json").read_text(encoding="utf-8"))["benchmark"], "agent-ab")
+            records = json.loads((root / "records.json").read_text(encoding="utf-8"))
+            self.assertEqual(records["benchmark"], "agent-ab")
+            self.assertTrue(any(trace_dir.glob("*/metadata.json")))
+            self.assertNotIn("stdout.jsonl", json.dumps(records))
         self.assertEqual(result["workload"]["kind"], "agent-run")
         self.assertEqual(len(result["runs"]), 8)
         self.assertEqual(json.loads(stdout.getvalue())["runs"], 8)
