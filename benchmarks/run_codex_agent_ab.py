@@ -43,7 +43,8 @@ from .benchmark_agent_ab import (
 
 DEFAULT_TIMEOUT = 900
 MCP_TREATMENT_SERVER = "ephemeral-buffer"
-MCP_SERVER_POLICY = "only-ephemeral-buffer-in-treatment"
+MCP_TREATMENT_SERVER_FALLBACK = "ephemeral-buffer-agent-ab"
+MCP_SERVER_POLICY = "inherited-codex-mcp-isolation-v2"
 EXCLUDED_FIXTURE_NAMES = {".git", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache"}
 _PATH_LINE_REFERENCE_RE = re.compile(
     r"(?<!\w)(?:[\w.-]*[\\/][\w./\\-]*|[\w-]+(?:\.[A-Za-z][\w-]*)+):(\d+)(?!\w|\.[0-9]|,[0-9])"
@@ -899,6 +900,20 @@ def _mcp_environment_overrides(
     return environment
 
 
+def _mcp_treatment_server_name(
+    inherited_mcp_servers: tuple[str, ...] | list[str],
+) -> str:
+    inherited = set(inherited_mcp_servers)
+    if MCP_TREATMENT_SERVER not in inherited:
+        return MCP_TREATMENT_SERVER
+    candidate = MCP_TREATMENT_SERVER_FALLBACK
+    suffix = 2
+    while candidate in inherited:
+        candidate = f"{MCP_TREATMENT_SERVER_FALLBACK}-{suffix}"
+        suffix += 1
+    return candidate
+
+
 def _codex_command(
     *,
     codex: str,
@@ -931,35 +946,34 @@ def _codex_command(
         "--config",
         f"shell_environment_policy.filters.{api_key_env}=\"exclude\"",
     ])
-    servers_to_disable = set(inherited_mcp_servers)
-    if mode == "mcp":
-        servers_to_disable.discard(MCP_TREATMENT_SERVER)
-    for server_name in sorted(servers_to_disable):
-        # Quoted TOML key segments preserve names that contain dots or spaces.
-        server_key = json.dumps(server_name)
-        command.extend([
-            "--config",
-            f"mcp_servers.{server_key}.enabled=false",
-        ])
+    # Codex merges MCP server tables from the selected profile with CLI
+    # overrides. Use TOML keys inside one table value so names with dots or
+    # spaces remain single keys, and disable every inherited server explicitly.
+    mcp_server_configs = [
+        f"{json.dumps(server_name)}={{enabled=false}}"
+        for server_name in sorted(set(inherited_mcp_servers))
+    ]
     if mode == "mcp":
         mcp_env = _mcp_environment_overrides(mcp_python_path, mcp_env)
         mcp_args = [mcp_server_script] if mcp_server_script else ["-m", mcp_module]
-        command.extend([
-            "--config",
-            f"mcp_servers.{MCP_TREATMENT_SERVER}.enabled=true",
-            "--config",
-            f"mcp_servers.{MCP_TREATMENT_SERVER}.command=" + json.dumps(mcp_python),
-            "--config",
-            f"mcp_servers.{MCP_TREATMENT_SERVER}.args=" + json.dumps(mcp_args),
-        ])
-        if mcp_env:
-            env_config = "{" + ", ".join(
-                f"{key}={json.dumps(value)}" for key, value in sorted(mcp_env.items())
-            ) + "}"
-            command.extend([
-                "--config",
-                f"mcp_servers.{MCP_TREATMENT_SERVER}.env=" + env_config,
-            ])
+        treatment_server = _mcp_treatment_server_name(inherited_mcp_servers)
+        env_config = "{" + ", ".join(
+            f"{json.dumps(key)}={json.dumps(value)}"
+            for key, value in sorted(mcp_env.items())
+        ) + "}"
+        treatment_config = ", ".join((
+            "enabled=true",
+            f"command={json.dumps(mcp_python)}",
+            f"args={json.dumps(mcp_args)}",
+            f"env={env_config}",
+        ))
+        mcp_server_configs.append(
+            f"{json.dumps(treatment_server)}={{{treatment_config}}}"
+        )
+    command.extend([
+        "--config",
+        "mcp_servers={" + ", ".join(mcp_server_configs) + "}",
+    ])
     return command
 
 

@@ -481,10 +481,13 @@ readable for summaries but cannot be resumed under v12.
 
 The repository includes a Codex CLI adapter for executing that protocol. The
 selected Codex profile supplies the model. The adapter creates a fresh fixture
-copy for every run, disables inherited MCP servers in both arms, and enables
-only `ephemeral-buffer` for the MCP arm. It writes metadata-only records and
-binds the MCP server policy into the protocol metadata so older mixed-policy
-runs cannot be resumed.
+copy for every run and disables inherited MCP servers in both arms. The MCP
+arm enables one stdio instance of the Ephemeral Buffer server. It normally uses
+the `ephemeral-buffer` server name; if that name is already configured, it
+selects a collision-free benchmark name because Codex merges profile tables.
+The adapter writes metadata-only records and binds the MCP server policy into
+the protocol metadata so runs created under the earlier isolation policy
+cannot be resumed with this configuration.
 Create a private task manifest (do not commit it) with fixture version 4 and
 rubric version 6, a
 prompt, signal marker, and objective success criteria for each scheduled task.
@@ -597,7 +600,7 @@ checkout's server module and add its `src` directory, for example
 For a matched MCP comparison where the client must call the configured server,
 add `--allow-mcp-approvals`. It applies Codex automatic review and the same
 `workspace-write` sandbox to both arms; inherited profile servers stay disabled
-and only the MCP arm receives `ephemeral-buffer`.
+and only the MCP arm receives the Ephemeral Buffer stdio server.
 Use it with a disposable, privacy-reviewed fixture. The records protocol
 identifies the matched policy. Add `--require-mcp-calls` when the MCP arm must
 exercise at least one MCP tool; runs that bypass MCP are marked with reason

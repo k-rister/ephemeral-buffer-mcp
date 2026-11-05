@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +34,11 @@ from benchmarks.run_codex_agent_ab import (
     _task_success,
     run_schedule,
 )
+
+
+def _mcp_servers_override(command):
+    config = next(value for value in command if value.startswith("mcp_servers="))
+    return tomllib.loads(config)["mcp_servers"]
 
 
 class TestCodexAgentRunner(unittest.TestCase):
@@ -173,6 +179,7 @@ class TestCodexAgentRunner(unittest.TestCase):
                 'wire_api = "responses"\n'
                 'env_key = "TEST_MODEL_API_KEY"\n'
                 '\n[mcp_servers.base_only]\ncommand = "base"\n'
+                '\n[mcp_servers."ephemeral-buffer"]\nurl = "https://mcp.example.invalid"\n'
                 '\n[mcp_servers."vendor.mcp"]\ncommand = "vendor"\n',
                 encoding="utf-8",
             )
@@ -189,6 +196,10 @@ class TestCodexAgentRunner(unittest.TestCase):
                 api_key_file=str(key_file),
                 api_key_env="TEST_MODEL_API_KEY",
             )
+            self.assertEqual(
+                server_names,
+                ("base_only", "ephemeral-buffer", "profile_only", "vendor.mcp"),
+            )
 
             command = run_codex_agent_ab._codex_command(
                 codex="codex",
@@ -204,10 +215,20 @@ class TestCodexAgentRunner(unittest.TestCase):
                 inherited_mcp_servers=server_names,
             )
 
-        self.assertIn('mcp_servers."base_only".enabled=false', command)
-        self.assertIn('mcp_servers."profile_only".enabled=false', command)
-        self.assertIn('mcp_servers."vendor.mcp".enabled=false', command)
-        self.assertIn("mcp_servers.ephemeral-buffer.enabled=true", command)
+        configured = _mcp_servers_override(command)
+        self.assertEqual(
+            {name for name, value in configured.items() if value.get("enabled")},
+            {"ephemeral-buffer-agent-ab"},
+        )
+        for inherited_name in server_names:
+            self.assertFalse(configured[inherited_name]["enabled"])
+        self.assertNotIn("url", configured["ephemeral-buffer-agent-ab"])
+        self.assertEqual(
+            set(configured["ephemeral-buffer-agent-ab"]),
+            {"enabled", "command", "args", "env"},
+        )
+        self.assertEqual(configured["ephemeral-buffer-agent-ab"]["command"], "python")
+        self.assertEqual(configured["ephemeral-buffer-agent-ab"]["args"], ["-m", "server"])
 
     def test_source_locations_bind_lines_to_files_in_answers_and_exposure(self):
         criteria = {
@@ -1323,10 +1344,10 @@ class TestCodexAgentRunner(unittest.TestCase):
             self.assertIn("--approve-for-me", command)
             self.assertNotIn("--ask-for-approval", command)
             self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
-        self.assertFalse(any(value.startswith("mcp_servers.") for value in control_command))
+        self.assertEqual(_mcp_servers_override(control_command), {})
 
-        env_config = next(item for item in mcp_command if item.startswith("mcp_servers.ephemeral-buffer.env="))
-        self.assertIn('EPHEMERAL_TEST_EMBEDDINGS="1"', env_config)
+        treatment_servers = _mcp_servers_override(mcp_command)
+        self.assertEqual(treatment_servers["ephemeral-buffer"]["env"]["EPHEMERAL_TEST_EMBEDDINGS"], "1")
 
     def test_profile_mcp_servers_are_isolated_to_ephemeral_buffer_treatment(self):
         from benchmarks.run_codex_agent_ab import _codex_command
@@ -1353,18 +1374,37 @@ class TestCodexAgentRunner(unittest.TestCase):
             mcp_server_script="/tmp/server.py",
         )
 
-        for server in inherited:
-            server_key = json.dumps(server)
-            self.assertIn(f"mcp_servers.{server_key}.enabled=false", control)
-        self.assertIn('mcp_servers."ephemeral-buffer".enabled=false', control)
-        self.assertFalse(any(".enabled=true" in value for value in control))
+        control_servers = _mcp_servers_override(control)
+        self.assertEqual(set(control_servers), set(inherited))
+        self.assertTrue(all(not value["enabled"] for value in control_servers.values()))
 
-        self.assertIn('mcp_servers."base-only".enabled=false', treatment)
-        self.assertIn('mcp_servers."vendor.mcp".enabled=false', treatment)
-        self.assertNotIn('mcp_servers."ephemeral-buffer".enabled=false', treatment)
-        self.assertIn("mcp_servers.ephemeral-buffer.enabled=true", treatment)
-        enabled_overrides = [value for value in treatment if value.endswith(".enabled=true")]
-        self.assertEqual(enabled_overrides, ["mcp_servers.ephemeral-buffer.enabled=true"])
+        treatment_servers = _mcp_servers_override(treatment)
+        self.assertEqual(
+            {name for name, value in treatment_servers.items() if value.get("enabled")},
+            {"ephemeral-buffer-agent-ab"},
+        )
+        self.assertTrue(
+            all(not treatment_servers[server]["enabled"] for server in inherited)
+        )
+        self.assertEqual(
+            treatment_servers["ephemeral-buffer-agent-ab"]["command"], "python"
+        )
+
+    def test_profile_mcp_treatment_server_name_avoids_inherited_collisions(self):
+        from benchmarks.run_codex_agent_ab import _codex_command
+
+        command = _codex_command(
+            codex="codex", mode="mcp", fixture=Path("/tmp/fixture"),
+            mcp_python="python", mcp_module="server", mcp_server_script=None,
+            allow_mcp_approvals=False, sandbox="read-only", timeout=10,
+            inherited_mcp_servers=(
+                "ephemeral-buffer", "ephemeral-buffer-agent-ab",
+            ),
+        )
+        servers = _mcp_servers_override(command)
+        self.assertFalse(servers["ephemeral-buffer"]["enabled"])
+        self.assertFalse(servers["ephemeral-buffer-agent-ab"]["enabled"])
+        self.assertTrue(servers["ephemeral-buffer-agent-ab-2"]["enabled"])
 
     def test_mcp_forwards_embedding_model_and_cache_configuration(self):
         from benchmarks.run_codex_agent_ab import _codex_command
@@ -1391,9 +1431,9 @@ class TestCodexAgentRunner(unittest.TestCase):
                     )
                 },
             )
-        env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
-        self.assertIn('EPHEMERAL_EMBEDDING_MODEL="custom/model"', env_config)
-        self.assertIn('EPHEMERAL_EMBEDDING_CACHE_DIR="/tmp/embedding-cache"', env_config)
+        server = _mcp_servers_override(command)["ephemeral-buffer"]
+        self.assertEqual(server["env"]["EPHEMERAL_EMBEDDING_MODEL"], "custom/model")
+        self.assertEqual(server["env"]["EPHEMERAL_EMBEDDING_CACHE_DIR"], "/tmp/embedding-cache")
 
     def test_mcp_server_source_paths_are_forwarded_to_the_child(self):
         from benchmarks.run_codex_agent_ab import _codex_command
@@ -1405,8 +1445,8 @@ class TestCodexAgentRunner(unittest.TestCase):
             mcp_python_path=["/tmp/revision/src", "/tmp/revision"],
         )
 
-        env_config = next(item for item in command if item.startswith("mcp_servers.ephemeral-buffer.env="))
-        self.assertIn('PYTHONPATH="/tmp/revision/src:/tmp/revision', env_config)
+        env = _mcp_servers_override(command)["ephemeral-buffer"]["env"]
+        self.assertTrue(env["PYTHONPATH"].startswith("/tmp/revision/src:/tmp/revision"))
 
     def test_module_fingerprint_uses_configured_interpreter_path_and_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1825,6 +1865,14 @@ class TestCodexAgentRunner(unittest.TestCase):
                     producer="run_codex_agent_ab.py",
                 )
                 self.assertEqual(len(extended_result["runs"]), len(extended_payload["runs"]))
+                records_path.write_text(json.dumps(extended_payload), encoding="utf-8")
+                old_policy_payload = copy.deepcopy(extended_payload)
+                old_policy_payload["protocol"]["mcp_server_policy"] = (
+                    "only-ephemeral-buffer-in-treatment"
+                )
+                records_path.write_text(json.dumps(old_policy_payload), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                    run_schedule(extended_schedule, manifest, args)
                 records_path.write_text(json.dumps(extended_payload), encoding="utf-8")
                 args.max_repetitions = 1
                 with self.assertRaisesRegex(ValueError, "below completed records"):
