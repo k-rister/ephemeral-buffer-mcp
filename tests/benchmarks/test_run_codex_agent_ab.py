@@ -1389,7 +1389,7 @@ class TestCodexAgentRunner(unittest.TestCase):
                     with patch("benchmarks.run_codex_agent_ab._run_one") as run_one:
                         with self.assertRaisesRegex(
                             ValueError,
-                            "--failure-artifacts-dir must be outside the --repository source fixture",
+                            "--failure-artifacts-dir must not be reachable from the --repository source fixture",
                         ):
                             run_schedule(schedule, manifest, args)
                         run_one.assert_not_called()
@@ -1415,6 +1415,14 @@ class TestCodexAgentRunner(unittest.TestCase):
                     run_schedule(schedule, manifest, args)
                 run_one.assert_not_called()
 
+            linked_traces = repository / "linked-traces"
+            linked_traces.symlink_to(external_target, target_is_directory=True)
+            args.failure_artifacts_dir = external_target / "failure-traces"
+            with patch("benchmarks.run_codex_agent_ab._run_one") as run_one:
+                with self.assertRaisesRegex(ValueError, "failure-artifacts-dir.*reachable"):
+                    run_schedule(schedule, manifest, args)
+                run_one.assert_not_called()
+
             outside_link = root / "outside-traces-link"
             outside_link.symlink_to(repository / "failure-traces", target_is_directory=True)
             args.failure_artifacts_dir = outside_link
@@ -1422,6 +1430,44 @@ class TestCodexAgentRunner(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "failure-artifacts-dir"):
                     run_schedule(schedule, manifest, args)
                 run_one.assert_not_called()
+
+    def test_failure_artifact_reachability_follows_nested_symlinks_and_skips_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            first_target = root / "first-target"
+            first_target.mkdir()
+            second_target = root / "second-target"
+            second_target.mkdir()
+            (first_target / "nested-link").symlink_to(second_target, target_is_directory=True)
+            (repository / "linked-root").symlink_to(first_target, target_is_directory=True)
+            artifact_dir = second_target / "failure-traces"
+
+            with self.assertRaisesRegex(ValueError, "failure-artifacts-dir.*reachable"):
+                run_codex_agent_ab._validate_failure_artifacts_dir(
+                    repository,
+                    repository.resolve(),
+                    artifact_dir,
+                )
+
+            linked_root = repository / "linked-root"
+            linked_root.unlink()
+            (repository / ".git").symlink_to(second_target, target_is_directory=True)
+            run_codex_agent_ab._validate_failure_artifacts_dir(
+                repository,
+                repository.resolve(),
+                artifact_dir,
+            )
+
+            cycle_repository = root / "cycle-repo"
+            cycle_repository.mkdir()
+            (cycle_repository / "cycle").symlink_to(cycle_repository, target_is_directory=True)
+            run_codex_agent_ab._validate_failure_artifacts_dir(
+                cycle_repository,
+                cycle_repository.resolve(),
+                root / "unrelated-traces",
+            )
 
     def test_resume_extends_staged_run_without_rerunning_matched_pairs(self):
         stage_design = {"selected_repetitions": 2}

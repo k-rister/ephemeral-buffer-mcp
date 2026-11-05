@@ -193,6 +193,59 @@ def _path_is_within(path: Path, directory: Path) -> bool:
     return path == directory or directory in path.parents
 
 
+def _failure_artifacts_reachable_from_fixture(
+    repository: Path,
+    failure_artifacts_dir: Path,
+) -> bool:
+    artifact_resolved = failure_artifacts_dir.resolve()
+    pending = [repository]
+    visited: set[Path] = set()
+    while pending:
+        directory = pending.pop()
+        try:
+            resolved_directory = directory.resolve()
+        except RuntimeError:
+            # A cyclic symlink cannot lead to a new directory target.
+            continue
+        if resolved_directory in visited:
+            continue
+        visited.add(resolved_directory)
+        if _path_is_within(artifact_resolved, resolved_directory):
+            return True
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.name in EXCLUDED_FIXTURE_NAMES:
+                        continue
+                    child = Path(entry.path)
+                    try:
+                        resolved_child = child.resolve()
+                        is_symlink = entry.is_symlink()
+                        is_directory = entry.is_dir(follow_symlinks=True)
+                    except RuntimeError:
+                        # Ignore a symlink loop while continuing through the
+                        # other entries, matching the copy's reachable tree.
+                        continue
+                    except OSError as exc:
+                        raise ValueError(
+                            "unable to inspect the repository fixture while "
+                            "validating --failure-artifacts-dir"
+                        ) from exc
+                    if (is_symlink or is_directory) and _path_is_within(
+                        artifact_resolved,
+                        resolved_child,
+                    ):
+                        return True
+                    if is_directory:
+                        pending.append(child)
+        except OSError as exc:
+            raise ValueError(
+                "unable to inspect the repository fixture while "
+                "validating --failure-artifacts-dir"
+            ) from exc
+    return False
+
+
 def _validate_failure_artifacts_dir(
     repository_input: Path,
     repository: Path,
@@ -212,7 +265,11 @@ def _validate_failure_artifacts_dir(
         or _path_is_within(artifact_resolved, repository)
     ):
         raise ValueError(
-            "--failure-artifacts-dir must be outside the --repository source fixture"
+            "--failure-artifacts-dir must not be reachable from the --repository source fixture"
+        )
+    if _failure_artifacts_reachable_from_fixture(repository, failure_artifacts_dir):
+        raise ValueError(
+            "--failure-artifacts-dir must not be reachable from the --repository source fixture"
         )
 
 
