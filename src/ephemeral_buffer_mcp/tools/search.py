@@ -87,8 +87,15 @@ def _render_search_text(
         out.insert(1, pending_note)
 
     for index, match in enumerate(matches, start=1):
+        exact_lines = match.get("matched_line_numbers", [])
+        line_summary = (
+            "Exact lexical hit lines: " + ", ".join(f"L{line}" for line in exact_lines)
+            if exact_lines
+            else "Exact lexical hit lines: none (semantic-only match or no exact token hit)"
+        )
         out.extend([
             f"### Match #{index} (Score: {match.get('score', 0)}, Range: {match.get('matched_range', 'unknown')}, Context: {match.get('context_range', 'unknown')})",
+            line_summary,
             "```text",
             str(match.get("snippet", "")),
             "```\n",
@@ -185,7 +192,7 @@ def _search_capture_response(
         structured_matches.append({
             key: match[key]
             for key in (
-                "chunk_id", "chunk_index", "score", "matched_range", "context_range",
+                "chunk_id", "chunk_index", "score", "matched_range", "matched_line_numbers", "context_range",
                 "context_start_line", "context_end_line",
             )
             if key in match
@@ -272,6 +279,8 @@ def search_capture(
     (embedding based). capture_id defaults to latest; top_k defaults to 5
     (maximum 20), and context_lines defaults to 3 (maximum 100). Use
     get_capture_slice for complete or omitted content.
+    Matches expose exact lexical token-hit line numbers; semantic-only matches
+    have no exact lexical lines. The wider matched range identifies the chunk.
     `semantic_coverage: complete` means indexed, not every source token was
     embedded. Oversized lines stay whole but the tokenizer may truncate them
     at the model's token limit.

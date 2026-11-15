@@ -222,7 +222,20 @@ def compact_tool_text(envelope: ToolResponseEnvelope) -> str:
                 continue
             matched_range = match.get("matched_range")
             location = ""
-            if isinstance(matched_range, str):
+            has_exact_lines = "matched_line_numbers" in match
+            exact_lines = match.get("matched_line_numbers")
+            if has_exact_lines:
+                valid_lines = (
+                    [line for line in exact_lines if isinstance(line, int) and not isinstance(line, bool) and line > 0]
+                    if isinstance(exact_lines, list)
+                    else []
+                )
+                location = (
+                    "Exact lexical hit lines " + ", ".join(f"L{line}" for line in valid_lines)
+                    if valid_lines
+                    else "Exact lexical hit lines unavailable"
+                )
+            elif isinstance(matched_range, str):
                 bounds = matched_range.removeprefix("L").split("-L", maxsplit=1)
                 if len(bounds) == 2 and all(bound.isdigit() for bound in bounds):
                     start_line, end_line = bounds
@@ -238,13 +251,14 @@ def compact_tool_text(envelope: ToolResponseEnvelope) -> str:
                     COMPACT_MATCH_SNIPPET_MAX_BYTES,
                     "... [match excerpt truncated]",
                 )
-            marker_line = (
-                _query_marker_line(data.get("query"), snippet)
-                if isinstance(snippet, str)
-                else None
-            )
-            if marker_line is not None:
-                location = f"Matched line {marker_line}"
+            if not has_exact_lines:
+                marker_line = (
+                    _query_marker_line(data.get("query"), snippet)
+                    if isinstance(snippet, str)
+                    else None
+                )
+                if marker_line is not None:
+                    location = f"Matched line {marker_line}"
             if location or isinstance(snippet, str):
                 heading = f"Match #{index}"
                 if location:

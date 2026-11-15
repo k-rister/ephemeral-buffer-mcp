@@ -4881,7 +4881,7 @@
     }
   },
   "search_capture": {
-    "payload_schema_version": 1,
+    "payload_schema_version": 2,
     "schema": {
       "$defs": {
         "SearchMatch": {
@@ -4922,6 +4922,13 @@
               "title": "Context Truncated",
               "type": "boolean"
             },
+            "matched_line_numbers": {
+              "items": {
+                "type": "integer"
+              },
+              "title": "Matched Line Numbers",
+              "type": "array"
+            },
             "matched_range": {
               "title": "Matched Range",
               "type": "string"
@@ -4944,6 +4951,7 @@
             "chunk_index",
             "score",
             "matched_range",
+            "matched_line_numbers",
             "context_range",
             "context_start_line",
             "context_end_line",

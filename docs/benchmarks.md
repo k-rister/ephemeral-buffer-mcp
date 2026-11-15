@@ -395,7 +395,7 @@ Paired binary power depends on discordance, because concordant pairs do not
 contribute to McNemar's test ([paired binary sample size
 methods](https://pmc.ncbi.nlm.nih.gov/articles/PMC5738522/)).
 
-No raw current fixture-v4/rubric-v6 pilot records are checked in. Until a pilot
+No raw current fixture-v5/rubric-v6 pilot records are checked in. Until a pilot
 is supplied, the reproducible fallback uses fully discordant pairs (`d = 1`)
 and a direction-specific control baseline `(1 - delta) / 2` for signed effect
 `delta`. This feasible model centers the two marginal success rates and
@@ -510,7 +510,7 @@ match the expected number `232`:
 
 ```json
 {
-  "fixture_version": 4,
+  "fixture_version": 5,
   "rubric_version": 6,
   "tasks": {
     "targeted-inspection": {
@@ -520,6 +520,15 @@ match the expected number `232`:
         "description": "Report the signal and its correct command-output line number.",
         "required_phrases": ["TARGETED_SIGNAL"],
         "required_line_numbers": [32]
+      },
+      "response_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["signal", "command_output_line"],
+        "properties": {
+          "signal": {"type": "string"},
+          "command_output_line": {"type": "string", "pattern": "^line [0-9]+$"}
+        }
       }
     },
     "noisy-test-failure": {
@@ -532,6 +541,16 @@ match the expected number `232`:
           "TEST_FAILURE_SIGNAL",
           "expected status=ready, got status=stalled"
         ]
+      },
+      "response_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["failed_test", "signal", "assertion"],
+        "properties": {
+          "failed_test": {"type": "string"},
+          "signal": {"type": "string"},
+          "assertion": {"type": "string"}
+        }
       }
     },
     "build-log-search": {
@@ -541,6 +560,15 @@ match the expected number `232`:
         "description": "Report the marker and its source location.",
         "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
         "required_source_locations": [{"path": "src/parser.c", "line": 917}]
+      },
+      "response_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["signal", "source_location"],
+        "properties": {
+          "signal": {"type": "string"},
+          "source_location": {"type": "string", "pattern": "^.+:[0-9]+$"}
+        }
       }
     },
     "follow-up-context": {
@@ -549,13 +577,23 @@ match the expected number `232`:
       "success_criteria": {
         "description": "Identify the earlier failed test and marker.",
         "required_phrases": ["test_case_1379", "TEST_FAILURE_SIGNAL"]
+      },
+      "response_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["failed_test", "signal"],
+        "properties": {
+          "failed_test": {"type": "string"},
+          "signal": {"type": "string"}
+        }
       }
     }
   }
 }
 ```
 
-Regenerate manifests and schedules for fixture version 4. Historical records
+Regenerate manifests and schedules for fixture version 5. Include one strict
+`response_schema` object per task. Historical records
 remain readable, but their scores must stay separate from the corrected rubric.
 Criterion vectors are ordered by required phrases, unbound line numbers, then
 source locations; paths and criterion text remain private and are not recorded.
@@ -611,7 +649,7 @@ task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 12. Version 7 added `criterion_passes`, ordered
+Runner records use version 13. Version 7 added `criterion_passes`, ordered
 booleans for the task's required answer criteria, including literal phrases and
 typed line numbers. Summary indexes are one-based and scoped to the task ID and
 fixture version. Criterion text and final answers are not stored. Empty or
@@ -621,7 +659,7 @@ invocation flag remains separate. Records include exit code, failure reason,
 MCP-specific tool-call count, provider-reported input/output token counts, and
 every provider usage sample when Codex emits them. They break the observable
 context proxy into prompt and output byte components. Version-1 through
-version-11 records remain readable. Criterion scores are unavailable for
+version-12 records remain readable. Criterion scores are unavailable for
 versions 1 through 6; task-success and affirmative retrieval scores are
 unavailable for versions 1 through 5. Missing values are not inferred from
 invocation status or marker-only scoring. Missing provider metrics are
@@ -671,6 +709,26 @@ version 3 phrase-only state names. No successful response does not prove that
 a tool was called, and no criterion match does not prove that semantically
 useful evidence was absent. Older summaries show these new fields as
 unavailable.
+Version 13 adds per-run MCP tool failure events containing only the tool name,
+one fixed category (`validation`, `timeout`, `socket`, `embedding`, `eviction`,
+or `other`), whether a failure came from an error result or an exception, and
+the duration in milliseconds. These are correlated with task, repetition, and
+mode by their containing run record. Normal records omit messages, call IDs,
+arguments, responses, and traces. The summary reports grouped counts and
+duration statistics by mode, task, tool, category, and kind; the Markdown
+report renderer includes the same aggregates. Schema version 13 reads older
+records, while resuming requires the current fixture and protocol.
+
+The runner accepts `--structured-final-answers` to constrain both arms to the
+task-specific strict JSON response schema. This option is off by default and
+its enabled state and schema fingerprint are part of the resume protocol. The
+optional `--max-tool-calls N` ceiling is also off by default; when enabled, it
+counts tool calls as Codex emits JSONL, deduplicating lifecycle events with
+stable call IDs, and terminates an invocation on the first call beyond N. It
+applies equally to control and MCP runs, records
+`tool_call_budget_exceeded`, and is included in protocol metadata. This is a
+live cap, so a capped run is recorded as an incomplete invocation even when
+partial output already contains an answer.
 Summaries also report usage sample counts, monotonicity observations, and
 first-to-last deltas. Monotonic samples are explicitly inconclusive: they may
 be cumulative or per-turn values and require a controlled calibration matrix.

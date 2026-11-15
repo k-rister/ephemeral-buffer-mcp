@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-FIXTURE_VERSION = 4
+FIXTURE_VERSION = 5
 RUBRIC_VERSION = 6
 PROFILE = "repository-shaped-v1"
 
@@ -22,6 +22,16 @@ TASKS = {
             "required_line_numbers": [32],
             "required_source_locations": [{"path": "src/packet_parser/parser.py", "line": 12}],
         },
+        "response_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["signal", "source_location", "command_output_line"],
+            "properties": {
+                "signal": {"type": "string"},
+                "source_location": {"type": "string", "pattern": "^.+:[0-9]+$"},
+                "command_output_line": {"type": "string", "pattern": "^line [0-9]+$"},
+            },
+        },
     },
     "noisy-test-failure": {
         "category": "repository-test-output",
@@ -36,6 +46,16 @@ TASKS = {
                 "expected status=ready, got status=stalled",
             ],
         },
+        "response_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["failed_test", "signal", "assertion"],
+            "properties": {
+                "failed_test": {"type": "string"},
+                "signal": {"type": "string"},
+                "assertion": {"type": "string"},
+            },
+        },
     },
     "build-log-search": {
         "category": "repository-build-output",
@@ -47,6 +67,15 @@ TASKS = {
             "required_phrases": ["BUILD_FAILURE_SIGNAL", "src/parser.c"],
             "required_source_locations": [{"path": "src/parser.c", "line": 917}],
         },
+        "response_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["signal", "source_location"],
+            "properties": {
+                "signal": {"type": "string"},
+                "source_location": {"type": "string", "pattern": "^.+:[0-9]+$"},
+            },
+        },
     },
     "follow-up-context": {
         "category": "repository-search-and-retrieval",
@@ -56,6 +85,15 @@ TASKS = {
         "success_criteria": {
             "description": "Final response preserves the earlier result and identifies test_case_1379 with TEST_FAILURE_SIGNAL.",
             "required_phrases": ["test_case_1379", "TEST_FAILURE_SIGNAL"],
+        },
+        "response_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["failed_test", "signal"],
+            "properties": {
+                "failed_test": {"type": "string"},
+                "signal": {"type": "string"},
+            },
         },
     },
 }

@@ -16,7 +16,9 @@ from tests.paths import REPOSITORY_ROOT
 
 
 def summary_fixture():
-    schedule = build_schedule(repetitions=2, seed=17)
+    schedule = build_schedule(
+        repetitions=2, seed=17, design={"selected_repetitions": 2}
+    )
     runs = []
     for item in schedule["schedule"]:
         mcp = item["mode"] == "mcp"
@@ -25,6 +27,7 @@ def summary_fixture():
             "completed": True, "task_success": mcp, "signal_retrieved": mcp,
             "criterion_passes": [mcp, mcp],
             "line_reference_diagnostics": [],
+            "mcp_tool_failures": [],
             "criterion_search_response_hits": [mcp, mcp] if mcp else None,
             "criterion_slice_response_hits": [mcp, mcp] if mcp else None,
             "search_capture_responses": 1 if mcp else 0,
@@ -48,6 +51,9 @@ def summary_fixture():
             "embedding_cache": "not-applicable",
             "timeout_seconds": 10, "effective_sandbox": "read-only",
             "mcp_launch_fingerprint": "sha256:" + "0" * 64,
+            "structured_final_answers": False,
+            "answer_schema_sha256": "sha256:" + "1" * 64,
+            "max_tool_calls": None,
         }, "schedule": schedule, "runs": runs,
     }
     return summarize_records(payload, schedule)

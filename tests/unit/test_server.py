@@ -434,6 +434,21 @@ class TestServerTools(unittest.TestCase):
 
             log.reset_mock()
 
+            @instrumentation_tools._instrument_tool("result_failure_tool")
+            def result_failure_tool():
+                return "Error: invalid request"
+
+            self.assertEqual(result_failure_tool(), "Error: invalid request")
+            self.assertEqual(
+                [call.args[2] for call in log.call_args_list],
+                ["mcp_tool_started", "mcp_tool_result_failed", "mcp_tool_completed"],
+            )
+            result_failure = log.call_args_list[1].kwargs
+            self.assertEqual(result_failure["failure_category"], "validation")
+            self.assertNotIn("invalid request", str(log.call_args_list))
+
+            log.reset_mock()
+
             @instrumentation_tools._instrument_tool("failing_tool")
             def failing_tool():
                 raise RuntimeError("private failure")
@@ -3630,6 +3645,7 @@ class TestServerTools(unittest.TestCase):
                 "chunk_index": index,
                 "score": 1.0,
                 "matched_range": f"L{index + 1}-L{index + 1}",
+                "matched_line_numbers": [],
                 "context_range": f"L{index + 1}-L{index + 1}",
                 "context_start_line": index + 1,
                 "context_end_line": index + 1,
@@ -3672,7 +3688,7 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(data["match_count"], len(data["matches"]))
         self.assertLess(data["match_count"], data["available_match_count"])
         self.assertTrue(response.structured_content["truncated"])
-        self.assertEqual(response.structured_content["payload_schema_version"], 1)
+        self.assertEqual(response.structured_content["payload_schema_version"], 2)
         envelope = server.ToolResponseEnvelope(
             status=response.structured_content["status"],
             data=data,
@@ -3852,7 +3868,7 @@ class TestServerTools(unittest.TestCase):
                 "available_match_count",
             },
         )
-        self.assertEqual(search_response.structured_content["payload_schema_version"], 1)
+        self.assertEqual(search_response.structured_content["payload_schema_version"], 2)
         self.assertEqual(
             set(search_response.structured_content["data"]["matches"][0]),
             {
@@ -3860,6 +3876,7 @@ class TestServerTools(unittest.TestCase):
                 "chunk_index",
                 "score",
                 "matched_range",
+                "matched_line_numbers",
                 "context_range",
                 "context_start_line",
                 "context_end_line",
@@ -3876,8 +3893,12 @@ class TestServerTools(unittest.TestCase):
             search_response.structured_content["data"]["matches"][0]["matched_range"],
             expected_match["matched_range"],
         )
+        self.assertEqual(
+            search_response.structured_content["data"]["matches"][0]["matched_line_numbers"],
+            expected_match["matched_line_numbers"],
+        )
         self.assertIn("matched_ranges=", search_response.content[0].text)
-        self.assertIn("Matched lines 1-2", search_response.content[0].text)
+        self.assertIn("Exact lexical hit lines L1", search_response.content[0].text)
         self.assertIn("get_capture_slice", search_response.content[0].text)
         self.assertIn(expected_match["snippet"], search_response.content[0].text)
         self.assertLessEqual(
@@ -4040,6 +4061,33 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("Matched line 32", search_summary)
         self.assertIn("Matched text (verbatim):", search_summary)
         self.assertIn("TARGETED_SIGNAL is on this source line", search_summary)
+
+        exact_search_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={
+                "query": "TARGETED_SIGNAL",
+                "matches": [{
+                    "matched_range": "L29-L35",
+                    "matched_line_numbers": [32],
+                    "snippet": ">>    32 | TARGETED_SIGNAL is the exact lexical hit",
+                }],
+            },
+        ))
+        self.assertIn("Exact lexical hit lines L32", exact_search_summary)
+
+        semantic_search_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
+            status="ok",
+            data={
+                "query": "TARGETED_SIGNAL",
+                "matches": [{
+                    "matched_range": "L29-L35",
+                    "matched_line_numbers": [],
+                    "snippet": "  32 | TARGETED_SIGNAL appears in semantic context",
+                }],
+            },
+        ))
+        self.assertIn("Exact lexical hit lines unavailable", semantic_search_summary)
+        self.assertNotIn("Matched line 32", semantic_search_summary)
 
         slice_summary = mcp_transport._compact_tool_text(server.ToolResponseEnvelope(
             status="ok",

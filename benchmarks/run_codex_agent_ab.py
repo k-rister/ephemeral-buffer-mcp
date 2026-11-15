@@ -9,6 +9,7 @@ manifest and are never copied to the output records.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -28,6 +29,7 @@ from ephemeral_buffer_mcp.config import DEFAULT_EMBEDDING_MODEL
 from .benchmark_agent_ab import (
     DATA_PATH_BYTE_FIELDS,
     MODES,
+    MCP_FAILURE_CATEGORIES,
     RECORDS_SCHEMA_VERSION,
     TASK_FIXTURE_VERSION,
     TASK_RUBRIC_VERSION,
@@ -111,6 +113,52 @@ def _source_location_hit(text: str, location: dict[str, Any]) -> bool:
     return False
 
 
+def _validate_response_schema(task_id: str, value: Any) -> dict[str, Any]:
+    """Accept only strict, flat string-object schemas for final answers."""
+    if not isinstance(value, dict) or set(value) != {
+        "type", "additionalProperties", "required", "properties"
+    }:
+        raise ValueError(f"task {task_id} response_schema must be a strict object schema")
+    required = value["required"]
+    properties = value["properties"]
+    if (
+        value["type"] != "object"
+        or value["additionalProperties"] is not False
+        or not isinstance(required, list)
+        or not required
+        or any(not isinstance(name, str) or not name for name in required)
+        or len(required) != len(set(required))
+        or not isinstance(properties, dict)
+        or set(properties) != set(required)
+    ):
+        raise ValueError(f"task {task_id} response_schema must require every declared property")
+    for name, specification in properties.items():
+        if not isinstance(specification, dict) or specification.get("type") != "string":
+            raise ValueError(f"task {task_id} response_schema property {name} must be a string")
+        if set(specification) - {"type", "pattern"}:
+            raise ValueError(f"task {task_id} response_schema property {name} has unsupported keywords")
+        pattern = specification.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str):
+                raise ValueError(f"task {task_id} response_schema property {name} pattern must be a string")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"task {task_id} response_schema property {name} pattern is invalid"
+                ) from exc
+    return value
+
+
+def _answer_schema_fingerprint(manifest: dict[str, dict[str, Any]]) -> str:
+    schemas = {
+        task_id: task.get("response_schema")
+        for task_id, task in sorted(manifest.items())
+    }
+    serialized = json.dumps(schemas, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
     payload = _read_json(path)
     if payload.get("fixture_version") != TASK_FIXTURE_VERSION:
@@ -169,9 +217,11 @@ def _load_manifest(path: Path) -> dict[str, dict[str, Any]]:
             raise ValueError(
                 f"task {task_id} success_criteria must require its signal_marker"
             )
+        response_schema = _validate_response_schema(task_id, task.get("response_schema"))
         manifest[task_id] = {
             "prompt": prompt,
             "signal_marker": marker,
+            "response_schema": response_schema,
             "success_criteria": {
                 "description": description,
                 "required_phrases": required_phrases,
@@ -723,9 +773,18 @@ def _process_peak_rss_bytes(pid: int) -> int:
 
 
 def _run_codex_process(
-    command: list[str], *, cwd: Path, timeout: int, env: dict[str, str] | None = None
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    max_tool_calls: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run Codex with bounded cleanup for descendants holding output pipes."""
+    """Run Codex with bounded cleanup and an optional live tool-call ceiling."""
+    if max_tool_calls is not None and (
+        isinstance(max_tool_calls, bool) or not isinstance(max_tool_calls, int) or max_tool_calls < 1
+    ):
+        raise ValueError("max_tool_calls must be a positive integer")
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -754,13 +813,84 @@ def _run_codex_process(
 
     monitor = threading.Thread(target=monitor_rss, daemon=True)
     monitor.start()
+    tool_call_budget_exceeded = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        if max_tool_calls is None:
+            stdout, stderr = process.communicate(timeout=timeout)
+        else:
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+            seen_tool_ids: set[str] = set()
+            anonymous_tool_calls = [0]
+            budget_exceeded = threading.Event()
+
+            def read_stdout() -> None:
+                assert process.stdout is not None
+                try:
+                    for line in process.stdout:
+                        stdout_chunks.append(line)
+                        anonymous_tool_calls[0] += _stream_tool_call_delta(line, seen_tool_ids)
+                        if len(seen_tool_ids) + anonymous_tool_calls[0] > max_tool_calls:
+                            budget_exceeded.set()
+                except (OSError, ValueError):
+                    pass
+
+            def read_stderr() -> None:
+                assert process.stderr is not None
+                try:
+                    stderr_chunks.extend(process.stderr)
+                except (OSError, ValueError):
+                    pass
+
+            stdout_reader = threading.Thread(target=read_stdout, daemon=True)
+            stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+            stdout_reader.start()
+            stderr_reader.start()
+            deadline = time.monotonic() + timeout
+            timed_out = False
+            process_group_terminated = False
+            while process.poll() is None:
+                if budget_exceeded.is_set():
+                    tool_call_budget_exceeded = True
+                    _terminate_process_group(process, process_group_id)
+                    process_group_terminated = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    _terminate_process_group(process, process_group_id)
+                    process_group_terminated = True
+                    break
+                time.sleep(min(0.01, remaining))
+            stdout_reader.join(timeout=1)
+            stderr_reader.join(timeout=1)
+            if stdout_reader.is_alive() or stderr_reader.is_alive():
+                _terminate_process_group(process, process_group_id)
+                process_group_terminated = True
+                stdout_reader.join(timeout=1)
+                stderr_reader.join(timeout=1)
+            stdout = "".join(stdout_chunks)
+            stderr = "".join(stderr_chunks)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            # The final tool event may be read after the process exits.
+            tool_call_budget_exceeded = tool_call_budget_exceeded or budget_exceeded.is_set()
+            if (tool_call_budget_exceeded or timed_out) and not process_group_terminated:
+                _terminate_process_group(process, process_group_id)
+                process_group_terminated = True
+            if tool_call_budget_exceeded or timed_out:
+                process.wait()
+            if timed_out:
+                raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
     except KeyboardInterrupt:
         _terminate_process_group(process, process_group_id)
         process.wait()
         raise
     except subprocess.TimeoutExpired:
+        if max_tool_calls is not None:
+            raise
         _terminate_process_group(process, process_group_id)
         try:
             stdout, stderr = process.communicate(timeout=1)
@@ -777,6 +907,7 @@ def _run_codex_process(
         monitor.join(timeout=1)
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     completed.peak_rss_bytes = peak_rss[0]
+    completed.tool_call_budget_exceeded = tool_call_budget_exceeded
     return completed
 
 
@@ -797,6 +928,29 @@ def _stable_tool_id(item: dict[str, Any]) -> str | None:
         if isinstance(value, (str, int)) and str(value).strip():
             return str(value)
     return None
+
+
+def _stream_tool_call_delta(line: str, seen_tool_ids: set[str]) -> int:
+    """Count new identified calls and anonymous call objects in one JSONL line."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(event, dict):
+        return 0
+    anonymous = 0
+    for item in _walk_dicts(event):
+        event_type = item.get("type")
+        if not isinstance(event_type, str) or not (
+            "tool_call" in event_type or event_type in {"command_execution", "function_call"}
+        ):
+            continue
+        stable_id = _stable_tool_id(item)
+        if stable_id is None:
+            anonymous += 1
+        elif stable_id not in seen_tool_ids:
+            seen_tool_ids.add(stable_id)
+    return anonymous
 
 
 def _event_metrics(output: str) -> tuple[int, int, int, int | None, int | None, list[int | float], list[int | float]]:
@@ -883,6 +1037,49 @@ def _data_path_bytes(path: Path | None) -> dict[str, int]:
     return result
 
 
+def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict[str, Any]]:
+    """Read only fixed, content-free failure fields from the MCP event log."""
+    if path is None or not path.is_file():
+        return []
+    failures = []
+    try:
+        with path.open("rb") as source:
+            source.seek(offset_bytes)
+            content = source.read().decode("utf-8")
+    except (OSError, UnicodeError):
+        return []
+    for line in content.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        name = event.get("event")
+        if name not in {"mcp_tool_result_failed", "mcp_tool_failed"}:
+            continue
+        tool = event.get("tool")
+        category = event.get("failure_category")
+        duration_ms = event.get("duration_ms")
+        if (
+            not isinstance(tool, str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", tool)
+            or category not in MCP_FAILURE_CATEGORIES
+            or isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, (int, float))
+            or not math.isfinite(duration_ms)
+            or duration_ms < 0
+        ):
+            continue
+        failures.append({
+            "tool": tool,
+            "category": category,
+            "kind": "result" if name == "mcp_tool_result_failed" else "exception",
+            "duration_ms": duration_ms,
+        })
+    return failures
+
+
 def _mcp_environment_overrides(
     mcp_python_path: list[str] | None,
     mcp_env: dict[str, str] | None = None,
@@ -927,6 +1124,7 @@ def _codex_command(
     allow_mcp_approvals: bool,
     sandbox: str,
     timeout: int,
+    output_schema: Path | None = None,
     mcp_env: dict[str, str] | None = None,
     mcp_python_path: list[str] | None = None,
     inherited_mcp_servers: tuple[str, ...] | list[str] = (),
@@ -946,6 +1144,8 @@ def _codex_command(
         "--config",
         f"shell_environment_policy.filters.{api_key_env}=\"exclude\"",
     ])
+    if output_schema is not None:
+        command.extend(["--output-schema", str(output_schema)])
     # Codex merges MCP server tables from the selected profile with CLI
     # overrides. Use TOML keys inside one table value so names with dots or
     # spaces remain single keys, and disable every inherited server explicitly.
@@ -1155,13 +1355,22 @@ def _run_one(
     diagnostic_log = None
     metrics_file = None
     diagnostic_log_dir = getattr(args, "diagnostic_log_dir", None)
-    if item["mode"] == "mcp" and diagnostic_log_dir:
-        diagnostic_log = Path(diagnostic_log_dir) / f"{item['sequence']:03d}-{item['mode']}.jsonl"
-        diagnostic_log.parent.mkdir(parents=True, exist_ok=True)
+    if item["mode"] == "mcp":
+        if diagnostic_log_dir:
+            diagnostic_log = Path(diagnostic_log_dir) / f"{item['sequence']:03d}-{item['mode']}.jsonl"
+            diagnostic_log.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            diagnostic_log = scratch / f"{item['sequence']:03d}-{item['mode']}.events.jsonl"
+    diagnostic_log_offset = 0
+    if diagnostic_log is not None:
+        try:
+            diagnostic_log_offset = diagnostic_log.stat().st_size
+        except OSError:
+            pass
     mcp_env = None
     if diagnostic_log is not None:
         mcp_env = {
-            "EPHEMERAL_LOG_LEVEL": "INFO",
+            "EPHEMERAL_LOG_LEVEL": "INFO" if diagnostic_log_dir else "WARNING",
             "EPHEMERAL_LOG_FILE": str(diagnostic_log),
         }
     if item["mode"] == "mcp":
@@ -1181,6 +1390,13 @@ def _run_one(
         mcp_env["EPHEMERAL_DISABLE_SOCKET_SERVER"] = "1"
         mcp_env["EPHEMERAL_METRICS"] = "1"
         mcp_env["EPHEMERAL_METRICS_FILE"] = str(metrics_file)
+    output_schema = None
+    if getattr(args, "structured_final_answers", False):
+        output_schema = scratch / f"{item['sequence']:03d}-{item['mode']}.answer-schema.json"
+        output_schema.write_text(
+            json.dumps(task["response_schema"], sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
     command = _codex_command(
         codex=args.codex,
         profile=(
@@ -1197,6 +1413,7 @@ def _run_one(
         allow_mcp_approvals=getattr(args, "allow_mcp_approvals", False),
         sandbox=args.sandbox,
         timeout=args.timeout,
+        output_schema=output_schema,
         mcp_env=mcp_env,
         mcp_python_path=[
             str(path) for path in getattr(args, "mcp_python_path", [])
@@ -1240,16 +1457,23 @@ def _run_one(
         )
     try:
         completed = _run_codex_process(
-            [*command, prompt], cwd=fixture, timeout=args.timeout, env=codex_environment
+            [*command, prompt],
+            cwd=fixture,
+            timeout=args.timeout,
+            env=codex_environment,
+            max_tool_calls=getattr(args, "max_tool_calls", None),
         )
         stdout = _redact_secret(completed.stdout, api_key)
         stderr = _redact_secret(completed.stderr, api_key)
         output = stdout + stderr
-        invocation_completed = completed.returncode == 0
+        tool_call_budget_exceeded = getattr(completed, "tool_call_budget_exceeded", False)
+        invocation_completed = completed.returncode == 0 and not tool_call_budget_exceeded
         execution_eligible = invocation_completed
         exit_code = completed.returncode
         peak_rss_bytes = getattr(completed, "peak_rss_bytes", 0)
-        if not invocation_completed:
+        if tool_call_budget_exceeded:
+            failure_reason = "tool_call_budget_exceeded"
+        elif not invocation_completed:
             failure_reason = "codex_exit_nonzero"
     except subprocess.TimeoutExpired as exc:
         stdout = _redact_secret(_as_text(exc.stdout), api_key)
@@ -1269,6 +1493,11 @@ def _run_one(
     api_key = None
     duration = time.monotonic() - started
     data_path_bytes = _data_path_bytes(metrics_file)
+    mcp_tool_failures = (
+        _mcp_tool_failures(diagnostic_log, offset_bytes=diagnostic_log_offset)
+        if item["mode"] == "mcp"
+        else []
+    )
     (
         tool_calls,
         mcp_tool_calls,
@@ -1320,6 +1549,7 @@ def _run_one(
         "criterion_passes": criterion_passes,
         # Only unbound line criteria receive a fixed category and criterion index.
         "line_reference_diagnostics": line_reference_diagnostics,
+        "mcp_tool_failures": mcp_tool_failures,
         # MCP treatment runs store only per-criterion exposure booleans from
         # named successful tool results. Control exposure is not applicable.
         "criterion_search_response_hits": criterion_search_response_hits,
@@ -1466,6 +1696,17 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
             raise ValueError("schedule model_config does not match Codex profile model")
     if schedule.get("repository_fixture") and schedule["repository_fixture"] != args.repository_fixture:
         raise ValueError("schedule repository_fixture does not match runner fixture")
+    max_tool_calls = getattr(args, "max_tool_calls", None)
+    if max_tool_calls is not None and (
+        isinstance(max_tool_calls, bool)
+        or not isinstance(max_tool_calls, int)
+        or max_tool_calls < 1
+    ):
+        raise ValueError("max_tool_calls must be a positive integer")
+    if getattr(args, "structured_final_answers", False) and any(
+        not isinstance(task.get("response_schema"), dict) for task in manifest.values()
+    ):
+        raise ValueError("structured final answers require a response_schema for every task")
     repository = Path(args.repository).resolve()
     if not repository.is_dir():
         raise ValueError(f"repository fixture is not a directory: {repository}")
@@ -1490,6 +1731,9 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
             else "read-only-sandbox"
         ),
         "mcp_usage_policy": "required" if getattr(args, "require_mcp_calls", False) else "opportunistic",
+        "structured_final_answers": bool(getattr(args, "structured_final_answers", False)),
+        "answer_schema_sha256": _answer_schema_fingerprint(manifest),
+        "max_tool_calls": max_tool_calls,
         "timeout_seconds": args.timeout,
         "effective_sandbox": (
             "workspace-write" if getattr(args, "allow_mcp_approvals", False) else args.sandbox
@@ -1578,7 +1822,7 @@ def run_schedule(schedule: dict[str, Any], manifest: dict[str, dict[str, Any]], 
         "protocol": protocol,
         "schedule": schedule,
         "runs": runs,
-        "privacy": "records contain metadata, task-scoped criterion pass and MCP response exposure booleans, line-reference criterion indexes and fixed diagnostic categories, and response counts only; prompts, criterion text, tool responses, transcripts, commands, captures, and user content are excluded",
+        "privacy": "records contain metadata, task-scoped criterion pass and MCP response exposure booleans, fixed line-reference and MCP failure categories, tool identifiers, timings, and response counts only; prompts, criterion text, tool responses, transcripts, commands, captures, and user content are excluded",
     }
     validate_records(
         payload,
@@ -1620,8 +1864,18 @@ def main() -> None:
         action="store_true",
         help="Require at least one MCP tool call in every MCP run",
     )
+    parser.add_argument(
+        "--structured-final-answers",
+        action="store_true",
+        help="Constrain both arms to the task-specific strict JSON answer schema",
+    )
     parser.add_argument("--sandbox", choices=("read-only", "workspace-write"), default="read-only")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--max-tool-calls",
+        type=int,
+        help="Optional live per-invocation tool-call ceiling applied equally to both arms",
+    )
     parser.add_argument(
         "--diagnostic-log-dir",
         type=Path,
@@ -1642,6 +1896,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.timeout < 1:
         parser.error("--timeout must be positive")
+    if args.max_tool_calls is not None and args.max_tool_calls < 1:
+        parser.error("--max-tool-calls must be positive")
     try:
         args.codex_profile, args.codex_mcp_servers = validate_codex_profile_and_mcp_servers()
     except ValueError as exc:
