@@ -279,11 +279,10 @@ def search_capture(
     (embedding based). capture_id defaults to latest; top_k defaults to 5
     (maximum 20), and context_lines defaults to 3 (maximum 100). Use
     get_capture_slice for complete or omitted content.
-    Matches expose exact lexical token-hit line numbers; semantic-only matches
-    have no exact lexical lines. The wider matched range identifies the chunk.
-    `semantic_coverage: complete` means indexed, not every source token was
-    embedded. Oversized lines stay whole but the tokenizer may truncate them
-    at the model's token limit.
+    Exact lexical hit lines are listed when available; semantic-only matches
+    may have none.
+    `semantic_coverage: complete` means indexed; not every token is embedded.
+    Long lines may be token-truncated.
     """
     return search_capture_result(query, mode, capture_id, top_k, context_lines).text or ""
 
