@@ -144,6 +144,7 @@ def _instrument_tool(name):
                 kwargs["__invocation_mode"] = invocation_mode
             call_id = supplied_call_id if supplied_call_id is not None else next(_TOOL_CALL_IDS)
             started = time.perf_counter()
+            failure_category = None
             log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
             try:
                 metrics = active_metrics()
@@ -151,7 +152,8 @@ def _instrument_tool(name):
                     try:
                         result = function(*args, **kwargs)
                     except Exception as exc:
-                        state["failure_category"] = _classify_tool_exception(name, exc, kwargs)
+                        failure_category = _classify_tool_exception(name, exc, kwargs)
+                        state["failure_category"] = failure_category
                         raise
                     response_text = result.text if isinstance(result, ToolResponseEnvelope) else result
                     if invocation_mode != "mcp" and isinstance(response_text, str):
@@ -166,6 +168,16 @@ def _instrument_tool(name):
                         state["success"] = False
                         state["failure_category"] = failure_category
                 duration_ms = round((time.perf_counter() - started) * 1000, 3)
+                if failure_category is not None:
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "mcp_tool_result_failed",
+                        call_id=call_id,
+                        duration_ms=duration_ms,
+                        failure_category=failure_category,
+                        tool=name,
+                    )
                 log_event(
                     LOGGER,
                     logging.INFO,
@@ -173,6 +185,7 @@ def _instrument_tool(name):
                     call_id=call_id,
                     duration_ms=duration_ms,
                     success=state["success"],
+                    failure_category=failure_category,
                     tool=name,
                 )
                 return result
@@ -186,6 +199,7 @@ def _instrument_tool(name):
                     call_id=call_id,
                     duration_ms=duration_ms,
                     error_type=type(exc).__name__,
+                    failure_category=failure_category or "other",
                     tool=name,
                 )
                 raise

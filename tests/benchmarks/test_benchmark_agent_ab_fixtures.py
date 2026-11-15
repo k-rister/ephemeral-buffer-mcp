@@ -30,6 +30,11 @@ class TestAgentAbFixtures(unittest.TestCase):
             )
             self.assertIn(task["signal_marker"], criteria["required_phrases"])
             self.assertTrue(task["output_profile"])
+            schema = task["response_schema"]
+            self.assertEqual(schema["type"], "object")
+            self.assertFalse(schema["additionalProperties"])
+            self.assertEqual(set(schema["required"]), set(schema["properties"]))
+            self.assertTrue(all(value["type"] == "string" for value in schema["properties"].values()))
         self.assertEqual(
             manifest["tasks"]["targeted-inspection"]["success_criteria"]["required_phrases"],
             ["TARGETED_SIGNAL"],

@@ -24,9 +24,9 @@ from benchmarks.agent_ab_statistics import (
 
 
 SCHEMA_VERSION = 2
-SUMMARY_SCHEMA_VERSION = 6
-RECORDS_SCHEMA_VERSION = 12
-TASK_FIXTURE_VERSION = 4
+SUMMARY_SCHEMA_VERSION = 7
+RECORDS_SCHEMA_VERSION = 13
+TASK_FIXTURE_VERSION = 5
 TASK_RUBRIC_VERSION = 6
 MODES = ("control", "mcp")
 LINE_REFERENCE_DIAGNOSTIC_CATEGORIES = (
@@ -34,6 +34,7 @@ LINE_REFERENCE_DIAGNOSTIC_CATEGORIES = (
     "expected_number_present_unrecognized_format",
     "expected_number_absent",
 )
+MCP_FAILURE_CATEGORIES = ("validation", "timeout", "socket", "embedding", "eviction", "other")
 CODEX_PROFILE_IDENTITY_FIELDS = {"name", "model_id", "provider_id", "config_sha256"}
 DEFAULT_AGENT_AB_SEED = 20260909
 DEFAULT_EXPLORATORY_REPETITIONS = 5
@@ -105,6 +106,7 @@ RUN_KEYS_V9 = RUN_KEYS_V8
 RUN_KEYS_V10 = RUN_KEYS_V9
 RUN_KEYS_V11 = RUN_KEYS_V10
 RUN_KEYS_V12 = RUN_KEYS_V11 | {"line_reference_diagnostics"}
+RUN_KEYS_V13 = RUN_KEYS_V12 | {"mcp_tool_failures"}
 METRICS = (
     "completed",
     "task_success",
@@ -209,7 +211,7 @@ def _bootstrap_model_inputs(
         or schedule.get("task_rubric_version", TASK_RUBRIC_VERSION) != TASK_RUBRIC_VERSION
         or payload.get("records_schema_version", 1) < 6
     ):
-        raise ValueError("power pilot records must contain current fixture-v4/rubric-v6 paired task-success outcomes")
+        raise ValueError("power pilot records must contain current fixture-v5/rubric-v6 paired task-success outcomes")
     _resolve_pilot_identity(
         payload,
         schedule,
@@ -788,6 +790,21 @@ def _validate_protocol(protocol: Any, records_schema_version: int = 1) -> None:
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint)
     ):
         raise ValueError("records protocol mcp_launch_fingerprint must be a SHA-256 fingerprint")
+    if records_schema_version >= 13:
+        if not isinstance(protocol.get("structured_final_answers"), bool):
+            raise ValueError("records protocol structured_final_answers must be boolean")
+        schema_fingerprint = protocol.get("answer_schema_sha256")
+        if not isinstance(schema_fingerprint, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", schema_fingerprint
+        ):
+            raise ValueError("records protocol answer_schema_sha256 must be a SHA-256 fingerprint")
+        max_tool_calls = protocol.get("max_tool_calls")
+        if max_tool_calls is not None and (
+            isinstance(max_tool_calls, bool)
+            or not isinstance(max_tool_calls, int)
+            or max_tool_calls < 1
+        ):
+            raise ValueError("records protocol max_tool_calls must be null or a positive integer")
     if records_schema_version >= 11:
         if timeout is None:
             raise ValueError("current records protocol requires timeout_seconds")
@@ -846,15 +863,22 @@ def validate_records(
     if records_schema_version not in range(1, RECORDS_SCHEMA_VERSION + 1):
         raise ValueError("records schema version is unsupported")
     _validate_protocol(payload.get("protocol"), records_schema_version)
-    if records_schema_version >= 12 and (
-        payload.get("task_fixture_version") != TASK_FIXTURE_VERSION
-        or schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION
-        or payload_rubric not in (5, TASK_RUBRIC_VERSION)
-        or schedule_rubric not in (5, TASK_RUBRIC_VERSION)
+    if records_schema_version == 12 and (
+        payload.get("task_fixture_version") != 4
+        or schedule.get("task_fixture_version") != 4
+        or payload_rubric not in (5, 6)
+        or schedule_rubric not in (5, 6)
     ):
         raise ValueError(
             "records schema version 12 requires matching fixture-v4/rubric-v5 or rubric-v6 metadata"
         )
+    if records_schema_version >= 13 and (
+        payload.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or schedule.get("task_fixture_version") != TASK_FIXTURE_VERSION
+        or payload_rubric != TASK_RUBRIC_VERSION
+        or schedule_rubric != TASK_RUBRIC_VERSION
+    ):
+        raise ValueError("records schema version 13 requires matching fixture-v5/rubric-v6 metadata")
     if 10 <= records_schema_version <= 11 and (
         payload_rubric != 4 or schedule_rubric != 4
     ):
@@ -876,8 +900,10 @@ def validate_records(
         if records_schema_version == 7
         else RUN_KEYS_V8
         if records_schema_version == 8
+        else RUN_KEYS_V13
+        if records_schema_version >= 13
         else RUN_KEYS_V12
-        if records_schema_version >= 12
+        if records_schema_version == 12
         else RUN_KEYS_V11
     )
     expected = {_run_key(item): item for item in schedule.get("schedule", [])}
@@ -950,6 +976,28 @@ def validate_records(
                 raise ValueError(
                     f"line-reference diagnostic indexes must be consistent for task: {record['task_id']}"
                 )
+        if records_schema_version >= 13:
+            failures = record["mcp_tool_failures"]
+            if not isinstance(failures, list):
+                raise ValueError(f"mcp_tool_failures must be a list in run: {key}")
+            if record["mode"] == "control" and failures:
+                raise ValueError(f"MCP tool failures must be empty for control runs: {key}")
+            for failure in failures:
+                if not isinstance(failure, dict) or set(failure) != {
+                    "tool", "category", "kind", "duration_ms"
+                }:
+                    raise ValueError(f"MCP tool failure fields are invalid in run: {key}")
+                if (
+                    not isinstance(failure["tool"], str)
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", failure["tool"])
+                ):
+                    raise ValueError(f"MCP tool failure tool is invalid in run: {key}")
+                if failure["category"] not in MCP_FAILURE_CATEGORIES:
+                    raise ValueError(f"MCP tool failure category is invalid in run: {key}")
+                if failure["kind"] not in ("result", "exception"):
+                    raise ValueError(f"MCP tool failure kind is invalid in run: {key}")
+                if not _is_nonnegative_finite_number(failure["duration_ms"]):
+                    raise ValueError(f"MCP tool failure duration is invalid in run: {key}")
         if records_schema_version >= 8:
             exposure_fields = (
                 "criterion_search_response_hits",
@@ -1581,6 +1629,43 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
                 "tasks": task_summaries,
             }
 
+    mcp_tool_failures_by_mode = {
+        mode: {"available": False, "tasks": {}}
+        for mode in MODES
+    }
+    if records_schema_version >= 13:
+        mcp_tool_failures_by_mode = {}
+        for mode in MODES:
+            mode_records = [record for record in runs if record["mode"] == mode]
+            task_summaries = {}
+            for task_id in sorted({record["task_id"] for record in mode_records}):
+                task_records = [record for record in mode_records if record["task_id"] == task_id]
+                grouped_failures: dict[tuple[str, str, str], list[float]] = {}
+                for record in task_records:
+                    for failure in record["mcp_tool_failures"]:
+                        grouped_failures.setdefault(
+                            (failure["tool"], failure["category"], failure["kind"]), []
+                        ).append(float(failure["duration_ms"]))
+                task_summaries[task_id] = {
+                    "runs": len(task_records),
+                    "runs_with_failures": sum(bool(record["mcp_tool_failures"]) for record in task_records),
+                    "failure_count": sum(len(record["mcp_tool_failures"]) for record in task_records),
+                    "failures": [
+                        {
+                            "tool": tool,
+                            "category": category,
+                            "kind": kind,
+                            "count": len(durations),
+                            "duration_ms": _stats(durations),
+                        }
+                        for (tool, category, kind), durations in sorted(grouped_failures.items())
+                    ],
+                }
+            mcp_tool_failures_by_mode[mode] = {
+                "available": True,
+                "tasks": task_summaries,
+            }
+
     for metric in METRICS:
         deltas = []
         for pair in grouped.values():
@@ -1659,8 +1744,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         "paired_criterion_deltas_mcp_minus_control": paired_criterion_deltas,
         "criterion_exposure_summaries_by_mode": criterion_exposure_summaries_by_mode,
         "line_reference_diagnostics_by_mode": line_reference_diagnostics_by_mode,
+        "mcp_tool_failures_by_mode": mcp_tool_failures_by_mode,
         "recommendations": recommendations,
-        "privacy": "summary contains aggregate metadata, task-scoped criterion indices, and fixed line-reference diagnostic categories only; raw prompts, criterion text, tool responses, commands, captures, transcripts, and user content are excluded",
+        "privacy": "summary contains aggregate metadata, task-scoped criterion indices, fixed line-reference and MCP failure categories, tool identifiers, and timing statistics only; raw prompts, criterion text, tool responses, commands, captures, transcripts, and user content are excluded",
     }
 
 
@@ -1831,7 +1917,7 @@ def main() -> None:
         help="Privacy-safe Codex profile identity from benchmarks.codex_profile",
     )
     parser.add_argument("--repository-fixture", help="Fixture profile used to validate resumable stages")
-    parser.add_argument("--pilot-records", type=Path, help="Current fixture-v4/rubric-v6 records used to bootstrap paired outcomes")
+    parser.add_argument("--pilot-records", type=Path, help="Current fixture-v5/rubric-v6 records used to bootstrap paired outcomes")
     parser.add_argument("--pilot-schedule", type=Path, help="Schedule for --pilot-records when not embedded")
     parser.add_argument("--records", type=Path, help="Analyze an external metadata-only records envelope")
     parser.add_argument("--schedule", type=Path, help="Schedule JSON when it is not embedded in records")

@@ -60,6 +60,9 @@ def _records_payload(repetitions=2, design=None, powered=False):
             "timeout_seconds": 10,
             "effective_sandbox": "read-only",
             "mcp_launch_fingerprint": "sha256:" + "0" * 64,
+            "structured_final_answers": False,
+            "answer_schema_sha256": "sha256:" + "1" * 64,
+            "max_tool_calls": None,
         },
         "schedule": schedule,
         "runs": runs,
@@ -97,6 +100,7 @@ def _scored_records_payload(repetitions=2, design=None, powered=False):
             if record["task_id"] == "targeted-inspection"
             else []
         )
+        record["mcp_tool_failures"] = []
         record["criterion_search_response_hits"] = [False, False] if record["mode"] == "mcp" else None
         record["criterion_slice_response_hits"] = [False, False] if record["mode"] == "mcp" else None
         record["search_capture_responses"] = 0
@@ -115,6 +119,7 @@ def _legacy_v6_records_payload():
     for record in payload["runs"]:
         record.pop("criterion_passes")
         record.pop("line_reference_diagnostics")
+        record.pop("mcp_tool_failures")
         record.pop("criterion_search_response_hits")
         record.pop("criterion_slice_response_hits")
         record.pop("search_capture_responses")
@@ -123,12 +128,26 @@ def _legacy_v6_records_payload():
 
 
 def _legacy_v10_records_payload():
-    schedule, payload = _scored_records_payload()
+    schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
     payload["records_schema_version"] = 10
     payload["task_rubric_version"] = 4
     schedule["task_rubric_version"] = 4
     for record in payload["runs"]:
         record.pop("line_reference_diagnostics")
+        record.pop("mcp_tool_failures")
+    return schedule, payload
+
+
+def _legacy_v12_records_payload():
+    schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+    payload["records_schema_version"] = 12
+    payload["task_fixture_version"] = 4
+    schedule["task_fixture_version"] = 4
+    payload["protocol"].pop("structured_final_answers")
+    payload["protocol"].pop("answer_schema_sha256")
+    payload["protocol"].pop("max_tool_calls")
+    for record in payload["runs"]:
+        record.pop("mcp_tool_failures")
     return schedule, payload
 
 
@@ -155,7 +174,7 @@ def _legacy_v5_records_payload():
 
 class TestAgentAbBenchmark(unittest.TestCase):
     def test_historical_rubric_v5_records_remain_readable_under_schema_v12(self):
-        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        schedule, payload = _legacy_v12_records_payload()
         schedule["task_rubric_version"] = 5
         payload["task_rubric_version"] = 5
 
@@ -163,6 +182,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
 
         self.assertEqual(summary["task_rubric_version"], 5)
         self.assertEqual(summary["records_schema_version"], 12)
+        self.assertFalse(summary["mcp_tool_failures_by_mode"]["mcp"]["available"])
 
     def test_historical_v3_fixture_records_remain_readable(self):
         schedule, payload = _legacy_v10_records_payload()
@@ -358,9 +378,9 @@ class TestAgentAbBenchmark(unittest.TestCase):
     def test_power_pilot_rejects_mixed_fixture_or_rubric_versions(self):
         schedule, payload = _scored_records_payload()
         payload["task_rubric_version"] = TASK_RUBRIC_VERSION
-        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v6"):
+        with self.assertRaisesRegex(ValueError, "fixture-v5/rubric-v6"):
             build_power_design(dict(payload, task_fixture_version=3), schedule, simulations=100)
-        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v6"):
+        with self.assertRaisesRegex(ValueError, "fixture-v5/rubric-v6"):
             build_power_design(dict(payload, task_rubric_version=3), schedule, simulations=100)
 
     def test_power_design_bootstraps_paired_pilot_and_marks_small_samples(self):
@@ -671,7 +691,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertEqual(control_run["measurements"]["invocation_completion_rate"]["value"], 1.0)
 
     def test_summary_separates_invocation_completion_from_objective_task_success(self):
-        schedule, payload = _scored_records_payload()
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
         summary = summarize_records(payload, schedule)
         mcp = summary["mode_summaries"]["mcp"]
         self.assertEqual(mcp["invocation_completion_rate"], 1.0)
@@ -680,7 +700,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
-        self.assertEqual(summary["schema_version"], 6)
+        self.assertEqual(summary["schema_version"], 7)
         task_success = summary["task_success_by_mode"]
         self.assertEqual(
             task_success["mcp"]["tasks"]["targeted-inspection"],
@@ -987,7 +1007,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
             validate_records(payload, schedule)
 
     def test_line_reference_diagnostics_are_validated_and_legacy_v11_is_readable(self):
-        schedule, payload = _scored_records_payload()
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
         record = next(
             item for item in payload["runs"]
             if item["task_id"] == "targeted-inspection" and item["mode"] == "mcp"
@@ -1015,7 +1035,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         wrong_fixture_payload = copy.deepcopy(payload)
         wrong_fixture_schedule["task_fixture_version"] = 3
         wrong_fixture_payload["task_fixture_version"] = 3
-        with self.assertRaisesRegex(ValueError, "fixture-v4/rubric-v5 or rubric-v6"):
+        with self.assertRaisesRegex(ValueError, "fixture-v5/rubric-v6"):
             validate_records(wrong_fixture_payload, wrong_fixture_schedule)
 
         legacy_schedule, legacy_payload = _legacy_v10_records_payload()
@@ -1028,7 +1048,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         )
 
     def test_line_reference_summary_reports_counts_and_rates_by_mode(self):
-        schedule, payload = _scored_records_payload()
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
         for record in payload["runs"]:
             if record["task_id"] != "targeted-inspection":
                 continue
@@ -1061,6 +1081,39 @@ class TestAgentAbBenchmark(unittest.TestCase):
             2,
         )
         self.assertIn("ci95_half_width", summary["paired_task_success_deltas_mcp_minus_control"]["tasks"]["targeted-inspection"])
+
+    def test_mcp_tool_failure_diagnostics_are_content_free_and_rendered(self):
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        record = next(
+            item for item in payload["runs"]
+            if item["task_id"] == "targeted-inspection"
+            and item["repetition"] == 1
+            and item["mode"] == "mcp"
+        )
+        record["mcp_tool_failures"] = [{
+            "tool": "search_capture",
+            "category": "embedding",
+            "kind": "result",
+            "duration_ms": 12.5,
+        }]
+
+        summary = summarize_records(payload, schedule)
+        task = summary["mcp_tool_failures_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+        self.assertEqual(task["failure_count"], 1)
+        self.assertEqual(task["runs_with_failures"], 1)
+        self.assertEqual(task["failures"][0]["duration_ms"]["mean"], 12.5)
+        self.assertNotIn("failure_category", json.dumps(payload))
+        report = render_agent_ab_sections([("candidate", summary)])
+        self.assertIn("MCP tool failure diagnostics", report)
+        self.assertIn("| candidate | mcp | targeted-inspection | search_capture | embedding | result | 1 | 12.500 |", report)
+
+        for invalid in (
+            {**record["mcp_tool_failures"][0], "message": "private error"},
+            {**record["mcp_tool_failures"][0], "category": "private error"},
+        ):
+            record["mcp_tool_failures"] = [invalid]
+            with self.assertRaises(ValueError):
+                validate_records(payload, schedule)
 
     def test_summary_excludes_unavailable_rss_measurements(self):
         schedule, payload = _records_payload()
@@ -1127,6 +1180,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         schedule["task_rubric_version"] = 4
         for record in payload["runs"]:
             record.pop("line_reference_diagnostics")
+            record.pop("mcp_tool_failures")
         self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
 
     def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):

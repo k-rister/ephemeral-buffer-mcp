@@ -23,6 +23,7 @@ from benchmarks.benchmark_agent_ab_repository_fixture import build_manifest as b
 from benchmarks.run_codex_agent_ab import (
     _data_path_bytes,
     _event_metrics,
+    _mcp_tool_failures,
     _criterion_text_hits,
     _line_reference_diagnostics,
     _load_manifest,
@@ -107,6 +108,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         schedule = build_schedule(
             repetitions=1,
             seed=61,
+            design={"selected_repetitions": 1},
             model_config="test-model",
             repository_fixture="fixture",
         )
@@ -162,7 +164,7 @@ class TestCodexAgentRunner(unittest.TestCase):
                 "benchmarks.run_codex_agent_ab._mcp_launch_fingerprint",
                 return_value=fingerprint,
             ):
-                with self.assertRaisesRegex(ValueError, "different model/configuration protocol"):
+                with self.assertRaisesRegex(ValueError, "different records schema"):
                     run_schedule(schedule, {}, args)
 
     def test_codex_command_uses_profile_mcp_server_names_from_preflight(self):
@@ -321,6 +323,10 @@ class TestCodexAgentRunner(unittest.TestCase):
 
                     self.assertEqual(set(manifest), set(payload["tasks"]))
                     criteria = manifest["targeted-inspection"]["success_criteria"]
+                    self.assertEqual(
+                        manifest["targeted-inspection"]["response_schema"]["type"],
+                        "object",
+                    )
                     if name == "synthetic":
                         self.assertEqual(criteria["required_line_numbers"], [32])
                     else:
@@ -925,6 +931,61 @@ class TestCodexAgentRunner(unittest.TestCase):
 
         self.assertEqual(_event_metrics(output), (2, 0, 1, None, None, [], []))
 
+    def test_live_tool_call_cap_deduplicates_ids_and_stops_on_first_excess(self):
+        script = (
+            "import json,time; "
+            "events=["
+            "{'id':'call-1','type':'function_call'},"
+            "{'id':'call-1','type':'function_call'},"
+            "{'id':'call-2','type':'function_call'}]; "
+            "[print(json.dumps({'type':'item.started','item':item}),flush=True) for item in events]; "
+            "time.sleep(30)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            completed = _run_codex_process(
+                [sys.executable, "-c", script],
+                cwd=Path(directory),
+                timeout=5,
+                max_tool_calls=1,
+            )
+
+        self.assertTrue(completed.tool_call_budget_exceeded)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(_event_metrics(completed.stdout)[0], 2)
+        self.assertIn('"id": "call-2"', completed.stdout)
+
+    def test_tool_call_budget_exceeded_is_recorded_as_incomplete(self):
+        item = {"sequence": 1, "repetition": 1, "task_id": "cap", "mode": "control"}
+        task = {
+            "prompt": "inspect",
+            "signal_marker": "SUCCESS",
+            "success_criteria": {"required_phrases": ["SUCCESS", "task found"]},
+        }
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False, max_tool_calls=1,
+        )
+        partial = json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "SUCCESS task found"},
+        })
+        result = subprocess_result(
+            returncode=-15,
+            stdout=partial,
+            tool_call_budget_exceeded=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            with patch("benchmarks.run_codex_agent_ab._run_codex_process", return_value=result):
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+        self.assertFalse(record["completed"])
+        self.assertFalse(record["task_success"])
+        self.assertEqual(record["failure_reason"], "tool_call_budget_exceeded")
+
     def test_event_metrics_merges_command_from_partial_lifecycle_snapshot(self):
         output = "\n".join([
             json.dumps({"type": "item.started", "item": {"id": "call-1", "type": "function_call"}}),
@@ -1123,6 +1184,99 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertEqual(output["mcp_tool_calls"], 0)
         self.assertIsNone(output["input_tokens"])
         self.assertEqual(output["peak_rss_bytes"], 1234)
+
+    def test_structured_final_answer_schema_is_applied_to_both_arms(self):
+        item = {
+            "sequence": 1,
+            "repetition": 1,
+            "task_id": "targeted-inspection",
+            "mode": "control",
+        }
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False, structured_final_answers=True, max_tool_calls=None,
+        )
+        answer = json.dumps({
+            "signal": "TARGETED_SIGNAL",
+            "command_output_line": "line 32",
+        })
+        result = subprocess_result(stdout=json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": answer},
+        }))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process", return_value=result
+            ) as run:
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+            command = run.call_args.args[0]
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            self.assertEqual(json.loads(schema_path.read_text(encoding="utf-8")), task["response_schema"])
+
+        self.assertTrue(record["task_success"])
+        self.assertEqual(record["criterion_passes"], [True, True])
+        self.assertNotIn("TARGETED_SIGNAL", json.dumps(record))
+
+    def test_mcp_failure_log_is_reduced_to_safe_run_metadata(self):
+        item = {
+            "sequence": 1,
+            "repetition": 1,
+            "task_id": "targeted-inspection",
+            "mode": "mcp",
+        }
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            diagnostics = root / "diagnostics"
+            diagnostics.mkdir()
+            diagnostic_path = diagnostics / "001-mcp.jsonl"
+            diagnostic_path.write_text(json.dumps({
+                "event": "mcp_tool_result_failed",
+                "tool": "prior_run_tool",
+                "failure_category": "other",
+                "duration_ms": 99,
+            }) + "\n", encoding="utf-8")
+            failure_event = json.dumps({
+                "event": "mcp_tool_result_failed",
+                "tool": "search_capture",
+                "failure_category": "embedding",
+                "duration_ms": 4.25,
+                "call_id": 91,
+                "message": "private capture-derived details",
+            })
+            args.diagnostic_log_dir = diagnostics
+            result = subprocess_result(stdout="no answer\n")
+            def append_failure_event(*_args, **_kwargs):
+                with diagnostic_path.open("a", encoding="utf-8") as stream:
+                    stream.write(failure_event + "\n")
+                return result
+
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                side_effect=append_failure_event,
+            ):
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+        self.assertEqual(record["mcp_tool_failures"], [{
+            "tool": "search_capture",
+            "category": "embedding",
+            "kind": "result",
+            "duration_ms": 4.25,
+        }])
+        self.assertNotIn("private", json.dumps(record))
+        self.assertEqual(_mcp_tool_failures(None), [])
 
     def test_task_scoring_separates_positive_partial_incorrect_refused_and_timeout(self):
         item = {
@@ -1499,6 +1653,19 @@ class TestCodexAgentRunner(unittest.TestCase):
             command,
         )
 
+    def test_codex_command_passes_optional_final_answer_schema(self):
+        from benchmarks.run_codex_agent_ab import _codex_command
+
+        schema = Path("/tmp/answer-schema.json")
+        for mode in ("control", "mcp"):
+            command = _codex_command(
+                codex="codex", mode=mode, fixture=Path("/tmp/fixture"),
+                mcp_python="python", mcp_module="server", mcp_server_script=None,
+                allow_mcp_approvals=False, sandbox="read-only", timeout=10,
+                output_schema=schema,
+            )
+            self.assertEqual(command[command.index("--output-schema") + 1], str(schema))
+
     def test_mcp_approval_flag_is_global_before_exec_subcommand(self):
         from benchmarks.run_codex_agent_ab import _codex_command
 
@@ -1610,7 +1777,7 @@ class TestCodexAgentRunner(unittest.TestCase):
         self.assertIn("must use the configured ephemeral-buffer MCP tools", run.call_args.args[0][-1])
 
     def test_run_schedule_writes_balanced_records(self):
-        schedule = build_schedule(repetitions=1, seed=3)
+        schedule = build_schedule(repetitions=1, seed=3, design={"selected_repetitions": 1})
         manifest = {
             task["id"]: {
                 "prompt": task["id"],
@@ -1646,8 +1813,11 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 12)
+        self.assertEqual(payload["records_schema_version"], 13)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
+        self.assertFalse(payload["protocol"]["structured_final_answers"])
+        self.assertIsNone(payload["protocol"]["max_tool_calls"])
+        self.assertRegex(payload["protocol"]["answer_schema_sha256"], r"^sha256:[0-9a-f]{64}$")
         result = records_workload_result(payload, producer="run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["producer"], "run_codex_agent_ab.py")
         self.assertEqual(result["workload"]["parameters"]["protocol"]["agent_adapter"], "codex-cli")

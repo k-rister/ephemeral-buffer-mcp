@@ -360,6 +360,7 @@ class SearchMatch(PayloadModel):
     chunk_index: Union[int, str]
     score: float
     matched_range: str
+    matched_line_numbers: list[int]
     context_range: str
     context_start_line: int
     context_end_line: int
@@ -516,7 +517,7 @@ PAYLOAD_SCHEMA_VERSIONS = {
         "cancel_execution",
         "get_execution",
         "list_executions",
-    }
+    } or name == "search_capture"
     else 1
     for name in PAYLOAD_CONTRACTS
 }

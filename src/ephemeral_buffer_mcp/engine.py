@@ -1998,6 +1998,7 @@ class EphemeralEngine:
         # the result quota with duplicate context, while adjacent windows that
         # would reveal new lines are still returned.
         ranked = sorted(candidates.values(), key=lambda entry: entry["score"], reverse=True)
+        lexical_query_terms = set(_fts5_tokens(query))
 
         matches = []
         seen_line_ranges = []
@@ -2011,7 +2012,7 @@ class EphemeralEngine:
             score = entry["score"]
             ctx_start = max(1, chunk.start_line - context_lines)
             ctx_end = min(capture.line_count, chunk.end_line + context_lines)
-            
+
             redundant = any(
                 (chunk.start_line <= core_e and core_s <= chunk.end_line)
                 or (prev_s <= chunk.start_line and chunk.end_line <= prev_e)
@@ -2047,10 +2048,20 @@ class EphemeralEngine:
                 per_line_budget = max(1, (snippet_budget - line_count) // line_count)
 
             lines_with_numbers = []
+            matched_line_numbers = []
+            if entry["index"] == "lexical" and lexical_query_terms:
+                matched_line_numbers = [
+                    line_no
+                    for line_no in range(chunk.start_line, chunk.end_line + 1)
+                    if lexical_query_terms.intersection(
+                        _fts5_tokens(capture.raw_lines[line_no - 1])
+                    )
+                ]
+            matched_line_set = set(matched_line_numbers)
             for line_no in range(ctx_start, ctx_end + 1):
                 raw = capture.raw_lines[line_no - 1]
                 is_match_core = chunk.start_line <= line_no <= chunk.end_line
-                prefix = ">" if is_match_core else " "
+                prefix = ">>" if line_no in matched_line_set else ">" if is_match_core else " "
                 lines_with_numbers.append(_bounded_preview(
                     f"{prefix} {line_no:5d} | {raw}",
                     max_bytes=per_line_budget,
@@ -2072,6 +2083,7 @@ class EphemeralEngine:
                 "chunk_index": entry["index"],
                 "score": round(score, 4),
                 "matched_range": f"L{chunk.start_line}-L{chunk.end_line}",
+                "matched_line_numbers": matched_line_numbers,
                 "context_range": f"L{ctx_start}-L{ctx_end}",
                 "context_start_line": ctx_start,
                 "context_end_line": ctx_end,

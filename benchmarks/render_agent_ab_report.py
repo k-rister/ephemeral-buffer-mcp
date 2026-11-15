@@ -388,6 +388,45 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
         if not emitted:
             status = "no unbound line criteria" if available else "diagnostics unavailable"
             lines.append(f"| {revision} | n/a | {status} | n/a | n/a | n/a | n/a |")
+
+    lines.extend(("", "## MCP tool failure diagnostics", ""))
+    lines.append(
+        "Failure events retain only tool name, fixed category, event kind, and duration. "
+        "Rows are grouped by task and treatment mode; no error messages or tool payloads are stored."
+    )
+    lines.extend((
+        "",
+        "| Revision | Mode | Task | Tool | Category | Kind | Failures | Mean duration (ms) |",
+        "|---|---|---|---|---|---|---:|---:|",
+    ))
+    for revision, summary in summaries:
+        failure_diagnostics = summary.get("mcp_tool_failures_by_mode", {})
+        emitted = False
+        available = False
+        for mode in ("control", "mcp"):
+            mode_summary = failure_diagnostics.get(mode, {})
+            available = available or (
+                isinstance(mode_summary, dict) and mode_summary.get("available") is True
+            )
+            task_summaries = mode_summary.get("tasks", {}) if isinstance(mode_summary, dict) else {}
+            for task_id, task in sorted(task_summaries.items()):
+                for failure in task.get("failures", []):
+                    emitted = True
+                    duration = failure.get("duration_ms", {})
+                    mean_duration = duration.get("mean") if isinstance(duration, dict) else None
+                    mean_text = (
+                        f"{mean_duration:.3f}"
+                        if isinstance(mean_duration, (int, float))
+                        else "n/a"
+                    )
+                    lines.append(
+                        f"| {revision} | {mode} | {task_id} | {failure.get('tool', 'n/a')} | "
+                        f"{failure.get('category', 'n/a')} | {failure.get('kind', 'n/a')} | "
+                        f"{failure.get('count', 0)} | {mean_text} |"
+                    )
+        if not emitted:
+            status = "no failures recorded" if available else "diagnostics unavailable"
+            lines.append(f"| {revision} | n/a | {status} | n/a | n/a | n/a | 0 | n/a |")
     return "\n".join(lines) + "\n"
 
 

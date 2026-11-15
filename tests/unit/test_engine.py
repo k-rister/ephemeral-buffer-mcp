@@ -717,6 +717,23 @@ STEP 3: Summary
             "context_limit_exceeded",
         )
 
+    def test_search_reports_exact_lexical_hit_lines_separately_from_chunk_range(self):
+        engine = self._new_engine(max_captures=1)
+        capture = engine._ingest_state(
+            "unrelated\nprefix needle suffix\nother\nneedle_inside\nend",
+            label="exact-lexical-lines",
+        )
+
+        result = engine.search(
+            "needle", mode="bm25", capture_id=capture.capture_id, top_k=1, context_lines=0
+        )
+
+        match = result["matches"][0]
+        self.assertEqual(match["matched_range"], "L1-L4")
+        self.assertEqual(match["matched_line_numbers"], [2, 4])
+        self.assertIn(">>     2 | prefix needle suffix", match["snippet"])
+        self.assertIn(">>     4 | needle_inside", match["snippet"])
+
     def test_search_context_and_snippet_are_bounded_for_wide_ranges(self):
         engine = self._new_engine(max_captures=1)
         content = "\n".join(["needle", *("x" * 20_000 for _ in range(80))])
@@ -3832,6 +3849,7 @@ class TestEmbeddingStartup(unittest.TestCase):
         self.assertEqual(semantic_only["matches"][0]["chunk_index"], "semantic")
         self.assertEqual(semantic_only["matches"][0]["chunk_id"], 2)
         self.assertEqual(semantic_only["matches"][0]["matched_range"], "L9-L12")
+        self.assertEqual(semantic_only["matches"][0]["matched_line_numbers"], [])
 
     def test_embedding_threads_configuration_and_validation(self):
         with patch.dict("os.environ", {"EPHEMERAL_EMBEDDING_THREADS": "3"}, clear=False):
