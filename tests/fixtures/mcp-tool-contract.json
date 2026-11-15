@@ -606,7 +606,7 @@
   },
   {
     "name": "search_capture",
-    "description": "Search a capture by query text and return bounded readable and structured matches.\n\n    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic\n    (embedding based). capture_id defaults to latest; top_k defaults to 5\n    (maximum 20), and context_lines defaults to 3 (maximum 100). Use\n    get_capture_slice for complete or omitted content.\n    `semantic_coverage: complete` means indexed, not every source token was\n    embedded. Oversized lines stay whole but the tokenizer may truncate them\n    at the model's token limit.\n    ",
+    "description": "Search a capture by query text and return bounded readable and structured matches.\n\n    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic\n    (embedding based). capture_id defaults to latest; top_k defaults to 5\n    (maximum 20), and context_lines defaults to 3 (maximum 100). Use\n    get_capture_slice for complete or omitted content.\n    Exact lexical hit lines are listed when available; semantic-only matches\n    may have none.\n    `semantic_coverage: complete` means indexed; not every token is embedded.\n    Long lines may be token-truncated.\n    ",
     "inputSchema": {
       "properties": {
         "query": {

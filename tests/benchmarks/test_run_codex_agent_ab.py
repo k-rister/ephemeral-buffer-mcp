@@ -1716,7 +1716,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             )
             captured_process_environment = {}
 
-            def capture_codex_environment(command, *, cwd, timeout, env):
+            def capture_codex_environment(command, *, cwd, timeout, env, max_tool_calls=None):
                 captured_process_environment.update(env)
                 return result
 
