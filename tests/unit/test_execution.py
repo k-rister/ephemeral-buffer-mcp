@@ -3625,12 +3625,22 @@ class TestPhaseExecutionManager(unittest.TestCase):
         manager = self.manager()
         self.addCleanup(manager.shutdown, 1)
 
-        with patch.object(manager, "_run", side_effect=RuntimeError("unexpected worker failure")):
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def unexpected_worker_failure(*args, **kwargs):
+            worker_started.set()
+            release_worker.wait(timeout=30)
+            raise RuntimeError("unexpected worker failure")
+
+        with patch.object(manager, "_run", side_effect=unexpected_worker_failure):
             started = manager.start_background(
                 [self.phase("phase", "phase")],
                 execution_id="unexpected-worker-failure",
             )
+            self.assertTrue(worker_started.wait(timeout=30))
             future = manager._background_futures[started["execution_id"]]
+            release_worker.set()
             with self.assertRaisesRegex(RuntimeError, "unexpected worker failure"):
                 future.result(timeout=30)
 
