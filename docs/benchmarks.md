@@ -422,7 +422,7 @@ direction also uses the full-discordance directional fallback.
 The model and repository fixture are derived from the pilot protocol, and
 optional identity flags must match it. Generated schedules bind those
 identities for runner validation.
-Fixture version 4 and the current rubric version 6 must match; historical
+Fixture version 5 and the current rubric version 6 must match; historical
 rubric results are never pooled.
 
 The scenario table uses design seed `20261031` and 1,000 independent power
@@ -488,7 +488,7 @@ selects a collision-free benchmark name because Codex merges profile tables.
 The adapter writes metadata-only records and binds the MCP server policy into
 the protocol metadata so runs created under the earlier isolation policy
 cannot be resumed with this configuration.
-Create a private task manifest (do not commit it) with fixture version 4 and
+Create a private task manifest (do not commit it) with fixture version 5 and
 rubric version 6, a
 prompt, signal marker, and objective success criteria for each scheduled task.
 Use `required_phrases` for exact names and descriptions, and
@@ -843,7 +843,7 @@ deterministic, offline runs; set it to `0` to exercise the configured ONNX
 model and measure real model startup and first-query behavior. Keep the model,
 embedding cache, and other environment settings identical across paired runs.
 To seed the design from current records, set `AGENT_AB_PILOT_RECORDS` and
-optionally `AGENT_AB_PILOT_SCHEDULE`; records must use fixture version 4,
+optionally `AGENT_AB_PILOT_SCHEDULE`; records must use fixture version 5,
 rubric version 6, and the same model/configuration. Historical versions are
 rejected.
 The script uses the synthetic fixture by default; set
