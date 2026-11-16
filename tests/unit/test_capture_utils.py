@@ -774,6 +774,7 @@ class TestBoundedCommandCapture(unittest.TestCase):
 
         with patch("ephemeral_buffer_mcp.capture_utils.selectors.DefaultSelector", return_value=selector), \
                 patch("ephemeral_buffer_mcp.capture_utils.subprocess.Popen", return_value=process), \
+                patch("ephemeral_buffer_mcp.capture_utils.os.getpgid", return_value=123), \
                 patch("ephemeral_buffer_mcp.capture_utils._terminate_process_group", return_value=True) as terminate:
             result = _run_command_bounded(
                 "ignored",
@@ -830,6 +831,7 @@ class TestBoundedCommandCapture(unittest.TestCase):
 
         with patch("ephemeral_buffer_mcp.capture_utils.selectors.DefaultSelector", return_value=selector), \
                 patch("ephemeral_buffer_mcp.capture_utils.subprocess.Popen", return_value=process), \
+                patch("ephemeral_buffer_mcp.capture_utils.os.getpgid", return_value=123), \
                 patch("ephemeral_buffer_mcp.capture_utils._terminate_process_group", return_value=True) as terminate:
             cancelled = _run_command_bounded(
                 "ignored",
