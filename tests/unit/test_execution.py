@@ -1147,6 +1147,8 @@ class TestPhaseExecutionManager(unittest.TestCase):
                 patch.object(execution.os, "close"):
             self.assertTrue(process_control._terminate_pidfd(123))
         with patch.object(execution.os, "pidfd_open", return_value=9), \
+                patch.object(execution.os, "getpid", return_value=999999), \
+                patch.object(execution.os, "getpgid", return_value=456), \
                 patch.object(process_control.signal, "pidfd_send_signal", side_effect=ProcessLookupError()), \
                 patch.object(process_control, "_pidfd_terminated", return_value=True), \
                 patch.object(process_control, "_process_group_is_absent", return_value=True), \
