@@ -2,13 +2,17 @@
 
 Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
-## Unreleased
+## 0.13.0 - 2026-11-16
 
 - Paginate compact capture slices before applying continuation cursors so
   text-only clients can retrieve every byte, including within long Unicode lines.
+- Expose bounded head and tail previews for plain-text captures so short
+  targeted results are visible in the initial MCP response.
 - Bind agent A/B source-line criteria to their expected files while accepting
-  references and prose. Advance task fixtures to version 4; regenerate manifests
+  references and prose. Advance task fixtures to version 5; regenerate manifests
   and schedules, and keep historical scores separate from the corrected rubric.
+- Add an opt-in powered agent A/B design with staged McNemar and Holm testing,
+  validated power bounds, strict response schemas, and pilot-based sizing.
 - Run agent A/B benchmarks with a configured Codex profile and file-backed API
   key, and bind the profile configuration to schedules and resumable records.
 - Disable profile-inherited MCP servers across agent A/B runs, enabling only the

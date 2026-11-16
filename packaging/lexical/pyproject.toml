@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ephemeral-buffer-mcp-lexical"
-version = "0.12.0"
+version = "0.13.0"
 description = "Lexical-only Ephemeral Buffer MCP server"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
 ]
-dependencies = ["ephemeral-buffer-mcp-core==0.12.0"]
+dependencies = ["ephemeral-buffer-mcp-core==0.13.0"]
 
 [project.urls]
 Homepage = "https://github.com/k-rister/ephemeral-buffer-mcp"
