@@ -19,6 +19,7 @@ from ._context import (
     current_request_cancel_event,
     write_metrics_snapshot,
 )
+from .request_context import current_mcp_supplied_arguments
 
 
 LOGGER = get_logger("server")
@@ -51,16 +52,19 @@ def _safe_type_name(value: Any) -> str:
     return "other"
 
 
-def _request_shape(function, args, kwargs) -> dict[str, str]:
+def _request_shape(function, args, kwargs, supplied_names=None) -> dict[str, str]:
     try:
         supplied = inspect.signature(function).bind_partial(*args, **kwargs).arguments
     except TypeError:
         supplied = kwargs
-    return {
+    shape = {
         name: _safe_type_name(value)
         for name, value in supplied.items()
         if name.isidentifier() and not name.startswith("_")
     }
+    if supplied_names is not None:
+        shape = {name: value for name, value in shape.items() if name in supplied_names}
+    return shape
 
 
 def _safe_error_code(value: Any, fallback: str) -> str:
@@ -197,7 +201,10 @@ def _instrument_tool(name):
             if "__invocation_mode" in inspect.signature(function).parameters:
                 kwargs["__invocation_mode"] = invocation_mode
             call_id = supplied_call_id if supplied_call_id is not None else next(_TOOL_CALL_IDS)
-            request_shape = _request_shape(function, args, kwargs)
+            supplied_names = (
+                current_mcp_supplied_arguments() if invocation_mode == "mcp" else None
+            )
+            request_shape = _request_shape(function, args, kwargs, supplied_names)
             capture_id_supplied = "capture_id" in request_shape
             cursor_supplied = "cursor" in request_shape
             started = time.perf_counter()
