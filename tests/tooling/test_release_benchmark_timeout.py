@@ -523,7 +523,8 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "count = int(args[args.index('--max-repetitions') + 1])\n"
                 "with open(os.environ['RELEASE_TEST_AGENT_ARGS_LOG'], 'a', encoding='utf-8') as stream:\n"
                 "    output = pathlib.Path(args[args.index('--output') + 1])\n"
-                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args, 'output': str(output), 'profile': os.environ.get('AGENT_AB_CODEX_PROFILE'), 'key_env': os.environ.get('AGENT_AB_CODEX_API_KEY_ENV'), 'key_file_configured': bool(os.environ.get('AGENT_AB_CODEX_API_KEY_FILE'))}) + '\\n')\n"
+                "    diagnostic_log_dir = pathlib.Path(args[args.index('--diagnostic-log-dir') + 1])\n"
+                "    stream.write(json.dumps({'variant': variant, 'count': count, 'resume': '--resume' in args, 'output': str(output), 'diagnostic_log_dir': str(diagnostic_log_dir), 'profile': os.environ.get('AGENT_AB_CODEX_PROFILE'), 'key_env': os.environ.get('AGENT_AB_CODEX_API_KEY_ENV'), 'key_file_configured': bool(os.environ.get('AGENT_AB_CODEX_API_KEY_FILE'))}) + '\\n')\n"
                 "if variant == 'baseline' and count == 1:\n"
                 "    raise SystemExit(0)\n"
                 "output = pathlib.Path(args[args.index('--output') + 1])\n"
@@ -586,6 +587,13 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             self.assertTrue(all(item["profile"] == "local-eval" for item in powered_invocations))
             self.assertTrue(all(item["key_env"] == "TEST_MODEL_API_KEY" for item in powered_invocations))
             self.assertTrue(all(item["key_file_configured"] for item in powered_invocations))
+            self.assertTrue(
+                all(
+                    item["diagnostic_log_dir"]
+                    == str(output_directory / "agent-ab" / item["variant"] / "lifecycle")
+                    for item in powered_invocations
+                )
+            )
             stage_two = [item for item in powered_invocations if item["count"] == 2]
             self.assertEqual(
                 {item["variant"]: item["resume"] for item in stage_two},

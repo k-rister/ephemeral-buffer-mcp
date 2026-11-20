@@ -397,8 +397,10 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
 
     lines.extend(("", "## MCP tool failure diagnostics", ""))
     lines.append(
-        "Failure events retain only tool name, fixed category, event kind, and duration. "
-        "Rows are grouped by task and treatment mode; no error messages or tool payloads are stored."
+        "Failure events retain only tool name, fixed category, event kind, error code, "
+        "request shape, result status, capture and cursor presence flags, and duration. "
+        "Rows are grouped by task and treatment mode; no argument values, error messages, "
+        "or tool payloads are stored."
     )
     lines.extend((
         "",
