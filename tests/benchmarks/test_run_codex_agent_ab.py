@@ -1373,6 +1373,69 @@ class TestCodexAgentRunner(unittest.TestCase):
             "no_tool_event": True,
         })
 
+    def test_invocation_timeout_uses_info_scratch_lifecycle_log_without_retained_directory(self):
+        item = {
+            "sequence": 1,
+            "repetition": 1,
+            "task_id": "targeted-inspection",
+            "mode": "mcp",
+        }
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        captured_mcp_env = {}
+
+        def capture_command(**kwargs):
+            captured_mcp_env.update(kwargs["mcp_env"])
+            return ["codex"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+
+            def append_events_and_timeout(*_args, **_kwargs):
+                diagnostic_path = Path(captured_mcp_env["EPHEMERAL_LOG_FILE"])
+                with diagnostic_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({
+                        "event": "mcp_tool_started",
+                        "tool": "search_capture",
+                        "call_id": 41,
+                    }) + "\n")
+                    stream.write(json.dumps({
+                        "event": "mcp_tool_completed",
+                        "tool": "search_capture",
+                        "call_id": 41,
+                    }) + "\n")
+                raise subprocess.TimeoutExpired(
+                    "codex", 10, output="private output", stderr="private error"
+                )
+
+            with patch(
+                "benchmarks.run_codex_agent_ab._codex_command",
+                side_effect=capture_command,
+            ), patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                side_effect=append_events_and_timeout,
+            ):
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+            diagnostic_path = Path(captured_mcp_env["EPHEMERAL_LOG_FILE"])
+
+        self.assertEqual(captured_mcp_env["EPHEMERAL_LOG_LEVEL"], "INFO")
+        self.assertTrue(str(diagnostic_path).startswith(str(root)))
+        self.assertEqual(record["failure_reason"], "timeout")
+        self.assertEqual(record["mcp_invocation_timeout"], {
+            "last_tool_event": "mcp_tool_completed",
+            "last_tool_name": "search_capture",
+            "last_tool_call_id": "41",
+            "pending_tool_calls": 0,
+            "no_tool_event": False,
+        })
+
     def test_task_scoring_separates_positive_partial_incorrect_refused_and_timeout(self):
         item = {
             "sequence": 1,
@@ -1729,6 +1792,27 @@ class TestCodexAgentRunner(unittest.TestCase):
                         args,
                         require_module_source=True,
                     )
+
+    def test_mcp_launch_fingerprint_matches_scratch_and_retained_log_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module_dir = Path(directory) / "mcp-source"
+            module_dir.mkdir()
+            (module_dir / "agent_ab_fingerprint_probe.py").write_text(
+                "VALUE = 'same'\n", encoding="utf-8"
+            )
+            args = argparse.Namespace(
+                mcp_python=sys.executable,
+                mcp_module="agent_ab_fingerprint_probe",
+                mcp_server_script=None,
+                mcp_python_path=[module_dir],
+                diagnostic_log_dir=None,
+            )
+            with patch.dict(os.environ, {"PYTHONPATH": ""}, clear=False):
+                scratch_fingerprint = run_codex_agent_ab._mcp_launch_fingerprint(args)
+                args.diagnostic_log_dir = Path(directory) / "diagnostics"
+                retained_fingerprint = run_codex_agent_ab._mcp_launch_fingerprint(args)
+
+        self.assertEqual(scratch_fingerprint, retained_fingerprint)
 
     def test_codex_command_uses_current_exec_subcommand_syntax(self):
         from benchmarks.run_codex_agent_ab import _codex_command

@@ -1436,9 +1436,7 @@ def _mcp_launch_fingerprint(
         "runner_environment": {
             "EPHEMERAL_DISABLE_SOCKET_SERVER": "1",
             "EPHEMERAL_METRICS": "1",
-            "EPHEMERAL_LOG_LEVEL": (
-                "INFO" if getattr(args, "diagnostic_log_dir", None) else None
-            ),
+            "EPHEMERAL_LOG_LEVEL": "INFO",
         },
     }
     canonical = json.dumps(launch_configuration, sort_keys=True, separators=(",", ":"))
@@ -1473,7 +1471,7 @@ def _run_one(
     mcp_env = None
     if diagnostic_log is not None:
         mcp_env = {
-            "EPHEMERAL_LOG_LEVEL": "INFO" if diagnostic_log_dir else "WARNING",
+            "EPHEMERAL_LOG_LEVEL": "INFO",
             "EPHEMERAL_LOG_FILE": str(diagnostic_log),
         }
     if item["mode"] == "mcp":
