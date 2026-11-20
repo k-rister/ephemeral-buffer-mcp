@@ -847,6 +847,11 @@ counts, durations, byte sizes, and bounded lifecycle outcomes, but do not
 retain captured content, labels, command arguments, or query text. Runtime
 logs follow the same privacy model. Treat any captured output or diagnostic
 excerpt as potentially sensitive and sanitize it before sharing.
+Powered agent A/B evaluations follow the same rule: records and summaries retain
+only content-free failure codes, public argument names and types, lifecycle
+call identifiers, and timing/count diagnostics. Raw transcripts and
+stdout/stderr traces are written only when you explicitly configure a failure
+artifacts directory.
 
 Interpret the measurements in two separate layers:
 

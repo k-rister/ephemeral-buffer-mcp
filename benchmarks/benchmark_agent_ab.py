@@ -24,8 +24,8 @@ from benchmarks.agent_ab_statistics import (
 
 
 SCHEMA_VERSION = 2
-SUMMARY_SCHEMA_VERSION = 7
-RECORDS_SCHEMA_VERSION = 13
+SUMMARY_SCHEMA_VERSION = 8
+RECORDS_SCHEMA_VERSION = 14
 TASK_FIXTURE_VERSION = 5
 TASK_RUBRIC_VERSION = 6
 MODES = ("control", "mcp")
@@ -35,6 +35,12 @@ LINE_REFERENCE_DIAGNOSTIC_CATEGORIES = (
     "expected_number_absent",
 )
 MCP_FAILURE_CATEGORIES = ("validation", "timeout", "socket", "embedding", "eviction", "other")
+MCP_REQUEST_TYPES = ("null", "boolean", "integer", "number", "string", "bytes", "array", "object", "other")
+MCP_RESULT_STATUSES = ("error", "text_error", "exception")
+MCP_FAILURE_DIAGNOSTIC_FIELDS = (
+    "error_code", "request_shape", "result_status", "capture_id_supplied", "cursor_supplied"
+)
+MCP_TOOL_EVENT_NAMES = ("mcp_tool_started", "mcp_tool_completed", "mcp_tool_result_failed", "mcp_tool_failed")
 CODEX_PROFILE_IDENTITY_FIELDS = {"name", "model_id", "provider_id", "config_sha256"}
 DEFAULT_AGENT_AB_SEED = 20260909
 DEFAULT_EXPLORATORY_REPETITIONS = 5
@@ -107,6 +113,7 @@ RUN_KEYS_V10 = RUN_KEYS_V9
 RUN_KEYS_V11 = RUN_KEYS_V10
 RUN_KEYS_V12 = RUN_KEYS_V11 | {"line_reference_diagnostics"}
 RUN_KEYS_V13 = RUN_KEYS_V12 | {"mcp_tool_failures"}
+RUN_KEYS_V14 = RUN_KEYS_V13 | {"mcp_invocation_timeout"}
 METRICS = (
     "completed",
     "task_success",
@@ -900,8 +907,10 @@ def validate_records(
         if records_schema_version == 7
         else RUN_KEYS_V8
         if records_schema_version == 8
+        else RUN_KEYS_V14
+        if records_schema_version >= 14
         else RUN_KEYS_V13
-        if records_schema_version >= 13
+        if records_schema_version == 13
         else RUN_KEYS_V12
         if records_schema_version == 12
         else RUN_KEYS_V11
@@ -982,10 +991,16 @@ def validate_records(
                 raise ValueError(f"mcp_tool_failures must be a list in run: {key}")
             if record["mode"] == "control" and failures:
                 raise ValueError(f"MCP tool failures must be empty for control runs: {key}")
+            failure_fields = (
+                {
+                    "tool", "category", "kind", "error_code", "request_shape",
+                    "result_status", "capture_id_supplied", "cursor_supplied", "duration_ms"
+                }
+                if records_schema_version >= 14
+                else {"tool", "category", "kind", "duration_ms"}
+            )
             for failure in failures:
-                if not isinstance(failure, dict) or set(failure) != {
-                    "tool", "category", "kind", "duration_ms"
-                }:
+                if not isinstance(failure, dict) or set(failure) != failure_fields:
                     raise ValueError(f"MCP tool failure fields are invalid in run: {key}")
                 if (
                     not isinstance(failure["tool"], str)
@@ -998,6 +1013,73 @@ def validate_records(
                     raise ValueError(f"MCP tool failure kind is invalid in run: {key}")
                 if not _is_nonnegative_finite_number(failure["duration_ms"]):
                     raise ValueError(f"MCP tool failure duration is invalid in run: {key}")
+                if records_schema_version >= 14:
+                    diagnostic_values = [failure[field] for field in MCP_FAILURE_DIAGNOSTIC_FIELDS]
+                    diagnostics_available = all(value is not None for value in diagnostic_values)
+                    if any(value is not None for value in diagnostic_values) and not diagnostics_available:
+                        raise ValueError(f"MCP tool failure diagnostics are incomplete in run: {key}")
+                    if diagnostics_available:
+                        request_shape = failure["request_shape"]
+                        shape_is_valid = (
+                            isinstance(request_shape, dict)
+                            and all(
+                                isinstance(argument_name, str)
+                                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", argument_name)
+                                and argument_type in MCP_REQUEST_TYPES
+                                for argument_name, argument_type in request_shape.items()
+                            )
+                        )
+                        if (
+                            not isinstance(failure["error_code"], str)
+                            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", failure["error_code"])
+                            or not shape_is_valid
+                            or failure["result_status"] not in MCP_RESULT_STATUSES
+                            or not isinstance(failure["capture_id_supplied"], bool)
+                            or not isinstance(failure["cursor_supplied"], bool)
+                        ):
+                            raise ValueError(f"MCP tool failure diagnostics are invalid in run: {key}")
+                        if failure["kind"] == "exception" and (
+                            failure["result_status"] != "exception"
+                            or not failure["error_code"].startswith("exception_")
+                        ):
+                            raise ValueError(f"MCP tool exception diagnostics are invalid in run: {key}")
+        if records_schema_version >= 14:
+            timeout_summary = record["mcp_invocation_timeout"]
+            expected_timeout = record["mode"] == "mcp" and record["failure_reason"] == "timeout"
+            if not expected_timeout:
+                if timeout_summary is not None:
+                    raise ValueError(f"mcp_invocation_timeout must be null in run: {key}")
+            elif (
+                not isinstance(timeout_summary, dict)
+                or set(timeout_summary) != {
+                    "last_tool_event", "last_tool_name", "last_tool_call_id",
+                    "pending_tool_calls", "no_tool_event"
+                }
+            ):
+                raise ValueError(f"mcp_invocation_timeout fields are invalid in run: {key}")
+            else:
+                last_tool_event = timeout_summary["last_tool_event"]
+                last_tool_name = timeout_summary["last_tool_name"]
+                last_tool_call_id = timeout_summary["last_tool_call_id"]
+                pending_tool_calls = timeout_summary["pending_tool_calls"]
+                if (
+                    not isinstance(timeout_summary["no_tool_event"], bool)
+                    or isinstance(pending_tool_calls, bool)
+                    or not isinstance(pending_tool_calls, int)
+                    or pending_tool_calls < 0
+                ):
+                    raise ValueError(f"mcp_invocation_timeout summary is invalid in run: {key}")
+                if timeout_summary["no_tool_event"]:
+                    if any(value is not None for value in (last_tool_event, last_tool_name, last_tool_call_id)):
+                        raise ValueError(f"mcp_invocation_timeout no-tool-event summary is invalid in run: {key}")
+                elif (
+                    last_tool_event not in MCP_TOOL_EVENT_NAMES
+                    or not isinstance(last_tool_name, str)
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", last_tool_name)
+                    or not isinstance(last_tool_call_id, str)
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", last_tool_call_id)
+                ):
+                    raise ValueError(f"mcp_invocation_timeout tool summary is invalid in run: {key}")
         if records_schema_version >= 8:
             exposure_fields = (
                 "criterion_search_response_hits",
@@ -1640,28 +1722,82 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
             task_summaries = {}
             for task_id in sorted({record["task_id"] for record in mode_records}):
                 task_records = [record for record in mode_records if record["task_id"] == task_id]
-                grouped_failures: dict[tuple[str, str, str], list[float]] = {}
+                grouped_failures: dict[tuple[Any, ...], list[float]] = {}
                 for record in task_records:
                     for failure in record["mcp_tool_failures"]:
-                        grouped_failures.setdefault(
-                            (failure["tool"], failure["category"], failure["kind"]), []
-                        ).append(float(failure["duration_ms"]))
+                        if records_schema_version >= 14:
+                            request_shape = failure["request_shape"]
+                            group = (
+                                failure["tool"], failure["category"], failure["kind"],
+                                failure["error_code"],
+                                tuple(sorted(request_shape.items())) if request_shape is not None else None,
+                            )
+                        else:
+                            group = (failure["tool"], failure["category"], failure["kind"])
+                        grouped_failures.setdefault(group, []).append(float(failure["duration_ms"]))
+                failure_rows = []
+                for group, durations in sorted(grouped_failures.items()):
+                    if records_schema_version >= 14:
+                        tool, category, kind, error_code, request_shape = group
+                    else:
+                        tool, category, kind = group
+                        error_code = None
+                        request_shape = None
+                    failure_rows.append({
+                        "tool": tool,
+                        "category": category,
+                        "kind": kind,
+                        "error_code": error_code,
+                        "request_shape": dict(request_shape) if request_shape is not None else None,
+                        "count": len(durations),
+                        "duration_ms": _stats(durations),
+                    })
                 task_summaries[task_id] = {
                     "runs": len(task_records),
                     "runs_with_failures": sum(bool(record["mcp_tool_failures"]) for record in task_records),
                     "failure_count": sum(len(record["mcp_tool_failures"]) for record in task_records),
-                    "failures": [
-                        {
-                            "tool": tool,
-                            "category": category,
-                            "kind": kind,
-                            "count": len(durations),
-                            "duration_ms": _stats(durations),
-                        }
-                        for (tool, category, kind), durations in sorted(grouped_failures.items())
-                    ],
+                    "failures": failure_rows,
                 }
             mcp_tool_failures_by_mode[mode] = {
+                "available": True,
+                "diagnostic_fields_available": records_schema_version >= 14 and all(
+                    all(failure[field] is not None for field in MCP_FAILURE_DIAGNOSTIC_FIELDS)
+                    for record in task_records
+                    for failure in record["mcp_tool_failures"]
+                ),
+                "tasks": task_summaries,
+            }
+
+    mcp_invocation_timeout_by_mode = {
+        mode: {"available": False, "tasks": {}}
+        for mode in MODES
+    }
+    if records_schema_version >= 14:
+        mcp_invocation_timeout_by_mode = {}
+        for mode in MODES:
+            mode_records = [record for record in runs if record["mode"] == mode]
+            task_summaries = {}
+            for task_id in sorted({record["task_id"] for record in mode_records}):
+                task_records = [record for record in mode_records if record["task_id"] == task_id]
+                timeout_records = [
+                    record["mcp_invocation_timeout"]
+                    for record in task_records
+                    if record["mcp_invocation_timeout"] is not None
+                ]
+                last_timeout = timeout_records[-1] if timeout_records else None
+                task_summaries[task_id] = {
+                    "timeout_count": len(timeout_records),
+                    "no_tool_event_count": sum(
+                        summary["no_tool_event"] for summary in timeout_records
+                    ),
+                    "last_tool_event": last_timeout["last_tool_event"] if last_timeout else None,
+                    "last_tool_name": last_timeout["last_tool_name"] if last_timeout else None,
+                    "last_tool_call_id": last_timeout["last_tool_call_id"] if last_timeout else None,
+                    "pending_tool_calls": _stats(
+                        [summary["pending_tool_calls"] for summary in timeout_records]
+                    ),
+                }
+            mcp_invocation_timeout_by_mode[mode] = {
                 "available": True,
                 "tasks": task_summaries,
             }
@@ -1745,8 +1881,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
         "criterion_exposure_summaries_by_mode": criterion_exposure_summaries_by_mode,
         "line_reference_diagnostics_by_mode": line_reference_diagnostics_by_mode,
         "mcp_tool_failures_by_mode": mcp_tool_failures_by_mode,
+        "mcp_invocation_timeout_by_mode": mcp_invocation_timeout_by_mode,
         "recommendations": recommendations,
-        "privacy": "summary contains aggregate metadata, task-scoped criterion indices, fixed line-reference and MCP failure categories, tool identifiers, and timing statistics only; raw prompts, criterion text, tool responses, commands, captures, transcripts, and user content are excluded",
+        "privacy": "summary contains aggregate metadata, task-scoped criterion indices, fixed line-reference and MCP failure categories, tool identifiers, public argument names and types, and timing statistics only; raw prompts, criterion text, tool arguments, tool responses, commands, captures, transcripts, and user content are excluded",
     }
 
 

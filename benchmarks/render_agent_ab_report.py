@@ -19,6 +19,12 @@ LEGACY_RESPONSE_STATES = {
 }
 
 
+def _request_shape_text(shape: Any) -> str:
+    if not isinstance(shape, dict) or not shape:
+        return "n/a"
+    return ", ".join(f"{name}={value}" for name, value in sorted(shape.items()))
+
+
 def _read_summary(revision: str, path: Path) -> tuple[str, dict[str, Any]] | None:
     if not path.is_file():
         return None
@@ -396,8 +402,8 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
     )
     lines.extend((
         "",
-        "| Revision | Mode | Task | Tool | Category | Kind | Failures | Mean duration (ms) |",
-        "|---|---|---|---|---|---|---:|---:|",
+        "| Revision | Mode | Task | Tool | Category | Kind | Error code | Request shape | Failures | Mean duration (ms) |",
+        "|---|---|---|---|---|---|---|---|---:|---:|",
     ))
     for revision, summary in summaries:
         failure_diagnostics = summary.get("mcp_tool_failures_by_mode", {})
@@ -422,11 +428,54 @@ def render_agent_ab_sections(summaries: list[tuple[str, dict[str, Any]]]) -> str
                     lines.append(
                         f"| {revision} | {mode} | {task_id} | {failure.get('tool', 'n/a')} | "
                         f"{failure.get('category', 'n/a')} | {failure.get('kind', 'n/a')} | "
+                        f"{failure.get('error_code', 'n/a')} | "
+                        f"{_request_shape_text(failure.get('request_shape'))} | "
                         f"{failure.get('count', 0)} | {mean_text} |"
                     )
         if not emitted:
             status = "no failures recorded" if available else "diagnostics unavailable"
-            lines.append(f"| {revision} | n/a | {status} | n/a | n/a | n/a | 0 | n/a |")
+            lines.append(f"| {revision} | n/a | {status} | n/a | n/a | n/a | n/a | n/a | 0 | n/a |")
+
+    lines.extend(("", "## MCP invocation timeout diagnostics", ""))
+    lines.append(
+        "Timeout records retain only the last tool event, tool name, lifecycle call ID, "
+        "pending-call count, and an explicit no-tool-event flag."
+    )
+    lines.extend((
+        "",
+        "| Revision | Mode | Task | Timeouts | No-tool-event | Last event | Last tool | Last call ID | Mean pending calls |",
+        "|---|---|---|---:|---:|---|---|---|---:|",
+    ))
+    for revision, summary in summaries:
+        timeout_diagnostics = summary.get("mcp_invocation_timeout_by_mode", {})
+        emitted = False
+        available = False
+        for mode in ("control", "mcp"):
+            mode_summary = timeout_diagnostics.get(mode, {})
+            available = available or (
+                isinstance(mode_summary, dict) and mode_summary.get("available") is True
+            )
+            task_summaries = mode_summary.get("tasks", {}) if isinstance(mode_summary, dict) else {}
+            for task_id, task in sorted(task_summaries.items()):
+                if not task.get("timeout_count"):
+                    continue
+                emitted = True
+                pending = task.get("pending_tool_calls", {})
+                mean_pending = pending.get("mean") if isinstance(pending, dict) else None
+                mean_pending_text = (
+                    f"{mean_pending:.3f}"
+                    if isinstance(mean_pending, (int, float))
+                    else "n/a"
+                )
+                lines.append(
+                    f"| {revision} | {mode} | {task_id} | {task.get('timeout_count', 0)} | "
+                    f"{task.get('no_tool_event_count', 0)} | {task.get('last_tool_event', 'n/a')} | "
+                    f"{task.get('last_tool_name', 'n/a')} | {task.get('last_tool_call_id', 'n/a')} | "
+                    f"{mean_pending_text} |"
+                )
+        if not emitted:
+            status = "no timeouts recorded" if available else "diagnostics unavailable"
+            lines.append(f"| {revision} | n/a | {status} | 0 | 0 | n/a | n/a | n/a | n/a |")
     return "\n".join(lines) + "\n"
 
 

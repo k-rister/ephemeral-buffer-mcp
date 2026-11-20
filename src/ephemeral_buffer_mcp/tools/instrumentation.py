@@ -6,9 +6,11 @@ import json
 import inspect
 import itertools
 import logging
+import re
 import subprocess
 import time
 from functools import wraps
+from typing import Any
 
 from ..logging_utils import get_logger, log_event
 from ..mcp_response import ToolResponseEnvelope
@@ -26,6 +28,43 @@ _TIMEOUT_RESULT_TOOLS = {
     "start_execution",
     "resume_execution",
 }
+_SAFE_ERROR_CODE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
+
+
+def _safe_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bytes):
+        return "bytes"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "other"
+
+
+def _request_shape(function, args, kwargs) -> dict[str, str]:
+    try:
+        supplied = inspect.signature(function).bind_partial(*args, **kwargs).arguments
+    except TypeError:
+        supplied = kwargs
+    return {
+        name: _safe_type_name(value)
+        for name, value in supplied.items()
+        if name.isidentifier() and not name.startswith("_")
+    }
+
+
+def _safe_error_code(value: Any, fallback: str) -> str:
+    return value if isinstance(value, str) and _SAFE_ERROR_CODE.fullmatch(value) else fallback
 
 
 def _classify_failure_text(text: str) -> str:
@@ -88,11 +127,15 @@ def _classify_tool_exception(tool: str, exc: Exception, kwargs: dict) -> str:
     return "other"
 
 
-def _classify_tool_result(tool: str, result) -> str | None:
-    """Classify structured or textual tool errors without retaining payloads."""
+def _tool_result_diagnostics(tool: str, result) -> tuple[str, str, str] | None:
+    """Classify tool errors without retaining payloads or argument values."""
     if isinstance(result, ToolResponseEnvelope):
         if result.status == "error" and result.error is not None:
-            return _classify_failure_text(f"{result.error.code} {result.error.message}")
+            return (
+                _classify_failure_text(f"{result.error.code} {result.error.message}"),
+                _safe_error_code(result.error.code, "operation_failed"),
+                "error",
+            )
         return None
     if isinstance(result, str):
         try:
@@ -122,13 +165,24 @@ def _classify_tool_result(tool: str, result) -> str | None:
                     for phase in phases
                 )
             ):
-                return "timeout"
-            if payload.get("status") in {"error", "capture_failed"}:
-                return _classify_failure_text(
+                category = "timeout"
+            elif payload.get("status") in {"error", "capture_failed"}:
+                category = _classify_failure_text(
                     str(payload.get("message") or payload.get("capture_error", ""))
                 )
+            else:
+                return None
+            payload_error = payload.get("error")
+            code = (
+                payload_error.get("code")
+                if isinstance(payload_error, dict)
+                else payload.get("error_code")
+            )
+            if code is None and payload.get("status") == "capture_failed":
+                code = "capture_failed"
+            return category, _safe_error_code(code, "operation_failed"), "error"
         if result.startswith(("Error", "Search Error")):
-            return _classify_failure_text(result)
+            return _classify_failure_text(result), "operation_failed", "text_error"
     return None
 
 
@@ -143,8 +197,14 @@ def _instrument_tool(name):
             if "__invocation_mode" in inspect.signature(function).parameters:
                 kwargs["__invocation_mode"] = invocation_mode
             call_id = supplied_call_id if supplied_call_id is not None else next(_TOOL_CALL_IDS)
+            request_shape = _request_shape(function, args, kwargs)
+            capture_id_supplied = "capture_id" in request_shape
+            cursor_supplied = "cursor" in request_shape
             started = time.perf_counter()
             failure_category = None
+            error_code = None
+            failure_kind = None
+            result_status = None
             log_event(LOGGER, logging.INFO, "mcp_tool_started", call_id=call_id, tool=name)
             try:
                 metrics = active_metrics()
@@ -153,6 +213,9 @@ def _instrument_tool(name):
                         result = function(*args, **kwargs)
                     except Exception as exc:
                         failure_category = _classify_tool_exception(name, exc, kwargs)
+                        error_code = f"exception_{failure_category}"
+                        failure_kind = "exception"
+                        result_status = "exception"
                         state["failure_category"] = failure_category
                         raise
                     response_text = result.text if isinstance(result, ToolResponseEnvelope) else result
@@ -163,8 +226,10 @@ def _instrument_tool(name):
                             metrics.record_bytes("search_response_bytes", response_bytes)
                         elif name in {"get_capture_slice", "get_capture_summary"}:
                             metrics.record_bytes("retrieval_response_bytes", response_bytes)
-                    failure_category = _classify_tool_result(name, result)
-                    if failure_category is not None:
+                    result_diagnostics = _tool_result_diagnostics(name, result)
+                    if result_diagnostics is not None:
+                        failure_category, error_code, result_status = result_diagnostics
+                        failure_kind = "result"
                         state["success"] = False
                         state["failure_category"] = failure_category
                 duration_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -175,7 +240,13 @@ def _instrument_tool(name):
                         "mcp_tool_result_failed",
                         call_id=call_id,
                         duration_ms=duration_ms,
+                        error_code=error_code,
                         failure_category=failure_category,
+                        failure_kind=failure_kind,
+                        request_shape=request_shape,
+                        result_status=result_status,
+                        capture_id_supplied=capture_id_supplied,
+                        cursor_supplied=cursor_supplied,
                         tool=name,
                     )
                 log_event(
@@ -198,8 +269,14 @@ def _instrument_tool(name):
                     "mcp_tool_failed",
                     call_id=call_id,
                     duration_ms=duration_ms,
+                    error_code=error_code or "exception_other",
                     error_type=type(exc).__name__,
                     failure_category=failure_category or "other",
+                    failure_kind=failure_kind or "exception",
+                    request_shape=request_shape,
+                    result_status=result_status or "exception",
+                    capture_id_supplied=capture_id_supplied,
+                    cursor_supplied=cursor_supplied,
                     tool=name,
                 )
                 raise

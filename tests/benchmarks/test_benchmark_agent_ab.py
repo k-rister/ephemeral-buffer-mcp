@@ -101,6 +101,7 @@ def _scored_records_payload(repetitions=2, design=None, powered=False):
             else []
         )
         record["mcp_tool_failures"] = []
+        record["mcp_invocation_timeout"] = None
         record["criterion_search_response_hits"] = [False, False] if record["mode"] == "mcp" else None
         record["criterion_slice_response_hits"] = [False, False] if record["mode"] == "mcp" else None
         record["search_capture_responses"] = 0
@@ -120,6 +121,7 @@ def _legacy_v6_records_payload():
         record.pop("criterion_passes")
         record.pop("line_reference_diagnostics")
         record.pop("mcp_tool_failures")
+        record.pop("mcp_invocation_timeout")
         record.pop("criterion_search_response_hits")
         record.pop("criterion_slice_response_hits")
         record.pop("search_capture_responses")
@@ -135,6 +137,7 @@ def _legacy_v10_records_payload():
     for record in payload["runs"]:
         record.pop("line_reference_diagnostics")
         record.pop("mcp_tool_failures")
+        record.pop("mcp_invocation_timeout")
     return schedule, payload
 
 
@@ -148,6 +151,15 @@ def _legacy_v12_records_payload():
     payload["protocol"].pop("max_tool_calls")
     for record in payload["runs"]:
         record.pop("mcp_tool_failures")
+        record.pop("mcp_invocation_timeout")
+    return schedule, payload
+
+
+def _legacy_v13_records_payload():
+    schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+    payload["records_schema_version"] = 13
+    for record in payload["runs"]:
+        record.pop("mcp_invocation_timeout")
     return schedule, payload
 
 
@@ -700,7 +712,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         paired = summary["paired_deltas_mcp_minus_control"]
         self.assertEqual(paired["completed"]["mean"], 0.0)
         self.assertEqual(paired["task_success"]["mean"], 0.5)
-        self.assertEqual(summary["schema_version"], 7)
+        self.assertEqual(summary["schema_version"], 8)
         task_success = summary["task_success_by_mode"]
         self.assertEqual(
             task_success["mcp"]["tasks"]["targeted-inspection"],
@@ -1094,6 +1106,11 @@ class TestAgentAbBenchmark(unittest.TestCase):
             "tool": "search_capture",
             "category": "embedding",
             "kind": "result",
+            "error_code": "embedding_unavailable",
+            "request_shape": {"query": "string", "capture_id": "string"},
+            "result_status": "error",
+            "capture_id_supplied": True,
+            "cursor_supplied": False,
             "duration_ms": 12.5,
         }]
 
@@ -1102,18 +1119,108 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertEqual(task["failure_count"], 1)
         self.assertEqual(task["runs_with_failures"], 1)
         self.assertEqual(task["failures"][0]["duration_ms"]["mean"], 12.5)
+        self.assertTrue(summary["mcp_tool_failures_by_mode"]["mcp"]["diagnostic_fields_available"])
+        self.assertEqual(task["failures"][0]["error_code"], "embedding_unavailable")
         self.assertNotIn("failure_category", json.dumps(payload))
         report = render_agent_ab_sections([("candidate", summary)])
         self.assertIn("MCP tool failure diagnostics", report)
-        self.assertIn("| candidate | mcp | targeted-inspection | search_capture | embedding | result | 1 | 12.500 |", report)
+        self.assertIn(
+            "| candidate | mcp | targeted-inspection | search_capture | embedding | result | "
+            "embedding_unavailable | capture_id=string, query=string | 1 | 12.500 |",
+            report,
+        )
 
         for invalid in (
             {**record["mcp_tool_failures"][0], "message": "private error"},
             {**record["mcp_tool_failures"][0], "category": "private error"},
+            {**record["mcp_tool_failures"][0], "request_shape": {"query": "private value"}},
         ):
             record["mcp_tool_failures"] = [invalid]
             with self.assertRaises(ValueError):
                 validate_records(payload, schedule)
+
+    def test_v13_failure_diagnostics_remain_readable_with_new_fields_unavailable(self):
+        schedule, payload = _legacy_v13_records_payload()
+        record = next(
+            item for item in payload["runs"]
+            if item["task_id"] == "targeted-inspection" and item["mode"] == "mcp"
+        )
+        record["mcp_tool_failures"] = [{
+            "tool": "search_capture",
+            "category": "embedding",
+            "kind": "result",
+            "duration_ms": 12.5,
+        }]
+
+        summary = summarize_records(payload, schedule)
+        task = summary["mcp_tool_failures_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+
+        self.assertEqual(summary["records_schema_version"], 13)
+        self.assertFalse(summary["mcp_tool_failures_by_mode"]["mcp"]["diagnostic_fields_available"])
+        self.assertIsNone(task["failures"][0]["error_code"])
+        self.assertIsNone(task["failures"][0]["request_shape"])
+        self.assertFalse(summary["mcp_invocation_timeout_by_mode"]["mcp"]["available"])
+
+    def test_v14_records_mark_diagnostics_unavailable_for_older_event_producers(self):
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        record = next(
+            item for item in payload["runs"]
+            if item["task_id"] == "targeted-inspection" and item["mode"] == "mcp"
+        )
+        record["mcp_tool_failures"] = [{
+            "tool": "search_capture",
+            "category": "embedding",
+            "kind": "result",
+            "error_code": None,
+            "request_shape": None,
+            "result_status": None,
+            "capture_id_supplied": None,
+            "cursor_supplied": None,
+            "duration_ms": 12.5,
+        }]
+
+        summary = summarize_records(payload, schedule)
+        task = summary["mcp_tool_failures_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+
+        self.assertFalse(summary["mcp_tool_failures_by_mode"]["mcp"]["diagnostic_fields_available"])
+        self.assertIsNone(task["failures"][0]["error_code"])
+        self.assertIsNone(task["failures"][0]["request_shape"])
+
+    def test_timeout_diagnostics_are_summarized_and_rendered(self):
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        record = next(
+            item for item in payload["runs"]
+            if item["task_id"] == "targeted-inspection"
+            and item["repetition"] == 1
+            and item["mode"] == "mcp"
+        )
+        record["completed"] = False
+        record["task_success"] = False
+        record["criterion_passes"] = [False, False]
+        record["exit_code"] = None
+        record["failure_reason"] = "timeout"
+        record["mcp_invocation_timeout"] = {
+            "last_tool_event": "mcp_tool_started",
+            "last_tool_name": "search_capture",
+            "last_tool_call_id": "91",
+            "pending_tool_calls": 2,
+            "no_tool_event": False,
+        }
+
+        summary = summarize_records(payload, schedule)
+        task = summary["mcp_invocation_timeout_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+        report = render_agent_ab_sections([("candidate", summary)])
+
+        self.assertEqual(task["timeout_count"], 1)
+        self.assertEqual(task["no_tool_event_count"], 0)
+        self.assertEqual(task["last_tool_name"], "search_capture")
+        self.assertEqual(task["pending_tool_calls"]["mean"], 2.0)
+        self.assertIn("MCP invocation timeout diagnostics", report)
+        self.assertIn(
+            "| candidate | mcp | targeted-inspection | 1 | 0 | mcp_tool_started | "
+            "search_capture | 91 | 2.000 |",
+            report,
+        )
 
     def test_summary_excludes_unavailable_rss_measurements(self):
         schedule, payload = _records_payload()
@@ -1181,6 +1288,7 @@ class TestAgentAbBenchmark(unittest.TestCase):
         for record in payload["runs"]:
             record.pop("line_reference_diagnostics")
             record.pop("mcp_tool_failures")
+            record.pop("mcp_invocation_timeout")
         self.assertEqual(len(validate_records(payload, schedule)), len(payload["runs"]))
 
     def test_validation_accepts_version_four_records_and_breaks_out_proxy(self):

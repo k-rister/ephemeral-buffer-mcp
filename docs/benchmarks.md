@@ -617,7 +617,11 @@ with a read-only sandbox by default. The profile selects the model for both
 arms; the runner does not override it with `--model`.
 `context_bytes_proxy` is an observable prompt/event-envelope proxy because the
 CLI does not expose the model's internal context size.
-To retain the complete Codex event stream for unsuccessful runs, opt in with
+Records now retain privacy-safe failure diagnostics by default: structured
+error codes, result-versus-exception status, public request argument names and
+types, whether capture-ID or cursor arguments were supplied, and a timeout
+summary with the last observed tool event and pending-call count. To retain the
+complete Codex event stream for unsuccessful runs, opt in with
 `--failure-artifacts-dir /path/to/private-failure-traces`. The runner creates
 one directory per failed scheduled run with `stdout.jsonl`, `stderr.txt`, and
 `metadata.json`. It includes task-criterion failures, MCP-not-used outcomes,
@@ -649,7 +653,7 @@ task scoring, even if they repeat a signal marker.
 Review prompts, fixtures, and generated records for privacy before sharing;
 the runner does not persist transcripts in its records output.
 
-Runner records use version 13. Version 7 added `criterion_passes`, ordered
+Runner records use version 14. Version 7 added `criterion_passes`, ordered
 booleans for the task's required answer criteria, including literal phrases and
 typed line numbers. Summary indexes are one-based and scoped to the task ID and
 fixture version. Criterion text and final answers are not stored. Empty or
@@ -709,15 +713,22 @@ version 3 phrase-only state names. No successful response does not prove that
 a tool was called, and no criterion match does not prove that semantically
 useful evidence was absent. Older summaries show these new fields as
 unavailable.
-Version 13 adds per-run MCP tool failure events containing only the tool name,
-one fixed category (`validation`, `timeout`, `socket`, `embedding`, `eviction`,
-or `other`), whether a failure came from an error result or an exception, and
-the duration in milliseconds. These are correlated with task, repetition, and
-mode by their containing run record. Normal records omit messages, call IDs,
-arguments, responses, and traces. The summary reports grouped counts and
-duration statistics by mode, task, tool, category, and kind; the Markdown
-report renderer includes the same aggregates. Schema version 13 reads older
-records, while resuming requires the current fixture and protocol.
+Version 13 adds per-run MCP tool failure events containing the tool name, one
+fixed category (`validation`, `timeout`, `socket`, `embedding`, `eviction`, or
+`other`), whether a failure came from an error result or an exception, and the
+duration in milliseconds. Version 14 enriches those events with the structured
+error code, result status, public request shape (argument names and JSON types
+only), and booleans showing whether capture-ID or cursor arguments were
+supplied. It also records an `mcp_invocation_timeout` summary with the last
+observed tool event, tool name, lifecycle call ID, pending-call count, and an
+explicit no-tool-event flag. These are correlated with task, repetition, and
+mode by their containing run record. Records omit messages, argument values,
+capture IDs, cursor values, responses, and traces. The summary groups failures
+by error code and request shape and reports timeout aggregates; the Markdown
+renderer includes both. Version 14 reads version-13 records, marks the new
+diagnostic fields unavailable for them, and requires the current fixture and
+protocol for resumed current-schema runs. Summary schema version 8 carries the
+new failure and timeout aggregates.
 
 The runner accepts `--structured-final-answers` to constrain both arms to the
 task-specific strict JSON response schema. This option is off by default and
