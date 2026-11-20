@@ -19,6 +19,11 @@ from typing import Any, Callable
 from pydantic import PrivateAttr, ValidationError
 from mcp.server.mcpserver.utilities.func_metadata import FuncMetadata
 
+from .tools.request_context import (
+    capture_mcp_supplied_arguments,
+    reset_mcp_supplied_arguments,
+)
+
 
 _LOGGER = logging.getLogger("mcpserver_adapter")
 _STATE_LOCK = threading.Lock()
@@ -51,6 +56,7 @@ class _ObservedFuncMetadata(FuncMetadata):
 
     def validate_arguments(self, arguments_to_validate):
         """Run the SDK validator once and observe its failures when possible."""
+        capture_mcp_supplied_arguments(arguments_to_validate)
         scope = ExitStack()
         try:
             scope.enter_context(self._validation_scope())
@@ -59,19 +65,25 @@ class _ObservedFuncMetadata(FuncMetadata):
             _record_validation_limitation(self._tool_name, type(exc).__name__)
             # Scope setup belongs to metrics only. Keep MCPServer's normal
             # validation and dispatch path if it cannot be established.
-            return super().validate_arguments(arguments_to_validate)
+            try:
+                return super().validate_arguments(arguments_to_validate)
+            finally:
+                reset_mcp_supplied_arguments()
 
         try:
             try:
                 return super().validate_arguments(arguments_to_validate)
-            except ValidationError:
-                try:
-                    self._validation_observer()
-                except Exception as exc:
-                    _record_validation_observation_failure(
-                        self._tool_name, type(exc).__name__
-                    )
+            except BaseException:
+                reset_mcp_supplied_arguments()
                 raise
+        except ValidationError:
+            try:
+                self._validation_observer()
+            except Exception as exc:
+                _record_validation_observation_failure(
+                    self._tool_name, type(exc).__name__
+                )
+            raise
         finally:
             scope.close()
 

@@ -11,6 +11,11 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import TypeAdapter
 
 import ephemeral_buffer_mcp.mcpserver_adapter as adapter
+from ephemeral_buffer_mcp.tools.request_context import (
+    capture_mcp_supplied_arguments,
+    current_mcp_supplied_arguments,
+    reset_mcp_supplied_arguments,
+)
 
 
 class TestMCPServerAdapter(TestCase):
@@ -28,6 +33,25 @@ class TestMCPServerAdapter(TestCase):
         self._limitations.stop()
         self._observation_failures.stop()
         adapter._INSTRUCTION_REFRESH_LIMITATION = self._instruction_limitation
+
+    def test_supplied_argument_context_nests_and_resets(self):
+        capture_mcp_supplied_arguments({
+            "query": "private value",
+            "_private": "private value",
+            3: "private value",
+        })
+        self.assertEqual(current_mcp_supplied_arguments(), frozenset({"query"}))
+
+        capture_mcp_supplied_arguments({"limit": 4})
+        self.assertEqual(current_mcp_supplied_arguments(), frozenset({"limit"}))
+        reset_mcp_supplied_arguments()
+        self.assertEqual(current_mcp_supplied_arguments(), frozenset({"query"}))
+        reset_mcp_supplied_arguments()
+        self.assertIsNone(current_mcp_supplied_arguments())
+
+        reset_mcp_supplied_arguments()
+        capture_mcp_supplied_arguments(None)
+        self.assertIsNone(current_mcp_supplied_arguments())
 
     def test_sdk_validation_runs_once_and_reports_invalid_input(self):
         app = MCPServer("validation-observer")

@@ -1,8 +1,16 @@
+import asyncio
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from mcp import Client
+
+from ephemeral_buffer_mcp import create_mcp_server, create_service_context
 from ephemeral_buffer_mcp.mcp_response import ToolErrorEnvelope, ToolResponseEnvelope
+from ephemeral_buffer_mcp.response_limits import SEARCH_QUERY_MAX_BYTES
 from ephemeral_buffer_mcp.tools import instrumentation
+import ephemeral_buffer_mcp.tools.retrieval as retrieval
+from ephemeral_buffer_mcp.tools.request_context import current_mcp_supplied_arguments
 
 
 class _Metrics:
@@ -20,6 +28,55 @@ class _Metrics:
 
 
 class TestToolInstrumentation(unittest.TestCase):
+    def test_mcp_dispatch_uses_raw_client_argument_names(self):
+        context = create_service_context()
+        app = create_mcp_server(context)
+        events = []
+        oversized_query = "x" * (SEARCH_QUERY_MAX_BYTES + 1)
+
+        async def call_through_client():
+            async with Client(app) as client:
+                return await client.call_tool("list_captures", {"limit": 1})
+
+        with patch.object(instrumentation, "active_metrics", return_value=_Metrics()), patch.object(
+            instrumentation, "write_metrics_snapshot"
+        ), patch.object(
+            retrieval,
+            "_active_engine",
+            return_value=SimpleNamespace(list_captures_page=lambda **_kwargs: {
+                "status": "error",
+                "message": "private listing failure",
+                "error_code": "listing_failed",
+            }),
+        ), patch.object(
+            instrumentation,
+            "log_event",
+            side_effect=lambda _logger, level, event, **fields: events.append((event, fields)),
+        ):
+            search_result = asyncio.run(
+                app.call_tool("search_capture", {"query": oversized_query})
+            )
+            list_result = asyncio.run(call_through_client())
+
+        self.assertTrue(search_result.is_error)
+        self.assertTrue(list_result.is_error)
+        search_failure = next(
+            fields for event, fields in events
+            if event == "mcp_tool_result_failed" and fields["tool"] == "search_capture"
+        )
+        list_failure = next(
+            fields for event, fields in events
+            if event == "mcp_tool_result_failed" and fields["tool"] == "list_captures"
+        )
+        self.assertEqual(search_failure["request_shape"], {"query": "string"})
+        self.assertFalse(search_failure["capture_id_supplied"])
+        self.assertFalse(search_failure["cursor_supplied"])
+        self.assertEqual(list_failure["request_shape"], {"limit": "integer"})
+        self.assertFalse(list_failure["capture_id_supplied"])
+        self.assertFalse(list_failure["cursor_supplied"])
+        self.assertIsNone(current_mcp_supplied_arguments())
+        self.assertNotIn(oversized_query, str(events))
+
     def test_structured_failure_retains_safe_diagnostics_without_values(self):
         @instrumentation._instrument_tool("search_capture")
         def search(query: str, capture_id: str = "latest", cursor: str | None = None):

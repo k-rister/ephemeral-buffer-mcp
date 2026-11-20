@@ -1465,6 +1465,13 @@ def _statistical_adequacy(
     }
 
 
+def _failure_group_sort_key(group: tuple[Any, ...]) -> tuple[tuple[bool, Any], ...]:
+    return tuple(
+        (value is None, value if value is not None else "")
+        for value in group
+    )
+
+
 def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict[str, Any]:
     """Return aggregate and paired outcome summaries without raw agent data."""
     runs = validate_records(
@@ -1736,7 +1743,9 @@ def summarize_records(payload: dict[str, Any], schedule: dict[str, Any]) -> dict
                             group = (failure["tool"], failure["category"], failure["kind"])
                         grouped_failures.setdefault(group, []).append(float(failure["duration_ms"]))
                 failure_rows = []
-                for group, durations in sorted(grouped_failures.items()):
+                for group, durations in sorted(
+                    grouped_failures.items(), key=lambda item: _failure_group_sort_key(item[0])
+                ):
                     if records_schema_version >= 14:
                         tool, category, kind, error_code, request_shape = group
                     else:

@@ -1186,6 +1186,46 @@ class TestAgentAbBenchmark(unittest.TestCase):
         self.assertIsNone(task["failures"][0]["error_code"])
         self.assertIsNone(task["failures"][0]["request_shape"])
 
+    def test_v14_mixed_diagnostic_availability_groups_deterministically(self):
+        schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
+        records = [
+            item for item in payload["runs"]
+            if item["task_id"] == "targeted-inspection" and item["mode"] == "mcp"
+        ]
+        self.assertEqual(len(records), 2)
+        records[0]["mcp_tool_failures"] = [{
+            "tool": "search_capture",
+            "category": "embedding",
+            "kind": "result",
+            "error_code": "embedding_unavailable",
+            "request_shape": {"query": "string"},
+            "result_status": "error",
+            "capture_id_supplied": False,
+            "cursor_supplied": False,
+            "duration_ms": 12.5,
+        }]
+        records[1]["mcp_tool_failures"] = [{
+            "tool": "search_capture",
+            "category": "embedding",
+            "kind": "result",
+            "error_code": None,
+            "request_shape": None,
+            "result_status": None,
+            "capture_id_supplied": None,
+            "cursor_supplied": None,
+            "duration_ms": 15.5,
+        }]
+
+        summary = summarize_records(payload, schedule)
+        task = summary["mcp_tool_failures_by_mode"]["mcp"]["tasks"]["targeted-inspection"]
+
+        self.assertFalse(summary["mcp_tool_failures_by_mode"]["mcp"]["diagnostic_fields_available"])
+        self.assertEqual(len(task["failures"]), 2)
+        self.assertEqual(task["failures"][0]["error_code"], "embedding_unavailable")
+        self.assertEqual(task["failures"][0]["request_shape"], {"query": "string"})
+        self.assertIsNone(task["failures"][1]["error_code"])
+        self.assertIsNone(task["failures"][1]["request_shape"])
+
     def test_timeout_diagnostics_are_summarized_and_rendered(self):
         schedule, payload = _scored_records_payload(design={"selected_repetitions": 2})
         record = next(

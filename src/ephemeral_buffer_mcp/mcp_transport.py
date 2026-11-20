@@ -43,6 +43,7 @@ from .mcpserver_adapter import (
     register_tool as _register_mcpserver_tool,
 )
 from .tools import load_tool_handlers
+from .tools.request_context import reset_mcp_supplied_arguments
 from .response_formatting import bounded_summary_text, truncate_utf8_with_marker
 from .response_limits import (
     MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
@@ -397,6 +398,17 @@ def _record_tool_response_bytes(service_context, name: str, text: Any) -> None:
             metrics.record_bytes("retrieval_response_bytes", response_bytes)
 
 
+def _reset_supplied_arguments_after_adapter(function):
+    @wraps(function)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            reset_mcp_supplied_arguments()
+
+    return wrapper
+
+
 def _register_mcp_tool_for_app(
     app,
     function,
@@ -447,6 +459,7 @@ def _register_mcp_tool_for_app(
         text_policy = "compact"
     background_execution = bool(background_execution)
     # Reuse the registration behavior installed by the decorator factory.
+    @_reset_supplied_arguments_after_adapter
     @wraps(function)
     async def adapter(*args, **kwargs):
         with _activate_service_context(service_context):
