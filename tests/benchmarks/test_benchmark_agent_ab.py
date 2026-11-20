@@ -1125,6 +1125,13 @@ class TestAgentAbBenchmark(unittest.TestCase):
         report = render_agent_ab_sections([("candidate", summary)])
         self.assertIn("MCP tool failure diagnostics", report)
         self.assertIn(
+            "Failure events retain only tool name, fixed category, event kind, error code, "
+            "request shape, result status, capture and cursor presence flags, and duration. "
+            "Rows are grouped by task and treatment mode; no argument values, error messages, "
+            "or tool payloads are stored.",
+            report,
+        )
+        self.assertIn(
             "| candidate | mcp | targeted-inspection | search_capture | embedding | result | "
             "embedding_unavailable | capture_id=string, query=string | 1 | 12.500 |",
             report,
