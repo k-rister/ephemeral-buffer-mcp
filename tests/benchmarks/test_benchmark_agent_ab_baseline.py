@@ -28,6 +28,7 @@ def summary_fixture():
             "criterion_passes": [mcp, mcp],
             "line_reference_diagnostics": [],
             "mcp_tool_failures": [],
+            "mcp_invocation_timeout": None,
             "criterion_search_response_hits": [mcp, mcp] if mcp else None,
             "criterion_slice_response_hits": [mcp, mcp] if mcp else None,
             "search_capture_responses": 1 if mcp else 0,

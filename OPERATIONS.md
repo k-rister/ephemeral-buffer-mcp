@@ -1195,8 +1195,10 @@ review it before sharing, and restart the server without this setting when the
 investigation ends.
 
 MCP tool lifecycle events include only a local call ID, tool name, duration,
-success state, and error class; captured content, labels, query text, command
-text, and secrets are not logged. A start event without a matching completion
+success state, error class, stable error code, result status, public argument
+names and types, and booleans showing whether capture-ID or cursor arguments
+were supplied; captured content, labels, query text, command text, argument
+values, and secrets are not logged. A start event without a matching completion
 or failure event identifies a stalled tool/session boundary.
 For the Codex A/B adapter, pass `--diagnostic-log-dir /path/to/logs` to write
 one content-free lifecycle log per MCP run. Keep this directory outside the
@@ -1245,6 +1247,10 @@ platform details, artifact paths, and command status counts. `REPORT.md`,
 and logs are collected alongside it. A benchmark absent from the baseline is
 recorded as skipped, while incompatible result metrics remain visible in the
 comparison reports. Keep the generated bundle outside the repository.
+For each `agent-ab/<revision>` directory, release collection retains the
+content-free lifecycle logs under `agent-ab/<revision>/lifecycle`. Current
+records also contain safe failure and timeout diagnostics, so those logs are
+useful without enabling opt-in raw failure traces.
 
 Each local benchmark is bounded by `--benchmark-timeout` (3600 seconds by
 default). On timeout, the runner sends SIGTERM to the benchmark process group,

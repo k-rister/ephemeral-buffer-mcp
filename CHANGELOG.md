@@ -2,6 +2,17 @@
 
 Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
+## Unreleased
+
+- Add privacy-safe powered agent A/B failure diagnostics by default, including
+  structured error codes, result status, public request shapes, and
+  capture/cursor presence flags without argument values.
+- Advance agent A/B records to schema version 14, preserve version-13 records,
+  group failures by error code and request shape, and summarize invocation
+  timeouts with the last tool event and pending-call count.
+- Retain content-free lifecycle logs for release agent A/B runs while keeping
+  raw stdout/stderr failure traces opt-in through `--failure-artifacts-dir`.
+
 ## 0.13.0 - 2026-11-16
 
 - Paginate compact capture slices before applying continuation cursors so

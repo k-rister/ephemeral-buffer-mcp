@@ -56,6 +56,17 @@ _LABELED_LINE_REFERENCE_RE = re.compile(
     r"(\d+)(?:\s*[-–—]\s*(?:L\s*)?(\d+))?(?!\w|\.[0-9]|,[0-9])",
     flags=re.IGNORECASE,
 )
+_SAFE_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
+_MCP_REQUEST_TYPES = {
+    "null", "boolean", "integer", "number", "string", "bytes", "array", "object", "other"
+}
+_MCP_RESULT_STATUSES = {"error", "text_error", "exception"}
+_MCP_TOOL_EVENT_NAMES = {
+    "mcp_tool_started",
+    "mcp_tool_completed",
+    "mcp_tool_result_failed",
+    "mcp_tool_failed",
+}
 
 
 def _normalize_source_path(path: str) -> str:
@@ -1037,17 +1048,16 @@ def _data_path_bytes(path: Path | None) -> dict[str, int]:
     return result
 
 
-def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict[str, Any]]:
-    """Read only fixed, content-free failure fields from the MCP event log."""
+def _diagnostic_event_objects(path: Path | None, *, offset_bytes: int = 0):
+    """Read lifecycle events emitted for one invocation without retaining output."""
     if path is None or not path.is_file():
-        return []
-    failures = []
+        return
     try:
         with path.open("rb") as source:
             source.seek(offset_bytes)
             content = source.read().decode("utf-8")
     except (OSError, UnicodeError):
-        return []
+        return
     for line in content.splitlines():
         try:
             event = json.loads(line)
@@ -1055,16 +1065,57 @@ def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict
             continue
         if not isinstance(event, dict):
             continue
+        yield event
+
+
+def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict[str, Any]]:
+    """Read only fixed, content-free failure fields from the MCP event log."""
+    failures = []
+    for event in _diagnostic_event_objects(path, offset_bytes=offset_bytes):
         name = event.get("event")
         if name not in {"mcp_tool_result_failed", "mcp_tool_failed"}:
             continue
         tool = event.get("tool")
         category = event.get("failure_category")
+        expected_kind = "result" if name == "mcp_tool_result_failed" else "exception"
+        kind = event.get("failure_kind", expected_kind)
+        diagnostic_keys = (
+            "error_code", "request_shape", "result_status",
+            "capture_id_supplied", "cursor_supplied",
+        )
+        supplied_diagnostics = [key for key in diagnostic_keys if key in event]
+        if len(supplied_diagnostics) not in (0, len(diagnostic_keys)):
+            continue
+        diagnostics_available = bool(supplied_diagnostics)
+        error_code = event.get("error_code") if diagnostics_available else None
+        request_shape = event.get("request_shape") if diagnostics_available else None
+        result_status = event.get("result_status") if diagnostics_available else None
+        capture_id_supplied = event.get("capture_id_supplied") if diagnostics_available else None
+        cursor_supplied = event.get("cursor_supplied") if diagnostics_available else None
         duration_ms = event.get("duration_ms")
+        shape_is_valid = (
+            isinstance(request_shape, dict)
+            and all(
+                isinstance(argument_name, str)
+                and _SAFE_IDENTIFIER.fullmatch(argument_name)
+                and isinstance(argument_type, str)
+                and argument_type in _MCP_REQUEST_TYPES
+                for argument_name, argument_type in request_shape.items()
+            )
+        )
         if (
             not isinstance(tool, str)
-            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", tool)
+            or not _SAFE_IDENTIFIER.fullmatch(tool)
             or category not in MCP_FAILURE_CATEGORIES
+            or kind != expected_kind
+            or (diagnostics_available and (
+                not isinstance(error_code, str)
+                or not _SAFE_IDENTIFIER.fullmatch(error_code)
+                or not shape_is_valid
+                or result_status not in _MCP_RESULT_STATUSES
+                or not isinstance(capture_id_supplied, bool)
+                or not isinstance(cursor_supplied, bool)
+            ))
             or isinstance(duration_ms, bool)
             or not isinstance(duration_ms, (int, float))
             or not math.isfinite(duration_ms)
@@ -1074,10 +1125,62 @@ def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict
         failures.append({
             "tool": tool,
             "category": category,
-            "kind": "result" if name == "mcp_tool_result_failed" else "exception",
+            "kind": kind,
+            "error_code": error_code,
+            "request_shape": request_shape,
+            "result_status": result_status,
+            "capture_id_supplied": capture_id_supplied,
+            "cursor_supplied": cursor_supplied,
             "duration_ms": duration_ms,
         })
     return failures
+
+
+def _safe_event_call_id(value: Any) -> str | None:
+    if isinstance(value, (str, int)) and str(value).strip():
+        return str(value)
+    return None
+
+
+def _mcp_invocation_timeout_summary(
+    path: Path | None, *, offset_bytes: int = 0
+) -> dict[str, Any]:
+    """Summarize the last content-free MCP tool event at invocation timeout."""
+    started_call_ids: set[str] = set()
+    finished_call_ids: set[str] = set()
+    last_tool_event = None
+    last_tool_name = None
+    last_tool_call_id = None
+    for event in _diagnostic_event_objects(path, offset_bytes=offset_bytes):
+        name = event.get("event")
+        if name not in _MCP_TOOL_EVENT_NAMES:
+            continue
+        tool = event.get("tool")
+        call_id = _safe_event_call_id(event.get("call_id"))
+        last_tool_event = name
+        if isinstance(tool, str) and _SAFE_IDENTIFIER.fullmatch(tool):
+            last_tool_name = tool
+        if call_id is not None:
+            last_tool_call_id = call_id
+            if name == "mcp_tool_started":
+                started_call_ids.add(call_id)
+            else:
+                finished_call_ids.add(call_id)
+    return {
+        "last_tool_event": last_tool_event,
+        "last_tool_name": last_tool_name,
+        "last_tool_call_id": last_tool_call_id,
+        "pending_tool_calls": len(started_call_ids - finished_call_ids),
+        "no_tool_event": last_tool_event is None,
+    }
+
+
+def _append_mcp_invocation_timeout(path: Path, summary: dict[str, Any]) -> None:
+    """Append the same safe timeout summary retained by the records envelope."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = {"event": "mcp_invocation_timeout", **summary}
+    with path.open("a", encoding="utf-8", newline="") as stream:
+        stream.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
 
 
 def _mcp_environment_overrides(
@@ -1424,6 +1527,7 @@ def _run_one(
     output = ""
     invocation_completed = False
     execution_eligible = False
+    invocation_timed_out = False
     exit_code = None
     failure_reason = None
     peak_rss_bytes = 0
@@ -1482,6 +1586,7 @@ def _run_one(
         invocation_completed = False
         execution_eligible = False
         failure_reason = "timeout"
+        invocation_timed_out = True
     except OSError as exc:
         stderr = _redact_secret(str(exc), api_key)
         output = stderr
@@ -1498,6 +1603,13 @@ def _run_one(
         if item["mode"] == "mcp"
         else []
     )
+    mcp_invocation_timeout = None
+    if item["mode"] == "mcp" and invocation_timed_out:
+        mcp_invocation_timeout = _mcp_invocation_timeout_summary(
+            diagnostic_log, offset_bytes=diagnostic_log_offset
+        )
+        if diagnostic_log is not None:
+            _append_mcp_invocation_timeout(diagnostic_log, mcp_invocation_timeout)
     (
         tool_calls,
         mcp_tool_calls,
@@ -1550,6 +1662,7 @@ def _run_one(
         # Only unbound line criteria receive a fixed category and criterion index.
         "line_reference_diagnostics": line_reference_diagnostics,
         "mcp_tool_failures": mcp_tool_failures,
+        "mcp_invocation_timeout": mcp_invocation_timeout,
         # MCP treatment runs store only per-criterion exposure booleans from
         # named successful tool results. Control exposure is not applicable.
         "criterion_search_response_hits": criterion_search_response_hits,

@@ -24,6 +24,7 @@ from benchmarks.run_codex_agent_ab import (
     _data_path_bytes,
     _event_metrics,
     _mcp_tool_failures,
+    _mcp_invocation_timeout_summary,
     _criterion_text_hits,
     _line_reference_diagnostics,
     _load_manifest,
@@ -1252,6 +1253,12 @@ class TestCodexAgentRunner(unittest.TestCase):
                 "event": "mcp_tool_result_failed",
                 "tool": "search_capture",
                 "failure_category": "embedding",
+                "failure_kind": "result",
+                "error_code": "embedding_unavailable",
+                "request_shape": {"query": "string", "capture_id": "string"},
+                "result_status": "error",
+                "capture_id_supplied": True,
+                "cursor_supplied": False,
                 "duration_ms": 4.25,
                 "call_id": 91,
                 "message": "private capture-derived details",
@@ -1273,10 +1280,98 @@ class TestCodexAgentRunner(unittest.TestCase):
             "tool": "search_capture",
             "category": "embedding",
             "kind": "result",
+            "error_code": "embedding_unavailable",
+            "request_shape": {"query": "string", "capture_id": "string"},
+            "result_status": "error",
+            "capture_id_supplied": True,
+            "cursor_supplied": False,
             "duration_ms": 4.25,
         }])
         self.assertNotIn("private", json.dumps(record))
         self.assertEqual(_mcp_tool_failures(None), [])
+        with tempfile.TemporaryDirectory() as legacy_directory:
+            legacy_path = Path(legacy_directory) / "legacy-v13-events.jsonl"
+            legacy_path.write_text(json.dumps({
+                "event": "mcp_tool_failed",
+                "tool": "search_capture",
+                "failure_category": "validation",
+                "duration_ms": 3.5,
+                "call_id": 12,
+            }) + "\n", encoding="utf-8")
+            self.assertEqual(_mcp_tool_failures(legacy_path), [{
+                "tool": "search_capture",
+                "category": "validation",
+                "kind": "exception",
+                "error_code": None,
+                "request_shape": None,
+                "result_status": None,
+                "capture_id_supplied": None,
+                "cursor_supplied": None,
+                "duration_ms": 3.5,
+            }])
+
+    def test_invocation_timeout_retains_safe_lifecycle_summary(self):
+        item = {
+            "sequence": 1,
+            "repetition": 1,
+            "task_id": "targeted-inspection",
+            "mode": "mcp",
+        }
+        task = build_manifest()["tasks"]["targeted-inspection"]
+        args = argparse.Namespace(
+            codex="codex", model="gpt-5.6-luna", mcp_python="python", mcp_module="server",
+            mcp_server_script=None, sandbox="read-only", timeout=10,
+            allow_mcp_approvals=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            diagnostics = root / "diagnostics"
+            diagnostics.mkdir()
+            diagnostic_path = diagnostics / "001-mcp.jsonl"
+            diagnostic_path.write_text(
+                json.dumps({"event": "mcp_tool_started", "tool": "prior_tool", "call_id": 1}) + "\n",
+                encoding="utf-8",
+            )
+            args.diagnostic_log_dir = diagnostics
+
+            def append_events_and_timeout(*_args, **_kwargs):
+                with diagnostic_path.open("a", encoding="utf-8") as stream:
+                    for event in (
+                        {"event": "mcp_tool_started", "tool": "search_capture", "call_id": 41},
+                        {"event": "mcp_tool_started", "tool": "get_capture_slice", "call_id": 42},
+                        {"event": "mcp_tool_completed", "tool": "search_capture", "call_id": 41},
+                    ):
+                        stream.write(json.dumps(event) + "\n")
+                raise subprocess.TimeoutExpired("codex", 10, output="private output", stderr="private error")
+
+            with patch(
+                "benchmarks.run_codex_agent_ab._run_codex_process",
+                side_effect=append_events_and_timeout,
+            ):
+                record = _run_one(item, task, args=args, repository=repository, scratch=root)
+
+            timeout_event = json.loads(diagnostic_path.read_text(encoding="utf-8").splitlines()[-1])
+
+        expected_summary = {
+            "last_tool_event": "mcp_tool_completed",
+            "last_tool_name": "search_capture",
+            "last_tool_call_id": "41",
+            "pending_tool_calls": 1,
+            "no_tool_event": False,
+        }
+        self.assertEqual(record["failure_reason"], "timeout")
+        self.assertEqual(record["mcp_invocation_timeout"], expected_summary)
+        self.assertEqual(timeout_event, {"event": "mcp_invocation_timeout", **expected_summary})
+        self.assertNotIn("private", json.dumps(record))
+        self.assertEqual(_mcp_invocation_timeout_summary(root / "missing.jsonl"), {
+            "last_tool_event": None,
+            "last_tool_name": None,
+            "last_tool_call_id": None,
+            "pending_tool_calls": 0,
+            "no_tool_event": True,
+        })
 
     def test_task_scoring_separates_positive_partial_incorrect_refused_and_timeout(self):
         item = {
@@ -1813,7 +1908,7 @@ class TestCodexAgentRunner(unittest.TestCase):
             payload = run_schedule(schedule, manifest, args)
         self.assertEqual(len(payload["runs"]), 8)
         self.assertTrue(all(item["criterion_passes"] == [True, True] for item in payload["runs"]))
-        self.assertEqual(payload["records_schema_version"], 13)
+        self.assertEqual(payload["records_schema_version"], 14)
         self.assertEqual(payload["protocol"]["agent_adapter"], "codex-cli")
         self.assertFalse(payload["protocol"]["structured_final_answers"])
         self.assertIsNone(payload["protocol"]["max_tool_calls"])
