@@ -453,6 +453,9 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             manifest = json.loads((output_directory / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["configuration"]["benchmark_timeout_seconds"], 1)
             self.assertEqual(manifest["configuration"]["agent_timeout_seconds"], 37)
+            report = (output_directory / "REPORT.md").read_text(encoding="utf-8")
+            self.assertIn("agent-ab/<variant>/failure-traces", report)
+            self.assertIn("privacy-review or remove those traces", report)
             schedule_calls = [
                 json.loads(line)
                 for line in (root / "schedule-args.jsonl").read_text(encoding="utf-8").splitlines()
@@ -465,9 +468,19 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(len(agent_invocations), 2)
+            failure_artifact_paths = set()
             for invocation in agent_invocations:
                 timeout_index = invocation.index("--timeout")
                 self.assertEqual(invocation[timeout_index + 1], "37")
+                failure_artifacts_index = invocation.index("--failure-artifacts-dir")
+                failure_artifact_paths.add(invocation[failure_artifacts_index + 1])
+            self.assertEqual(
+                failure_artifact_paths,
+                {
+                    str(output_directory.resolve() / "agent-ab" / "baseline" / "failure-traces"),
+                    str(output_directory.resolve() / "agent-ab" / "candidate" / "failure-traces"),
+                },
+            )
 
     def test_agent_ab_stages_continue_with_one_summary_and_stop_cleanly_without_summaries(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -582,7 +595,9 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             invocations = [
                 json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
             ]
-            powered_invocations = [item for item in invocations if str(output_directory) in item["output"]]
+            powered_invocations = [
+                item for item in invocations if str(output_directory.resolve()) in item["output"]
+            ]
             self.assertEqual(len(powered_invocations), 4)
             self.assertTrue(all(item["profile"] == "local-eval" for item in powered_invocations))
             self.assertTrue(all(item["key_env"] == "TEST_MODEL_API_KEY" for item in powered_invocations))
@@ -590,7 +605,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
             self.assertTrue(
                 all(
                     item["diagnostic_log_dir"]
-                    == str(output_directory / "agent-ab" / item["variant"] / "lifecycle")
+                    == str(output_directory.resolve() / "agent-ab" / item["variant"] / "lifecycle")
                     for item in powered_invocations
                 )
             )

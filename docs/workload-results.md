@@ -389,8 +389,8 @@ repetitions per task and mode, with interim looks. Fixture version 3 scored
 the targeted inspection answer's line number as a typed criterion, accepting
 formats such as `line 32`, `line number: 32`, and `L32`.
 
-`control` runs without the EB MCP server; the `mcp` arm requires the agent to
-use the configured EB tools for the capture and search workflow. Both arms use
+`control` runs without the EB MCP server; the `mcp` arm configures the EB server
+and `--require-mcp-calls` requires at least one MCP call. Both arms use
 the same Codex automatic-review policy and `workspace-write` sandbox, and the
 deterministic test embedding backend. Records contain task-scoped pass/fail
 metadata, not prompts, criterion text, tool responses, or transcripts. The
@@ -402,6 +402,43 @@ including through fixture symlinks, to keep traces out of later fixture copies.
 Review them before sharing. The
 fixture is synthetic and small; these results do not establish performance on
 other models or representative agent work.
+
+### Release 0.13.0 timeout replay (2026-11-20)
+
+The 22 MCP runs that reached the 900-second ceiling in the release 0.13.0
+powered run were replayed with their original task, repetition, model/profile,
+fixture, sandbox, approval policy, timeout, and MCP-call requirement. The replay
+schedule contained exactly those 22 records, with sequence numbers 1–22 and a
+single 722-repetition stage look.
+
+| Replay outcome | Count |
+| --- | ---: |
+| Invocations completed | 22/22 |
+| Invocation timeouts | 0/22 |
+| Objective task successes | 20/22 |
+| Repeated command signatures | 0 |
+| Pending EB tool calls | 0 |
+| `budget-limited` / `loop` / `blocked` | 0 / 0 / 0 |
+| `not-reproduced` | 22 |
+
+Replayed wall time ranged from 17.48 to 103.59 seconds (mean 42.59 seconds).
+Lifecycle logs recorded 54 EB tool starts and 54 completions with no pending
+call. The largest repeated EB tool name was six calls, but every call completed
+with a distinct call ID and the run's repeated-command count remained zero;
+tool-name reuse alone does not establish a loop. Four completed runs had no EB
+tool event after embedding warmup, but they were not blocked at the timeout
+deadline because Codex completed them normally.
+
+The two criterion failures retained raw traces; both ended with
+`turn.completed`, had zero pending items, and repeated no command or MCP
+tool signature.
+
+This replay did not reproduce the original timeout cluster and found no
+evidence of a command loop, pending EB call, or a 900-second budget that was
+still being consumed by useful work. The 900-second release budget remains
+unchanged. Future release collector runs retain raw traces for unsuccessful
+invocations so a recurrence can be classified without another replay. Raw
+replay artifacts remain local and are not committed or shared.
 
 ### Historical fixture-v4 / rubric-v4 batch (seed 20261046)
 

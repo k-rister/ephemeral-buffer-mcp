@@ -455,6 +455,7 @@ for stage_count in "${agent_ab_stage_repetitions[@]}"; do
             "${server_args[@]}" --mcp-python "$python_bin" \
             --allow-mcp-approvals --require-mcp-calls --sandbox read-only --timeout "$agent_timeout" \
             --max-repetitions "$stage_count" --diagnostic-log-dir "$ab_dir/lifecycle" \
+            --failure-artifacts-dir "$ab_dir/failure-traces" \
             --output "$ab_dir/records.json" --result "$ab_dir/records.result.json" \
             "${resume_args[@]}" "${agent_metadata[@]}"
         if [[ -f "$ab_dir/records.json" ]]; then
@@ -635,6 +636,7 @@ fi
         printf '| %s | %s | %s | %s |\n' "$status" "$name" "$code" "$log_or_reason"
     done < "$output_dir/STATUS.tsv"
     printf '\nGenerated fixture and records remain in this local bundle. The fixture is synthetic; keep the bundle out of the repository.\n'
+    printf 'Unsuccessful agent A/B invocations may retain raw stdout/stderr traces under `agent-ab/<variant>/failure-traces`. Before sharing the bundle or retaining it beyond diagnosis, privacy-review or remove those traces.\n'
     if ((agent_ab_only)); then
         printf 'Agent A/B records and summaries are under `agent-ab/`; no native local-benchmark outputs were requested.\n'
     else
