@@ -10,8 +10,10 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Advance agent A/B records to schema version 14, preserve version-13 records,
   group failures by error code and request shape, and summarize invocation
   timeouts with the last tool event and pending-call count.
-- Retain content-free lifecycle logs for release agent A/B runs while keeping
-  raw stdout/stderr failure traces opt-in through `--failure-artifacts-dir`.
+- Retain content-free lifecycle logs for release agent A/B runs and enable raw
+  stdout/stderr failure traces automatically in the release collector; direct
+  `run_codex_agent_ab.py` invocations still opt in through
+  `--failure-artifacts-dir`.
 
 ## 0.13.0 - 2026-11-16
 

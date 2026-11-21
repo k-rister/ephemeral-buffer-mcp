@@ -636,6 +636,17 @@ it when it is no longer needed. It is separate from the metadata-only `--output`
 and `--result` files and is never generated unless the option is supplied. A
 `--resume` run warns about earlier unsuccessful records without a trace; it
 does not rerun completed tasks to recreate one.
+
+Classify a replayed invocation timeout from its retained trace and lifecycle
+log as `budget-limited` when distinct, non-repeating actions continue until the
+deadline; `loop` when the same command or tool signature repeats at least three
+times without a new result; or `blocked` when a tool call remains pending or no
+tool event appears after startup. A replay that completes before the deadline is
+classified as `not-reproduced` rather than forced into those timeout categories.
+Use the smallest evidence-based response: raise the timeout only for confirmed
+budget-limited work, add a repeated-action guardrail only for confirmed loops,
+and improve tool guidance only for confirmed blocked calls.
+
 When the fixture does not contain the application package, select the source
 checkout's server module and add its `src` directory, for example
 `--mcp-module ephemeral_buffer_mcp.server --mcp-python-path /path/to/checkout/src`.
@@ -760,7 +771,11 @@ CODEX_HOME=/path/to/writable-codex-home \
 
 The wrapper creates one counterbalanced schedule and reuses it for control and
 MCP runs on both revisions, passing the same profile to every run. The bundle
-report includes per-task success counts and paired MCP-minus-control deltas,
+always passes `--failure-artifacts-dir` and stores raw unsuccessful-run traces
+under `agent-ab/<variant>/failure-traces`; keep that directory local and
+privacy-review it before sharing or retaining it beyond diagnosis.
+
+The report includes per-task success counts and paired MCP-minus-control deltas,
 per-criterion final-answer counts and paired deltas, and source-specific MCP
 response exposure cross-tabs against answer pass/fail. `criterion_hit` means
 the criterion matched in a successful response; `response_without_criterion_hit`

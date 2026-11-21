@@ -1247,10 +1247,14 @@ platform details, artifact paths, and command status counts. `REPORT.md`,
 and logs are collected alongside it. A benchmark absent from the baseline is
 recorded as skipped, while incompatible result metrics remain visible in the
 comparison reports. Keep the generated bundle outside the repository.
-For each `agent-ab/<revision>` directory, release collection retains the
-content-free lifecycle logs under `agent-ab/<revision>/lifecycle`. Current
-records also contain safe failure and timeout diagnostics, so those logs are
-useful without enabling opt-in raw failure traces.
+For each `agent-ab/<revision>` directory, release collection retains
+content-free lifecycle logs under `agent-ab/<revision>/lifecycle` and
+automatically enables raw stdout/stderr traces for unsuccessful invocations
+under `agent-ab/<revision>/failure-traces`. Those raw traces may contain
+private prompts and tool output; privacy-review or remove them before sharing
+the bundle or retaining it beyond diagnosis. Direct
+`run_codex_agent_ab.py` invocations still opt into those traces with
+`--failure-artifacts-dir`.
 
 Each local benchmark is bounded by `--benchmark-timeout` (3600 seconds by
 default). On timeout, the runner sends SIGTERM to the benchmark process group,
