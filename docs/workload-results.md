@@ -435,7 +435,9 @@ tool signature.
 
 This replay did not reproduce the original timeout cluster and found no
 evidence of a command loop, pending EB call, or a 900-second budget that was
-still being consumed by useful work. The 900-second release budget remains
+still being consumed by useful work. Non-reproduction rules out those observed
+patterns under the replay conditions, but it does not identify the original
+cluster's root or dominant cause. The 900-second release budget remains
 unchanged. Future release collector runs retain raw traces for unsuccessful
 invocations so a recurrence can be classified without another replay. Raw
 replay artifacts remain local and are not committed or shared.
