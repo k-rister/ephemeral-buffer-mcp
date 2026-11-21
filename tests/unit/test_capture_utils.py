@@ -451,7 +451,11 @@ class TestBoundedCommandCapture(unittest.TestCase):
             self.assertTrue(capture_utils._supervisor_process_absent(123))
         with patch.object(capture_utils.os, "kill", side_effect=OSError("permission denied")):
             self.assertFalse(capture_utils._supervisor_process_absent(123))
-        with patch.object(capture_utils.os, "kill", return_value=None):
+        with patch.object(capture_utils.os, "kill", return_value=None), \
+                patch.object(capture_utils.Path, "read_text", return_value="123 (live) S 0 0"):
+            self.assertFalse(capture_utils._supervisor_process_absent(123))
+        with patch.object(capture_utils.os, "kill", return_value=None), \
+                patch.object(capture_utils.Path, "read_text", side_effect=OSError("read failed")):
             self.assertFalse(capture_utils._supervisor_process_absent(123))
         with patch.object(capture_utils.select, "select", return_value=([9], [], [])):
             self.assertTrue(capture_utils._supervisor_pidfd_terminated(9))
