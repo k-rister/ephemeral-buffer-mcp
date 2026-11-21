@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 import ephemeral_buffer_mcp.mcpserver_adapter as adapter
 from ephemeral_buffer_mcp.tools.request_context import (
     capture_mcp_supplied_arguments,
+    current_mcp_request_shape,
     current_mcp_supplied_arguments,
     reset_mcp_supplied_arguments,
 )
@@ -41,13 +42,31 @@ class TestMCPServerAdapter(TestCase):
             3: "private value",
         })
         self.assertEqual(current_mcp_supplied_arguments(), frozenset({"query"}))
+        self.assertEqual(current_mcp_request_shape(), {"query": "string"})
 
-        capture_mcp_supplied_arguments({"limit": 4})
-        self.assertEqual(current_mcp_supplied_arguments(), frozenset({"limit"}))
+        capture_mcp_supplied_arguments({"limit": 4, "cursor": None})
+        self.assertEqual(current_mcp_supplied_arguments(), frozenset({"limit", "cursor"}))
+        self.assertEqual(current_mcp_request_shape(), {"limit": "integer", "cursor": "null"})
+        capture_mcp_supplied_arguments({
+            "number": 1.5,
+            "bytes": b"private value",
+            "array": ["private value"],
+            "object": {"private": "value"},
+            "other": object(),
+        })
+        self.assertEqual(current_mcp_request_shape(), {
+            "number": "number",
+            "bytes": "bytes",
+            "array": "array",
+            "object": "object",
+            "other": "other",
+        })
+        reset_mcp_supplied_arguments()
         reset_mcp_supplied_arguments()
         self.assertEqual(current_mcp_supplied_arguments(), frozenset({"query"}))
         reset_mcp_supplied_arguments()
         self.assertIsNone(current_mcp_supplied_arguments())
+        self.assertIsNone(current_mcp_request_shape())
 
         reset_mcp_supplied_arguments()
         capture_mcp_supplied_arguments(None)
@@ -62,12 +81,17 @@ class TestMCPServerAdapter(TestCase):
             calls.append(value)
             return str(value)
 
+        observed_shapes = []
+
         adapter.register_tool(
             app,
             sync_probe,
             name="sync_probe",
             validation_scope=nullcontext,
-            validation_observer=lambda: observations.append("validation"),
+            validation_observer=lambda: (
+                observations.append("validation"),
+                observed_shapes.append(current_mcp_request_shape()),
+            ),
         )
 
         asyncio.run(app.call_tool("sync_probe", {"value": 3}))
@@ -78,6 +102,7 @@ class TestMCPServerAdapter(TestCase):
             asyncio.run(app.call_tool("sync_probe", {}))
         self.assertEqual(calls, [3])
         self.assertEqual(observations, ["validation"])
+        self.assertEqual(observed_shapes, [{}])
 
     def test_hand_built_output_schema_is_published_without_sdk_output_validation(self):
         app = MCPServer("manual-output-schema")

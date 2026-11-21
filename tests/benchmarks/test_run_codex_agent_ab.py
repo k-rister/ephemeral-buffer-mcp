@@ -591,6 +591,11 @@ class TestCodexAgentRunner(unittest.TestCase):
             "task_rubric_version": run_codex_agent_ab.TASK_RUBRIC_VERSION,
         })
         self.assertEqual(metadata["outcome"]["failure_reason"], "task_success_criteria_not_met")
+        self.assertEqual(metadata["schema_version"], 2)
+        self.assertEqual(metadata["timing"]["timeout_seconds"], 10)
+        self.assertAlmostEqual(metadata["timing"]["duration_seconds"], record["duration_seconds"])
+        self.assertRegex(metadata["timing"]["started_at"], r"^2026-.*Z$")
+        self.assertRegex(metadata["timing"]["ended_at"], r"^2026-.*Z$")
         self.assertNotIn("TARGETED_SIGNAL", json.dumps(record))
 
     def test_failure_trace_write_error_does_not_change_task_result(self):

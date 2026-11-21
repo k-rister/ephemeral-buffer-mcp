@@ -277,15 +277,17 @@
   },
   {
     "name": "get_capture_slice",
-    "description": "Fetch a byte-bounded page of 1-indexed capture lines.\n\n    Repeat the range and capture ID from the first call, then pass the returned\n    opaque ``next_cursor`` to continue. Pages never split a Unicode character;\n    the cursor's line offset is a zero-based UTF-8 byte offset.\n    ",
+    "description": "Fetch a byte-bounded page of 1-indexed capture lines.\n\n    Omit ``cursor`` on the first page. Continue by repeating the same capture\n    and line range with the returned ``next_cursor``. Pages never split a\n    Unicode character;\n    the cursor's line offset is a zero-based UTF-8 byte offset.\n    ",
     "inputSchema": {
       "properties": {
         "start_line": {
+          "description": "First 1-indexed line to include.",
           "minimum": 1,
           "title": "Start Line",
           "type": "integer"
         },
         "end_line": {
+          "description": "Last 1-indexed line to include; use a narrow range for a small excerpt.",
           "minimum": 1,
           "title": "End Line",
           "type": "integer"
@@ -297,6 +299,7 @@
         },
         "max_bytes": {
           "default": 65536,
+          "description": "Total JSON response byte budget; an integer from 4096 through 65536. Use a narrower line range, not a small byte budget, to request a short excerpt.",
           "maximum": 65536,
           "minimum": 4096,
           "title": "Max Bytes",
@@ -312,6 +315,7 @@
             }
           ],
           "default": null,
+          "description": "Opaque next_cursor from the previous response for the same capture and line range; omit on the first page.",
           "title": "Cursor"
         }
       },
@@ -456,7 +460,7 @@
   },
   {
     "name": "list_captures",
-    "description": "List active captures with readable text and structured capture data.\n\n    ``limit`` must be 1–25. Pass the opaque ``next_cursor`` to continue a stable\n    newest-first snapshot; captures evicted before their page is read are\n    omitted. The structured result includes ``page_count`` and the current\n    active ``capture_count``.\n    ",
+    "description": "List active captures with readable text and structured capture data.\n\n    ``limit`` must be 1\u201325. Pass the opaque ``next_cursor`` to continue a stable\n    newest-first snapshot; captures evicted before their page is read are\n    omitted. The structured result includes ``page_count`` and the current\n    active ``capture_count``.\n    ",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -610,6 +614,7 @@
     "inputSchema": {
       "properties": {
         "query": {
+          "description": "Search text; at most 1,024 UTF-8 bytes.",
           "title": "Query",
           "type": "string"
         },

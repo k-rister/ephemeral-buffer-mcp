@@ -2275,7 +2275,12 @@ class EphemeralEngine:
                 return {
                     "status": "error",
                     "error_code": "invalid_cursor",
-                    "message": "The continuation cursor is invalid or belongs to another capture range.",
+                    "message": (
+                        "The continuation cursor is invalid or belongs to another "
+                        "capture range. Use next_cursor from the immediately "
+                        "previous response for the same capture and line range, or "
+                        "omit cursor to restart."
+                    ),
                 }
             line_number = cursor_data["line"]
             character_offset = cursor_data["character_offset"]
@@ -2290,7 +2295,11 @@ class EphemeralEngine:
                 return {
                     "status": "error",
                     "error_code": "invalid_cursor",
-                    "message": "The continuation cursor points outside the requested capture range.",
+                    "message": (
+                        "The continuation cursor points outside the requested "
+                        "capture range. Keep the same line range or omit cursor to "
+                        "restart."
+                    ),
                 }
 
         segments: List[Dict[str, Any]] = []

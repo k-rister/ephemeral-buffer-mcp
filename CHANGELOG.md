@@ -14,6 +14,12 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
   stdout/stderr failure traces automatically in the release collector; direct
   `run_codex_agent_ab.py` invocations still opt in through
   `--failure-artifacts-dir`.
+- Add a privacy-safe offline agent failure analyzer that classifies timeout
+  recurrences, groups validation failures, reads version-1 and version-2 trace
+  metadata, and emits release analysis documents automatically.
+- Record MCP input-schema validation failures with content-free request shapes
+  and clarify the `get_capture_slice` byte-budget, continuation-cursor, and
+  `search_capture` query limits in the published tool contracts.
 
 ## 0.13.0 - 2026-11-16
 
