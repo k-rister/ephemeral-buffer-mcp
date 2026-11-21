@@ -442,6 +442,59 @@ unchanged. Future release collector runs retain raw traces for unsuccessful
 invocations so a recurrence can be classified without another replay. Raw
 replay artifacts remain local and are not committed or shared.
 
+The offline classifier was run on 2026-11-21 with the original powered-run
+records as `--timeout-source-records`. It matched all 22 original timeout keys
+to completed replay records and classified all 22 as `not-reproduced`, with
+zero `budget-limited`, `loop`, `blocked`, `external-inactivity-suspected`, or
+`insufficient-evidence` outcomes. This closes the original investigation as
+indeterminate rather than assigning a cause: the original run lacked raw
+traces and timestamped failure metadata, and the replay did not reproduce the
+cluster. The unchanged 900-second budget remains the evidence-based default
+until a future recurrence is directly classified as `budget-limited`.
+
+### MCP validation friction follow-up (2026-11-21)
+
+The original `get_capture_slice` friction was not an input-schema violation:
+the affected requests already had a valid public shape. The follow-up sample
+used the clarified contract and retained request-shape diagnostics across
+1,600 invocations (800 MCP and 800 control).
+
+| Follow-up outcome | Count |
+| --- | ---: |
+| `get_capture_slice` / `invalid_cursor` | 1 |
+| `execute_and_capture` / `operation_failed` | 1 |
+| Invocation timeouts | 13 |
+| `task_success_criteria_not_met` | 144 |
+
+All 13 timeouts were classified as `blocked` because no MCP tool event
+preceded the deadline; that label does not prove a process hang. The two
+validation-related events were classified from lifecycle evidence:
+
+- The `get_capture_slice` request supplied both `capture_id` and `cursor`, but
+  the cursor did not match the same capture and line range. The call followed a
+  successful slice and preceded a successful retry, so it is model misuse of
+  the continuation cursor rather than a tool defect.
+- The `execute_and_capture` request supplied `command` and `cwd`, but its
+  lifecycle log recorded `FileNotFoundError`. The model supplied a nonexistent
+  command or working directory despite the tool's instruction to verify them;
+  subsequent command executions succeeded. This is model command/path misuse,
+  not a tool defect.
+
+The clarified schema and diagnostics therefore resolve the diagnostic gap:
+future validation failures can be separated into input-schema mistakes,
+engine-result mistakes, and valid-shape model misuse without retaining prompt
+or command values in aggregate records.
+
+### Rare `search_capture` targeted replay (2026-11-21)
+
+The two records associated with the earlier rare `search_capture` friction were
+replayed with full lifecycle diagnostics as execution
+`issue-545-targeted-replay-20261121`. Both completed successfully in 33.77 and
+55.96 seconds, with zero invocation timeouts and zero validation failures. The
+targeted replay did not reproduce the issue; final closure waits for the
+powered evaluation below to confirm that any remaining validation anomalies
+remain classifiable and that no new `search_capture` recurrence appears.
+
 ### Historical fixture-v4 / rubric-v4 batch (seed 20261046)
 
 This historical rubric-v4 run used five repetitions for each of four tasks and

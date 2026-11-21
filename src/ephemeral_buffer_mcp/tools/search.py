@@ -267,7 +267,7 @@ def _search_capture_response(
     payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["search_capture"],
 )
 def search_capture(
-    query: str,
+    query: Annotated[str, Field(description=f"Search text; at most {SEARCH_QUERY_MAX_BYTES:,} UTF-8 bytes.")],
     mode: Literal["hybrid", "bm25", "semantic"] = "hybrid",
     capture_id: str = "latest",
     top_k: Annotated[int, Field(ge=1, le=MAX_SEARCH_TOP_K)] = 5,

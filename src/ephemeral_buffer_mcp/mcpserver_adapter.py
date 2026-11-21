@@ -65,25 +65,20 @@ class _ObservedFuncMetadata(FuncMetadata):
             _record_validation_limitation(self._tool_name, type(exc).__name__)
             # Scope setup belongs to metrics only. Keep MCPServer's normal
             # validation and dispatch path if it cannot be established.
-            try:
-                return super().validate_arguments(arguments_to_validate)
-            finally:
-                reset_mcp_supplied_arguments()
+            return super().validate_arguments(arguments_to_validate)
 
         try:
             try:
                 return super().validate_arguments(arguments_to_validate)
-            except BaseException:
+            except ValidationError:
+                try:
+                    self._validation_observer()
+                except Exception as exc:
+                    _record_validation_observation_failure(
+                        self._tool_name, type(exc).__name__
+                    )
                 reset_mcp_supplied_arguments()
                 raise
-        except ValidationError:
-            try:
-                self._validation_observer()
-            except Exception as exc:
-                _record_validation_observation_failure(
-                    self._tool_name, type(exc).__name__
-                )
-            raise
         finally:
             scope.close()
 

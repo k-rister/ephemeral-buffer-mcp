@@ -637,13 +637,49 @@ and `--result` files and is never generated unless the option is supplied. A
 `--resume` run warns about earlier unsuccessful records without a trace; it
 does not rerun completed tasks to recreate one.
 
-Classify a replayed invocation timeout from its retained trace and lifecycle
-log as `budget-limited` when distinct, non-repeating actions continue until the
-deadline; `loop` when the same command or tool signature repeats at least three
-times without a new result; or `blocked` when a tool call remains pending or no
-tool event appears after startup. A replay that completes before the deadline is
-classified as `not-reproduced` rather than forced into those timeout categories.
-Use the smallest evidence-based response: raise the timeout only for confirmed
+Input-schema validation failures are also retained before tool dispatch. They
+use error code `input_validation`, result status `exception`, and the same
+public request-shape/capture/cursor fields as in-tool failures. This
+distinguishes a client-side schema mistake from an engine result such as
+`invalid_range`, `invalid_byte_budget`, `unsupported_search_mode`, or
+`query_too_large`. The `get_capture_slice` schema explicitly documents that
+`max_bytes` is a 4,096–65,536-byte total JSON response budget and that narrow
+line ranges—not small byte budgets—are the way to request a short excerpt. It
+also states that `cursor` must be omitted on the first page and reused only
+with the immediately previous response's capture and line range.
+The `search_capture` schema documents the 1,024-byte UTF-8 query limit.
+
+Classify invocation timeouts with the offline analyzer:
+
+```bash
+.venv/bin/python -m benchmarks.analyze_agent_failures \
+  --records /tmp/agent-ab/records.json \
+  --lifecycle-dir /tmp/agent-ab/lifecycle \
+  --failure-traces-dir /tmp/agent-ab/failure-traces \
+  --timeout-source-records /tmp/original-powered-run/records.json \
+  --output /tmp/agent-ab/failure-analysis.json \
+  --result /tmp/agent-ab/failure-analysis.result.json
+```
+
+When `--timeout-source-records` identifies an original timeout, a matched replay
+that completes is `not-reproduced`; that result is never promoted to a causal
+explanation for the original run. Without a matched completed replay, a pending
+tool call or a lifecycle log with startup but no tool event is `blocked`; the
+same command or safe tool signature repeated at least three times without a new
+result is `loop`; a local activity gap longer than `--inactivity-threshold`
+(300 seconds by default) is `external-inactivity-suspected`; and distinct,
+non-repeating actions within 60 seconds of the deadline are `budget-limited`.
+Everything else is `insufficient-evidence`. Classification order follows that
+list, with `not-reproduced` taking precedence only for a matched replay.
+
+The analyzer reads raw traces only to count structural signatures and never
+emits prompts, commands, argument values, tool results, transcripts, or
+signature digests. Its output contains task identity, timestamps, duration,
+timeout budget, last tool state, pending/repeated/distinct-action counts,
+provider usage sample counts, malformed-input counts, and validation groups.
+Validation failures are grouped by tool, error code, public request shape,
+result status, capture/cursor presence, count, and mean duration. Use the
+smallest evidence-based response: raise the timeout only for confirmed
 budget-limited work, add a repeated-action guardrail only for confirmed loops,
 and improve tool guidance only for confirmed blocked calls.
 
@@ -774,6 +810,9 @@ MCP runs on both revisions, passing the same profile to every run. The bundle
 always passes `--failure-artifacts-dir` and stores raw unsuccessful-run traces
 under `agent-ab/<variant>/failure-traces`; keep that directory local and
 privacy-review it before sharing or retaining it beyond diagnosis.
+After each revision produces records, the collector also runs
+`benchmarks/analyze_agent_failures.py` and writes
+`agent-ab/<variant>/failure-analysis.json` plus its workload-result companion.
 
 The report includes per-task success counts and paired MCP-minus-control deltas,
 per-criterion final-answer counts and paired deltas, and source-specific MCP

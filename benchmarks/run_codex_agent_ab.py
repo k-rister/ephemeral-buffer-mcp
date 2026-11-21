@@ -7,6 +7,7 @@ manifest and are never copied to the output records.
 """
 
 import argparse
+import datetime as datetime_module
 import hashlib
 import json
 import math
@@ -1522,6 +1523,7 @@ def _run_one(
         inherited_mcp_servers=getattr(args, "codex_mcp_servers", ()),
     )
     started = time.monotonic()
+    started_at = datetime_module.datetime.now(datetime_module.timezone.utc)
     output = ""
     invocation_completed = False
     execution_eligible = False
@@ -1595,6 +1597,7 @@ def _run_one(
         codex_environment.pop(api_key_env, None)
     api_key = None
     duration = time.monotonic() - started
+    ended_at = datetime_module.datetime.now(datetime_module.timezone.utc)
     data_path_bytes = _data_path_bytes(metrics_file)
     mcp_tool_failures = (
         _mcp_tool_failures(diagnostic_log, offset_bytes=diagnostic_log_offset)
@@ -1694,6 +1697,9 @@ def _run_one(
             record=record,
             stdout=stdout,
             stderr=stderr,
+            started_at=started_at,
+            ended_at=ended_at,
+            timeout_seconds=args.timeout,
         )
     return record
 
@@ -1709,6 +1715,9 @@ def _write_failure_artifact(
     record: dict[str, Any],
     stdout: str,
     stderr: str,
+    started_at: datetime_module.datetime,
+    ended_at: datetime_module.datetime,
+    timeout_seconds: int,
 ) -> None:
     """Persist the full Codex event streams outside the privacy-safe records."""
     root = Path(root)
@@ -1722,7 +1731,7 @@ def _write_failure_artifact(
         (staging / "stdout.jsonl").write_text(stdout, encoding="utf-8", newline="")
         (staging / "stderr.txt").write_text(stderr, encoding="utf-8", newline="")
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run": {
                 "sequence": item["sequence"],
                 "task_id": item["task_id"],
@@ -1737,6 +1746,12 @@ def _write_failure_artifact(
                 "criterion_passes": record["criterion_passes"],
                 "failure_reason": record["failure_reason"],
                 "exit_code": record["exit_code"],
+            },
+            "timing": {
+                "started_at": started_at.isoformat().replace("+00:00", "Z"),
+                "ended_at": ended_at.isoformat().replace("+00:00", "Z"),
+                "duration_seconds": record["duration_seconds"],
+                "timeout_seconds": timeout_seconds,
             },
             "streams": {
                 "stdout": "stdout.jsonl",
