@@ -2,7 +2,7 @@
 # Keep requirements.txt flexible for downstream users; update these pins only
 # after the focused and end-to-end test suites pass on Python 3.11 and 3.12.
 mcp==2.3.0
-filelock==4.2.1
+filelock==4.2.12
 huggingface-hub==2.4.0
 numpy==2.2.6
 onnxruntime==1.23.2
