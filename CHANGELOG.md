@@ -23,6 +23,8 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Record MCP input-schema validation failures with content-free request shapes
   and clarify the `get_capture_slice` byte-budget, continuation-cursor, and
   `search_capture` query limits in the published tool contracts.
+- Clarify that `search_capture` capture IDs must reference the current
+  in-memory buffer and guide stale-ID failures to `latest` or `list_captures`.
 
 ## 0.13.0 - 2026-11-16
 

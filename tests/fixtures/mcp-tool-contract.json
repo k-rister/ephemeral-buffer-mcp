@@ -610,7 +610,7 @@
   },
   {
     "name": "search_capture",
-    "description": "Search a capture by query text and return bounded readable and structured matches.\n\n    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic\n    (embedding based). capture_id defaults to latest; top_k defaults to 5\n    (maximum 20), and context_lines defaults to 3 (maximum 100). Use\n    get_capture_slice for complete or omitted content.\n    Exact lexical hit lines are listed when available; semantic-only matches\n    may have none.\n    `semantic_coverage: complete` means indexed; not every token is embedded.\n    Long lines may be token-truncated.\n    ",
+    "description": "Search a capture by query; return bounded readable and structured matches.\n\n    mode is hybrid (default), bm25, or semantic. capture_id references a\n    currently buffered capture; default latest, and list_captures refreshes\n    IDs after eviction or clearing. top_k defaults to 5 (max 20),\n    context_lines defaults to 3 (max 100). Use get_capture_slice for omitted\n    content.\n    Exact lexical hit lines are listed; semantic-only matches may have none.\n    `semantic_coverage: complete` means indexed; not every token is embedded.\n    Long lines may be token-truncated.\n    ",
     "inputSchema": {
       "properties": {
         "query": {
@@ -630,6 +630,7 @@
         },
         "capture_id": {
           "default": "latest",
+          "description": "Capture ID from the current in-memory buffer; defaults to latest. Use list_captures for current IDs.",
           "title": "Capture Id",
           "type": "string"
         },

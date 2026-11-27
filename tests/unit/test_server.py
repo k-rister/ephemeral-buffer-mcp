@@ -1200,6 +1200,7 @@ class TestServerTools(unittest.TestCase):
         execute_doc = server.execute_and_capture.__doc__
         preflight_doc = server.preflight_command.__doc__
         search_doc = server.search_capture.__doc__
+        normalized_search_doc = " ".join(search_doc.split())
         list_doc = server.list_captures.__doc__
         start_execution_doc = " ".join(server.start_execution.__doc__.split())
         resume_execution_doc = " ".join(server.resume_execution.__doc__.split())
@@ -1213,6 +1214,8 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("duration independently of output size", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
         self.assertIn("filesystem safety", execute_doc)
+        self.assertIn("capture_id references a currently buffered capture", normalized_search_doc)
+        self.assertIn("list_captures refreshes IDs", normalized_search_doc)
         self.assertIn("content_type accepts auto", execute_doc)
         self.assertIn("returns exit code 124", execute_doc)
         self.assertIn("JSON-compatible named metrics", execute_doc)
@@ -4355,6 +4358,8 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(invalid_budget.error.code, "invalid_byte_budget")
         self.assertEqual(invalid_cursor.error.code, "invalid_cursor")
         self.assertEqual(missing_search.error.code, "capture_not_found")
+        self.assertIn("Other captures remain in the buffer", missing_search.error.message)
+        self.assertIn("current list_captures result", missing_search.error.message)
         self.assertEqual(too_small.error.code, "response_budget_too_small")
 
     def test_slice_cursor_range_mismatch_returns_guidance_and_safe_shape(self):
