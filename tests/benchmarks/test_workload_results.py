@@ -488,7 +488,7 @@ class TestExperiment(unittest.TestCase):
         self.assertEqual(summary["metadata"], {"started_at": "2026-09-18T10:00:00+00:00", "owner": "me"})
         self.assertEqual(summary["status"], "partial")
         self.assertEqual(summary["errors"], [])
-        self.assertEqual(summary["recorded_at"], recorded)
+        self.assertEqual(summary["recorded_at"], started["environment"]["recorded_at"])
         self.assertEqual(summary["ordered_at"], "2026-09-18T10:00:00+00:00")
         self.assertEqual(summary["tool_version"], started["environment"]["tool"]["version"])
         self.assertEqual(summary["source_revision"], started["environment"]["source_revision"])
