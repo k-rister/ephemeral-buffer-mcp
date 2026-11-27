@@ -459,6 +459,11 @@ for stage_count in "${agent_ab_stage_repetitions[@]}"; do
             --output "$ab_dir/records.json" --result "$ab_dir/records.result.json" \
             "${resume_args[@]}" "${agent_metadata[@]}"
         if [[ -f "$ab_dir/records.json" ]]; then
+            run_tool "analyze-agent-ab-failures-$revision-stage-$stage_index" "$repo_dir" 0 analyze_agent_failures.py \
+                --records "$ab_dir/records.json" --lifecycle-dir "$ab_dir/lifecycle" \
+                --failure-traces-dir "$ab_dir/failure-traces" \
+                --output "$ab_dir/failure-analysis.json" \
+                --result "$ab_dir/failure-analysis.result.json"
             run_tool "summarize-agent-ab-$revision-stage-$stage_index" "$repo_dir" 0 benchmark_agent_ab.py \
                 --records "$ab_dir/records.json" --output "$stage_summary" \
                 --result "$stage_result" "${agent_metadata[@]}"

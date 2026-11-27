@@ -1200,6 +1200,7 @@ class TestServerTools(unittest.TestCase):
         execute_doc = server.execute_and_capture.__doc__
         preflight_doc = server.preflight_command.__doc__
         search_doc = server.search_capture.__doc__
+        normalized_search_doc = " ".join(search_doc.split())
         list_doc = server.list_captures.__doc__
         start_execution_doc = " ".join(server.start_execution.__doc__.split())
         resume_execution_doc = " ".join(server.resume_execution.__doc__.split())
@@ -1213,6 +1214,8 @@ class TestServerTools(unittest.TestCase):
         self.assertIn("duration independently of output size", execute_doc)
         self.assertIn("inherits the server process directory", execute_doc)
         self.assertIn("filesystem safety", execute_doc)
+        self.assertIn("capture_id references a currently buffered capture", normalized_search_doc)
+        self.assertIn("list_captures refreshes IDs", normalized_search_doc)
         self.assertIn("content_type accepts auto", execute_doc)
         self.assertIn("returns exit code 124", execute_doc)
         self.assertIn("JSON-compatible named metrics", execute_doc)
@@ -4355,7 +4358,121 @@ class TestServerTools(unittest.TestCase):
         self.assertEqual(invalid_budget.error.code, "invalid_byte_budget")
         self.assertEqual(invalid_cursor.error.code, "invalid_cursor")
         self.assertEqual(missing_search.error.code, "capture_not_found")
+        self.assertIn("Other captures remain in the buffer", missing_search.error.message)
+        self.assertIn("current list_captures result", missing_search.error.message)
         self.assertEqual(too_small.error.code, "response_budget_too_small")
+
+    def test_slice_cursor_range_mismatch_returns_guidance_and_safe_shape(self):
+        content = "λ" * 5_000 + "\nsecond line"
+        capture = json.loads(server.capture_text(content, label="cursor-range"))
+        capture_id = capture["capture_id"]
+        first_page = server.get_capture_slice_result(
+            1, 2, capture_id=capture_id, max_bytes=4096
+        )
+
+        self.assertEqual(first_page.status, "ok")
+        self.assertIsNotNone(first_page.next_cursor)
+
+        with patch.object(instrumentation_tools, "log_event") as lifecycle_log:
+            mismatched_range = asyncio.run(self.call_mcp_tool_inline(
+                "get_capture_slice",
+                {
+                    "start_line": 2,
+                    "end_line": 2,
+                    "capture_id": capture_id,
+                    "max_bytes": 4096,
+                    "cursor": first_page.next_cursor,
+                },
+            ))
+
+        self.assertEqual(mismatched_range.is_error, True)
+        self.assertEqual(
+            mismatched_range.structured_content["error"]["code"],
+            "invalid_cursor",
+        )
+        self.assertIn(
+            "same capture and line range",
+            mismatched_range.structured_content["error"]["message"],
+        )
+        failure_event = next(
+            event for event in lifecycle_log.call_args_list
+            if event.args[2] == "mcp_tool_result_failed"
+        )
+        self.assertEqual(failure_event.kwargs["error_code"], "invalid_cursor")
+        self.assertEqual(failure_event.kwargs["request_shape"], {
+            "start_line": "integer",
+            "end_line": "integer",
+            "capture_id": "string",
+            "max_bytes": "integer",
+            "cursor": "string",
+        })
+        self.assertTrue(failure_event.kwargs["capture_id_supplied"])
+        self.assertTrue(failure_event.kwargs["cursor_supplied"])
+        self.assertNotIn(content, str(lifecycle_log.call_args_list))
+
+    def test_retrieval_and_search_input_boundaries_emit_safe_validation_shapes(self):
+        capture = json.loads(
+            server.capture_text("safe contract boundary", label="input-boundaries")
+        )
+        capture_id = capture["capture_id"]
+        invalid_slice_shapes = (
+            {"start_line": 0, "end_line": 1},
+            {"start_line": 1, "end_line": 0},
+            {"start_line": 1, "end_line": 1, "max_bytes": 1024},
+            {"start_line": 1, "end_line": 1, "max_bytes": 70000},
+            {"start_line": 1, "end_line": 1, "cursor": 7},
+        )
+        invalid_search_shapes = (
+            {"query": "needle", "mode": "invalid"},
+            {"query": "needle", "top_k": 0},
+            {"query": "needle", "top_k": 21},
+            {"query": "needle", "context_lines": -1},
+            {"query": "needle", "context_lines": 101},
+            {"query": 7},
+        )
+
+        with patch.object(mcp_transport, "log_event") as validation_log:
+            for arguments in invalid_slice_shapes:
+                with self.subTest(tool="get_capture_slice", arguments=arguments):
+                    with self.assertRaises(Exception):
+                        asyncio.run(self.call_mcp_tool_inline(
+                            "get_capture_slice", arguments
+                        ))
+            for arguments in invalid_search_shapes:
+                with self.subTest(tool="search_capture", arguments=arguments):
+                    with self.assertRaises(Exception):
+                        asyncio.run(self.call_mcp_tool_inline(
+                            "search_capture", arguments
+                        ))
+
+        validation_events = [
+            call for call in validation_log.call_args_list
+            if call.args[2] == "mcp_tool_result_failed"
+        ]
+        self.assertEqual(len(validation_events), len(invalid_slice_shapes) + len(invalid_search_shapes))
+        self.assertTrue(
+            all(event.kwargs["error_code"] == "input_validation" for event in validation_events)
+        )
+        self.assertIn(
+            {"start_line": "integer", "end_line": "integer", "max_bytes": "integer"},
+            [event.kwargs["request_shape"] for event in validation_events],
+        )
+        self.assertNotIn("safe contract boundary", str(validation_log.call_args_list))
+
+        missing_slice = asyncio.run(self.call_mcp_tool_inline("get_capture_slice", {
+            "start_line": 1, "end_line": 1, "capture_id": "missing-boundary",
+        }))
+        missing_search = asyncio.run(self.call_mcp_tool_inline("search_capture", {
+            "query": "needle", "mode": "bm25", "capture_id": "missing-boundary",
+        }))
+        too_large_query = asyncio.run(self.call_mcp_tool_inline("search_capture", {
+            "query": "q" * (server.SEARCH_QUERY_MAX_BYTES + 1),
+            "mode": "bm25",
+            "capture_id": capture_id,
+        }))
+        self.assertEqual(missing_slice.structured_content["error"]["code"], "capture_not_found")
+        self.assertEqual(missing_search.structured_content["error"]["code"], "capture_not_found")
+        self.assertEqual(too_large_query.structured_content["error"]["code"], "query_too_large")
 
     def test_legacy_mcp_envelopes_keep_text_and_assign_stable_errors(self):
         plain_text = mcp_transport._legacy_tool_envelope("get_buffer_stats", "not JSON")

@@ -44,6 +44,18 @@ def _codex_profile_environment(root: Path, codex_home: Path) -> dict[str, str]:
     }
 
 
+def _write_analyzer_stub(benchmarks: Path) -> None:
+    (benchmarks / "analyze_agent_failures.py").write_text(
+        "import json, os, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['RELEASE_TEST_ANALYZER_ARGS_LOG'], 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(args) + '\\n')\n"
+        "pathlib.Path(args[args.index('--output') + 1]).write_text('{}', encoding='utf-8')\n"
+        "pathlib.Path(args[args.index('--result') + 1]).write_text('{}', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+
 def _git(repository: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", *arguments],
@@ -380,6 +392,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n",
                 encoding="utf-8",
             )
+            _write_analyzer_stub(benchmarks)
             (data / "benchmark_baseline.json").write_text("{}\n", encoding="utf-8")
 
             _git(repository, "init", "--quiet")
@@ -406,6 +419,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                     "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                     "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
                     "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(root / "schedule-args.jsonl"),
+                    "RELEASE_TEST_ANALYZER_ARGS_LOG": str(root / "analyzer-args.jsonl"),
                     **_codex_profile_environment(root, codex_home),
                 }
             )
@@ -545,6 +559,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "output.write_text('{}', encoding='utf-8')\n",
                 encoding="utf-8",
             )
+            _write_analyzer_stub(benchmarks)
             (data / "benchmark_baseline.json").write_text("{}\n", encoding="utf-8")
 
             _git(repository, "init", "--quiet")
@@ -570,6 +585,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                 "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_args_log),
                 "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(root / "schedule-args.jsonl"),
+                "RELEASE_TEST_ANALYZER_ARGS_LOG": str(root / "analyzer-args.jsonl"),
                 **_codex_profile_environment(root, codex_home),
             })
             result = subprocess.run(
@@ -592,6 +608,40 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertNotIn("FileNotFoundError", result.stderr)
+            analyzer_calls = [
+                json.loads(line)
+                for line in (root / "analyzer-args.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(analyzer_calls), 3)
+            expected_records = {
+                str(output_directory.resolve() / "agent-ab" / variant / "records.json")
+                for variant in ("baseline", "candidate")
+            }
+            expected_lifecycle_dirs = {
+                str(output_directory.resolve() / "agent-ab" / variant / "lifecycle")
+                for variant in ("baseline", "candidate")
+            }
+            expected_trace_dirs = {
+                str(output_directory.resolve() / "agent-ab" / variant / "failure-traces")
+                for variant in ("baseline", "candidate")
+            }
+            self.assertTrue(
+                all(
+                    call[call.index("--records") + 1] in expected_records
+                    and call[call.index("--lifecycle-dir") + 1]
+                    in expected_lifecycle_dirs
+                    and call[call.index("--failure-traces-dir") + 1]
+                    in expected_trace_dirs
+                    for call in analyzer_calls
+                )
+            )
+            self.assertTrue(
+                all(
+                    (output_directory / "agent-ab" / variant / "failure-analysis.json").is_file()
+                    and (output_directory / "agent-ab" / variant / "failure-analysis.result.json").is_file()
+                    for variant in ("baseline", "candidate")
+                )
+            )
             invocations = [
                 json.loads(line) for line in agent_args_log.read_text(encoding="utf-8").splitlines()
             ]
@@ -669,6 +719,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "pathlib.Path(args[args.index('--result') + 1]).write_text('{}', encoding='utf-8')\n",
                 encoding="utf-8",
             )
+            _write_analyzer_stub(benchmarks)
             (benchmarks / "render_agent_ab_report.py").write_text(
                 "import pathlib, sys\n"
                 "output = pathlib.Path(sys.argv[3])\n"
@@ -701,6 +752,7 @@ class TestReleaseBenchmarkTimeoutCollection(unittest.TestCase):
                 "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
                 "RELEASE_TEST_SCHEDULE_ARGS_LOG": str(schedule_log),
                 "RELEASE_TEST_AGENT_ARGS_LOG": str(agent_log),
+                "RELEASE_TEST_ANALYZER_ARGS_LOG": str(root / "analyzer-args.jsonl"),
                 **_codex_profile_environment(root, codex_home),
             })
             result = subprocess.run(

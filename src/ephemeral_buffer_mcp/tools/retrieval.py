@@ -204,16 +204,33 @@ def _capture_slice_response(
     payload_schema_version=PAYLOAD_SCHEMA_VERSIONS["get_capture_slice"],
 )
 def get_capture_slice(
-    start_line: Annotated[int, Field(ge=1)],
-    end_line: Annotated[int, Field(ge=1)],
+    start_line: Annotated[int, Field(ge=1, description="First 1-indexed line to include.")],
+    end_line: Annotated[int, Field(ge=1, description="Last 1-indexed line to include; use a narrow range for a small excerpt.")],
     capture_id: str = "latest",
-    max_bytes: Annotated[int, Field(ge=4096, le=MCP_TOOL_RESPONSE_MAX_BYTES)] = MCP_TOOL_RESPONSE_MAX_BYTES,
-    cursor: Optional[str] = None,
+    max_bytes: Annotated[int, Field(
+        ge=4096,
+        le=MCP_TOOL_RESPONSE_MAX_BYTES,
+        description=(
+            "Total JSON response byte budget; an integer from 4096 through "
+            f"{MCP_TOOL_RESPONSE_MAX_BYTES}. Use a narrower line range, not a "
+            "small byte budget, to request a short excerpt."
+        ),
+    )] = MCP_TOOL_RESPONSE_MAX_BYTES,
+    cursor: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Opaque next_cursor from the previous response for the same "
+                "capture and line range; omit on the first page."
+            )
+        ),
+    ] = None,
 ) -> str:
     """Fetch a byte-bounded page of 1-indexed capture lines.
 
-    Repeat the range and capture ID from the first call, then pass the returned
-    opaque ``next_cursor`` to continue. Pages never split a Unicode character;
+    Omit ``cursor`` on the first page. Continue by repeating the same capture
+    and line range with the returned ``next_cursor``. Pages never split a
+    Unicode character;
     the cursor's line offset is a zero-based UTF-8 byte offset.
     """
     return get_capture_slice_result(start_line, end_line, capture_id, max_bytes, cursor).text or ""

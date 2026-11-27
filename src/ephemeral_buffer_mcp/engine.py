@@ -1823,9 +1823,12 @@ class EphemeralEngine:
             with self._lock:
                 buffer_is_empty = not self._captures
             buffer_detail = (
-                "Buffer is currently empty."
+                "Buffer is currently empty. Capture content before searching."
                 if buffer_is_empty
-                else "Other captures remain in the buffer."
+                else (
+                    "Other captures remain in the buffer. Use 'latest' or a "
+                    "capture_id from the current list_captures result."
+                )
             )
             return {
                 "status": "error",
@@ -2275,7 +2278,12 @@ class EphemeralEngine:
                 return {
                     "status": "error",
                     "error_code": "invalid_cursor",
-                    "message": "The continuation cursor is invalid or belongs to another capture range.",
+                    "message": (
+                        "The continuation cursor is invalid or belongs to another "
+                        "capture range. Use next_cursor from the immediately "
+                        "previous response for the same capture and line range, or "
+                        "omit cursor to restart."
+                    ),
                 }
             line_number = cursor_data["line"]
             character_offset = cursor_data["character_offset"]
@@ -2290,7 +2298,11 @@ class EphemeralEngine:
                 return {
                     "status": "error",
                     "error_code": "invalid_cursor",
-                    "message": "The continuation cursor points outside the requested capture range.",
+                    "message": (
+                        "The continuation cursor points outside the requested "
+                        "capture range. Keep the same line range or omit cursor to "
+                        "restart."
+                    ),
                 }
 
         segments: List[Dict[str, Any]] = []

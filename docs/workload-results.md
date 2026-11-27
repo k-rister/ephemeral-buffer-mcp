@@ -442,6 +442,152 @@ unchanged. Future release collector runs retain raw traces for unsuccessful
 invocations so a recurrence can be classified without another replay. Raw
 replay artifacts remain local and are not committed or shared.
 
+The offline classifier was run on 2026-11-21 with the original powered-run
+records as `--timeout-source-records`. It matched all 22 original timeout keys
+to completed replay records and classified all 22 as `not-reproduced`, with
+zero `budget-limited`, `loop`, `blocked`, `external-inactivity-suspected`, or
+`insufficient-evidence` outcomes. This closes the original investigation as
+indeterminate rather than assigning a cause: the original run lacked raw
+traces and timestamped failure metadata, and the replay did not reproduce the
+cluster. The unchanged 900-second budget remains the evidence-based default
+until a future recurrence is directly classified as `budget-limited`.
+
+### MCP validation friction follow-up (2026-11-21)
+
+The original `get_capture_slice` friction was not an input-schema violation:
+the affected requests already had a valid public shape. The follow-up sample
+used the clarified contract and retained request-shape diagnostics across
+1,600 invocations (800 MCP and 800 control).
+
+| Follow-up outcome | Count |
+| --- | ---: |
+| `get_capture_slice` / `invalid_cursor` | 1 |
+| `execute_and_capture` / `operation_failed` | 1 |
+| Invocation timeouts | 13 |
+| `task_success_criteria_not_met` | 144 |
+
+All 13 timeouts were classified as `blocked` because no MCP tool event
+preceded the deadline; that label does not prove a process hang. The two
+validation-related events were classified from lifecycle evidence:
+
+- The `get_capture_slice` request supplied both `capture_id` and `cursor`, but
+  the cursor did not match the same capture and line range. The call followed a
+  successful slice and preceded a successful retry, so it is model misuse of
+  the continuation cursor rather than a tool defect.
+- The `execute_and_capture` request supplied `command` and `cwd`, but its
+  lifecycle log recorded `FileNotFoundError`. The model supplied a nonexistent
+  command or working directory despite the tool's instruction to verify them;
+  subsequent command executions succeeded. This is model command/path misuse,
+  not a tool defect.
+
+The clarified schema and diagnostics therefore resolve the diagnostic gap:
+future validation failures can be separated into input-schema mistakes,
+engine-result mistakes, and valid-shape model misuse without retaining prompt
+or command values in aggregate records.
+
+### Rare `search_capture` targeted replay (2026-11-21)
+
+The two records associated with the earlier rare `search_capture` friction were
+replayed with full lifecycle diagnostics as execution
+`issue-545-targeted-replay-20261121`. Both completed successfully in 33.77 and
+55.96 seconds, with zero invocation timeouts and zero validation failures. The
+targeted replay did not reproduce the issue. The powered evaluation below did
+record a new recurrence, so the issue remains open with retained evidence
+rather than closing as non-reproduced.
+
+### Powered agent A/B failure evaluation (2026-11-27)
+
+The fixture-v2 powered evaluation compared release `v0.13.0`
+(`59d1184f60c1b676992d1a7620b75edcbc753389`) with candidate
+`a3e1a283d0ebb9bc11530d5d4420bbb1bfa8389c` using the `enmaas` profile,
+model `rits/zai-org/glm-5-3`, seed `20260909`, deterministic test embeddings,
+and the unchanged 900-second agent timeout. Durable execution
+`issue-554-powered-evaluation-seed20260909-20261121` started on
+2026-11-21 and completed successfully on 2026-11-27 after 5 days, 7 hours,
+and 36 minutes.
+
+The scheduler planned 1,419 repetitions per task and mode. This is not the
+historical 980-repetition design: that count was pilot-calibrated for
+fixture-v1. Fixture-v2 has no compatible pilot evidence, so its conservative
+least-favorable unknown-baseline model selected 1,419 after the 1,224
+discovery candidate passed validation on attempt 4. Both variants stopped at
+the first planned look—710 repetitions per task and mode, or 2,840 MCP and
+2,840 control invocations per variant (5,680 invocations per
+variant)—because both stage
+summaries were `evidence_ready`. No stage-2 or stage-3 records were run.
+
+Objective task success was:
+
+| Revision | Control | MCP available | MCP minus control |
+| --- | ---: | ---: | ---: |
+| Baseline `v0.13.0` | 2,537/2,840 (89.33%) | 2,534/2,840 (89.23%) | -0.11 pp |
+| Candidate | 2,562/2,840 (90.21%) | 2,593/2,840 (91.30%) | +1.09 pp |
+
+Per-task MCP-minus-control differences were:
+
+| Task | Baseline | Candidate |
+| --- | ---: | ---: |
+| Build log search | -7.18 pp | -3.24 pp |
+| Follow-up context | -1.13 pp | -1.13 pp |
+| Noisy test failure | +0.14 pp | +0.28 pp |
+| Targeted inspection | +7.75 pp | +8.45 pp |
+
+The MCP arm recorded 23 baseline timeouts and 32 candidate timeouts out of
+2,840 runs (0.81% and 1.13%). The corrected analyzer classified all 23
+baseline timeouts and all 32 candidate MCP timeouts as `blocked`; the one
+candidate control timeout was classified separately as
+`insufficient-evidence`. No timeout was classified as `loop`,
+`budget-limited`, or `external-inactivity-suspected`. The 900-second budget
+therefore remains unchanged.
+
+Validation events were grouped from lifecycle logs:
+
+| Revision | Events | Groups | Summary |
+| --- | ---: | ---: | --- |
+| Baseline | 20 | 2 | 17 `get_capture_slice` and 3 `search_capture`; v0.13.0 logs lacked detailed error codes and request shapes |
+| Candidate | 28 | 8 | 17 `get_capture_slice` / `invalid_cursor`, 1 `get_capture_slice` / `input_validation`, 1 `get_capture_summary` / `capture_not_found`, 3 `get_execution_output` / `input_validation`, 1 `list_captures` / `invalid_cursor`, 4 `search_capture` / `capture_not_found`, and 1 `start_execution` / `input_validation` |
+
+The candidate count includes five exception-kind `mcp_tool_result_failed`
+events that the original post-run analyzer omitted. The corrected analyzer
+treats validation-category lifecycle events as authoritative and accepts
+`failure_kind` values of both `result` and `exception` for
+`mcp_tool_result_failed`.
+The run's generated `REPORT.md` predates that correction; the regenerated
+`failure-analysis.json` files are authoritative for validation counts.
+The 17 candidate `get_capture_slice` / `invalid_cursor` events match the
+previously identified continuation-cursor misuse pattern; they are not
+input-schema defects.
+
+The four candidate `search_capture` events all returned `capture_not_found`,
+used the valid public request shape (`capture_id`, `query`, `mode`, `top_k`,
+and `context_lines`), and supplied a capture ID. They occurred in
+`1800-mcp` (follow-up-context repetition 225), `3420-mcp` (build-log-search
+repetition 428), and `3917-mcp` (noisy-test-failure repetition 490, with two
+consecutive events). The evidence indicates stale or nonexistent capture-ID
+use by the model rather than an input-schema defect. Issue #545 is resolved by
+the current-buffer capture-ID guidance in PR #561; per the rare-issue policy,
+the powered evaluation was not rerun for that clarification. The local raw
+traces are retained only under `/tmp` for diagnosis.
+
+The generic workload comparison reported 22 regressed, 15 improved, 33
+unchanged, and 46 neutral-changed result entries. The regressions are secondary
+resource, behavior, and latency measurements across control (4), MCP (10), and
+paired-delta (8) result sections, including context and output bytes, token
+counts, wall time, capture bytes, retrieval bytes, tool calls, and repeated
+commands. They do not contradict the primary task-success improvement, but
+they do prevent an unqualified claim that the candidate improved overall
+performance.
+
+The powered evaluation resolves the diagnostic objective: every timeout and
+validation anomaly was classifiable without committing private traces, and the
+new diagnostics exposed a real `search_capture` recurrence. The operational
+conclusions are mixed: candidate task success improved overall, targeted
+inspection improved while build-log search remained lower with MCP, timeout
+rates rose slightly without evidence for a larger budget, and secondary cost
+and latency metrics regressed. Broader default or release-performance claims
+require additional representative tasks; the #545 stale-ID follow-up is
+complete.
+
 ### Historical fixture-v4 / rubric-v4 batch (seed 20261046)
 
 This historical rubric-v4 run used five repetitions for each of four tasks and

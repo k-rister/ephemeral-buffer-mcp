@@ -591,6 +591,11 @@ class TestCodexAgentRunner(unittest.TestCase):
             "task_rubric_version": run_codex_agent_ab.TASK_RUBRIC_VERSION,
         })
         self.assertEqual(metadata["outcome"]["failure_reason"], "task_success_criteria_not_met")
+        self.assertEqual(metadata["schema_version"], 2)
+        self.assertEqual(metadata["timing"]["timeout_seconds"], 10)
+        self.assertAlmostEqual(metadata["timing"]["duration_seconds"], record["duration_seconds"])
+        self.assertRegex(metadata["timing"]["started_at"], r"^2026-.*Z$")
+        self.assertRegex(metadata["timing"]["ended_at"], r"^2026-.*Z$")
         self.assertNotIn("TARGETED_SIGNAL", json.dumps(record))
 
     def test_failure_trace_write_error_does_not_change_task_result(self):
@@ -1308,6 +1313,34 @@ class TestCodexAgentRunner(unittest.TestCase):
                 "capture_id_supplied": None,
                 "cursor_supplied": None,
                 "duration_ms": 3.5,
+            }])
+
+    def test_mcp_result_failure_accepts_exception_kind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "validation-events.jsonl"
+            path.write_text(json.dumps({
+                "event": "mcp_tool_result_failed",
+                "tool": "start_execution",
+                "failure_category": "validation",
+                "failure_kind": "exception",
+                "error_code": "input_validation",
+                "request_shape": {"cwd": "string"},
+                "result_status": "exception",
+                "capture_id_supplied": False,
+                "cursor_supplied": False,
+                "duration_ms": 1.5,
+            }) + "\n", encoding="utf-8")
+
+            self.assertEqual(_mcp_tool_failures(path), [{
+                "tool": "start_execution",
+                "category": "validation",
+                "kind": "exception",
+                "error_code": "input_validation",
+                "request_shape": {"cwd": "string"},
+                "result_status": "exception",
+                "capture_id_supplied": False,
+                "cursor_supplied": False,
+                "duration_ms": 1.5,
             }])
 
     def test_invocation_timeout_retains_safe_lifecycle_summary(self):

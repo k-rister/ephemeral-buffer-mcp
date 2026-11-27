@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import threading
+import time
 import uuid
 import weakref
 from collections import OrderedDict
@@ -43,7 +44,11 @@ from .mcpserver_adapter import (
     register_tool as _register_mcpserver_tool,
 )
 from .tools import load_tool_handlers
-from .tools.request_context import reset_mcp_supplied_arguments
+from .logging_utils import get_logger, log_event
+from .tools.request_context import (
+    current_mcp_request_shape,
+    reset_mcp_supplied_arguments,
+)
 from .response_formatting import bounded_summary_text, truncate_utf8_with_marker
 from .response_limits import (
     MCP_JSONRPC_ENVELOPE_RESERVE_BYTES,
@@ -56,6 +61,8 @@ from .tools.registry import (
 )
 
 load_tool_handlers()
+
+_LOGGER = get_logger("server")
 
 _MCP_SESSION_SCOPE_LOCK = threading.Lock()
 _MCP_SESSION_SCOPES: weakref.WeakKeyDictionary[Any, tuple[str, dict[str, str]]] = (
@@ -668,9 +675,25 @@ def _register_mcp_tool_for_app(
             yield
 
     def observe_validation_failure():
+        started = time.perf_counter()
+        request_shape = current_mcp_request_shape() or {}
         with _active_metrics().measure(name) as state:
             state["success"] = False
             state["failure_category"] = "validation"
+        log_event(
+            _LOGGER,
+            logging.WARNING,
+            "mcp_tool_result_failed",
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            error_code="input_validation",
+            failure_category="validation",
+            failure_kind="exception",
+            request_shape=request_shape,
+            result_status="exception",
+            capture_id_supplied="capture_id" in request_shape,
+            cursor_supplied="cursor" in request_shape,
+            tool=name,
+        )
         _write_metrics_snapshot(service_context)
 
     output_schema = None

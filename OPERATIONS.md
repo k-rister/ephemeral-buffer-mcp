@@ -1255,6 +1255,19 @@ private prompts and tool output; privacy-review or remove them before sharing
 the bundle or retaining it beyond diagnosis. Direct
 `run_codex_agent_ab.py` invocations still opt into those traces with
 `--failure-artifacts-dir`.
+For every revision with records, collection also emits
+`failure-analysis.json` and `failure-analysis.result.json`. These documents are
+privacy-safe timeout and validation summaries; they do not replace the raw
+trace privacy review. To compare a replay with an earlier timeout cluster, run
+`python -m benchmarks.analyze_agent_failures` with `--records`,
+`--lifecycle-dir`, `--failure-traces-dir`, and
+`--timeout-source-records`. Keep the default 900-second agent timeout unless a
+direct recurrence is classified as `budget-limited`.
+Validation grouping uses validation-category lifecycle events when they are
+available and falls back to the records envelope only when no such event is
+present. `mcp_tool_result_failed` may report either `result` or `exception`
+as its failure kind; both are valid, and exception-kind input-schema failures
+must remain in the validation summaries.
 
 Each local benchmark is bounded by `--benchmark-timeout` (3600 seconds by
 default). On timeout, the runner sends SIGTERM to the benchmark process group,
