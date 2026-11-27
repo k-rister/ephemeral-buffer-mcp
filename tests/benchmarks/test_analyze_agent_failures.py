@@ -302,6 +302,63 @@ class AnalyzeAgentFailuresTests(unittest.TestCase):
             }
         ])
 
+    def test_lifecycle_validation_events_are_authoritative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_lifecycle(root / "001-mcp.jsonl", [
+                {
+                    "event": "mcp_tool_result_failed",
+                    "tool": "execute_and_capture",
+                    "failure_category": "operation",
+                    "failure_kind": "exception",
+                    "error_code": "operation_failed",
+                    "request_shape": {"command": "string"},
+                    "result_status": "exception",
+                    "capture_id_supplied": False,
+                    "cursor_supplied": False,
+                    "duration_ms": 1,
+                },
+                {
+                    "event": "mcp_tool_result_failed",
+                    "tool": "start_execution",
+                    "failure_category": "validation",
+                    "failure_kind": "exception",
+                    "error_code": "input_validation",
+                    "request_shape": {"cwd": "string"},
+                    "result_status": "exception",
+                    "capture_id_supplied": False,
+                    "cursor_supplied": False,
+                    "duration_ms": 1.5,
+                }
+            ])
+            run = timeout_run(completed=True, mcp_tool_failures=[{
+                "tool": "search_capture",
+                "error_code": "capture_not_found",
+                "request_shape": {"capture_id": "string"},
+                "result_status": "error",
+                "capture_id_supplied": True,
+                "cursor_supplied": False,
+                "duration_ms": 2,
+            }])
+            analysis = build_analysis(
+                records_payload=records_payload([run]),
+                lifecycle_dir=root,
+                failure_traces_dir=None,
+                timeout_source_payload=None,
+            )
+
+        self.assertEqual(analysis["summary"]["validation_failure_events"], 1)
+        self.assertEqual(analysis["validation_failure_groups"], [{
+            "tool": "start_execution",
+            "error_code": "input_validation",
+            "request_shape": {"cwd": "string"},
+            "result_status": "exception",
+            "capture_id_supplied": False,
+            "cursor_supplied": False,
+            "count": 1,
+            "mean_duration_ms": 1.5,
+        }])
+
     def test_failure_metadata_versions_one_and_two(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -17,6 +17,9 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 - Add a privacy-safe offline agent failure analyzer that classifies timeout
   recurrences, groups validation failures, reads version-1 and version-2 trace
   metadata, and emits release analysis documents automatically.
+- Treat validation-category lifecycle events as authoritative in agent failure
+  analysis and accept exception-kind `mcp_tool_result_failed` records so
+  input-schema validation failures are not omitted.
 - Record MCP input-schema validation failures with content-free request shapes
   and clarify the `get_capture_slice` byte-budget, continuation-cursor, and
   `search_capture` query limits in the published tool contracts.

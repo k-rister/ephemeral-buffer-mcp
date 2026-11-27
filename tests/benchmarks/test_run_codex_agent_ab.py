@@ -1315,6 +1315,34 @@ class TestCodexAgentRunner(unittest.TestCase):
                 "duration_ms": 3.5,
             }])
 
+    def test_mcp_result_failure_accepts_exception_kind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "validation-events.jsonl"
+            path.write_text(json.dumps({
+                "event": "mcp_tool_result_failed",
+                "tool": "start_execution",
+                "failure_category": "validation",
+                "failure_kind": "exception",
+                "error_code": "input_validation",
+                "request_shape": {"cwd": "string"},
+                "result_status": "exception",
+                "capture_id_supplied": False,
+                "cursor_supplied": False,
+                "duration_ms": 1.5,
+            }) + "\n", encoding="utf-8")
+
+            self.assertEqual(_mcp_tool_failures(path), [{
+                "tool": "start_execution",
+                "category": "validation",
+                "kind": "exception",
+                "error_code": "input_validation",
+                "request_shape": {"cwd": "string"},
+                "result_status": "exception",
+                "capture_id_supplied": False,
+                "cursor_supplied": False,
+                "duration_ms": 1.5,
+            }])
+
     def test_invocation_timeout_retains_safe_lifecycle_summary(self):
         item = {
             "sequence": 1,
