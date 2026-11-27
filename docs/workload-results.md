@@ -564,9 +564,10 @@ and `context_lines`), and supplied a capture ID. They occurred in
 `1800-mcp` (follow-up-context repetition 225), `3420-mcp` (build-log-search
 repetition 428), and `3917-mcp` (noisy-test-failure repetition 490, with two
 consecutive events). The evidence indicates stale or nonexistent capture-ID
-use by the model rather than an input-schema defect. Issue #545 therefore
-remains open with this recurrence; the local raw traces are retained only
-under `/tmp` for diagnosis.
+use by the model rather than an input-schema defect. Issue #545 is resolved by
+the current-buffer capture-ID guidance in PR #561; per the rare-issue policy,
+the powered evaluation was not rerun for that clarification. The local raw
+traces are retained only under `/tmp` for diagnosis.
 
 The generic workload comparison reported 22 regressed, 15 improved, 33
 unchanged, and 46 neutral-changed result entries. The regressions are secondary
@@ -584,7 +585,8 @@ conclusions are mixed: candidate task success improved overall, targeted
 inspection improved while build-log search remained lower with MCP, timeout
 rates rose slightly without evidence for a larger budget, and secondary cost
 and latency metrics regressed. Broader default or release-performance claims
-require additional representative tasks and follow-up on #545.
+require additional representative tasks; the #545 stale-ID follow-up is
+complete.
 
 ### Historical fixture-v4 / rubric-v4 batch (seed 20261046)
 
