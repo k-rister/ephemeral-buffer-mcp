@@ -1823,9 +1823,12 @@ class EphemeralEngine:
             with self._lock:
                 buffer_is_empty = not self._captures
             buffer_detail = (
-                "Buffer is currently empty."
+                "Buffer is currently empty. Capture content before searching."
                 if buffer_is_empty
-                else "Other captures remain in the buffer."
+                else (
+                    "Other captures remain in the buffer. Use 'latest' or a "
+                    "capture_id from the current list_captures result."
+                )
             )
             return {
                 "status": "error",

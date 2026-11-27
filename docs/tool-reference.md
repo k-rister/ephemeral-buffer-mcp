@@ -37,6 +37,10 @@ sections for full workflows.
 | `list_captures(limit=25, cursor=None)` | Lists up to 25 active captures per page, newest first. The structured result includes `page_count` and the current active `capture_count`; top-level `next_cursor` and `truncated` indicate another page. Pass the opaque cursor to continue the creation-sequence snapshot, so newer captures and LRU touches do not shift later pages. A capture evicted before its page is read is omitted; an invalid cursor returns `invalid_cursor`, and callers can restart to refresh. Listing labels are capped at 128 JSON-safe bytes with per-entry `label_truncated`. |
 | `clear_captures(capture_id='all')` | Clears buffer. |
 
+`search_capture` IDs identify the current in-memory buffer only. The default
+`latest` is safe when one capture is active; after eviction, clearing, or
+uncertainty, use `list_captures` to refresh the ID before searching.
+
 ## Private CLI socket payload
 
 The `ephbuf` CLI and MCP server exchange length-prefixed JSON frames over a
@@ -218,8 +222,9 @@ MCP argument validation occurs in the SDK before an execution tool runs.
 Those validation failures follow the SDK's validation response and do not carry
 an execution `error.code`.
 
-When `capture_not_found` is returned, the message says the buffer is empty
-only if no captures remain; otherwise it says that other captures remain.
+When `capture_not_found` is returned, the message says the buffer is empty only
+if no captures remain; otherwise it says that other captures remain and directs
+the caller to `latest` or a current `list_captures` ID.
 
 ### Response schema versioning
 

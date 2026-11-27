@@ -269,18 +269,26 @@ def _search_capture_response(
 def search_capture(
     query: Annotated[str, Field(description=f"Search text; at most {SEARCH_QUERY_MAX_BYTES:,} UTF-8 bytes.")],
     mode: Literal["hybrid", "bm25", "semantic"] = "hybrid",
-    capture_id: str = "latest",
+    capture_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Capture ID from the current in-memory buffer; defaults to latest. "
+                "Use list_captures for current IDs."
+            )
+        ),
+    ] = "latest",
     top_k: Annotated[int, Field(ge=1, le=MAX_SEARCH_TOP_K)] = 5,
     context_lines: Annotated[int, Field(ge=0, le=MAX_SEARCH_CONTEXT_LINES)] = 3,
 ) -> str:
-    """Search a capture by query text and return bounded readable and structured matches.
+    """Search a capture by query; return bounded readable and structured matches.
 
-    mode is hybrid (default, lexical and semantic), bm25 (lexical), or semantic
-    (embedding based). capture_id defaults to latest; top_k defaults to 5
-    (maximum 20), and context_lines defaults to 3 (maximum 100). Use
-    get_capture_slice for complete or omitted content.
-    Exact lexical hit lines are listed when available; semantic-only matches
-    may have none.
+    mode is hybrid (default), bm25, or semantic. capture_id references a
+    currently buffered capture; default latest, and list_captures refreshes
+    IDs after eviction or clearing. top_k defaults to 5 (max 20),
+    context_lines defaults to 3 (max 100). Use get_capture_slice for omitted
+    content.
+    Exact lexical hit lines are listed; semantic-only matches may have none.
     `semantic_coverage: complete` means indexed; not every token is embedded.
     Long lines may be token-truncated.
     """
