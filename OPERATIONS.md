@@ -1263,6 +1263,11 @@ trace privacy review. To compare a replay with an earlier timeout cluster, run
 `--lifecycle-dir`, `--failure-traces-dir`, and
 `--timeout-source-records`. Keep the default 900-second agent timeout unless a
 direct recurrence is classified as `budget-limited`.
+Validation grouping uses validation-category lifecycle events when they are
+available and falls back to the records envelope only when no such event is
+present. `mcp_tool_result_failed` may report either `result` or `exception`
+as its failure kind; both are valid, and exception-kind input-schema failures
+must remain in the validation summaries.
 
 Each local benchmark is bounded by `--benchmark-timeout` (3600 seconds by
 default). On timeout, the runner sends SIGTERM to the benchmark process group,

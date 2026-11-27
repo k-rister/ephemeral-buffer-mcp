@@ -1078,8 +1078,8 @@ def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict
             continue
         tool = event.get("tool")
         category = event.get("failure_category")
-        expected_kind = "result" if name == "mcp_tool_result_failed" else "exception"
-        kind = event.get("failure_kind", expected_kind)
+        default_kind = "result" if name == "mcp_tool_result_failed" else "exception"
+        kind = event.get("failure_kind", default_kind)
         diagnostic_keys = (
             "error_code", "request_shape", "result_status",
             "capture_id_supplied", "cursor_supplied",
@@ -1108,7 +1108,7 @@ def _mcp_tool_failures(path: Path | None, *, offset_bytes: int = 0) -> list[dict
             not isinstance(tool, str)
             or not _SAFE_IDENTIFIER.fullmatch(tool)
             or category not in MCP_FAILURE_CATEGORIES
-            or kind != expected_kind
+            or kind not in {"result", "exception"}
             or (diagnostics_available and (
                 not isinstance(error_code, str)
                 or not _SAFE_IDENTIFIER.fullmatch(error_code)

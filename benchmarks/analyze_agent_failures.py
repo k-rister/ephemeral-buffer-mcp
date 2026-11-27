@@ -383,29 +383,71 @@ def _classify_timeout(
     }
 
 
-def _validation_groups(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[Any, ...], list[float]] = defaultdict(list)
+def _record_validation_failures(
+    records: Iterable[dict[str, Any]],
+) -> Iterable[dict[str, Any]]:
     for record in records:
         failures = record.get("mcp_tool_failures")
         if not isinstance(failures, list):
             continue
         for failure in failures:
-            if not isinstance(failure, dict):
+            if isinstance(failure, dict):
+                yield failure
+
+
+def _lifecycle_validation_failures(
+    lifecycle_dir: Path | None,
+) -> Iterable[dict[str, Any]]:
+    if lifecycle_dir is None:
+        return
+    root = Path(lifecycle_dir)
+    if not root.is_dir():
+        return
+    for path in sorted(root.glob("*.jsonl")):
+        events, _ = _jsonl_objects(path)
+        for event in events:
+            if event.get("event") not in {"mcp_tool_result_failed", "mcp_tool_failed"}:
                 continue
-            request_shape = failure.get("request_shape")
+            if event.get("failure_category") != "validation":
+                continue
+            request_shape = event.get("request_shape")
             if not isinstance(request_shape, dict):
                 request_shape = {}
-            key = (
-                failure.get("tool"),
-                failure.get("error_code"),
-                tuple(sorted(request_shape.items())),
-                failure.get("result_status"),
-                failure.get("capture_id_supplied"),
-                failure.get("cursor_supplied"),
-            )
-            duration = _finite_number(failure.get("duration_ms"))
-            if duration is not None:
-                grouped[key].append(duration)
+            yield {
+                "tool": event.get("tool"),
+                "error_code": event.get("error_code"),
+                "request_shape": request_shape,
+                "result_status": event.get("result_status"),
+                "capture_id_supplied": event.get("capture_id_supplied"),
+                "cursor_supplied": event.get("cursor_supplied"),
+                "duration_ms": event.get("duration_ms"),
+            }
+
+
+def _validation_groups(
+    records: Iterable[dict[str, Any]],
+    *,
+    lifecycle_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    failures = list(_lifecycle_validation_failures(lifecycle_dir))
+    if not failures:
+        failures = list(_record_validation_failures(records))
+    grouped: dict[tuple[Any, ...], list[float]] = defaultdict(list)
+    for failure in failures:
+        request_shape = failure.get("request_shape")
+        if not isinstance(request_shape, dict):
+            request_shape = {}
+        key = (
+            failure.get("tool"),
+            failure.get("error_code"),
+            tuple(sorted(request_shape.items())),
+            failure.get("result_status"),
+            failure.get("capture_id_supplied"),
+            failure.get("cursor_supplied"),
+        )
+        duration = _finite_number(failure.get("duration_ms"))
+        if duration is not None:
+            grouped[key].append(duration)
     result = []
     for key, durations in sorted(grouped.items(), key=lambda item: repr(item[0])):
         tool, error_code, shape, result_status, capture_id_supplied, cursor_supplied = key
@@ -489,7 +531,7 @@ def build_analysis(
                 inactivity_threshold_seconds=inactivity_threshold_seconds,
             )
         )
-    validation = _validation_groups(records)
+    validation = _validation_groups(records, lifecycle_dir=lifecycle_dir)
     category_counts = Counter(item["category"] for item in classifications)
     return {
         "format": FORMAT,

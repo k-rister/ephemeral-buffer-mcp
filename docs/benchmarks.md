@@ -683,6 +683,14 @@ smallest evidence-based response: raise the timeout only for confirmed
 budget-limited work, add a repeated-action guardrail only for confirmed loops,
 and improve tool guidance only for confirmed blocked calls.
 
+When lifecycle logs are supplied, validation-category lifecycle events are the
+authoritative source for validation grouping; record-envelope failures are
+used only when no validation lifecycle event exists. A
+`mcp_tool_result_failed` lifecycle event may have `failure_kind: result` or
+`failure_kind: exception`. Both forms are retained, so an input-schema
+exception that occurs before tool dispatch is not omitted from validation
+counts.
+
 When the fixture does not contain the application package, select the source
 checkout's server module and add its `src` directory, for example
 `--mcp-module ephemeral_buffer_mcp.server --mcp-python-path /path/to/checkout/src`.
