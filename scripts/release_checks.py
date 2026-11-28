@@ -10,6 +10,9 @@ import tomllib
 from pathlib import Path
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
 class ReleaseCheckError(ValueError):
     """Raised when a release guardrail fails."""
 
@@ -173,7 +176,11 @@ def git(*args: str) -> str:
     """Run Git and return stripped stdout, raising on command failure."""
     try:
         return subprocess.run(
-            ["git", *args], check=True, capture_output=True, text=True
+            ["git", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=REPOSITORY_ROOT,
         ).stdout.strip()
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() or exc.stdout.strip() or "unknown git error"
@@ -185,6 +192,7 @@ def is_ancestor(ancestor: str, descendant: str) -> bool:
     return subprocess.run(
         ["git", "merge-base", "--is-ancestor", ancestor, descendant],
         capture_output=True,
+        cwd=REPOSITORY_ROOT,
     ).returncode == 0
 
 
@@ -201,12 +209,11 @@ def run(argv: list[str] | None = None) -> int:
         version = package_version(args.pyproject)
         changelog = args.changelog.read_text(encoding="utf-8")
         validate_metadata(args.tag, version, changelog)
-        repository_root = Path(__file__).resolve().parents[1]
-        if args.pyproject.resolve() == repository_root / "pyproject.toml":
+        if args.pyproject.resolve() == REPOSITORY_ROOT / "pyproject.toml":
             validate_distribution_metadata(
                 args.pyproject,
-                repository_root / "packaging" / "full" / "pyproject.toml",
-                repository_root / "packaging" / "lexical" / "pyproject.toml",
+                REPOSITORY_ROOT / "packaging" / "full" / "pyproject.toml",
+                REPOSITORY_ROOT / "packaging" / "lexical" / "pyproject.toml",
                 version,
             )
         tag_commit = git("rev-parse", "--verify", f"{args.tag}^{{commit}}")

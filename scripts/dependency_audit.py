@@ -14,6 +14,16 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXCEPTIONS = REPOSITORY_ROOT / ".github" / "dependency-audit-exceptions.json"
 
 
+def _normalize_python_version(python_version: str) -> str:
+    """Return the canonical major.minor form of a Python-version scope."""
+    parts = python_version.split(".")
+    if len(parts) != 2:
+        raise ValueError("Python version must use major.minor components")
+    if any(not part.isascii() or not part.isdecimal() for part in parts):
+        raise ValueError("Python version must use ASCII major.minor components")
+    return f"{int(parts[0])}.{int(parts[1])}"
+
+
 def load_exceptions(path: Path) -> list[dict[str, Any]]:
     """Load and validate explicit package/version/advisory exceptions."""
     try:
@@ -25,7 +35,8 @@ def load_exceptions(path: Path) -> list[dict[str, Any]]:
     if not isinstance(exceptions, list):
         raise ValueError("Exception policy must contain an 'exceptions' list")
 
-    seen_packages: set[str] = set()
+    seen_exceptions: set[tuple[str, str | None]] = set()
+    package_scopes: dict[str, set[str | None]] = {}
     for exception in exceptions:
         if not isinstance(exception, dict):
             raise ValueError("Every exception must be a JSON object")
@@ -35,20 +46,32 @@ def load_exceptions(path: Path) -> list[dict[str, Any]]:
         if not isinstance(package, str) or not package.strip():
             raise ValueError("Every exception must name a package")
         normalized_package = package.casefold()
-        if normalized_package in seen_packages:
-            raise ValueError(f"Only one exception per package is allowed: {package}")
-        seen_packages.add(normalized_package)
         if not isinstance(version, str) or not version.strip():
             raise ValueError(f"Exception for {package} must pin an exact version")
         python_version = exception.get("python_version")
-        if python_version is not None and (
-            not isinstance(python_version, str)
-            or len(python_version.split(".")) != 2
-            or any(not part.isdecimal() for part in python_version.split("."))
-        ):
+        if python_version is not None:
+            if not isinstance(python_version, str):
+                raise ValueError(
+                    f"Exception for {package} must use a major.minor Python version"
+                )
+            python_version = _normalize_python_version(python_version)
+            exception["python_version"] = python_version
+        exception_key = (normalized_package, python_version)
+        if exception_key in seen_exceptions:
             raise ValueError(
-                f"Exception for {package} must use a major.minor Python version"
+                f"Only one exception per package and Python scope is allowed: {package}"
             )
+        scopes = package_scopes.setdefault(normalized_package, set())
+        if python_version is None and scopes:
+            raise ValueError(
+                f"Global and Python-scoped exceptions cannot overlap for package: {package}"
+            )
+        if python_version is not None and None in scopes:
+            raise ValueError(
+                f"Global and Python-scoped exceptions cannot overlap for package: {package}"
+            )
+        seen_exceptions.add(exception_key)
+        scopes.add(python_version)
         if (
             not isinstance(vulnerability_ids, list)
             or not vulnerability_ids

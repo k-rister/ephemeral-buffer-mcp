@@ -101,7 +101,156 @@ class TestDependencyAudit(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "major.minor Python version"):
+            with self.assertRaisesRegex(ValueError, "major.minor components"):
+                load_exceptions(policy)
+
+    def test_exception_policy_rejects_noncanonical_duplicate_python_scopes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "exceptions": [
+                            {
+                                "package": "example-package",
+                                "version": "1.0.0",
+                                "vulnerability_ids": ["GHSA-example"],
+                                "issue": "https://example.com/issue/1",
+                                "python_version": "3.11",
+                            },
+                            {
+                                "package": "example-package",
+                                "version": "1.0.0",
+                                "vulnerability_ids": ["GHSA-example"],
+                                "issue": "https://example.com/issue/1",
+                                "python_version": "03.11",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "Only one exception per package and Python scope"
+            ):
+                load_exceptions(policy)
+
+    def test_exception_policy_rejects_non_ascii_python_scopes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "exceptions": [
+                            {
+                                "package": "example-package",
+                                "version": "1.0.0",
+                                "vulnerability_ids": ["GHSA-example"],
+                                "issue": "https://example.com/issue/1",
+                                "python_version": "٣.11",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "ASCII major.minor"):
+                load_exceptions(policy)
+
+    def test_exception_policy_normalizes_python_scopes(self):
+        exception = {
+            "package": "example-package",
+            "version": "1.0.0",
+            "vulnerability_ids": ["GHSA-example"],
+            "issue": "https://example.com/issue/1",
+            "python_version": "03.11",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps({"exceptions": [exception]}),
+                encoding="utf-8",
+            )
+            exceptions = load_exceptions(policy)
+
+        self.assertEqual(exceptions[0]["python_version"], "3.11")
+        self.assertEqual(exceptions_for_python(exceptions, "3.11"), exceptions)
+
+    def test_python_scoped_exceptions_allow_the_same_package_across_versions(self):
+        exception_311 = {
+            "package": "example-package",
+            "version": "1.0.0",
+            "vulnerability_ids": ["GHSA-example"],
+            "issue": "https://example.com/issue/1",
+            "python_version": "3.11",
+        }
+        exception_312 = {
+            "package": "example-package",
+            "version": "1.0.0",
+            "vulnerability_ids": ["GHSA-example"],
+            "issue": "https://example.com/issue/1",
+            "python_version": "3.12",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps({"exceptions": [exception_311, exception_312]}),
+                encoding="utf-8",
+            )
+            exceptions = load_exceptions(policy)
+
+        self.assertEqual(exceptions_for_python(exceptions, "3.11"), [exception_311])
+        self.assertEqual(exceptions_for_python(exceptions, "3.12"), [exception_312])
+
+    def test_exception_policy_rejects_global_and_scoped_overlap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "exceptions": [
+                            {
+                                "package": "example-package",
+                                "version": "1.0.0",
+                                "vulnerability_ids": ["GHSA-example"],
+                                "issue": "https://example.com/issue/1",
+                            },
+                            {
+                                "package": "example-package",
+                                "version": "1.0.0",
+                                "vulnerability_ids": ["GHSA-example"],
+                                "issue": "https://example.com/issue/1",
+                                "python_version": "3.11",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "cannot overlap"):
+                load_exceptions(policy)
+
+    def test_exception_policy_rejects_duplicate_scoped_exceptions(self):
+        exception = {
+            "package": "example-package",
+            "version": "1.0.0",
+            "vulnerability_ids": ["GHSA-example"],
+            "issue": "https://example.com/issue/1",
+            "python_version": "3.11",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps({"exceptions": [exception, dict(exception)]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "Only one exception per package and Python scope"
+            ):
                 load_exceptions(policy)
 
 
