@@ -264,6 +264,18 @@ class TestReleaseChecks(unittest.TestCase):
             run_git.return_value.returncode = 1
             self.assertFalse(is_ancestor("tag", "main"))
 
+    def test_git_commands_run_against_the_repository_root(self):
+        git_result = SimpleNamespace(returncode=0, stdout="repository\n", stderr="")
+        ancestor_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch(
+            "scripts.release_checks.subprocess.run", side_effect=[git_result, ancestor_result]
+        ) as run_git:
+            self.assertEqual(git("status"), "repository")
+            self.assertTrue(is_ancestor("tag", "main"))
+
+        self.assertEqual(run_git.call_args_list[0].kwargs["cwd"], REPOSITORY_ROOT)
+        self.assertEqual(run_git.call_args_list[1].kwargs["cwd"], REPOSITORY_ROOT)
+
     def test_cli_reports_missing_changelog(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "pyproject.toml"

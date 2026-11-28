@@ -4,6 +4,10 @@ Breaking changes are marked with the `Breaking:` prefix on the affected entry.
 
 ## Unreleased
 
+- Run release Git checks from the repository root so unrelated clean repositories cannot
+  satisfy tag and ancestry guardrails.
+- Allow dependency-audit exceptions to be scoped by canonical ASCII Python versions
+  while rejecting global/scoped overlaps and duplicate package scopes.
 - Add privacy-safe powered agent A/B failure diagnostics by default, including
   structured error codes, result status, public request shapes, and
   capture/cursor presence flags without argument values.
